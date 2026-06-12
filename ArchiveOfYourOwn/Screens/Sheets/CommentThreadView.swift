@@ -35,6 +35,7 @@ struct CommentThreadView: View {
 
     let workID: String
     let chapterID: UInt64?
+    var initialComments: [ParsedComment] = []
 
     @State private var comments: [ParsedComment] = []
     @State private var currentPage: UInt32 = 1
@@ -52,8 +53,10 @@ struct CommentThreadView: View {
     @State private var replySuccess = false
     @State private var avatarCache: [String: UIImage] = [:]
 
+    var overrideLoggedIn: Bool = false
+
     private var isLoggedIn: Bool {
-        state.bridge.getCredentials() != nil
+        overrideLoggedIn || state.bridge.getCredentials() != nil
     }
 
     var body: some View {
@@ -125,7 +128,11 @@ struct CommentThreadView: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
         .task {
-            await loadInitial()
+            if !initialComments.isEmpty {
+                comments = initialComments
+            } else {
+                await loadInitial()
+            }
         }
     }
 
