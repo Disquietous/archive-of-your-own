@@ -1,6 +1,6 @@
 # Archive of Your Own
 
-A privacy-focused native reader for [Archive of Our Own](https://archiveofourown.org) on iOS and iPad. All traffic is routed through Tor. AO3 content is parsed into structured data and rendered as native SwiftUI views — no web views, no tracking, no compromise.
+A privacy-focused native reader for [Archive of Our Own](https://archiveofourown.org) on iOS and iPad. Supports restricting all traffic to Tor network. AO3 content is parsed into structured data and rendered as native SwiftUI views — no web views, no tracking, no compromise.
 
 <p align="center">
 <img src="screenshots/iPhone-17-Pro/paper_library.png" width="260" alt="Library - Paper theme" />
@@ -66,7 +66,7 @@ Read and reply to comment threads. Manage AO3 subscriptions across authors, work
 
 ## Privacy
 
-All network traffic routes through an embedded Tor client (pure Rust, no system proxy). The local database is encrypted with SQLCipher. Connection status and account management are accessible from any screen.
+When Tor is enabled, lll network traffic routes through an embedded Tor client (pure Rust, no system proxy). The local database is encrypted with SQLCipher. Connection status and account management are accessible from any screen. Optional feature to automatically destroy local data on repeated failed authentication attempts.
 
 <p align="center">
 <img src="screenshots/iPhone-17-Pro/paper_privacySheet.png" width="260" alt="Privacy - Paper theme" />
@@ -84,6 +84,7 @@ SwiftUI  -->  UniFFI bridge  -->  Rust core
 - **No HTML in the UI layer.** AO3 pages are parsed in Rust into `ContentBlock` / `InlineContent` enum trees and rendered as native `Text` views.
 - **No third-party Swift dependencies.** The entire dependency surface is in Rust, auditable in one place.
 - **All persistent state lives in Rust.** SwiftUI is a thin, stateless shell.
+- **Tor performance tuning.** App automatically tests exit node response upon connection and tries a new circuit if a response is not received in a reasonable time period.
 
 ### Key dependencies (Rust)
 
