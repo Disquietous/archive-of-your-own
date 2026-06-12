@@ -1,0 +1,1302 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use tokio::sync::Mutex;
+use tokio::time::{Instant, sleep};
+
+use crate::error::AppError;
+use crate::models::*;
+use crate::parser;
+
+pub const BASE_URL: &str = "https://archiveofourown.org";
+
+const APP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0";
+const RATE_LIMIT_DELAY: Duration = Duration::from_millis(1500);
+
+// ---------------------------------------------------------------------------
+// Transport abstraction
+// ---------------------------------------------------------------------------
+
+enum Transport {
+    Direct(reqwest::Client),
+    #[cfg(feature = "tor")]
+    Tor {
+        client: reqwest::Client,
+        // Keep the TorClient alive so the background tasks continue running.
+        // The SOCKS proxy task also holds a clone.
+        _tor: Arc<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// AO3Client
+// ---------------------------------------------------------------------------
+
+/// Progress state for a fetch operation.
+#[derive(Debug, Clone)]
+pub struct FetchProgress {
+    pub bytes_received: u64,
+    pub total_bytes: Option<u64>,
+    pub status: FetchStatus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FetchStatus {
+    Idle,
+    Connecting,
+    Downloading,
+    Complete,
+    Failed,
+}
+
+pub type ProgressHandle = Arc<std::sync::Mutex<FetchProgress>>;
+
+pub fn new_progress_handle() -> ProgressHandle {
+    Arc::new(std::sync::Mutex::new(FetchProgress {
+        bytes_received: 0,
+        total_bytes: None,
+        status: FetchStatus::Idle,
+    }))
+}
+
+/// HTTP client for fetching AO3 pages, with optional Tor transport.
+pub struct AO3Client {
+    transport: Transport,
+    cookie_jar: Arc<reqwest::cookie::Jar>,
+    last_request: Arc<Mutex<Option<Instant>>>,
+    timeout_secs: Arc<std::sync::atomic::AtomicU64>,
+    active_progress: Arc<std::sync::Mutex<Option<ProgressHandle>>>,
+    socks_port: Option<u16>,
+}
+
+impl AO3Client {
+    pub fn is_tor(&self) -> bool {
+        #[cfg(feature = "tor")]
+        { matches!(self.transport, Transport::Tor { .. }) }
+        #[cfg(not(feature = "tor"))]
+        { false }
+    }
+
+    #[cfg(feature = "tor")]
+    pub fn tor_client(&self) -> Option<&Arc<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>> {
+        match &self.transport {
+            Transport::Tor { _tor, .. } => Some(_tor),
+            _ => None,
+        }
+    }
+
+    /// Return the local SOCKS5 proxy port, if Tor transport is active.
+    pub fn socks_port(&self) -> Option<u16> {
+        self.socks_port
+    }
+
+    // -- Constructors -------------------------------------------------------
+
+    /// Create a client using direct HTTP (for development/testing).
+    pub async fn new_direct() -> Result<Self, AppError> {
+        let (client, jar) = build_reqwest_client(None)?;
+        Ok(Self {
+            transport: Transport::Direct(client),
+            cookie_jar: jar,
+            last_request: Arc::new(Mutex::new(None)),
+            timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
+            active_progress: Arc::new(std::sync::Mutex::new(None)),
+            socks_port: None,
+        })
+    }
+
+    /// Create a client that routes all traffic through Tor.
+    ///
+    /// `state_dir` must be a writable directory inside the app's sandbox
+    /// (e.g. Application Support). Tor caches consensus data here so
+    /// subsequent launches are faster.
+    ///
+    /// Bootstrap has a 90-second timeout. First launch downloads ~3 MB of
+    /// network consensus and typically takes 15-40 seconds.
+    #[cfg(feature = "tor")]
+    pub async fn new_tor_with_dir(state_dir: &str) -> Result<Self, AppError> {
+        use arti_client::{TorClient, TorClientConfig};
+
+        let tor_dir = std::path::PathBuf::from(state_dir).join("tor");
+        let cache_dir = tor_dir.join("cache");
+        let data_dir = tor_dir.join("data");
+        for dir in [&tor_dir, &cache_dir, &data_dir] {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| AppError::TorError(format!("Cannot create dir {}: {e}", dir.display())))?;
+        }
+
+        // Set arti's env vars so default config resolves to our sandbox paths
+        std::env::set_var("ARTI_CACHE", &cache_dir);
+        std::env::set_var("ARTI_LOCAL_DATA", &data_dir);
+
+        let config = TorClientConfig::default();
+
+        let tor = tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            TorClient::create_bootstrapped(config),
+        )
+        .await
+        .map_err(|_| AppError::TorError(
+            "Tor bootstrap timed out after 90 seconds. Check your network connection.".to_string()
+        ))?
+        .map_err(|e| AppError::TorError(format!("Tor bootstrap failed: {e}")))?;
+
+        let tor = Arc::new(tor);
+
+        // Bind a local TCP listener on an ephemeral port to act as a SOCKS5
+        // proxy. For every inbound connection we perform a minimal SOCKS5
+        // handshake, extract the target address, open a Tor stream, and then
+        // bidirectionally copy bytes between the local socket and the Tor
+        // DataStream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| AppError::NetworkError(format!("Failed to bind SOCKS listener: {e}")))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| AppError::NetworkError(format!("Failed to get local address: {e}")))?;
+
+        let tor_for_proxy = Arc::clone(&tor);
+        tokio::spawn(async move {
+            run_socks_proxy(listener, tor_for_proxy).await;
+        });
+
+        let port = local_addr.port();
+        let proxy_url = format!("socks5h://127.0.0.1:{}", port);
+        let (client, jar) = build_reqwest_client(Some(&proxy_url))?;
+
+        Ok(Self {
+            transport: Transport::Tor {
+                client,
+                _tor: tor,
+            },
+            cookie_jar: jar,
+            last_request: Arc::new(Mutex::new(None)),
+            timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
+            active_progress: Arc::new(std::sync::Mutex::new(None)),
+            socks_port: Some(port),
+        })
+    }
+
+    // -- Public API ---------------------------------------------------------
+
+    /// Fetch the search form structure from /works/search?edit_search=true
+    pub async fn fetch_search_form(&self) -> Result<SearchForm, AppError> {
+        let url = format!("{BASE_URL}/works/search?edit_search=true");
+        let html = self.fetch(&url).await?;
+        parser::parse_search_form(&html)
+    }
+
+    /// Browse latest works (returns one page from /works).
+    pub async fn browse_works(&self, page: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let url = format!("{BASE_URL}/works?page={page}");
+        let html = self.fetch(&url).await?;
+        parser::parse_work_listings(&html)
+    }
+
+    /// Search works with raw query string parameters.
+    pub async fn search_works_raw(&self, query_pairs: &[(String, String)], page: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let mut parts: Vec<String> = vec![format!("page={page}"), "commit=Search".to_string()];
+        for (key, value) in query_pairs {
+            if !value.is_empty() {
+                let encoded_key = key.replace('[', "%5B").replace(']', "%5D");
+                parts.push(format!("{}={}", encoded_key, urlencoded(value)));
+            }
+        }
+        let url = format!("{BASE_URL}/works/search?{}", parts.join("&"));
+        let html = self.fetch(&url).await?;
+        parser::parse_work_listings(&html)
+    }
+
+    /// Search works using AO3's search engine (/works/search).
+    /// Mirrors the full search form at archiveofourown.org/works/search.
+    pub async fn search_works(&self, params: &SearchParams, page: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(format!("page={page}"));
+        parts.push("commit=Search".to_string());
+
+        if !params.query.is_empty() {
+            parts.push(format!("work_search%5Bquery%5D={}", urlencoded(&params.query)));
+        }
+        if !params.title.is_empty() {
+            parts.push(format!("work_search%5Btitle%5D={}", urlencoded(&params.title)));
+        }
+        if !params.creators.is_empty() {
+            parts.push(format!("work_search%5Bcreators%5D={}", urlencoded(&params.creators)));
+        }
+        if !params.fandom_names.is_empty() {
+            parts.push(format!("work_search%5Bfandom_names%5D={}", urlencoded(&params.fandom_names)));
+        }
+        if !params.relationship_names.is_empty() {
+            parts.push(format!("work_search%5Brelationship_names%5D={}", urlencoded(&params.relationship_names)));
+        }
+        if !params.character_names.is_empty() {
+            parts.push(format!("work_search%5Bcharacter_names%5D={}", urlencoded(&params.character_names)));
+        }
+        if !params.freeform_names.is_empty() {
+            parts.push(format!("work_search%5Bfreeform_names%5D={}", urlencoded(&params.freeform_names)));
+        }
+        if !params.word_count.is_empty() {
+            parts.push(format!("work_search%5Bword_count%5D={}", urlencoded(&params.word_count)));
+        }
+        if !params.hits.is_empty() {
+            parts.push(format!("work_search%5Bhits%5D={}", urlencoded(&params.hits)));
+        }
+        if !params.kudos_count.is_empty() {
+            parts.push(format!("work_search%5Bkudos_count%5D={}", urlencoded(&params.kudos_count)));
+        }
+        if !params.sort_column.is_empty() {
+            parts.push(format!("work_search%5Bsort_column%5D={}", urlencoded(&params.sort_column)));
+        }
+        if !params.sort_direction.is_empty() {
+            parts.push(format!("work_search%5Bsort_direction%5D={}", urlencoded(&params.sort_direction)));
+        }
+        if let Some(rating_id) = params.rating_id {
+            parts.push(format!("work_search%5Brating_ids%5D={rating_id}"));
+        }
+        for wid in &params.warning_ids {
+            parts.push(format!("work_search%5Barchive_warning_ids%5D%5B%5D={wid}"));
+        }
+        for cid in &params.category_ids {
+            parts.push(format!("work_search%5Bcategory_ids%5D%5B%5D={cid}"));
+        }
+        if !params.complete.is_empty() {
+            parts.push(format!("work_search%5Bcomplete%5D={}", urlencoded(&params.complete)));
+        }
+        if !params.crossover.is_empty() {
+            parts.push(format!("work_search%5Bcrossover%5D={}", urlencoded(&params.crossover)));
+        }
+        if params.single_chapter {
+            parts.push("work_search%5Bsingle_chapter%5D=1".to_string());
+        }
+        if !params.language_id.is_empty() {
+            parts.push(format!("work_search%5Blanguage_id%5D={}", urlencoded(&params.language_id)));
+        }
+
+        let url = format!("{BASE_URL}/works/search?{}", parts.join("&"));
+        let html = self.fetch(&url).await?;
+        parser::parse_work_listings(&html)
+    }
+
+    /// Browse works by tag (returns one page from /tags/{tag}/works).
+    pub async fn search_by_tag(&self, tag: &str, page: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let encoded_tag = ao3_tag_encode(tag);
+        let url = format!("{BASE_URL}/tags/{encoded_tag}/works?page={page}");
+        let html = self.fetch(&url).await?;
+        parser::parse_work_listings(&html)
+    }
+
+    /// Fetch a single work's metadata and all its chapters.
+    pub async fn get_work(&self, work_id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
+        let url = format!("{BASE_URL}/works/{work_id}?view_full_work=true&view_adult=true");
+        let html = self.fetch(&url).await?;
+        let (mut summary, chapters) = parser::parse_work_page(&html)?;
+        summary.id = work_id;
+        Ok((summary, chapters))
+    }
+
+    /// Fetch a specific chapter by its AO3 chapter ID.
+    pub async fn get_chapter(
+        &self,
+        work_id: u64,
+        chapter_id: u64,
+    ) -> Result<Chapter, AppError> {
+        let url = format!(
+            "{BASE_URL}/works/{work_id}/chapters/{chapter_id}?view_adult=true"
+        );
+        let html = self.fetch(&url).await?;
+        let (_summary, chapters) = parser::parse_work_page(&html)?;
+
+        // The page for a single chapter should still parse into one chapter.
+        // If the parser returns multiple (e.g. the page included surrounding
+        // chapters), look for the matching ID or fall back to the first.
+        chapters
+            .into_iter()
+            .find(|ch| ch.id == Some(chapter_id))
+            .ok_or_else(|| {
+                AppError::ElementNotFound(format!(
+                    "Chapter {chapter_id} not found in work {work_id}"
+                ))
+            })
+    }
+
+    // -- Inbox operations -----------------------------------------------------
+
+    pub async fn fetch_inbox(&self, username: &str, page: u32) -> Result<InboxPage, AppError> {
+        let url = format!("{BASE_URL}/users/{username}/inbox?page={page}");
+        let html = self.fetch(&url).await?;
+        Ok(parser::parse_inbox(&html))
+    }
+
+    // -- Comment operations ---------------------------------------------------
+
+    pub async fn fetch_comments_for_chapter(&self, work_id: u64, chapter_id: u64, page: u32) -> Result<CommentsPage, AppError> {
+        if page <= 1 {
+            let url = format!("{BASE_URL}/works/{work_id}/chapters/{chapter_id}?show_comments=true&view_adult=true");
+            let html = self.fetch(&url).await?;
+            Ok(parser::parse_comments(&html))
+        } else {
+            let url = format!("{BASE_URL}/comments/show_comments?chapter_id={chapter_id}&page={page}");
+            let html = self.fetch_ajax(&url).await?;
+            Ok(parser::parse_comments(&html))
+        }
+    }
+
+    pub async fn fetch_comments_for_work(&self, work_id: u64, page: u32) -> Result<CommentsPage, AppError> {
+        if page <= 1 {
+            let url = format!("{BASE_URL}/works/{work_id}?show_comments=true&view_adult=true");
+            let html = self.fetch(&url).await?;
+            Ok(parser::parse_comments(&html))
+        } else {
+            let url = format!("{BASE_URL}/comments/show_comments?work_id={work_id}&page={page}");
+            let html = self.fetch_ajax(&url).await?;
+            Ok(parser::parse_comments(&html))
+        }
+    }
+
+    pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {
+        self.enforce_rate_limit().await;
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        // Resolve the full URL for relative paths
+        let full_url = if url.starts_with('/') {
+            format!("{BASE_URL}{url}")
+        } else {
+            url.to_string()
+        };
+
+        log_debug!("image", "Fetching {}", full_url);
+        let response = tokio::time::timeout(timeout, client.get(&full_url).send())
+            .await
+            .map_err(|_| AppError::NetworkError("timeout".to_string()))?
+            .map_err(|e| {
+                log_debug!("image", "Error fetching {}: {}", full_url, e);
+                AppError::NetworkError(format!("{e}"))
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            log_debug!("image", "HTTP {} for {}", status, full_url);
+            return Err(AppError::NetworkError(format!("HTTP {status}")));
+        }
+
+        let bytes = tokio::time::timeout(timeout, response.bytes())
+            .await
+            .map_err(|_| AppError::NetworkError("timeout".to_string()))?
+            .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+        log_debug!("image", "Downloaded {} bytes from {}", bytes.len(), full_url);
+        Ok(bytes.to_vec())
+    }
+
+    pub async fn post_reply(&self, parent_comment_id: u64, comment: &str) -> Result<bool, AppError> {
+        let url = format!("{BASE_URL}/comments/{parent_comment_id}/comments");
+        let params = vec![
+            ("comment[comment_content]".to_string(), comment.to_string()),
+        ];
+        let body = self.post_form(&url, &params).await?;
+        Ok(body.contains("Comment created") || body.contains("was added"))
+    }
+
+    // -- Bookmark operations -------------------------------------------------
+
+    /// Fetch a page of user bookmarks.
+    /// Returns (bookmarks, has_more_pages).
+    pub async fn fetch_user_bookmarks(
+        &self,
+        username: &str,
+        page: u32,
+    ) -> Result<(Vec<crate::models::BookmarkListing>, bool), AppError> {
+        let url = format!("{BASE_URL}/users/{username}/bookmarks?page={page}");
+        let html = self.fetch(&url).await?;
+        let bookmarks = parser::parse_bookmark_listings(&html)?;
+        let has_more = parser::has_next_page(&html);
+        Ok((bookmarks, has_more))
+    }
+
+    /// Create a bookmark on AO3 for the given work.
+    /// Returns the ao3_bookmark_id if parseable from the response.
+    pub async fn create_ao3_bookmark(
+        &self,
+        work_id: u64,
+        note: &str,
+    ) -> Result<Option<u64>, AppError> {
+        let url = format!("{BASE_URL}/works/{work_id}/bookmarks");
+        let params = vec![
+            ("bookmark[bookmarkable_id]".to_string(), work_id.to_string()),
+            ("bookmark[bookmarkable_type]".to_string(), "Work".to_string()),
+            ("bookmark[notes]".to_string(), note.to_string()),
+            ("bookmark[private]".to_string(), "1".to_string()),
+            ("bookmark[rec]".to_string(), "0".to_string()),
+            ("bookmark[tag_string]".to_string(), String::new()),
+            ("commit".to_string(), "Create".to_string()),
+        ];
+        let body = self.post_form(&url, &params).await?;
+
+        // Try to extract the bookmark ID from the response.
+        // AO3 typically redirects to /bookmarks/NNNNN or includes id="bookmark_NNNNN"
+        let ao3_bookmark_id = extract_bookmark_id_from_response(&body);
+        Ok(ao3_bookmark_id)
+    }
+
+    /// Delete a bookmark from AO3.
+    /// Returns true if the delete appeared successful.
+    pub async fn delete_ao3_bookmark(
+        &self,
+        ao3_bookmark_id: u64,
+    ) -> Result<bool, AppError> {
+        let url = format!("{BASE_URL}/bookmarks/{ao3_bookmark_id}");
+        let params = vec![
+            ("_method".to_string(), "delete".to_string()),
+        ];
+        let body = self.post_form(&url, &params).await?;
+        // AO3 typically redirects or shows a page without the bookmark
+        Ok(!body.contains("Error") && !body.contains("Sorry, you don't have permission"))
+    }
+
+    // -- Subscription operations -----------------------------------------------
+
+    /// Fetch a page of user subscriptions.
+    /// Returns (subscriptions, has_more_pages).
+    pub async fn fetch_subscriptions(
+        &self,
+        username: &str,
+        page: u32,
+    ) -> Result<(Vec<crate::models::Subscription>, bool), AppError> {
+        let url = format!("{BASE_URL}/users/{username}/subscriptions?page={page}");
+        let html = self.fetch(&url).await?;
+        let subs = parser::parse_subscriptions_page(&html)?;
+        let has_more = parser::has_next_page(&html);
+        Ok((subs, has_more))
+    }
+
+    /// Fetch the most recent works by an author (page 1 only).
+    pub async fn fetch_author_works(
+        &self,
+        username: &str,
+        page: u32,
+    ) -> Result<Vec<WorkSummary>, AppError> {
+        let url = format!("{BASE_URL}/users/{username}/works?page={page}");
+        log_info!("http"," Starting: {url}");
+        let start = std::time::Instant::now();
+        match self.fetch(&url).await {
+            Ok(html) => {
+                log_info!("http"," Success in {:?}: {} bytes from {url}", start.elapsed(), html.len());
+                parser::parse_work_listings(&html)
+            }
+            Err(e) => {
+                log_info!("http"," Failed in {:?}: {e} for {url}", start.elapsed());
+                Err(e)
+            }
+        }
+    }
+
+    /// Fetch works in a series.
+    /// Returns Vec of (work_id, title, chapter_count, word_count).
+    pub async fn fetch_series_works(
+        &self,
+        series_id: u64,
+    ) -> Result<Vec<(u64, String, u32, u64)>, AppError> {
+        let url = format!("{BASE_URL}/series/{series_id}");
+        let html = self.fetch(&url).await?;
+        parser::parse_series_page(&html)
+    }
+
+    /// Fetch multiple URLs concurrently in batches.
+    ///
+    /// Processes URLs in chunks of `concurrency` size, sleeping 1 second between
+    /// batches to respect AO3 rate limits. Returns results in the same order as
+    /// the input URLs. Individual rate limiting is skipped within a batch.
+    pub async fn fetch_concurrent(
+        &self,
+        urls: Vec<String>,
+        concurrency: usize,
+    ) -> Vec<Result<String, AppError>> {
+        let concurrency = concurrency.max(1);
+        let timeout_secs = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        let mut all_results: Vec<Result<String, AppError>> = Vec::with_capacity(urls.len());
+
+        for (chunk_idx, chunk) in urls.chunks(concurrency).enumerate() {
+            if chunk_idx > 0 {
+                // Sleep between batches to respect rate limits
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            let client = match &self.transport {
+                Transport::Direct(c) => c.clone(),
+                #[cfg(feature = "tor")]
+                Transport::Tor { client, .. } => client.clone(),
+            };
+
+            let mut handles = Vec::with_capacity(chunk.len());
+            for url in chunk {
+                let client = client.clone();
+                let url = url.clone();
+                let handle = tokio::spawn(async move {
+                    let mut retries = 0u32;
+                    loop {
+                        let result = tokio::time::timeout(timeout, async {
+                            let response = client.get(&url).send().await
+                                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+                            let status = response.status();
+                            let body = response.text().await
+                                .map_err(|e| AppError::NetworkError(format!("Failed to read body: {e}")))?;
+                            Ok::<(reqwest::StatusCode, String), AppError>((status, body))
+                        }).await;
+
+                        let (status, body) = match result {
+                            Err(_) => return Err(AppError::NetworkError("timeout".to_string())),
+                            Ok(Err(e)) => return Err(e),
+                            Ok(Ok(pair)) => pair,
+                        };
+
+                        let code = status.as_u16();
+                        if (code == 525 || code == 503 || code == 429) && retries < 5 {
+                            retries += 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            continue;
+                        }
+                        if !status.is_success() {
+                            return Err(AppError::NetworkError(format!("HTTP {status} for {url}")));
+                        }
+                        return Ok(body);
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Await all handles in this chunk
+            for handle in handles {
+                let result = match handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(AppError::NetworkError(format!("Task failed: {e}"))),
+                };
+                all_results.push(result);
+            }
+        }
+
+        all_results
+    }
+
+    // -- Internal -----------------------------------------------------------
+
+    /// Fetch raw HTML from a URL with idle-based timeout and progress reporting.
+    /// Times out if no data arrives for `timeout_secs` seconds (not total elapsed).
+    async fn fetch_with_timeout(&self, url: &str, timeout_secs: u64) -> Result<String, AppError> {
+        self.fetch_with_progress(url, timeout_secs, None).await
+    }
+
+    pub async fn fetch_ajax_with_progress(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>) -> Result<String, AppError> {
+        self.fetch_with_progress_inner(url, timeout_secs, progress, true).await
+    }
+
+    pub async fn fetch_with_progress(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>) -> Result<String, AppError> {
+        self.fetch_with_progress_inner(url, timeout_secs, progress, false).await
+    }
+
+    async fn fetch_with_progress_inner(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>, ajax: bool) -> Result<String, AppError> {
+        let mut retries = 0;
+        let header_timeout = std::time::Duration::from_secs(timeout_secs);
+        let body_timeout = std::time::Duration::from_secs(timeout_secs);
+        let fetch_start = std::time::Instant::now();
+        log_debug!("http", " {} header_timeout={}s body_timeout={}s", url, header_timeout.as_secs(), body_timeout.as_secs());
+        macro_rules! progress {
+            ($status:expr, $recv:expr, $total:expr) => {
+                if let Some(ref p) = progress {
+                    let mut lock = p.lock().unwrap();
+                    lock.status = $status;
+                    lock.bytes_received = $recv;
+                    lock.total_bytes = $total;
+                }
+            };
+        }
+        loop {
+            self.enforce_rate_limit().await;
+            progress!(FetchStatus::Connecting, 0, None);
+
+            // Check cookies before sending
+            let cookies = self.get_session_cookies();
+            let has_auth = cookies.contains("user_credentials");
+            log_debug!("http"," cookies: has_auth={} len={} for {}", has_auth, cookies.len(), url);
+
+            let client = match &self.transport {
+                Transport::Direct(c) => c,
+                #[cfg(feature = "tor")]
+                Transport::Tor { client, .. } => client,
+            };
+
+            // Phase 1: Connect + TLS + headers (short timeout — dead connections fail fast)
+            let send_start = std::time::Instant::now();
+            let mut req = client.get(url);
+            if ajax {
+                req = req.header("X-Requested-With", "XMLHttpRequest")
+                    .header("Accept", "text/html, */*; q=0.01");
+            }
+            let response = match tokio::time::timeout(header_timeout, req.send()).await {
+                Err(_) => {
+                    log_debug!("http"," TIMEOUT send phase after {:?} total={:?} {}", send_start.elapsed(), fetch_start.elapsed(), url);
+                    progress!(FetchStatus::Failed, 0, None);
+                    return Err(AppError::NetworkError("timeout".to_string()));
+                }
+                Ok(Err(e)) => {
+                    log_debug!("http"," ERROR send phase after {:?}: {e} {}", send_start.elapsed(), url);
+                    progress!(FetchStatus::Failed, 0, None);
+                    return Err(AppError::NetworkError(format!("{e}")));
+                }
+                Ok(Ok(r)) => {
+                    log_debug!("http"," HEADERS in {:?} status={} {}", send_start.elapsed(), r.status(), url);
+                    r
+                }
+            };
+
+            // Detect stale session — AO3 redirects to login page
+            let final_url = response.url().to_string();
+            if final_url.contains("/users/login") && !url.contains("/users/login") {
+                progress!(FetchStatus::Failed, 0, None);
+                return Err(AppError::NetworkError("session_expired".to_string()));
+            }
+
+            let status = response.status();
+            let code = status.as_u16();
+
+            // Retry on transient HTTP errors before reading body
+            if (code == 525 || code == 503 || code == 429) && retries < 5 {
+                retries += 1;
+                progress!(FetchStatus::Connecting, 0, None);
+                let delay = std::cmp::min(retries as u64 * 2, 10);
+                log_debug!("http"," {} retry {}/5, waiting {}s for {}", code, retries, delay, url);
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                continue;
+            }
+            if !status.is_success() {
+                progress!(FetchStatus::Failed, 0, None);
+                return Err(AppError::NetworkError(format!("HTTP {status} for {url}")));
+            }
+
+            // Phase 2: Read body in chunks with idle timeout per chunk
+            let total_bytes = response.content_length();
+            progress!(FetchStatus::Downloading, 0, total_bytes);
+
+            let mut bytes_received: u64 = 0;
+            let mut body_bytes = Vec::new();
+            let mut response = response;
+
+            loop {
+                match tokio::time::timeout(body_timeout, response.chunk()).await {
+                    Err(_) => {
+                        progress!(FetchStatus::Failed, bytes_received, total_bytes);
+                        return Err(AppError::NetworkError("timeout".to_string()));
+                    }
+                    Ok(Err(e)) => {
+                        progress!(FetchStatus::Failed, bytes_received, total_bytes);
+                        return Err(AppError::NetworkError(format!("Failed to read body: {e}")));
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Ok(Some(chunk))) => {
+                        bytes_received += chunk.len() as u64;
+                        body_bytes.extend_from_slice(&chunk);
+                        progress!(FetchStatus::Downloading, bytes_received, total_bytes);
+                    }
+                }
+            }
+
+            progress!(FetchStatus::Complete, bytes_received, total_bytes);
+            log_debug!("http"," DONE {} bytes in {:?} {}", bytes_received, fetch_start.elapsed(), url);
+
+            let body = String::from_utf8(body_bytes)
+                .map_err(|e| AppError::NetworkError(format!("Invalid UTF-8: {e}")))?;
+
+            return Ok(body);
+        }
+    }
+
+    pub async fn fetch_health_check(&self) -> Result<u16, AppError> {
+        self.enforce_rate_limit().await;
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+        let response = client.head(BASE_URL)
+            .send()
+            .await
+            .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+        Ok(response.status().as_u16())
+    }
+
+    async fn fetch(&self, url: &str) -> Result<String, AppError> {
+        let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+        let progress = self.active_progress.lock().unwrap().clone();
+        self.fetch_with_progress(url, timeout, progress).await
+    }
+
+    async fn fetch_ajax(&self, url: &str) -> Result<String, AppError> {
+        let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+        let progress = self.active_progress.lock().unwrap().clone();
+        self.fetch_ajax_with_progress(url, timeout, progress).await
+    }
+
+    pub fn set_active_progress(&self, handle: ProgressHandle) {
+        *self.active_progress.lock().unwrap() = Some(handle);
+    }
+
+    pub fn clear_active_progress(&self) {
+        *self.active_progress.lock().unwrap() = None;
+    }
+
+    /// Log in to AO3 with username and password.
+    /// Returns true on success, false on failure.
+    pub async fn login(&self, username: &str, password: &str) -> Result<bool, AppError> {
+        // Step 1: GET login page to get authenticity_token and session cookie
+        let login_html = self.fetch(&format!("{BASE_URL}/users/login")).await?;
+
+        // Get the token from the MAIN login form (#new_user), not the small header form
+        let token = {
+            let doc = scraper::Html::parse_document(&login_html);
+            let form_sel = scraper::Selector::parse("form#new_user input[name='authenticity_token']").unwrap();
+            doc.select(&form_sel)
+                .next()
+                .and_then(|el| el.value().attr("value"))
+                .map(|s| s.to_string())
+                .ok_or_else(|| AppError::ParseError("No authenticity_token found".to_string()))
+        }?;
+
+        // Step 2: POST login form
+        self.enforce_rate_limit().await;
+
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let params = [
+            ("authenticity_token", token.as_str()),
+            ("user[login]", username),
+            ("user[password]", password),
+            ("user[remember_me]", "1"),
+            ("commit", "Log In"),
+        ];
+
+        let result = tokio::time::timeout(timeout, async {
+            let resp = client.post(&format!("{BASE_URL}/users/login"))
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+
+            // Check for user_credentials cookie in response headers
+            let has_cred_cookie = resp.headers().get_all("set-cookie")
+                .iter()
+                .any(|v| v.to_str().unwrap_or("").contains("user_credentials"));
+
+            let final_url = resp.url().to_string();
+            let body = resp.text().await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+
+            Ok::<(bool, String, String), AppError>((has_cred_cookie, final_url, body))
+        }).await;
+
+        let (has_cred_cookie, final_url, _body) = match result {
+            Err(_) => return Err(AppError::NetworkError("timeout".to_string())),
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(v)) => v,
+        };
+
+        let logged_in = has_cred_cookie || !final_url.contains("/users/login");
+
+        Ok(logged_in)
+    }
+
+    /// POST a form to AO3 (for kudos, comments, bookmarks).
+    pub async fn post_form(&self, url: &str, params: &[(String, String)]) -> Result<String, AppError> {
+        // First get the page to extract authenticity_token
+        let page = self.fetch(url).await?;
+        let token = scraper::Html::parse_document(&page)
+            .select(&scraper::Selector::parse("input[name='authenticity_token']").unwrap())
+            .next()
+            .and_then(|el| el.value().attr("value"))
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        self.enforce_rate_limit().await;
+
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let mut form_params: Vec<(String, String)> = vec![
+            ("authenticity_token".to_string(), token),
+        ];
+        form_params.extend_from_slice(params);
+
+        let result = tokio::time::timeout(timeout, async {
+            let resp = client.post(url)
+                .form(&form_params)
+                .send()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            resp.text().await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))
+        }).await;
+
+        match result {
+            Err(_) => Err(AppError::NetworkError("timeout".to_string())),
+            Ok(r) => r,
+        }
+    }
+
+    /// Check if the current session is logged in.
+    pub async fn is_logged_in(&self) -> Result<bool, AppError> {
+        self.enforce_rate_limit().await;
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let result = tokio::time::timeout(timeout, async {
+            let resp = client.get(&format!("{BASE_URL}/users/login"))
+                .send()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            // If logged in, AO3 redirects away from /users/login
+            Ok::<bool, AppError>(!resp.url().to_string().contains("/users/login"))
+        }).await;
+        match result {
+            Err(_) => Err(AppError::NetworkError("timeout".to_string())),
+            Ok(r) => r,
+        }
+    }
+
+    /// Get session cookies as a string for persistence.
+    pub fn get_session_cookies(&self) -> String {
+        use reqwest::cookie::CookieStore;
+        let url = BASE_URL.parse::<url::Url>().unwrap();
+        self.cookie_jar.cookies(&url)
+            .map(|h| h.to_str().unwrap_or("").to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_cookies(&self) {
+        use reqwest::cookie::CookieStore;
+        let url = BASE_URL.parse::<url::Url>().unwrap();
+        // Set each existing cookie to expire by setting empty values
+        if let Some(header) = self.cookie_jar.cookies(&url) {
+            let cookie_str = header.to_str().unwrap_or("");
+            for part in cookie_str.split("; ") {
+                if let Some(name) = part.split('=').next() {
+                    if !name.is_empty() {
+                        self.cookie_jar.add_cookie_str(&format!("{}=; Max-Age=0", name), &url);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore session cookies from a saved string.
+    pub fn set_session_cookies(&self, cookies: &str) {
+        let url = BASE_URL.parse::<url::Url>().unwrap();
+        for cookie_str in cookies.split("; ") {
+            if !cookie_str.is_empty() {
+                self.cookie_jar.add_cookie_str(cookie_str, &url);
+            }
+        }
+    }
+
+    /// Get a new circuit by rebuilding the SOCKS proxy with an isolated TorClient.
+    /// Much faster than full re-bootstrap — reuses existing consensus and guards.
+    #[cfg(feature = "tor")]
+    pub async fn new_circuit(&mut self) -> Result<(), AppError> {
+        let tor = match &self.transport {
+            Transport::Tor { _tor, .. } => Arc::clone(_tor),
+            _ => return Err(AppError::TorError("Not connected via Tor".to_string())),
+        };
+
+        let isolated = tor.isolated_client();
+        let isolated = Arc::new(isolated);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| AppError::NetworkError(format!("Failed to bind SOCKS listener: {e}")))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|e| AppError::NetworkError(format!("Failed to get local address: {e}")))?;
+
+        let tor_for_proxy = Arc::clone(&isolated);
+        tokio::spawn(async move {
+            run_socks_proxy(listener, tor_for_proxy).await;
+        });
+
+        let proxy_url = format!("socks5h://127.0.0.1:{}", local_addr.port());
+        let (client, new_jar) = build_reqwest_client(Some(&proxy_url))?;
+
+        // Transfer cookies from old jar to new jar
+        let old_cookies = self.get_session_cookies();
+        if !old_cookies.is_empty() {
+            let url = BASE_URL.parse::<url::Url>().unwrap();
+            for cookie_str in old_cookies.split("; ") {
+                if !cookie_str.is_empty() {
+                    new_jar.add_cookie_str(cookie_str, &url);
+                }
+            }
+        }
+
+        let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+        self.transport = Transport::Tor { client, _tor: isolated };
+        self.cookie_jar = new_jar;
+        self.socks_port = Some(local_addr.port());
+        self.timeout_secs.store(timeout, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    pub fn set_timeout(&self, secs: u64) {
+        self.timeout_secs.store(secs, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Enforce a minimum delay of [`RATE_LIMIT_DELAY`] between requests to be
+    /// respectful of AO3's servers.
+    async fn enforce_rate_limit(&self) {
+        let mut last = self.last_request.lock().await;
+        if let Some(prev) = *last {
+            let elapsed = prev.elapsed();
+            if elapsed < RATE_LIMIT_DELAY {
+                sleep(RATE_LIMIT_DELAY - elapsed).await;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a `reqwest::Client` with our standard headers and an optional SOCKS
+/// proxy.
+fn build_reqwest_client(proxy_url: Option<&str>) -> Result<(reqwest::Client, Arc<reqwest::cookie::Jar>), AppError> {
+    use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, ACCEPT_ENCODING};
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(APP_USER_AGENT));
+    headers.insert(ACCEPT, HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br, zstd"));
+    headers.insert("Sec-GPC", HeaderValue::from_static("1"));
+    headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+    headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+    headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
+    headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
+    headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
+    headers.insert("Priority", HeaderValue::from_static("u=0, i"));
+
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let mut builder = reqwest::Client::builder()
+        .default_headers(headers)
+        .cookie_provider(jar.clone())
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(0))
+        .pool_max_idle_per_host(0)
+        .tcp_nodelay(true)
+        .tcp_keepalive(Duration::from_secs(15));
+
+    if let Some(url) = proxy_url {
+        let proxy = reqwest::Proxy::all(url)
+            .map_err(|e| AppError::NetworkError(format!("Invalid proxy URL: {e}")))?;
+        builder = builder.proxy(proxy);
+    }
+
+    let client = builder
+        .build()
+        .map_err(|e| AppError::NetworkError(format!("Failed to build HTTP client: {e}")))?;
+    Ok((client, jar))
+}
+
+/// Minimal percent-encoding for AO3 tag URLs. AO3 uses *. (dot)* as a tag
+/// separator in URLs, so we only encode what's strictly necessary for a valid
+/// URL path segment.
+fn urlencoded(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// Try to extract a bookmark ID from AO3's response HTML.
+/// Looks for patterns like id="bookmark_12345" or /bookmarks/12345.
+fn extract_bookmark_id_from_response(html: &str) -> Option<u64> {
+    // Try id="bookmark_NNNNN"
+    if let Some(pos) = html.find("id=\"bookmark_") {
+        let after = &html[pos + 13..]; // skip `id="bookmark_`
+        let end = after.find('"').unwrap_or(after.len());
+        if let Ok(id) = after[..end].parse::<u64>() {
+            return Some(id);
+        }
+    }
+    // Try /bookmarks/NNNNN in the URL or body
+    for part in html.split("/bookmarks/") {
+        if part.is_empty() {
+            continue;
+        }
+        let num_str: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(id) = num_str.parse::<u64>() {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn ao3_tag_encode(tag: &str) -> String {
+    tag.replace('/', "*s*")
+       .replace('&', "*a*")
+       .replace('.', "*d*")
+       .replace(' ', "%20")
+}
+
+// ---------------------------------------------------------------------------
+// Embedded SOCKS5 proxy (Tor transport)
+// ---------------------------------------------------------------------------
+
+/// Run a minimal SOCKS5 proxy that bridges local TCP connections through the
+/// Tor network. Only SOCKS5 CONNECT (command 0x01) with domain-name addresses
+/// (address type 0x03), IPv4 (0x01), and IPv6 (0x04) is supported — this is
+/// exactly what `reqwest` sends when configured with `socks5h://`.
+#[cfg(feature = "tor")]
+async fn run_socks_proxy(
+    listener: tokio::net::TcpListener,
+    tor: Arc<arti_client::TorClient<tor_rtcompat::PreferredRuntime>>,
+) {
+    loop {
+        let (stream, _addr) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let tor = Arc::clone(&tor);
+        tokio::spawn(async move {
+            if let Err(_e) = handle_socks_connection(stream, &tor).await {
+                // Connection-level errors are silently dropped; the caller
+                // (reqwest) will surface a network error.
+            }
+        });
+    }
+}
+
+/// Handle one inbound SOCKS5 connection.
+///
+/// Protocol reference: RFC 1928
+#[cfg(feature = "tor")]
+async fn handle_socks_connection(
+    mut stream: tokio::net::TcpStream,
+    tor: &arti_client::TorClient<tor_rtcompat::PreferredRuntime>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use arti_client::IntoTorAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    stream.set_nodelay(true)?;
+
+    // --- Greeting -----------------------------------------------------------
+    // Client sends: VER | NMETHODS | METHODS...
+    let mut buf = [0u8; 2];
+    stream.read_exact(&mut buf).await?;
+    let ver = buf[0];
+    let nmethods = buf[1] as usize;
+    if ver != 0x05 {
+        return Err("unsupported SOCKS version".into());
+    }
+    let mut methods = vec![0u8; nmethods];
+    stream.read_exact(&mut methods).await?;
+
+    // We only support "no authentication" (0x00).
+    stream.write_all(&[0x05, 0x00]).await?;
+
+    // --- Request ------------------------------------------------------------
+    // Client sends: VER | CMD | RSV | ATYP | DST.ADDR | DST.PORT
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).await?;
+    let cmd = header[1];
+    let atyp = header[3];
+
+    if cmd != 0x01 {
+        // Only CONNECT is supported.
+        let reply = [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        stream.write_all(&reply).await?;
+        return Err("unsupported SOCKS command".into());
+    }
+
+    let (host, port) = match atyp {
+        // IPv4
+        0x01 => {
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr).await?;
+            let mut port_buf = [0u8; 2];
+            stream.read_exact(&mut port_buf).await?;
+            let port = u16::from_be_bytes(port_buf);
+            let ip = std::net::Ipv4Addr::from(addr);
+            (ip.to_string(), port)
+        }
+        // Domain name
+        0x03 => {
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await?;
+            let len = len_buf[0] as usize;
+            let mut domain = vec![0u8; len];
+            stream.read_exact(&mut domain).await?;
+            let mut port_buf = [0u8; 2];
+            stream.read_exact(&mut port_buf).await?;
+            let port = u16::from_be_bytes(port_buf);
+            (String::from_utf8(domain)?, port)
+        }
+        // IPv6
+        0x04 => {
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr).await?;
+            let mut port_buf = [0u8; 2];
+            stream.read_exact(&mut port_buf).await?;
+            let port = u16::from_be_bytes(port_buf);
+            let ip = std::net::Ipv6Addr::from(addr);
+            (ip.to_string(), port)
+        }
+        _ => {
+            let reply = [0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+            stream.write_all(&reply).await?;
+            return Err("unsupported address type".into());
+        }
+    };
+
+    // --- Connect via Tor ----------------------------------------------------
+    let tor_addr = (host.as_str(), port)
+        .into_tor_addr()
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("invalid Tor address: {e}").into()
+        })?;
+
+    log_debug!("socks"," Connecting to {host}:{port} via Tor");
+    let socks_start = std::time::Instant::now();
+    let tor_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tor.connect(tor_addr),
+    ).await {
+        Ok(Ok(s)) => {
+            log_debug!("socks"," Connected to {host}:{port} in {:?}", socks_start.elapsed());
+            s
+        }
+        Ok(Err(e)) => {
+            log_debug!("socks"," Failed to connect to {host}:{port} in {:?}: {e}", socks_start.elapsed());
+            let reply = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+            stream.write_all(&reply).await?;
+            return Err(format!("Tor connect failed: {e}").into());
+        }
+        Err(_) => {
+            log_debug!("socks"," Timed out connecting to {host}:{port} after 15s");
+            let reply = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+            stream.write_all(&reply).await?;
+            return Err("Tor stream timed out after 15s".into());
+        }
+    };
+
+    // --- Success reply ------------------------------------------------------
+    // VER | REP(0x00=success) | RSV | ATYP(IPv4) | BND.ADDR(0.0.0.0) | BND.PORT(0)
+    let reply = [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+    stream.write_all(&reply).await?;
+
+    // --- Bidirectional copy -------------------------------------------------
+    let (mut local_read, mut local_write) = stream.into_split();
+    let (mut tor_read, mut tor_write) = tokio::io::split(tor_stream);
+
+    let client_to_tor = tokio::io::copy(&mut local_read, &mut tor_write);
+    let tor_to_client = tokio::io::copy(&mut tor_read, &mut local_write);
+
+    // When either direction finishes (or errors), we're done.
+    tokio::select! {
+        _ = client_to_tor => {}
+        _ = tor_to_client => {}
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_urlencoded() {
+        assert_eq!(urlencoded("Harry Potter"), "Harry+Potter");
+        assert_eq!(
+            urlencoded("Alternate Universe - Modern Setting"),
+            "Alternate+Universe+-+Modern+Setting"
+        );
+    }
+
+    #[test]
+    fn test_build_reqwest_client_direct() {
+        let client = build_reqwest_client(None);
+        assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiting() {
+        let client = AO3Client::new_direct().await.unwrap();
+
+        // Record first timestamp
+        client.enforce_rate_limit().await;
+        let start = Instant::now();
+
+        // Second call should wait ~1.5s
+        client.enforce_rate_limit().await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(1400),
+            "Rate limiting should enforce ~1.5s delay, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_search_url() {
+        let encoded = urlencoded("Sherlock Holmes & Related Fandoms");
+        let url = format!("{BASE_URL}/tags/{encoded}/works?page=1");
+        assert!(url.starts_with("https://archiveofourown.org/tags/"));
+        assert!(url.ends_with("works?page=1"));
+    }
+
+    #[test]
+    fn test_work_url() {
+        let url = format!("{BASE_URL}/works/12345?view_adult=true");
+        assert_eq!(
+            url,
+            "https://archiveofourown.org/works/12345?view_adult=true"
+        );
+    }
+
+    #[test]
+    fn test_chapter_url() {
+        let url = format!("{BASE_URL}/works/12345/chapters/67890?view_adult=true");
+        assert_eq!(
+            url,
+            "https://archiveofourown.org/works/12345/chapters/67890?view_adult=true"
+        );
+    }
+}
