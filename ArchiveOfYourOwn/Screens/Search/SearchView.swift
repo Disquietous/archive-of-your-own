@@ -12,6 +12,8 @@ struct SearchView: View {
     @State private var formError: String?
     @State private var hasSearched = false
     @State private var showFilters = false
+    var initialShowFilters: Bool = false
+    @State private var didApplyInitialFilters = false
     @State private var searchTask: Task<Void, Never>?
     @State private var savedSearches: [USavedSearch] = []
     @State private var showSaveDialog = false
@@ -86,8 +88,16 @@ struct SearchView: View {
         }
         .background { ThemeBackgroundView() }
         .task {
-            if formFields.isEmpty && state.bridge.isInitialized {
-                await loadForm()
+            if !didApplyInitialFilters {
+                showFilters = initialShowFilters
+                didApplyInitialFilters = true
+            }
+            if formFields.isEmpty {
+                if let cached = Self.loadCachedForm() {
+                    formFields = cached
+                } else if state.bridge.isInitialized {
+                    await loadForm()
+                }
             }
             savedSearches = state.bridge.getSavedSearches()
         }

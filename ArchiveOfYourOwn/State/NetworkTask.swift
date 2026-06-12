@@ -22,7 +22,7 @@ final class NetworkTask {
 extension AppState {
     func retryOnTimeout<T>(task: NetworkTask, using bridge: RustBridge, _ operation: () async throws -> T) async throws -> T {
         if bridge.networkBlocked {
-            throw Ao3Error.Network(message: "Tor is required but not connected. Connect via Tor or disable the requirement in Settings.")
+            throw Ao3Error.Network(message: "Tor is enabled in settings but not connected. Connect via Tor or disable it in Settings.")
         }
         task.reset()
         var sessionRetried = false

@@ -24,45 +24,54 @@ struct ArchiveApp: App {
 
     var body: some Scene {
         WindowGroup {
-            let bridge = appState.bridge
-            let _ = bridge.isInitialized
-            let _ = bridge.showingRecoveryKey
-            let _ = bridge.hasDbPassword
-            let _ = bridge.torHasConnectedOnce
-            switch bridge.launchState {
-            case .ready:
-                ContentView()
-                    .environment(theme)
-                    .environment(appState)
-                    .environment(nav)
-                    .preferredColorScheme(theme.preferredColorScheme)
-                    .animation(.easeInOut(duration: 0.4), value: theme.activeTheme.id)
-                    .onAppear {
-                        appState.loadPersistedState()
-                        Self.scheduleSubscriptionCheck()
-                    }
-            case .locked:
-                DatabaseUnlockScreen()
-                    .environment(theme)
-                    .environment(appState)
-                    .preferredColorScheme(theme.preferredColorScheme)
-            case .firstLaunch:
-                DatabaseSetupScreen()
-                    .environment(theme)
-                    .environment(appState)
-                    .preferredColorScheme(theme.preferredColorScheme)
-            case .autoUnlock:
-                Color(theme.bg)
-                    .ignoresSafeArea()
-                    .onAppear {
-                        _ = appState.bridge.open()
-                    }
-            case .connectingTor:
-                TorConnectingScreen()
-                    .environment(theme)
-                    .environment(appState)
-                    .preferredColorScheme(theme.preferredColorScheme)
+            if ProcessInfo.processInfo.arguments.contains("-screenshots") {
+                ScreenshotHarness()
+            } else {
+                normalLaunchView
             }
+        }
+    }
+
+    @ViewBuilder
+    private var normalLaunchView: some View {
+        let bridge = appState.bridge
+        let _ = bridge.isInitialized
+        let _ = bridge.showingRecoveryKey
+        let _ = bridge.hasDbPassword
+        let _ = bridge.torHasConnectedOnce
+        switch bridge.launchState {
+        case .ready:
+            ContentView()
+                .environment(theme)
+                .environment(appState)
+                .environment(nav)
+                .preferredColorScheme(theme.preferredColorScheme)
+                .animation(.easeInOut(duration: 0.4), value: theme.activeTheme.id)
+                .onAppear {
+                    appState.loadPersistedState()
+                    Self.scheduleSubscriptionCheck()
+                }
+        case .locked:
+            DatabaseUnlockScreen()
+                .environment(theme)
+                .environment(appState)
+                .preferredColorScheme(theme.preferredColorScheme)
+        case .firstLaunch:
+            DatabaseSetupScreen()
+                .environment(theme)
+                .environment(appState)
+                .preferredColorScheme(theme.preferredColorScheme)
+        case .autoUnlock:
+            Color(theme.bg)
+                .ignoresSafeArea()
+                .onAppear {
+                    _ = appState.bridge.open()
+                }
+        case .connectingTor:
+            TorConnectingScreen()
+                .environment(theme)
+                .environment(appState)
+                .preferredColorScheme(theme.preferredColorScheme)
         }
     }
 

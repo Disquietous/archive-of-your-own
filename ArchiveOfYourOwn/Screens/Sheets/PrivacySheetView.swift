@@ -242,7 +242,7 @@ struct PrivacySheetView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Color(hex: "CE514D"))
-            Text("Tor is required but not connected. Network requests are blocked.")
+            Text("Tor is enabled in settings but not connected. Network requests are blocked.")
                 .font(.custom("HankenGrotesk", size: 13).weight(.medium))
                 .foregroundStyle(theme.ink2)
                 .fixedSize(horizontal: false, vertical: true)
