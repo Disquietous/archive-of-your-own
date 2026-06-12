@@ -9,7 +9,11 @@ struct LibraryView: View {
         case reading, bookmarks, subscriptions, history
     }
 
+    var initialTab: Tab = .reading
+    var initialExpandedSections: Set<String> = []
+
     @State private var selectedTab: Tab = .reading
+    @State private var didApplyInitialTab = false
     @State private var expandedSubSections: Set<String> = []
 
     var body: some View {
@@ -45,6 +49,13 @@ struct LibraryView: View {
             .padding(.bottom, 32)
         }
         .background { ThemeBackgroundView() }
+        .onAppear {
+            if !didApplyInitialTab {
+                selectedTab = initialTab
+                expandedSubSections = initialExpandedSections
+                didApplyInitialTab = true
+            }
+        }
         .onChange(of: nav.goHomeRequested) { _, requested in
             if requested {
                 selectedTab = .reading
