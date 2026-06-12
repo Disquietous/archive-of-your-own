@@ -1,0 +1,167 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+design/
+tmp/
+build/
+develop-eggs/
+dist/
+specs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+.cache/
+.parcel-cache/
+.turbo/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# IDEs and editors
+.vscode/
+.idea/
+.serena/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs
+logs/
+*.log
+
+# Process management
+.run/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# AI assistants
+.claude/
+CLAUDE.md
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/gen/schemas/
+src-tauri/dist-placeholder/
+
+# PyInstaller
+packaging/build/
+packaging/dist/
+packaging/.tiktoken_cache/
+
+# Release builds
+releases/
+
+# Rust
+core/target/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+AO3Core.xcframework/
+ArchiveOfYourOwn/Generated/
+
+# Misc
+*.bak
+*.tmp
+*.temp
+.scratch/
+suggestions.md
