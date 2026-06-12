@@ -159,8 +159,7 @@ DerivedData/
 AO3Core.xcframework/
 ArchiveOfYourOwn/Generated/
 
-# Screenshot output
-/screenshots/
+# Screenshot build artifacts
 /.build/
 
 # Misc
