@@ -468,6 +468,19 @@ impl AO3App {
         }
     }
 
+    pub async fn disconnect_tor(&self) -> Result<(), AO3Error> {
+        let client_ref = self.client.clone();
+        let runtime = self._runtime.clone();
+        runtime.spawn(async move {
+            let mut client = client_ref.write().await;
+            client.disconnect_tor()
+        })
+        .await
+        .map_err(|e| AO3Error::Network { message: format!("Disconnect failed: {e}") })?
+        .map_err(AO3Error::from)?;
+        Ok(())
+    }
+
     pub fn set_request_timeout(&self, seconds: u64) {
         self.timeout_secs.store(seconds, std::sync::atomic::Ordering::Relaxed);
         let client = self.client.blocking_read();

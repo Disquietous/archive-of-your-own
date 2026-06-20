@@ -262,6 +262,14 @@ final class RustBridge {
         }
     }
 
+    func disconnectTor() async {
+        guard let runtime = app ?? torOnlyApp else { return }
+        try? await runtime.disconnectTor()
+        torStatus = .disconnected
+        circuitHops = []
+        cloudflareReady = false
+    }
+
     var circuitHops: [UCircuitHop] = []
 
     /// Return the local SOCKS5 proxy port, or 0 if Tor is not connected.
