@@ -14,6 +14,7 @@ struct PrivacySheetView: View {
     @State private var isAddingAccount = false
     @State private var showLogoutConfirm = false
     @State private var isLoggingOut = false
+    @State private var showDisconnectConfirm = false
 
     private var isInProgress: Bool {
         state.bridge.torStatus == .connecting || state.isTestingCircuit || state.isResolvingCloudflare
@@ -78,6 +79,14 @@ struct PrivacySheetView: View {
         .clipShape(RoundedRectangle(cornerRadius: Radius.sheet))
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.hidden)
+        .alert("Disconnect from Tor?", isPresented: $showDisconnectConfirm) {
+            Button("Disconnect", role: .destructive) {
+                Task { await state.bridge.disconnectTor() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your connection will no longer be routed through Tor. Your IP address will be visible to AO3 and your network provider will be able to see that you are accessing AO3.")
+        }
         .alert("Log Out?", isPresented: $showLogoutConfirm) {
             Button("Log out", role: .destructive) {
                 isLoggingOut = true
@@ -347,6 +356,21 @@ struct PrivacySheetView: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: 40)
                     .background(RoundedRectangle(cornerRadius: Radius.button).stroke(theme.line, lineWidth: 1))
+                }
+                .buttonStyle(ButtonPressStyle())
+
+                Button {
+                    showDisconnectConfirm = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "shield.slash")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Disconnect")
+                            .font(Typography.smallButtonLabel())
+                    }
+                    .foregroundStyle(Color(hex: "CE514D"))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 40)
                 }
                 .buttonStyle(ButtonPressStyle())
             }

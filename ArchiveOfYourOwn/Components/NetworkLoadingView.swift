@@ -77,7 +77,10 @@ struct NetworkLoadingView: View {
             }
 
             if let onCancel {
-                Button("Cancel", action: onCancel)
+                Button("Cancel") {
+                    state.bridge.cancelRequest()
+                    onCancel()
+                }
                     .font(Typography.smallButtonLabel())
                     .foregroundStyle(theme.accent)
             }
@@ -113,7 +116,10 @@ struct NetworkLoadingView: View {
             }
 
             if let onCancel {
-                Button("Cancel", action: onCancel)
+                Button("Cancel") {
+                    state.bridge.cancelRequest()
+                    onCancel()
+                }
                     .font(Typography.smallButtonLabel())
                     .foregroundStyle(theme.accent)
             }

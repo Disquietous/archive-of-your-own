@@ -947,6 +947,38 @@ impl AO3Client {
         Ok(())
     }
 
+    /// Switch back from Tor to a direct HTTP client, preserving cookies.
+    pub fn disconnect_tor(&mut self) -> Result<(), AppError> {
+        use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, ACCEPT_ENCODING};
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(APP_USER_AGENT));
+        headers.insert(ACCEPT, HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"));
+        headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.5"));
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br, zstd"));
+        headers.insert("Sec-GPC", HeaderValue::from_static("1"));
+        headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("Upgrade-Insecure-Requests", HeaderValue::from_static("1"));
+        headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("document"));
+        headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("navigate"));
+        headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
+        headers.insert("Priority", HeaderValue::from_static("u=0, i"));
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .cookie_provider(self.cookie_jar.clone())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .pool_idle_timeout(std::time::Duration::from_secs(0))
+            .pool_max_idle_per_host(0)
+            .tcp_nodelay(true)
+            .tcp_keepalive(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| AppError::NetworkError(format!("Failed to build HTTP client: {e}")))?;
+
+        self.transport = Transport::Direct(client);
+        self.socks_port = None;
+        Ok(())
+    }
+
     /// Get session cookies as a string for persistence.
     pub fn get_session_cookies(&self) -> String {
         use reqwest::cookie::CookieStore;

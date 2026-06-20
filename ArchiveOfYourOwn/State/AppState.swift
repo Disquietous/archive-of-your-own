@@ -1,5 +1,4 @@
 import SwiftUI
-import UserNotifications
 
 @Observable
 final class AppState {
@@ -647,27 +646,7 @@ final class AppState {
             loadNotifications()
 
             if !subNotifications.isEmpty {
-                let center = UNUserNotificationCenter.current()
-                let settings = await center.notificationSettings()
-                if settings.authorizationStatus == .notDetermined {
-                    _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-                }
-                let updatedSettings = await center.notificationSettings()
-                if updatedSettings.authorizationStatus == .authorized {
-                    for notif in subNotifications {
-                        let content = UNMutableNotificationContent()
-                        content.title = notif.author
-                        content.body = notif.message
-                        content.sound = .default
-                        content.userInfo = ["workId": notif.workId]
-                        let request = UNNotificationRequest(
-                            identifier: "notif-\(notif.id)",
-                            content: content,
-                            trigger: nil
-                        )
-                        try? await center.add(request)
-                    }
-                }
+                loadNotifications()
             }
         } catch {
             if !subscriptionCheckTask.isCancelled {
