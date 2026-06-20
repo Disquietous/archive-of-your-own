@@ -11,8 +11,8 @@ struct AO3LoginSheet: View {
     @State private var error: String?
     @State private var isLoggedIn = false
 
-    private var credentials: [String]? {
-        state.bridge.getCredentials()
+    private var hasAccount: Bool {
+        state.ao3Username != nil
     }
 
     var body: some View {
@@ -33,8 +33,8 @@ struct AO3LoginSheet: View {
                 .foregroundStyle(theme.ink)
                 .padding(.bottom, 6)
 
-            if isLoggedIn, let creds = credentials {
-                loggedInView(username: creds.first ?? "")
+            if isLoggedIn, let username = state.ao3Username {
+                loggedInView(username: username)
             } else {
                 loginFormView
             }
@@ -50,9 +50,9 @@ struct AO3LoginSheet: View {
         .presentationDetents([.medium])
         .presentationDragIndicator(.hidden)
         .task {
-            if let creds = credentials, !creds.isEmpty {
+            if let existing = state.ao3Username {
                 isLoggedIn = true
-                username = creds.first ?? ""
+                username = existing
             }
         }
     }
@@ -133,17 +133,30 @@ struct AO3LoginSheet: View {
                 Button {
                     logOut()
                 } label: {
-                    Text("Log out")
-                        .font(Typography.buttonLabel())
-                        .foregroundStyle(Color(hex: "CE514D"))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(
-                            RoundedRectangle(cornerRadius: Radius.button)
-                                .stroke(Color(hex: "CE514D").opacity(0.4), lineWidth: 1)
-                        )
+                    Group {
+                        if isLoggingOut {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                    .tint(Color(hex: "CE514D"))
+                                Text("Logging out...")
+                                    .font(Typography.buttonLabel())
+                                    .foregroundStyle(Color(hex: "CE514D"))
+                            }
+                        } else {
+                            Text("Log out")
+                                .font(Typography.buttonLabel())
+                                .foregroundStyle(Color(hex: "CE514D"))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .background(
+                        RoundedRectangle(cornerRadius: Radius.button)
+                            .stroke(Color(hex: "CE514D").opacity(0.4), lineWidth: 1)
+                    )
                 }
                 .buttonStyle(ButtonPressStyle())
+                .disabled(isLoggingOut)
             } else {
                 Button {
                     Task { await logIn() }
@@ -194,9 +207,11 @@ struct AO3LoginSheet: View {
         do {
             let success = try await state.bridge.login(username: username, password: password)
             if success {
-                try state.bridge.saveCredentials(username: username, password: password)
+                try state.bridge.saveAccount(username: username)
+                state.bridge.saveSessionCookies()
                 state.refreshAO3Username()
                 isLoggedIn = true
+                password = ""
             } else {
                 error = "Login failed. Check your username and password."
             }
@@ -207,13 +222,19 @@ struct AO3LoginSheet: View {
         isLoading = false
     }
 
+    @State private var isLoggingOut = false
+
     private func logOut() {
-        state.bridge.clearCredentials()
-        state.refreshAO3Username()
-        isLoggedIn = false
-        username = ""
-        password = ""
-        error = nil
+        isLoggingOut = true
+        Task {
+            await state.bridge.logoutAccount()
+            state.refreshAO3Username()
+            isLoggedIn = false
+            username = ""
+            password = ""
+            error = nil
+            isLoggingOut = false
+        }
     }
 }
 

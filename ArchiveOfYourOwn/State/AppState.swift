@@ -58,6 +58,7 @@ final class AppState {
     var cloudflareError: String?
     var torConnectCancelled = false
     var torConnectFailed = false
+    var needsReauth = false
 
     func ensureAO3Login() async {
         guard !bridge.networkBlocked else { return }
@@ -205,9 +206,8 @@ final class AppState {
         bridge.restoreSessionCookies()
         refreshAO3Username()
 
-        // Log in to AO3 if we have credentials
-        // If Tor is enabled, this runs after Tor+Cloudflare are ready (loadPersistedState is called after .ready state)
-        if bridge.getCredentials() != nil {
+        // Verify session is still valid if we have an account
+        if ao3Username != nil {
             Task { await ensureAO3Login() }
         }
 
@@ -474,12 +474,16 @@ final class AppState {
 
     func refreshAO3Username() {
         let active = bridge.getActiveAccountUsername()
-        ao3Username = active.isEmpty ? bridge.getCredentials()?.first : active
+        ao3Username = active.isEmpty ? nil : active
     }
 
     func switchAccount(_ accountId: String) {
-        let username = bridge.switchAccount(accountId: accountId)
-        ao3Username = username.isEmpty ? nil : username
+        let result = bridge.switchAccount(accountId: accountId)
+        ao3Username = result.username.isEmpty ? nil : result.username
+
+        if !result.hasSession && !result.username.isEmpty {
+            needsReauth = true
+        }
 
         // Invalidate per-account network data so views refetch
         subscriptionsLoadedForAccount = nil

@@ -12,6 +12,8 @@ struct PrivacySheetView: View {
     @State private var addPassword = ""
     @State private var addError: String?
     @State private var isAddingAccount = false
+    @State private var showLogoutConfirm = false
+    @State private var isLoggingOut = false
 
     private var isInProgress: Bool {
         state.bridge.torStatus == .connecting || state.isTestingCircuit || state.isResolvingCloudflare
@@ -76,6 +78,19 @@ struct PrivacySheetView: View {
         .clipShape(RoundedRectangle(cornerRadius: Radius.sheet))
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.hidden)
+        .alert("Log Out?", isPresented: $showLogoutConfirm) {
+            Button("Log out", role: .destructive) {
+                isLoggingOut = true
+                Task {
+                    await state.bridge.logoutAccount()
+                    state.refreshAO3Username()
+                    isLoggingOut = false
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The session will be ended on AO3. You'll need to sign in again to use this account.")
+        }
     }
 
     // MARK: - Account Row
@@ -108,6 +123,14 @@ struct PrivacySheetView: View {
                     addError = nil
                 } label: {
                     Label("Add account", systemImage: "plus")
+                }
+
+                if state.ao3Username != nil {
+                    Button(role: .destructive) {
+                        showLogoutConfirm = true
+                    } label: {
+                        Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
                 }
             } label: {
                 HStack(spacing: 6) {

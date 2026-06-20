@@ -362,7 +362,7 @@ impl Storage {
         self.get_active_account()
             .ok()
             .flatten()
-            .map(|(id, _, _, _)| id)
+            .map(|(id, _, _)| id)
             .unwrap_or_default()
     }
 
@@ -1289,10 +1289,10 @@ impl Storage {
 
     // -- Accounts -------------------------------------------------------------
 
-    pub fn create_account(&self, id: &str, username: &str, password: &str, cookies: &str) -> Result<(), AppError> {
+    pub fn create_account(&self, id: &str, username: &str, cookies: &str) -> Result<(), AppError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO accounts (id, username, password, cookies) VALUES (?1, ?2, ?3, ?4)",
-            params![id, username, password, cookies],
+            "INSERT OR REPLACE INTO accounts (id, username, password, cookies) VALUES (?1, ?2, '', ?3)",
+            params![id, username, cookies],
         ).map_err(map_sql)?;
         Ok(())
     }
@@ -1303,12 +1303,12 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_active_account(&self) -> Result<Option<(String, String, String, String)>, AppError> {
+    pub fn get_active_account(&self) -> Result<Option<(String, String, String)>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, username, password, cookies FROM accounts WHERE is_active = 1"
+            "SELECT id, username, cookies FROM accounts WHERE is_active = 1"
         ).map_err(map_sql)?;
         let mut rows = stmt.query_map([], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?))
+            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))
         }).map_err(map_sql)?;
         match rows.next() {
             Some(Ok(r)) => Ok(Some(r)),
@@ -1334,22 +1334,31 @@ impl Storage {
         Ok(())
     }
 
+    pub fn clear_account_cookies(&self, id: &str) -> Result<(), AppError> {
+        self.conn.execute(
+            "UPDATE accounts SET cookies = '' WHERE id = ?1",
+            params![id],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
     pub fn delete_account(&self, id: &str) -> Result<(), AppError> {
         self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![id]).map_err(map_sql)?;
         Ok(())
     }
 
     pub fn migrate_legacy_credentials(&self) -> Result<Option<String>, AppError> {
+        // Clear any stored passwords from existing accounts
+        self.conn.execute("UPDATE accounts SET password = ''", []).map_err(map_sql)?;
+
         let username = self.get_state("ao3_username")?;
-        let password = self.get_state("ao3_password")?;
         let cookies = self.get_state("ao3_session_cookies")?;
 
         if let Some(ref u) = username {
             if !u.is_empty() {
                 let id = format!("migrated-{}", u);
-                let p = password.unwrap_or_default();
                 let c = cookies.unwrap_or_default();
-                self.create_account(&id, u, &p, &c)?;
+                self.create_account(&id, u, &c)?;
                 self.set_active_account(&id)?;
                 self.set_state("ao3_username", "")?;
                 self.set_state("ao3_password", "")?;

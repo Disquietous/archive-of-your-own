@@ -12,13 +12,11 @@ struct AccountManagementView: View {
     @State private var addError: String?
     @State private var isAddingAccount = false
 
-    @State private var editingPasswordFor: String?
-    @State private var newPassword = ""
-    @State private var passwordUpdateError: String?
-    @State private var passwordUpdated = false
-
     @State private var removeConfirmId: String?
     @State private var showRemoveConfirm = false
+    @State private var logoutConfirmId: String?
+    @State private var showLogoutConfirm = false
+    @State private var loggingOutAccountId: String?
 
     private var accounts: [(id: String, username: String, isActive: Bool)] {
         state.bridge.getAccounts()
@@ -55,13 +53,6 @@ struct AccountManagementView: View {
                             .stroke(theme.line, lineWidth: 1)
                     )
                     .padding(.horizontal, theme.pad)
-                }
-
-                // Password edit form
-                if let editId = editingPasswordFor,
-                   let account = accounts.first(where: { $0.id == editId }) {
-                    passwordEditForm(account)
-                        .padding(.horizontal, theme.pad)
                 }
 
                 // Add account
@@ -104,7 +95,18 @@ struct AccountManagementView: View {
             }
             Button("Cancel", role: .cancel) { removeConfirmId = nil }
         } message: {
-            Text("This account's credentials will be removed from this device.")
+            Text("This account will be removed from this device.")
+        }
+        .alert("Log Out?", isPresented: $showLogoutConfirm) {
+            Button("Log out", role: .destructive) {
+                if let id = logoutConfirmId {
+                    performLogout(accountId: id)
+                    logoutConfirmId = nil
+                }
+            }
+            Button("Cancel", role: .cancel) { logoutConfirmId = nil }
+        } message: {
+            Text("The session will be ended on AO3. You'll need to sign in again to use this account.")
         }
     }
 
@@ -158,25 +160,22 @@ struct AccountManagementView: View {
 
                 Spacer()
 
-                // Update password
-                Button {
-                    if editingPasswordFor == account.id {
-                        editingPasswordFor = nil
-                    } else {
-                        editingPasswordFor = account.id
-                        newPassword = ""
-                        passwordUpdateError = nil
-                        passwordUpdated = false
-                    }
-                } label: {
-                    Image(systemName: "key")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(theme.ink2)
+                if loggingOutAccountId == account.id {
+                    ProgressView()
                         .frame(width: 32, height: 32)
+                } else {
+                    Button {
+                        logoutConfirmId = account.id
+                        showLogoutConfirm = true
+                    } label: {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(theme.ink2)
+                            .frame(width: 32, height: 32)
+                    }
+                    .buttonStyle(IconButtonPressStyle())
                 }
-                .buttonStyle(IconButtonPressStyle())
 
-                // Remove
                 Button {
                     removeConfirmId = account.id
                     showRemoveConfirm = true
@@ -190,56 +189,6 @@ struct AccountManagementView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-        }
-    }
-
-    // MARK: - Password Edit
-
-    private func passwordEditForm(_ account: (id: String, username: String, isActive: Bool)) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Update password for \(account.username)")
-                .font(Typography.uiSmall())
-                .foregroundStyle(theme.ink3)
-
-            SecureFieldWithToggle(placeholder: "New password", text: $newPassword)
-                .font(Typography.uiBody())
-                .padding(10)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if let passwordUpdateError {
-                Text(passwordUpdateError)
-                    .font(Typography.uiCaption())
-                    .foregroundStyle(Color(hex: "CE514D"))
-            }
-
-            if passwordUpdated {
-                Text("Password updated.")
-                    .font(Typography.uiCaption())
-                    .foregroundStyle(theme.sage)
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    updatePassword(accountId: account.id, username: account.username)
-                } label: {
-                    Text("Save")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.onAccent)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.accent))
-                }
-                .disabled(newPassword.isEmpty)
-
-                Button {
-                    editingPasswordFor = nil
-                } label: {
-                    Text("Cancel")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.ink3)
-                }
-            }
         }
     }
 
@@ -296,6 +245,15 @@ struct AccountManagementView: View {
 
     // MARK: - Actions
 
+    private func performLogout(accountId: String) {
+        loggingOutAccountId = accountId
+        Task {
+            await state.bridge.logoutSpecificAccount(accountId: accountId)
+            state.refreshAO3Username()
+            loggingOutAccountId = nil
+        }
+    }
+
     private func performAddAccount() async {
         guard !state.bridge.networkBlocked else {
             addError = "Connect to Tor first."
@@ -320,17 +278,4 @@ struct AccountManagementView: View {
         isAddingAccount = false
     }
 
-    private func updatePassword(accountId: String, username: String) {
-        passwordUpdateError = nil
-        passwordUpdated = false
-        do {
-            try state.bridge.saveCredentials(username: username, password: newPassword)
-            passwordUpdated = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                editingPasswordFor = nil
-            }
-        } catch {
-            passwordUpdateError = error.localizedDescription
-        }
-    }
 }

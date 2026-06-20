@@ -557,6 +557,18 @@ final class RustBridge {
         return (try? await app.ensureLoggedIn()) ?? false
     }
 
+    func reauthenticate(password: String) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        guard let creds = getCredentials(), let username = creds.first else {
+            return false
+        }
+        let success = try await app.login(username: username, password: password)
+        if success {
+            _ = try? app.saveSessionCookies()
+        }
+        return success
+    }
+
     // MARK: - AO3 Account
 
     func login(username: String, password: String) async throws -> Bool {
@@ -577,9 +589,9 @@ final class RustBridge {
         _ = try? app?.saveSessionCookies()
     }
 
-    func saveCredentials(username: String, password: String) throws {
+    func saveAccount(username: String) throws {
         guard let app else { throw BridgeError.notInitialized }
-        try app.saveCredentials(username: username, password: password)
+        try app.saveAccount(username: username)
     }
 
     func getCredentials() -> [String]? {
@@ -598,6 +610,14 @@ final class RustBridge {
         return try await app.addAccount(username: username, password: password)
     }
 
+    func logoutAccount() async {
+        try? await app?.logoutAccount()
+    }
+
+    func logoutSpecificAccount(accountId: String) async {
+        try? await app?.logoutSpecificAccount(accountId: accountId)
+    }
+
     func removeAccount(accountId: String) {
         try? app?.removeAccount(accountId: accountId)
     }
@@ -611,9 +631,12 @@ final class RustBridge {
         }
     }
 
-    func switchAccount(accountId: String) -> String {
-        guard let app else { return "" }
-        return (try? app.switchAccount(accountId: accountId)) ?? ""
+    func switchAccount(accountId: String) -> (username: String, hasSession: Bool) {
+        guard let app else { return ("", false) }
+        let result = (try? app.switchAccount(accountId: accountId)) ?? []
+        let username = result.first ?? ""
+        let hasSession = result.count > 1 && result[1] == "1"
+        return (username, hasSession)
     }
 
     func getActiveAccountUsername() -> String {

@@ -37,10 +37,23 @@ extension AppState {
                 if desc.contains("session_expired") && !sessionRetried {
                     sessionRetried = true
                     task.statusMessage = "Session expired. Re-authenticating…"
-                    _ = await bridge.ensureLoggedIn()
+                    let loggedIn = await bridge.ensureLoggedIn()
                     if task.isCancelled { throw error }
-                    task.statusMessage = "Retrying…"
-                    continue
+                    if loggedIn {
+                        task.statusMessage = "Retrying…"
+                        continue
+                    }
+                    await MainActor.run {
+                        needsReauth = true
+                    }
+                    throw Ao3Error.Network(message: "Session expired. Please re-enter your password.")
+                }
+                if desc.contains("password_needed") && !sessionRetried {
+                    sessionRetried = true
+                    await MainActor.run {
+                        needsReauth = true
+                    }
+                    throw Ao3Error.Network(message: "Session expired. Please re-enter your password.")
                 }
                 if desc.contains("timeout") {
                     timeoutCount += 1
