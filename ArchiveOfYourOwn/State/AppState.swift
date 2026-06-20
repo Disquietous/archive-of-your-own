@@ -471,10 +471,12 @@ final class AppState {
     var pendingBookmarkRemoval: String?
 
     var ao3Username: String?
+    var ao3AccountCount = 0
 
     func refreshAO3Username() {
         let active = bridge.getActiveAccountUsername()
         ao3Username = active.isEmpty ? nil : active
+        ao3AccountCount = bridge.getAccounts().count
     }
 
     func switchAccount(_ accountId: String) {

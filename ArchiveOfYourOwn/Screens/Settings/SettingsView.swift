@@ -153,7 +153,7 @@ struct SettingsView: View {
 
                             Spacer()
 
-                            let count = state.bridge.getAccounts().count
+                            let count = state.ao3AccountCount
                             Text(count > 0 ? "\(count) account\(count == 1 ? "" : "s")" : "None")
                                 .font(Typography.uiSmall())
                                 .foregroundStyle(count > 0 ? theme.sage : theme.ink3)
