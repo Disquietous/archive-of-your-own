@@ -11,6 +11,7 @@ enum AppDestination: Hashable {
     case readingList(listID: Int64, name: String)
     case authorWorks(username: String)
     case downloads
+    case history
     case inbox
     case accountManagement
 }

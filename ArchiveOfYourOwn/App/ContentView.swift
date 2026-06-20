@@ -127,6 +127,8 @@ struct ContentView: View {
             AuthorWorksView(username: username)
         case .downloads:
             DownloadsView()
+        case .history:
+            HistoryView()
         case .inbox:
             InboxView()
         case .accountManagement:

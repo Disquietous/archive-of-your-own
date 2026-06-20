@@ -29,6 +29,7 @@ struct ContentBlockView: View {
                 .lineSpacing(compact ? 4 : theme.readingLineSpacing)
                 .foregroundStyle(theme.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, !compact && !isFirst ? theme.readingLineSpacing * 1.0 : 0)
 
         case .heading(let level, let text):
             Text(text)
@@ -99,6 +100,9 @@ struct ContentBlockView: View {
 
     private func buildAttributedInlines(_ inlines: [ParsedInlineContent]) -> AttributedString {
         var result = AttributedString()
+        if !compact {
+            result.append(AttributedString("\u{2002}\u{2002}\u{2002}\u{2002}"))
+        }
         for inline in inlines {
             result.append(attributedString(for: inline))
         }
