@@ -6,7 +6,7 @@ struct LibraryView: View {
     @Environment(NavigationState.self) private var nav
 
     enum Tab: String, CaseIterable {
-        case reading, bookmarks, subscriptions, history
+        case reading, bookmarks, subscriptions, history, downloads, lists
     }
 
     var initialTab: Tab = .reading
@@ -30,6 +30,8 @@ struct LibraryView: View {
                         (key: Tab.bookmarks, label: "Bookmarks"),
                         (key: Tab.subscriptions, label: "Subscriptions"),
                         (key: Tab.history, label: "History"),
+                        (key: Tab.downloads, label: "Downloads"),
+                        (key: Tab.lists, label: "Lists"),
                     ]
                 )
                 .padding(.horizontal, theme.pad)
@@ -44,6 +46,10 @@ struct LibraryView: View {
                     subscriptionsTab
                 case .history:
                     historyTab
+                case .downloads:
+                    downloadsTab
+                case .lists:
+                    listsTab
                 }
             }
             .padding(.bottom, 32)
@@ -170,39 +176,6 @@ struct LibraryView: View {
                 }
             }
 
-            // Downloads
-            if !state.downloadedWorkIDs.isEmpty {
-                Button {
-                    let dest = AppDestination.downloads
-                    nav.libraryPath.append(dest)
-                } label: {
-                    HStack {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(theme.sage)
-                        Text("Downloaded Works")
-                            .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
-                            .foregroundStyle(theme.ink)
-                        Spacer()
-                        Text("\(state.downloadedWorkIDs.count)")
-                            .font(.custom("HankenGrotesk", size: 13).weight(.medium))
-                            .foregroundStyle(theme.ink3)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(theme.ink3)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
-                    .background(theme.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: Radius.card))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Radius.card)
-                            .stroke(theme.line, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(CardPressStyle())
-                .padding(.horizontal, theme.pad)
-            }
         }
         .alert("New Reading List", isPresented: $showNewListDialog) {
             TextField("List name", text: $newListName)
@@ -569,6 +542,123 @@ struct LibraryView: View {
 
     private var earlierWorks: [Work] {
         Array(state.historyWorks.dropFirst())
+    }
+
+    // MARK: - Downloads Tab
+
+    private var downloadsTab: some View {
+        VStack(alignment: .leading, spacing: theme.rowGap) {
+            if downloadedWorks.isEmpty {
+                EmptyStateView(
+                    systemImage: "arrow.down.circle",
+                    title: "No downloads",
+                    subtitle: "Works you download will appear here for offline reading."
+                )
+                .padding(.top, 40)
+            } else {
+                LazyVStack(spacing: theme.rowGap) {
+                    ForEach(downloadedWorks) { work in
+                        WorkCardView(
+                            work: work,
+                            blurExplicit: state.hideExplicit && work.rating == .explicit,
+                            onTap: { nav.openWork(work.id) }
+                        )
+                    }
+                }
+                .padding(.horizontal, theme.pad)
+            }
+        }
+    }
+
+    private var downloadedWorks: [Work] {
+        state.allKnownWorks.filter { state.downloadedWorkIDs.contains($0.id) }
+    }
+
+    // MARK: - Lists Tab
+
+    private var listsTab: some View {
+        VStack(alignment: .leading, spacing: theme.rowGap) {
+            HStack {
+                SectionHeaderView(title: "Reading Lists")
+                Spacer()
+                Button {
+                    showNewListDialog = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+                .buttonStyle(IconButtonPressStyle())
+            }
+            .padding(.horizontal, theme.pad)
+
+            if state.readingLists.isEmpty {
+                EmptyStateView(
+                    systemImage: "list.bullet.rectangle",
+                    title: "No reading lists",
+                    subtitle: "Create a list to organize your reading."
+                )
+                .padding(.top, 40)
+            } else {
+                LazyVStack(spacing: theme.rowGap) {
+                    ForEach(state.readingLists, id: \.id) { list in
+                        readingListRow(list)
+                    }
+                }
+                .padding(.horizontal, theme.pad)
+            }
+        }
+        .alert("New Reading List", isPresented: $showNewListDialog) {
+            TextField("List name", text: $newListName)
+            Button("Create") {
+                if !newListName.trimmingCharacters(in: .whitespaces).isEmpty {
+                    state.createReadingList(newListName.trimmingCharacters(in: .whitespaces))
+                    newListName = ""
+                }
+            }
+            Button("Cancel", role: .cancel) { newListName = "" }
+        }
+    }
+
+    private func readingListRow(_ list: UReadingList) -> some View {
+        let summary = state.readingListSummary(list.id)
+
+        return Button {
+            nav.openReadingList(list.id, name: list.name)
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(list.name)
+                        .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+
+                    HStack(spacing: 8) {
+                        Text("\(summary.readCount)/\(summary.totalCount) read")
+                            .font(.custom("HankenGrotesk", size: 12).weight(.medium))
+                            .foregroundStyle(theme.ink2)
+                        Text(summary.totalWords.abbreviated + " words")
+                            .font(.custom("HankenGrotesk", size: 12).weight(.medium))
+                            .foregroundStyle(theme.ink3)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.ink3)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Radius.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: Radius.card)
+                    .stroke(theme.line, lineWidth: 1)
+            )
+        }
+        .buttonStyle(CardPressStyle())
     }
 
     // MARK: - Subscriptions Tab

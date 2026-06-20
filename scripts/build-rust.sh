@@ -6,6 +6,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Ensure cargo is on PATH
+[[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 CORE_DIR="$ROOT_DIR/core"
 GENERATED_DIR="$ROOT_DIR/ArchiveOfYourOwn/Generated"
 
@@ -24,11 +27,15 @@ cd "$CORE_DIR"
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim 2>/dev/null || true
 
 # Build for device and simulator
+# Set deployment target to match project.yml so the linker doesn't warn
+# about objects built for a newer OS than the app targets.
+export IPHONEOS_DEPLOYMENT_TARGET=18.0
+
 echo "  Building for iOS device (aarch64-apple-ios)..."
-cargo build --target aarch64-apple-ios $PROFILE_FLAG --no-default-features
+cargo build --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor
 
 echo "  Building for iOS simulator (aarch64-apple-ios-sim)..."
-cargo build --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features
+cargo build --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor
 
 # Generate Swift bindings
 echo "==> Generating Swift bindings..."
