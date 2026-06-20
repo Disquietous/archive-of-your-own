@@ -33,39 +33,8 @@ struct WorkDetailView: View {
     }
 
     var body: some View {
-        if let work {
-            workContent(work)
-        } else {
-            ZStack(alignment: .top) {
-                if state.metadataTask.isCancelled {
-                    NetworkErrorView(message: "Loading was cancelled.", onRetry: {
-                        Task { await state.fetchWorkMetadata(workID) }
-                    })
-                } else if let error = state.searchError {
-                    NetworkErrorView(message: error, onRetry: {
-                        Task { await state.fetchWorkMetadata(workID) }
-                    })
-                } else {
-                    NetworkLoadingView(message: "Loading work...", task: state.metadataTask, operation: "work") {
-                        state.metadataTask.cancel()
-                    }
-                }
-                topChrome
-            }
-            .background(theme.bg)
-            .navigationBarBackButtonHidden(true)
-            .toolbar(.hidden, for: .tabBar)
-            .toolbar(.hidden, for: .navigationBar)
-            .task(id: workID) {
-                if isLiveWork {
-                    await state.fetchWorkMetadata(workID)
-                }
-            }
-        }
-    }
-
-    private func workContent(_ work: Work) -> some View {
-            ZStack(alignment: .top) {
+        ZStack(alignment: .top) {
+            if let work {
                 ScrollView {
                     VStack(alignment: .leading, spacing: theme.rowGap) {
                         Spacer()
@@ -86,24 +55,39 @@ struct WorkDetailView: View {
                     .padding(.bottom, 16)
                 }
 
-                // Top chrome
-                topChrome
-
-                // Bottom bar
                 VStack {
                     Spacer()
                     bottomBar(work)
                 }
-            }
-            .background(theme.bg)
-            .navigationBarBackButtonHidden(true)
-            .toolbar(.hidden, for: .tabBar)
-            .toolbar(.hidden, for: .navigationBar)
-            .task(id: workID) {
-                if isLiveWork {
-                    await state.fetchWorkMetadata(workID)
+            } else if state.metadataTask.isCancelled {
+                NetworkErrorView(message: "Loading was cancelled.", onRetry: {
+                    Task { await state.fetchWorkMetadata(workID) }
+                })
+                .frame(maxHeight: .infinity)
+            } else if let error = state.searchError {
+                NetworkErrorView(message: error, onRetry: {
+                    Task { await state.fetchWorkMetadata(workID) }
+                })
+                .frame(maxHeight: .infinity)
+            } else {
+                NetworkLoadingView(message: "Loading work...", task: state.metadataTask, operation: "work") {
+                    state.metadataTask.cancel()
                 }
+                .frame(maxHeight: .infinity)
             }
+
+            topChrome
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.bg)
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: workID) {
+            if isLiveWork {
+                await state.fetchWorkMetadata(workID)
+            }
+        }
     }
 
     private var topChrome: some View {
