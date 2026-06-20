@@ -23,6 +23,11 @@ struct ContentView: View {
                 .environment(state)
                 .environment(nav)
         }
+        .onChange(of: state.needsReauth) {
+            if state.needsReauth && nav.presentedSheet == nil {
+                nav.presentedSheet = .reauth
+            }
+        }
     }
 
     // MARK: - iPhone (TabView)
@@ -155,6 +160,8 @@ struct ContentView: View {
             BookmarkEditSheet(workID: workID)
         case .themeEditor:
             ThemeEditorSheet()
+        case .reauth:
+            ReauthSheet()
         }
     }
 }

@@ -21,6 +21,7 @@ enum SheetType: Identifiable, Hashable {
     case readingSettings
     case databasePasswordReset
     case ao3Login
+    case reauth
     case comment(workID: String, chapterID: UInt64?)
     case viewComments(workID: String, chapterID: UInt64?)
     case bookmarkEdit(workID: String)
@@ -32,6 +33,7 @@ enum SheetType: Identifiable, Hashable {
         case .readingSettings: "readingSettings"
         case .databasePasswordReset: "databasePasswordReset"
         case .ao3Login: "ao3Login"
+        case .reauth: "reauth"
         case .comment(let workID, let chapterID): "comment-\(workID)-\(chapterID ?? 0)"
         case .viewComments(let workID, let chapterID): "viewComments-\(workID)-\(chapterID ?? 0)"
         case .bookmarkEdit(let workID): "bookmarkEdit-\(workID)"

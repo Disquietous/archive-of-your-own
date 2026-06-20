@@ -790,59 +790,15 @@ impl AO3App {
     }
 
     async fn relogin(&self) -> Result<bool, AO3Error> {
-        self.run_on_runtime(|client, storage| async move {
-            // Check if already authenticated
+        self.run_on_runtime(|client, _storage| async move {
             let c = client.read().await;
             let current_cookies = c.get_session_cookies();
             if current_cookies.contains("user_credentials") {
                 log_info!("auth", "Already authenticated (user_credentials cookie present), skipping re-login");
                 return Ok(true);
             }
-            drop(c);
-
-            let s = storage.lock().await;
-
-            // Try active account first
-            let (username, password) = if let Ok(Some((_, u, p, _))) = s.get_active_account() {
-                if !u.is_empty() && !p.is_empty() { (Some(u), Some(p)) } else { (None, None) }
-            } else {
-                // Fallback to legacy
-                let u = s.get_state("ao3_username").map_err(AO3Error::from)?;
-                let p = s.get_state("ao3_password").map_err(AO3Error::from)?;
-                (u, p)
-            };
-            drop(s);
-
-            match (username, password) {
-                (Some(ref u), Some(ref p)) if !u.is_empty() && !p.is_empty() => {
-                    log_info!("auth", "Re-login attempt for user: {}", u);
-                    let c = client.read().await;
-                    let result = match c.login(u, p).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            log_error!("auth", "Re-login failed: {}", e);
-                            return Err(AO3Error::from(e));
-                        }
-                    };
-                    log_info!("auth", "Re-login result: {}", result);
-                    if result {
-                        let cookies = c.get_session_cookies();
-                        log_info!("auth", "Re-login cookies: {} chars, has_auth={}", cookies.len(), cookies.contains("user_credentials"));
-                        let s = storage.lock().await;
-                        // Save to active account or legacy
-                        if let Ok(Some((id, _, _, _))) = s.get_active_account() {
-                            let _ = s.update_account_cookies(&id, &cookies);
-                        } else {
-                            let _ = s.set_state("ao3_session_cookies", &cookies);
-                        }
-                    }
-                    Ok(result)
-                }
-                _ => {
-                    log_info!("auth", "No credentials for re-login");
-                    Ok(false)
-                }
-            }
+            log_info!("auth", "Session expired, password needed from user");
+            Err(AO3Error::Network { message: "password_needed".to_string() })
         }).await
     }
 
@@ -852,9 +808,9 @@ impl AO3App {
         let storage = self.storage.blocking_lock();
 
         // Save to active account if one exists
-        if let Ok(Some((id, _, _, _))) = storage.get_active_account() {
+        if let Ok(Some((id, _, _))) = storage.get_active_account() {
             if !cookies.contains("user_credentials") {
-                if let Ok(Some((_, _, _, existing))) = storage.get_active_account() {
+                if let Ok(Some((_, _, existing))) = storage.get_active_account() {
                     if existing.contains("user_credentials") {
                         log_info!("cookies", " Refusing to overwrite authenticated cookies with unauthenticated jar");
                         return Ok(());
@@ -881,7 +837,7 @@ impl AO3App {
         let storage = self.storage.blocking_lock();
 
         // Try active account first
-        if let Ok(Some((_, _, _, cookies))) = storage.get_active_account() {
+        if let Ok(Some((_, _, cookies))) = storage.get_active_account() {
             if !cookies.is_empty() {
                 log_info!("cookies"," Restoring from account: {} chars, has user_credentials={}", cookies.len(), cookies.contains("user_credentials"));
                 let client = self.client.blocking_read();
@@ -902,42 +858,41 @@ impl AO3App {
         Ok(false)
     }
 
-    pub fn save_credentials(&self, username: String, password: String) -> Result<(), AO3Error> {
+    pub fn save_account(&self, username: String) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        // Save to active account if exists
-        if let Ok(Some((id, _, _, _))) = storage.get_active_account() {
-            storage.create_account(&id, &username, &password, "").map_err(AO3Error::from)?;
+        if let Ok(Some((id, _, _))) = storage.get_active_account() {
+            storage.create_account(&id, &username, "").map_err(AO3Error::from)?;
             return Ok(());
         }
-        storage.set_state("ao3_username", &username).map_err(AO3Error::from)?;
-        storage.set_state("ao3_password", &password).map_err(AO3Error::from)
+        let id = format!("account-{}", username.to_lowercase());
+        let client = self.client.blocking_read();
+        let cookies = client.get_session_cookies();
+        storage.create_account(&id, &username, &cookies).map_err(AO3Error::from)?;
+        storage.set_active_account(&id).map_err(AO3Error::from)
     }
 
     pub fn get_credentials(&self) -> Result<Option<Vec<String>>, AO3Error> {
         let storage = self.storage.blocking_lock();
-        // Try active account first
-        if let Ok(Some((_, username, password, _))) = storage.get_active_account() {
+        if let Ok(Some((_, username, _))) = storage.get_active_account() {
             if !username.is_empty() {
-                return Ok(Some(vec![username, password]));
+                return Ok(Some(vec![username]));
             }
         }
         // Fallback to legacy
         let u = storage.get_state("ao3_username").map_err(AO3Error::from)?;
-        let p = storage.get_state("ao3_password").map_err(AO3Error::from)?;
-        match (u, p) {
-            (Some(u), Some(p)) if !u.is_empty() => Ok(Some(vec![u, p])),
+        match u {
+            Some(u) if !u.is_empty() => Ok(Some(vec![u])),
             _ => Ok(None),
         }
     }
 
     pub fn clear_credentials(&self) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        if let Ok(Some((id, _, _, _))) = storage.get_active_account() {
+        if let Ok(Some((id, _, _))) = storage.get_active_account() {
             storage.delete_account(&id).map_err(AO3Error::from)?;
             return Ok(());
         }
-        storage.set_state("ao3_username", "").map_err(AO3Error::from)?;
-        storage.set_state("ao3_password", "").map_err(AO3Error::from)
+        storage.set_state("ao3_username", "").map_err(AO3Error::from)
     }
 
     // -- Account Management ---------------------------------------------------
@@ -948,13 +903,11 @@ impl AO3App {
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
 
-            // Save current cookies and clear jar so AO3 shows the login form
             let previous_cookies = c.get_session_cookies();
             c.clear_cookies();
 
             let success = c.login(&u, &p).await.map_err(AO3Error::from)?;
             if !success {
-                // Restore previous account's cookies on failure
                 if !previous_cookies.is_empty() {
                     c.set_session_cookies(&previous_cookies);
                 }
@@ -965,24 +918,57 @@ impl AO3App {
             let id = format!("account-{}", u.to_lowercase());
             let s = storage.lock().await;
 
-            // Save previous account's cookies if it was active
-            if let Ok(Some((prev_id, _, _, _))) = s.get_active_account() {
+            if let Ok(Some((prev_id, _, _))) = s.get_active_account() {
                 if !previous_cookies.is_empty() {
                     let _ = s.update_account_cookies(&prev_id, &previous_cookies);
                 }
             }
 
-            s.create_account(&id, &u, &p, &new_cookies).map_err(AO3Error::from)?;
+            s.create_account(&id, &u, &new_cookies).map_err(AO3Error::from)?;
             s.set_active_account(&id).map_err(AO3Error::from)?;
             Ok(id)
         }).await?;
         Ok(result)
     }
 
+    pub async fn logout_account(&self) -> Result<(), AO3Error> {
+        self.run_on_runtime(|client, storage| async move {
+            let c = client.read().await;
+            let _ = c.logout().await;
+            drop(c);
+
+            let s = storage.lock().await;
+            if let Ok(Some((id, _, _))) = s.get_active_account() {
+                s.clear_account_cookies(&id).map_err(AO3Error::from)?;
+            }
+            Ok(())
+        }).await
+    }
+
+    pub async fn logout_specific_account(&self, account_id: String) -> Result<(), AO3Error> {
+        let aid = account_id.clone();
+        self.run_on_runtime(move |client, storage| async move {
+            let s = storage.lock().await;
+
+            let is_active = s.get_active_account()
+                .map(|a| a.map(|(id, _, _)| id == aid).unwrap_or(false))
+                .unwrap_or(false);
+
+            if is_active {
+                let c = client.read().await;
+                let _ = c.logout().await;
+                drop(c);
+            }
+
+            s.clear_account_cookies(&aid).map_err(AO3Error::from)?;
+            Ok(())
+        }).await
+    }
+
     pub fn remove_account(&self, account_id: String) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
         let was_active = storage.get_active_account()
-            .map(|a| a.map(|(id, _, _, _)| id == account_id).unwrap_or(false))
+            .map(|a| a.map(|(id, _, _)| id == account_id).unwrap_or(false))
             .unwrap_or(false);
         storage.delete_account(&account_id).map_err(AO3Error::from)?;
         if was_active {
@@ -1005,39 +991,37 @@ impl AO3App {
         }).collect())
     }
 
-    pub fn switch_account(&self, account_id: String) -> Result<String, AO3Error> {
+    pub fn switch_account(&self, account_id: String) -> Result<Vec<String>, AO3Error> {
         let storage = self.storage.blocking_lock();
 
-        // Save current account's cookies
         let client = self.client.blocking_read();
         let current_cookies = client.get_session_cookies();
-        if let Ok(Some((current_id, _, _, _))) = storage.get_active_account() {
+        if let Ok(Some((current_id, _, _))) = storage.get_active_account() {
             if current_cookies.contains("user_credentials") || !current_cookies.is_empty() {
                 let _ = storage.update_account_cookies(&current_id, &current_cookies);
             }
         }
         drop(client);
 
-        // Switch active
         storage.set_active_account(&account_id).map_err(AO3Error::from)?;
 
-        // Load new account's cookies
-        if let Ok(Some((_, username, _, cookies))) = storage.get_active_account() {
+        if let Ok(Some((_, username, cookies))) = storage.get_active_account() {
             let client = self.client.blocking_read();
             client.clear_cookies();
+            let has_session = !cookies.is_empty() && cookies.contains("user_credentials");
             if !cookies.is_empty() {
                 client.set_session_cookies(&cookies);
             }
             log_info!("accounts", "Switched to account: {}", username);
-            return Ok(username);
+            return Ok(vec![username, if has_session { "1" } else { "0" }.to_string()]);
         }
-        Ok(String::new())
+        Ok(vec![String::new(), "0".to_string()])
     }
 
     pub fn get_active_account_username(&self) -> Result<String, AO3Error> {
         let storage = self.storage.blocking_lock();
         let _ = storage.migrate_legacy_credentials();
-        if let Ok(Some((_, username, _, _))) = storage.get_active_account() {
+        if let Ok(Some((_, username, _))) = storage.get_active_account() {
             return Ok(username);
         }
         Ok(String::new())

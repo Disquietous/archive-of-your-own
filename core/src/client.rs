@@ -889,6 +889,64 @@ impl AO3Client {
         }
     }
 
+    /// Log out of AO3 by sending a DELETE request to the session endpoint.
+    pub async fn logout(&self) -> Result<(), AppError> {
+        let html = self.fetch(&format!("{BASE_URL}/")).await?;
+        let token = {
+            let doc = scraper::Html::parse_document(&html);
+            let sel = scraper::Selector::parse("a[href='/users/logout']").unwrap();
+            if doc.select(&sel).next().is_none() {
+                return Ok(());
+            }
+            let meta_sel = scraper::Selector::parse("meta[name='csrf-token']").unwrap();
+            doc.select(&meta_sel)
+                .next()
+                .and_then(|el| el.value().attr("content"))
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+
+        if token.is_empty() {
+            self.clear_cookies();
+            return Ok(());
+        }
+
+        self.enforce_rate_limit().await;
+
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let params = [
+            ("authenticity_token", token.as_str()),
+            ("_method", "delete"),
+        ];
+
+        let result = tokio::time::timeout(timeout, async {
+            client.post(&format!("{BASE_URL}/users/logout"))
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            Ok::<(), AppError>(())
+        }).await;
+
+        match result {
+            Err(_) => {},
+            Ok(Err(_)) => {},
+            Ok(Ok(())) => {},
+        }
+
+        self.clear_cookies();
+        Ok(())
+    }
+
     /// Get session cookies as a string for persistence.
     pub fn get_session_cookies(&self) -> String {
         use reqwest::cookie::CookieStore;
