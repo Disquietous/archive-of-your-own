@@ -9,7 +9,7 @@ struct ContentBlockView: View {
 
     var body: some View {
         ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-            blockView(block, isFirst: index == 0)
+            blockView(block, isFirst: index == 0, previousBlock: index > 0 ? blocks[index - 1] : nil)
                 .id("block-\(index)")
                 .padding(.vertical, highlightedIndex == index ? 2 : 0)
                 .background(
@@ -20,8 +20,20 @@ struct ContentBlockView: View {
         }
     }
 
+    private func previousBlockAddsSpace(_ block: ParsedContentBlock?) -> Bool {
+        guard let block else { return false }
+        switch block {
+        case .paragraph(let inlines):
+            return trimmedInlines(inlines).isEmpty
+        case .horizontalRule:
+            return true
+        default:
+            return false
+        }
+    }
+
     @ViewBuilder
-    private func blockView(_ block: ParsedContentBlock, isFirst: Bool) -> some View {
+    private func blockView(_ block: ParsedContentBlock, isFirst: Bool, previousBlock: ParsedContentBlock? = nil) -> some View {
         switch block {
         case .paragraph(let inlines):
             Text(buildAttributedInlines(inlines))
@@ -29,7 +41,7 @@ struct ContentBlockView: View {
                 .lineSpacing(compact ? 4 : theme.readingLineSpacing)
                 .foregroundStyle(theme.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, !compact && !isFirst ? theme.readingLineSpacing * 1.0 : 0)
+                .padding(.top, !compact && !isFirst && !previousBlockAddsSpace(previousBlock) ? theme.readingLineSpacing * 1.0 : 0)
 
         case .heading(let level, let text):
             Text(text)
@@ -98,12 +110,23 @@ struct ContentBlockView: View {
         }
     }
 
+    private func trimmedInlines(_ inlines: [ParsedInlineContent]) -> [ParsedInlineContent] {
+        var result = inlines
+        while let first = result.first, case .text(let v) = first, v.allSatisfy({ $0.isWhitespace || $0.isNewline }) {
+            result.removeFirst()
+        }
+        while let last = result.last, case .text(let v) = last, v.allSatisfy({ $0.isWhitespace || $0.isNewline }) {
+            result.removeLast()
+        }
+        return result
+    }
+
     private func buildAttributedInlines(_ inlines: [ParsedInlineContent]) -> AttributedString {
         var result = AttributedString()
         if !compact {
             result.append(AttributedString("\u{2002}\u{2002}\u{2002}\u{2002}"))
         }
-        for inline in inlines {
+        for inline in trimmedInlines(inlines) {
             result.append(attributedString(for: inline))
         }
         return result
