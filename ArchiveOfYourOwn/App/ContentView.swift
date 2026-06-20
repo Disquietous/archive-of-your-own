@@ -106,7 +106,7 @@ struct ContentView: View {
                 }
             }
         }
-        .navigationSplitViewStyle(.balanced)
+        .navigationSplitViewStyle(.prominentDetail)
         .background(theme.bg)
     }
 

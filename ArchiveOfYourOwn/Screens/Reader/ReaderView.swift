@@ -172,33 +172,21 @@ struct ReaderView: View {
                                 Spacer()
                                     .frame(height: chromeVisible ? 80 : 50)
                             }
-                            .frame(maxWidth: 640)
-                            .frame(maxWidth: .infinity)
                             .padding(.horizontal, theme.readMargin)
                         } else if isLoading {
                             loadingContent
-                                .frame(maxWidth: 640)
-                                .frame(maxWidth: .infinity)
                                 .padding(.horizontal, theme.readMargin)
                         } else if let error = loadError {
                             errorContent(error)
-                                .frame(maxWidth: 640)
-                                .frame(maxWidth: .infinity)
                                 .padding(.horizontal, theme.readMargin)
                         } else if didCancel {
                             cancelledContent
-                                .frame(maxWidth: 640)
-                                .frame(maxWidth: .infinity)
                                 .padding(.horizontal, theme.readMargin)
                         } else if !hasFetched {
                             loadingContent
-                                .frame(maxWidth: 640)
-                                .frame(maxWidth: .infinity)
                                 .padding(.horizontal, theme.readMargin)
                         } else {
                             errorContent("Chapter content could not be loaded.")
-                                .frame(maxWidth: 640)
-                                .frame(maxWidth: .infinity)
                                 .padding(.horizontal, theme.readMargin)
                         }
                     }
@@ -406,8 +394,6 @@ struct ReaderView: View {
                         Spacer()
                             .frame(height: chromeVisible ? 80 : 50)
                     }
-                    .frame(maxWidth: 640)
-                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, theme.readMargin)
                     .background(
                         GeometryReader { contentGeo in
