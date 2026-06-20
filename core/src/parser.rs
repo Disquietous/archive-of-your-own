@@ -669,7 +669,13 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
             let t = child.value().as_text().unwrap();
             let s = t.to_string();
             if !s.is_empty() {
-                inlines.push(InlineContent::Text { value: s });
+                if s.contains('\n') && s.trim().is_empty() {
+                    inlines.push(InlineContent::Text {
+                        value: " ".to_string(),
+                    });
+                } else {
+                    inlines.push(InlineContent::Text { value: s });
+                }
             }
         } else if child.value().is_element() {
             let element = child.value().as_element().unwrap();
@@ -719,6 +725,12 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
                 }
             }
         }
+    }
+    while inlines.first().map_or(false, |i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+        inlines.remove(0);
+    }
+    while inlines.last().map_or(false, |i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+        inlines.pop();
     }
     inlines
 }
