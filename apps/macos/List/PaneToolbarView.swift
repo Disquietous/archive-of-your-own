@@ -1,0 +1,150 @@
+import AppKit
+
+/// The 52px toolbar that sits above the list pane and reading pane content.
+final class PaneToolbarView: NSView {
+    private let theme: AppTheme
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subLabel = NSTextField(labelWithString: "")
+    private let leadingStack = NSStackView()
+    private let trailingStack = NSStackView()
+    private let separator = NSView()
+
+    init(theme: AppTheme) {
+        self.theme = theme
+        super.init(frame: .zero)
+
+        titleLabel.font = MacFont.ui(15, weight: .bold)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        subLabel.font = MacFont.ui(12, weight: .medium)
+        subLabel.lineBreakMode = .byTruncatingTail
+
+        let titleStack = NSStackView(views: [titleLabel, subLabel])
+        titleStack.orientation = .vertical
+        titleStack.alignment = .leading
+        titleStack.spacing = 0
+
+        leadingStack.orientation = .horizontal
+        leadingStack.spacing = 8
+        trailingStack.orientation = .horizontal
+        trailingStack.spacing = 4
+
+        let bar = NSStackView(views: [leadingStack, titleStack, NSView(), trailingStack])
+        bar.orientation = .horizontal
+        bar.spacing = 10
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(bar)
+
+        separator.wantsLayer = true
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(separator)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 52),
+            bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            bar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func configure(title: String, sub: String?) {
+        titleLabel.stringValue = title
+        subLabel.stringValue = sub ?? ""
+        subLabel.isHidden = sub == nil
+    }
+
+    func setLeading(_ views: [NSView]) {
+        leadingStack.setViews(views, in: .leading)
+        leadingStack.isHidden = views.isEmpty
+    }
+
+    func setTrailing(_ views: [NSView]) {
+        trailingStack.setViews(views, in: .trailing)
+    }
+
+    func applyTheme() {
+        titleLabel.textColor = theme.nsInk
+        subLabel.textColor = theme.nsInk3
+        separator.layer?.backgroundColor = theme.nsLine.cgColor
+    }
+}
+
+/// 30×30 icon button used across pane toolbars — hover tint, optional "on" accent state.
+final class ToolButton: NSButton {
+    private let theme: AppTheme
+    private var hovering = false
+    var isOn = false {
+        didSet { refresh() }
+    }
+    /// Icon tint when set (e.g. accent for an active bookmark) without the "on" fill.
+    var tintOverride: NSColor? {
+        didSet { refresh() }
+    }
+
+    init(theme: AppTheme, symbol: String, tooltip: String, action: @escaping () -> Void) {
+        self.theme = theme
+        self.callback = action
+        super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        toolTip = tooltip
+        target = self
+        self.action = #selector(fire)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(equalToConstant: 30),
+        ])
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(tracking)
+        refresh()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    private let callback: () -> Void
+
+    @objc private func fire() {
+        callback()
+    }
+
+    func setSymbol(_ symbol: String) {
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip)?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
+        refresh()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        refresh()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        refresh()
+    }
+
+    func refresh() {
+        if isOn {
+            layer?.backgroundColor = theme.nsAccent.cgColor
+            contentTintColor = theme.nsOnAccent
+        } else {
+            layer?.backgroundColor = hovering ? theme.nsInk.withAlphaComponent(0.08).cgColor : NSColor.clear.cgColor
+            contentTintColor = tintOverride ?? theme.nsInk2
+        }
+    }
+}

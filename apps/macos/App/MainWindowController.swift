@@ -1,21 +1,19 @@
 import AppKit
 
 final class MainWindowController: NSWindowController {
-    convenience init(theme: AppTheme, appState: AppState) {
-        let splitController = MainSplitViewController(theme: theme, appState: appState)
+    convenience init(theme: AppTheme, appState: AppState, model: MacAppModel) {
+        let splitController = MainSplitViewController(theme: theme, appState: appState, model: model)
         let window = NSWindow(contentViewController: splitController)
         window.title = "AoYO"
-        window.toolbarStyle = .unified
-        window.titlebarAppearsTransparent = false
+        // Panes draw their own 52px toolbars (per the design); the system
+        // titlebar is hidden and the traffic lights float over the sidebar head.
         window.styleMask.insert(.fullSizeContentView)
-        window.setContentSize(NSSize(width: 1280, height: 860))
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.setContentSize(NSSize(width: 1280, height: 820))
+        window.minSize = NSSize(width: 1000, height: 600)
         window.center()
         window.setFrameAutosaveName("MainWindow")
-
-        // An empty unified toolbar gives the standard full-height sidebar look.
-        let toolbar = NSToolbar(identifier: "MainToolbar")
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
 
         self.init(window: window)
     }

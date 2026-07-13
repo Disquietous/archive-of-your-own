@@ -5,7 +5,14 @@ import SwiftUI
 /// TextKit 2 reader. Second consumer of the same content tree the SwiftUI
 /// views render on iOS — no HTML, no Rust changes.
 struct ContentBlockRenderer {
+    /// `.indented` — classic book style (first-line indent, no gaps).
+    /// `.macReading` — the desktop handoff style (no indent, 1.2em paragraph gap).
+    enum ParagraphMode {
+        case indented, macReading
+    }
+
     let theme: AppTheme
+    var paragraphStyle: ParagraphMode = .indented
 
     private var bodySize: CGFloat { CGFloat(theme.fontSize) }
     private var bodyFont: NSFont { Self.readingFont(named: theme.readingFont.fontName, size: bodySize) }
@@ -220,9 +227,15 @@ struct ContentBlockRenderer {
     private func bodyParagraphStyle(indentLevel: Int) -> NSMutableParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = theme.readLeading
-        style.paragraphSpacing = bodySize * 0.6
         style.headIndent = CGFloat(indentLevel) * 24
-        style.firstLineHeadIndent = CGFloat(indentLevel) * 24 + (indentLevel == 0 ? bodySize * 1.5 : 0)
+        switch paragraphStyle {
+        case .indented:
+            style.paragraphSpacing = bodySize * 0.6
+            style.firstLineHeadIndent = CGFloat(indentLevel) * 24 + (indentLevel == 0 ? bodySize * 1.5 : 0)
+        case .macReading:
+            style.paragraphSpacing = bodySize * 1.2
+            style.firstLineHeadIndent = CGFloat(indentLevel) * 24
+        }
         return style
     }
 
