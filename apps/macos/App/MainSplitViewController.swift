@@ -36,7 +36,7 @@ final class MainSplitViewController: NSSplitViewController {
         sidebarItem.canCollapse = true
         addSplitViewItem(sidebarItem)
 
-        let listController = ListPaneViewController(theme: theme, model: model)
+        let listController = ListPaneViewController(theme: theme, appState: appState, model: model)
         listItem = NSSplitViewItem(viewController: listController)
         listItem.minimumThickness = 384
         listItem.maximumThickness = 384

@@ -3,20 +3,16 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let theme = AppTheme()
     let appState = AppState()
-    let model = MacAppModel()
+    lazy var model = MacAppModel(appState: appState)
 
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
-
-        // First launch on this machine: create the encrypted database with an
-        // auto-generated key (stored in the Keychain), matching the passwordless path.
-        if appState.bridge.launchState == .firstLaunch {
-            _ = appState.bridge.createWithAutoKey()
-        }
-
+        // Database creation/unlock is handled by the launch gate — first
+        // launch shows Protect Your Library, a password-protected library
+        // shows the unlock screen.
         let controller = MainWindowController(theme: theme, appState: appState, model: model)
         controller.showWindow(nil)
         mainWindowController = controller

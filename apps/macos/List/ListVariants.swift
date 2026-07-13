@@ -1,7 +1,7 @@
 import SwiftUI
 
 // SwiftUI content for the list pane's non-table variants, hosted from the
-// AppKit ListPaneViewController.
+// AppKit ListPaneViewController. All data comes from the shared AppState.
 
 // MARK: - Tag chips (browse/search)
 
@@ -11,7 +11,7 @@ struct ChipsBar: View {
 
     var body: some View {
         FlowLayout(spacing: 7) {
-            ForEach(MacMockData.popularTags, id: \.self) { tag in
+            ForEach(model.availableTags, id: \.self) { tag in
                 chip(tag, on: model.activeTags.contains(tag))
             }
         }
@@ -70,7 +70,7 @@ struct FlowLayout: Layout {
     }
 }
 
-// MARK: - Empty state
+// MARK: - Empty / loading / error states
 
 struct EmptyStateMac: View {
     @Bindable var theme: AppTheme
@@ -97,33 +97,59 @@ struct EmptyStateMac: View {
     }
 }
 
+struct LoadingStateMac: View {
+    @Bindable var theme: AppTheme
+    let message: String
+    var detail: String? = nil
+    var onCancel: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.regular)
+            Text(message)
+                .font(Font(MacFont.ui(13.5, weight: .semibold)))
+                .foregroundStyle(theme.ink2)
+            if let detail {
+                Text(detail)
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(theme.ink3)
+            }
+            if let onCancel {
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                    .foregroundStyle(theme.ink3)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(40)
+    }
+}
+
 // MARK: - Subscriptions
 
 struct SubscriptionsList: View {
     @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
     @State private var view = "new"
-    @State private var notify: [String: Bool] = {
-        var m: [String: Bool] = [:]
-        for group in MacMockData.subscriptions {
-            for s in group.items { m[s.id] = s.notify }
-        }
-        return m
-    }()
 
     var body: some View {
         VStack(spacing: 0) {
             segmented
-            ScrollView {
-                if view == "new" {
-                    VStack(spacing: 0) {
-                        ForEach(MacMockData.subUpdates) { u in
-                            UpdateRowView(theme: theme, model: model, update: u)
-                        }
+            if appState.ao3Username == nil {
+                EmptyStateMac(theme: theme, icon: "person.crop.circle.badge.questionmark",
+                              title: "Sign in to follow",
+                              message: "Add your AO3 account in Settings to see subscription updates here.")
+            } else {
+                ScrollView {
+                    if view == "new" {
+                        notificationsFeed
+                    } else {
+                        followingGroups
                     }
-                } else {
-                    followingGroups
                 }
             }
         }
@@ -155,39 +181,75 @@ struct SubscriptionsList: View {
         .buttonStyle(.plain)
     }
 
-    private var followingGroups: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(MacMockData.subscriptions, id: \.label) { group in
-                HStack(spacing: 7) {
-                    Image(systemName: group.icon).font(.system(size: 10, weight: .semibold))
-                    Text(group.label.uppercased()).kerning(0.6)
-                    Spacer()
-                    Text("\(group.items.count)").opacity(0.7)
+    @ViewBuilder
+    private var notificationsFeed: some View {
+        if appState.notifications.isEmpty {
+            EmptyStateMac(theme: theme, icon: "bell",
+                          title: "Nothing new",
+                          message: appState.isCheckingSubscriptions
+                            ? "Checking your subscriptions…"
+                            : "Updates from works and authors you follow appear here.")
+                .frame(minHeight: 300)
+        } else {
+            VStack(spacing: 0) {
+                ForEach(appState.notifications, id: \.id) { notification in
+                    NotificationRowView(theme: theme, appState: appState, model: model,
+                                        notification: notification)
                 }
-                .font(Font(MacFont.ui(10.5, weight: .bold)))
-                .foregroundStyle(theme.ink3)
-                .padding(.init(top: 12, leading: 16, bottom: 4, trailing: 16))
+            }
+        }
+    }
 
-                ForEach(group.items) { s in
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(s.name)
-                                .font(Font(MacFont.ui(14, weight: .semibold)))
-                                .foregroundStyle(theme.ink)
-                            Text(s.by.map { "by \($0) · \(s.status)" } ?? s.status)
-                                .font(Font(MacFont.ui(12)))
-                                .foregroundStyle(theme.ink3)
+    @ViewBuilder
+    private var followingGroups: some View {
+        let groups: [(label: String, icon: String, type: String)] = [
+            ("Works", "book.closed", "work"),
+            ("Series", "square.stack", "series"),
+            ("Authors", "person", "author"),
+        ]
+        if appState.subscriptions.isEmpty {
+            EmptyStateMac(theme: theme, icon: "bell",
+                          title: appState.isLoadingSubscriptions ? "Loading…" : "No subscriptions",
+                          message: appState.subscriptionError ?? "Works, series, and authors you subscribe to on AO3 appear here.")
+                .frame(minHeight: 300)
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(groups, id: \.type) { group in
+                    let items = appState.subscriptions.filter { $0.subType.lowercased().contains(group.type) }
+                    if !items.isEmpty {
+                        HStack(spacing: 7) {
+                            Image(systemName: group.icon).font(.system(size: 10, weight: .semibold))
+                            Text(group.label.uppercased()).kerning(0.6)
+                            Spacer()
+                            Text("\(items.count)").opacity(0.7)
                         }
-                        Spacer()
-                        NotifyButton(theme: theme, on: notify[s.id] ?? false) {
-                            notify[s.id] = !(notify[s.id] ?? false)
+                        .font(Font(MacFont.ui(10.5, weight: .bold)))
+                        .foregroundStyle(theme.ink3)
+                        .padding(.init(top: 12, leading: 16, bottom: 4, trailing: 16))
+
+                        ForEach(items, id: \.id) { sub in
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(sub.name)
+                                        .font(Font(MacFont.ui(14, weight: .semibold)))
+                                        .foregroundStyle(theme.ink)
+                                    Text(group.label.dropLast(group.label.hasSuffix("s") ? 1 : 0))
+                                        .font(Font(MacFont.ui(12)))
+                                        .foregroundStyle(theme.ink3)
+                                }
+                                Spacer()
+                            }
+                            .padding(.init(top: 10, leading: 16, bottom: 10, trailing: 16))
+                            .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if group.type == "work" { model.selectWork(sub.id) }
+                                if group.type == "author" {
+                                    model.query = sub.name
+                                    model.submitSearch()
+                                }
+                            }
                         }
-                    }
-                    .padding(.init(top: 10, leading: 16, bottom: 10, trailing: 16))
-                    .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if model.works.contains(where: { $0.id == s.id }) { model.selectWork(s.id) }
                     }
                 }
             }
@@ -195,57 +257,65 @@ struct SubscriptionsList: View {
     }
 }
 
-struct UpdateRowView: View {
+struct NotificationRowView: View {
     @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
-    let update: MacSubUpdate
+    let notification: UNotification
 
     private var icon: String {
-        switch update.type {
-        case .work: "book.closed"
-        case .author: "person"
-        case .collection: "folder"
-        case .series: "square.stack"
+        switch notification.notifType.lowercased() {
+        case let t where t.contains("chapter") || t.contains("work"): "book.closed"
+        case let t where t.contains("inbox") || t.contains("comment"): "envelope"
+        case let t where t.contains("author") || t.contains("user"): "person"
+        default: "bell"
         }
     }
 
     var body: some View {
         Button {
-            if let id = update.workID { model.selectWork(id) }
+            appState.markNotificationRead(notification.id)
+            if notification.workId > 0 {
+                model.selectWork(String(notification.workId))
+            }
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Fandom.spineColorForHue(update.hue, opacity: 0.18))
+                    .fill(theme.accentSoft)
                     .frame(width: 34, height: 34)
                     .overlay {
                         Image(systemName: icon)
                             .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Fandom.spineColorForHue(update.hue))
+                            .foregroundStyle(theme.accent)
                     }
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 7) {
-                        Text(update.type.rawValue.uppercased())
+                        Text(notification.notifType.uppercased())
                             .font(Font(MacFont.ui(10, weight: .bold)))
                             .kerning(0.6)
                             .foregroundStyle(theme.ink3)
-                        if update.unread && !model.notifsRead {
+                        if !notification.read {
                             Circle().fill(theme.accent).frame(width: 7, height: 7)
                         }
                         Spacer()
-                        Text(update.time)
+                        Text(Fmt.relativeTime(notification.createdAt))
                             .font(Font(MacFont.ui(11, weight: .medium)))
                             .foregroundStyle(theme.ink3)
                     }
-                    Text(update.target)
+                    Text(notification.title)
                         .font(Font(MacFont.serif(15, weight: .semibold)))
                         .foregroundStyle(theme.ink)
-                    Text(update.action)
-                        .font(Font(MacFont.ui(12.5, weight: .medium)))
-                        .foregroundStyle(theme.ink2)
-                    if let detail = update.detail {
-                        Text(detail)
-                            .font(Font(MacFont.ui(12)).italic())
+                        .multilineTextAlignment(.leading)
+                    if !notification.author.isEmpty {
+                        Text("by \(notification.author)")
+                            .font(Font(MacFont.ui(12)))
                             .foregroundStyle(theme.ink3)
+                    }
+                    if !notification.message.isEmpty {
+                        Text(notification.message)
+                            .font(Font(MacFont.ui(12.5, weight: .medium)))
+                            .foregroundStyle(theme.ink2)
+                            .multilineTextAlignment(.leading)
                     }
                 }
             }
@@ -258,145 +328,137 @@ struct UpdateRowView: View {
     }
 }
 
-struct NotifyButton: View {
-    @Bindable var theme: AppTheme
-    let on: Bool
-    let toggle: () -> Void
-
-    var body: some View {
-        Button(action: toggle) {
-            Image(systemName: on ? "bell" : "bell.slash")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(on ? theme.accent : theme.ink3)
-                .frame(width: 34, height: 34)
-                .background(on ? theme.accentSoft : theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(on ? theme.accent.opacity(0.35) : theme.line, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Fandoms
+// MARK: - Fandoms (derived from the local library)
 
 struct FandomsGrid: View {
     @Bindable var theme: AppTheme
     @Bindable var model: MacAppModel
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
-                ForEach(MacMockData.fandoms) { fandom in
-                    Button {
-                        model.openFandom(fandom)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 0) {
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Fandom.spineColorForHue(fandom.hue))
-                                .frame(width: 34, height: 34)
-                                .overlay {
-                                    Image(systemName: "flame")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundStyle(theme.onAccent)
-                                }
-                                .padding(.bottom, 10)
-                            Text(fandom.short)
-                                .font(Font(MacFont.serif(15, weight: .semibold)))
-                                .foregroundStyle(theme.ink)
-                                .multilineTextAlignment(.leading)
-                                .padding(.bottom, 2)
-                            Text("\(MacMockData.fmt(fandom.works)) works")
-                                .font(Font(MacFont.ui(11.5, weight: .medium)))
-                                .foregroundStyle(theme.ink3)
-                        }
-                        .padding(.init(top: 15, leading: 14, bottom: 15, trailing: 14))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(theme.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
-                        .overlay(alignment: .topTrailing) {
-                            if fandom.unread > 0 {
-                                Text("\(fandom.unread) new")
-                                    .font(Font(MacFont.ui(10, weight: .bold)))
-                                    .foregroundStyle(theme.onAccent)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(theme.accent)
-                                    .clipShape(Capsule())
-                                    .padding(13)
+        if model.libraryFandoms.isEmpty {
+            EmptyStateMac(theme: theme, icon: "flame",
+                          title: "No fandoms yet",
+                          message: "Fandoms from works you browse and save will appear here.")
+        } else {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
+                    ForEach(model.libraryFandoms) { fandom in
+                        Button {
+                            model.query = fandom.name
+                            model.submitSearch()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 0) {
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Fandom.spineColor(for: fandom.name))
+                                    .frame(width: 34, height: 34)
+                                    .overlay {
+                                        Image(systemName: "flame")
+                                            .font(.system(size: 14, weight: .medium))
+                                            .foregroundStyle(theme.onAccent)
+                                    }
+                                    .padding(.bottom, 10)
+                                Text(fandom.name)
+                                    .font(Font(MacFont.serif(15, weight: .semibold)))
+                                    .foregroundStyle(theme.ink)
+                                    .multilineTextAlignment(.leading)
+                                    .padding(.bottom, 2)
+                                Text("\(fandom.count) in library")
+                                    .font(Font(MacFont.ui(11.5, weight: .medium)))
+                                    .foregroundStyle(theme.ink3)
                             }
+                            .padding(.init(top: 15, leading: 14, bottom: 15, trailing: 14))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(theme.surface)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
                         }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(16)
             }
-            .padding(16)
         }
     }
 }
 
-// MARK: - Authors
+// MARK: - Authors (from AO3 subscriptions)
 
 struct AuthorsList: View {
     @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
-    @State private var notify = Dictionary(uniqueKeysWithValues: MacMockData.authors.map { ($0.id, $0.notify) })
-
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                ForEach(MacMockData.authors) { author in
-                    HStack(spacing: 12) {
-                        Circle()
-                            .fill(Fandom.spineColorForHue(author.hue))
-                            .frame(width: 40, height: 40)
-                            .overlay {
-                                Text(String(author.handle.prefix(1)).uppercased())
-                                    .font(Font(MacFont.serif(18, weight: .semibold)))
-                                    .foregroundStyle(theme.onAccent)
+        if appState.ao3Username == nil {
+            EmptyStateMac(theme: theme, icon: "person.crop.circle.badge.questionmark",
+                          title: "Sign in to follow authors",
+                          message: "Author subscriptions from your AO3 account appear here.")
+        } else if model.followedAuthors.isEmpty {
+            EmptyStateMac(theme: theme, icon: "person",
+                          title: "No followed authors",
+                          message: appState.isLoadingSubscriptions ? "Loading subscriptions…" : "Authors you subscribe to on AO3 appear here.")
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(model.followedAuthors, id: \.id) { author in
+                        Button {
+                            model.query = author.name
+                            model.submitSearch()
+                        } label: {
+                            HStack(spacing: 12) {
+                                Circle()
+                                    .fill(theme.accent2)
+                                    .frame(width: 40, height: 40)
+                                    .overlay {
+                                        Text(String(author.name.prefix(1)).uppercased())
+                                            .font(Font(MacFont.serif(18, weight: .semibold)))
+                                            .foregroundStyle(theme.onAccent)
+                                    }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(author.name)
+                                        .font(Font(MacFont.ui(14.5, weight: .semibold)))
+                                        .foregroundStyle(theme.ink)
+                                    Text("Subscribed on AO3")
+                                        .font(Font(MacFont.ui(12)))
+                                        .foregroundStyle(theme.ink3)
+                                }
+                                Spacer()
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(theme.ink3)
                             }
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(author.handle)
-                                .font(Font(MacFont.ui(14.5, weight: .semibold)))
-                                .foregroundStyle(theme.ink)
-                            Text("\(author.works) works · \(author.subs) subscribers")
-                                .font(Font(MacFont.ui(12)))
-                                .foregroundStyle(theme.ink3)
-                            Text(author.fandoms)
-                                .font(Font(MacFont.ui(11.5, weight: .semibold)))
-                                .foregroundStyle(theme.accent)
+                            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
+                            .contentShape(Rectangle())
                         }
-                        Spacer()
-                        NotifyButton(theme: theme, on: notify[author.id] ?? false) {
-                            notify[author.id] = !(notify[author.id] ?? false)
-                        }
+                        .buttonStyle(.plain)
+                        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
                     }
-                    .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-                    .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
                 }
             }
         }
     }
 }
 
-// MARK: - Stats
+// MARK: - Stats (computed on device)
 
 struct StatsView: View {
     @Bindable var theme: AppTheme
-
-    private let days = ["M", "T", "W", "T", "F", "S", "S"]
+    @Bindable var model: MacAppModel
 
     var body: some View {
+        let stats = model.localStats
         ScrollView {
             VStack(spacing: 14) {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
-                    statCard(String(format: "%.2fM", Double(MacMockData.stats.wordsThisYear) / 1_000_000), "Words this year")
-                    statCard("\(MacMockData.stats.worksFinished)", "Works finished")
-                    statCard("\(MacMockData.stats.streakDays)", "Day streak")
-                    statCard("\(MacMockData.stats.hoursThisMonth)h", "Read this month")
+                    statCard(Fmt.k(stats.wordsRead), "Words read")
+                    statCard("\(stats.worksFinished)", "Works finished")
+                    statCard("\(stats.inLibrary)", "In library")
+                    statCard("\(stats.downloaded)", "Downloaded")
                 }
-                chart
+                Text("Counted on this device from your reading progress. Nothing leaves your library.")
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(theme.ink3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(20)
         }
@@ -413,36 +475,6 @@ struct StatsView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
-    }
-
-    private var chart: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("THIS WEEK · MINUTES PER DAY")
-                .font(Font(MacFont.ui(11, weight: .bold)))
-                .kerning(0.7)
-                .foregroundStyle(theme.ink3)
-            HStack(alignment: .bottom, spacing: 8) {
-                let maxValue = MacMockData.stats.weekly.max() ?? 1
-                ForEach(Array(MacMockData.stats.weekly.enumerated()), id: \.offset) { index, value in
-                    VStack(spacing: 7) {
-                        UnevenRoundedRectangle(topLeadingRadius: 6, bottomLeadingRadius: 3,
-                                               bottomTrailingRadius: 3, topTrailingRadius: 6)
-                            .fill(LinearGradient(colors: [theme.accent, theme.accent2],
-                                                 startPoint: .top, endPoint: .bottom))
-                            .frame(maxWidth: 30)
-                            .frame(height: max(6, 120 * CGFloat(value) / CGFloat(maxValue)))
-                        Text(days[index])
-                            .font(Font(MacFont.ui(11, weight: .semibold)))
-                            .foregroundStyle(theme.ink3)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .padding(16)
         .background(theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
