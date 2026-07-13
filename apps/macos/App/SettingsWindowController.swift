@@ -19,7 +19,7 @@ final class SettingsWindowController: NSWindowController {
         }
 
         let general = NSTabViewItem(viewController: pane(
-            GeneralSettingsPane(theme: theme, model: model), minHeight: 360))
+            GeneralSettingsPane(theme: theme, appState: appState, model: model), minHeight: 420))
         general.label = "General"
         general.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "General")
 
@@ -137,6 +137,7 @@ struct SettingsInfoRow: View {
 
 struct GeneralSettingsPane: View {
     @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
     private let timeouts = [15, 30, 60, 120]
@@ -167,12 +168,7 @@ struct GeneralSettingsPane: View {
                     .foregroundStyle(theme.ink3)
             }
 
-            SettingsGroup(theme: theme, label: "Account") {
-                SettingsCard(theme: theme) {
-                    SettingsInfoRow(theme: theme, label: "AO3 account",
-                                    value: "Available once archive sync lands on macOS")
-                }
-            }
+            AccountSection(theme: theme, appState: appState)
         }
         .padding(16)
     }
@@ -198,8 +194,42 @@ struct PrivacySettingsPane: View {
     let appState: AppState
     @Bindable var model: MacAppModel
 
+    @State private var showPasswordSheet = false
+    @State private var showRemoveConfirm = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            SettingsGroup(theme: theme, label: "Protection") {
+                SettingsCard(theme: theme) {
+                    SettingsInfoRow(theme: theme, label: "Library password",
+                                    value: appState.bridge.hasDbPassword ? "On" : "Off")
+                }
+                HStack(spacing: 8) {
+                    ghostButton(appState.bridge.hasDbPassword ? "Change Password…" : "Set Password…",
+                                tint: theme.ink) {
+                        showPasswordSheet = true
+                    }
+                    if appState.bridge.hasDbPassword {
+                        ghostButton("Remove Password", tint: Color(hex: "CE514D")) {
+                            showRemoveConfirm = true
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $showPasswordSheet) {
+                PasswordChangeSheet(theme: theme, appState: appState)
+            }
+            .alert("Remove Password?", isPresented: $showRemoveConfirm) {
+                Button("Remove", role: .destructive) {
+                    if appState.bridge.removePassword() {
+                        RecoveryKey.deleteEncryptedBlob()
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The library stays encrypted, but the key will be stored in the Keychain instead of requiring your password at launch.")
+            }
+
             SettingsGroup(theme: theme, label: "Tor") {
                 SettingsCard(theme: theme) {
                     SettingsToggleRow(theme: theme, label: "Connect via Tor on launch",
@@ -236,5 +266,97 @@ struct PrivacySettingsPane: View {
             }
         }
         .padding(16)
+    }
+
+    private func ghostButton(_ label: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(Font(MacFont.ui(13, weight: .bold)))
+                .foregroundStyle(tint)
+                .frame(maxWidth: .infinity, minHeight: 34)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Set or change the library password from Settings. Rekeys the open database
+/// and issues a fresh recovery key.
+struct PasswordChangeSheet: View {
+    @Bindable var theme: AppTheme
+    let appState: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var password = ""
+    @State private var confirmPassword = ""
+    @State private var error: String?
+    @State private var recoveryKey: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(appState.bridge.hasDbPassword ? "Change Password" : "Set Password")
+                .font(Font(MacFont.ui(15, weight: .bold)))
+                .foregroundStyle(theme.ink)
+
+            if let key = recoveryKey {
+                VStack(spacing: 8) {
+                    Text("RECOVERY KEY")
+                        .font(Font(MacFont.ui(11, weight: .bold)))
+                        .kerning(0.9)
+                        .foregroundStyle(theme.ink3)
+                    Text(key)
+                        .font(.system(size: 16, design: .monospaced).weight(.bold))
+                        .foregroundStyle(theme.ink)
+                        .textSelection(.enabled)
+                    Text("Write this down and keep it safe. If you forget your password, this is the only way to recover your data. It will not be shown again.")
+                        .font(Font(MacFont.ui(12, weight: .medium)))
+                        .foregroundStyle(Color(hex: "CE514D"))
+                        .fixedSize(horizontal: false, vertical: true)
+                    GateButton(theme: theme, label: "I've saved my recovery key", fill: theme.accent) {
+                        dismiss()
+                    }
+                }
+            } else {
+                SecureField("New password", text: $password)
+                    .textFieldStyle(.roundedBorder)
+                SecureField("Confirm password", text: $confirmPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { save() }
+                if let error {
+                    Text(error)
+                        .font(Font(MacFont.ui(12, weight: .medium)))
+                        .foregroundStyle(Color(hex: "CE514D"))
+                }
+                HStack {
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Save") { save() }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+        .background(theme.surface)
+    }
+
+    private func save() {
+        error = nil
+        guard !password.isEmpty else { error = "Password cannot be empty."; return }
+        guard password == confirmPassword else { error = "Passwords don't match."; return }
+        guard password.count >= 4 else { error = "Password must be at least 4 characters."; return }
+        guard appState.bridge.changePassword(to: password) else {
+            error = "Failed to update the password."
+            return
+        }
+        let key = RecoveryKey.generate()
+        if let blob = RecoveryKey.encryptPassword(password, withRecoveryKey: key) {
+            RecoveryKey.storeEncryptedBlob(blob)
+            recoveryKey = key
+        }
+        RecoveryKey.resetFailureCount()
     }
 }

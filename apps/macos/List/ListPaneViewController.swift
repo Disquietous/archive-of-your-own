@@ -2,10 +2,12 @@ import AppKit
 import SwiftUI
 
 /// Middle pane: contextual list driven by the selected sidebar section.
-/// Work lists render in an NSTableView; the managed-list variants
-/// (subscriptions, fandoms, authors, stats) are hosted SwiftUI.
+/// Work lists render in an NSTableView backed by shared AppState data; the
+/// managed-list variants (subscriptions, fandoms, authors, stats) are hosted
+/// SwiftUI. Network sections surface loading / error / Tor-blocked states.
 final class ListPaneViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let theme: AppTheme
+    private let appState: AppState
     private let model: MacAppModel
 
     private let toolbar: PaneToolbarView
@@ -15,15 +17,18 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     private var chipsHost: NSHostingView<ChipsBar>?
     private var variantHost: NSView?
-    private var emptyHost: NSView?
+    private var overlayHost: NSView?
     private var eyeButton: ToolButton?
+    private var refreshButton: ToolButton?
+    private var loadMoreButton: ToolButton?
 
     private var works: [Work] = []
     private var renderedSection: MacAppModel.Section?
     private var expandedSummaries: Set<String> = []
 
-    init(theme: AppTheme, model: MacAppModel) {
+    init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
+        self.appState = appState
         self.model = model
         self.toolbar = PaneToolbarView(theme: theme)
         super.init(nibName: nil, bundle: nil)
@@ -87,77 +92,154 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
         let section = model.section
         switch section {
-        case .browse, .search:
-            let query = model.query.trimmingCharacters(in: .whitespaces)
-            works = model.searchResults
-            toolbar.configure(title: query.isEmpty ? "Browse" : "“\(query)”", sub: "\(works.count) works")
-            configureEyeButton()
-            showWorksContent(section: section, chips: true,
-                             empty: works.isEmpty ? ("magnifyingglass", "No works found", "Try a different tag or search term.") : nil)
+        case .browse:
+            works = model.works(for: .browse)
+            toolbar.configure(title: "Browse", sub: subtitleForNetworkList(count: works.count, loading: appState.isBrowsing))
+            toolbar.setTrailing([browseRefreshButton(), eyeToggleButton()])
+            showWorksContent(section: section, chips: !model.availableTags.isEmpty,
+                             overlay: networkOverlay(loading: appState.isBrowsing,
+                                                     loadingMessage: "Fetching latest works…",
+                                                     emptyIcon: "safari", emptyTitle: "Nothing here yet",
+                                                     emptyMessage: "Connect and refresh to browse the newest works on the archive."))
 
-        case .reading, .later, .history, .bookmarks, .downloads:
+        case .search:
+            works = model.works(for: .search)
+            let query = model.query.trimmingCharacters(in: .whitespaces)
+            toolbar.configure(title: query.isEmpty ? "Search" : "“\(query)”",
+                              sub: subtitleForNetworkList(count: works.count, loading: appState.isSearching))
+            toolbar.setTrailing([searchLoadMoreButton(), eyeToggleButton()])
+            showWorksContent(section: section, chips: !model.availableTags.isEmpty,
+                             overlay: networkOverlay(loading: appState.isSearching,
+                                                     loadingMessage: "Searching the archive…",
+                                                     emptyIcon: "magnifyingglass", emptyTitle: "No works found",
+                                                     emptyMessage: "Try a different search term, or press Return in the search field to search."))
+
+        case .reading, .history, .bookmarks, .downloads:
             works = model.works(for: section)
-            let meta = Self.sectionMeta[section]!
+            let meta = sectionMeta(for: section)
             toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
             toolbar.setTrailing([])
-            showWorksContent(section: section, chips: false,
-                             empty: works.isEmpty ? meta.empty : nil)
+            let empty = works.isEmpty
+                ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
+                : nil
+            showWorksContent(section: section, chips: false, overlay: empty)
 
         case .subscriptions:
             toolbar.configure(title: "Subscriptions", sub: "Followed updates")
-            let markRead = ToolButton(theme: theme, symbol: "checkmark", tooltip: "Mark all read") { [weak self] in
-                self?.model.notifsRead = true
+            var buttons: [NSView] = []
+            if appState.unreadNotificationCount > 0 {
+                buttons.append(ToolButton(theme: theme, symbol: "checkmark", tooltip: "Mark all read") { [weak self] in
+                    self?.appState.markAllNotificationsRead()
+                })
             }
-            toolbar.setTrailing(model.notifsRead ? [] : [markRead])
-            showVariant(SubscriptionsList(theme: theme, model: model), section: section)
+            buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check now") { [weak self] in
+                guard let self else { return }
+                Task {
+                    await self.appState.loadSubscriptions(force: true)
+                    await self.appState.checkSubscriptions()
+                }
+            })
+            toolbar.setTrailing(buttons)
+            showVariant(SubscriptionsList(theme: theme, appState: appState, model: model), section: section)
 
         case .fandoms:
-            toolbar.configure(title: "Fandoms", sub: "\(MacMockData.fandoms.count) followed")
+            toolbar.configure(title: "Fandoms", sub: "\(model.libraryFandoms.count) in library")
             toolbar.setTrailing([])
             showVariant(FandomsGrid(theme: theme, model: model), section: section)
 
         case .authors:
-            toolbar.configure(title: "Authors", sub: "\(MacMockData.authors.count) followed")
+            toolbar.configure(title: "Authors", sub: "\(model.followedAuthors.count) followed")
             toolbar.setTrailing([])
-            showVariant(AuthorsList(theme: theme, model: model), section: section)
+            showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
 
         case .stats:
             toolbar.configure(title: "Reading Stats", sub: "Counted on device")
             toolbar.setTrailing([])
-            showVariant(StatsView(theme: theme), section: section)
+            showVariant(StatsView(theme: theme, model: model), section: section)
         }
         renderedSection = section
     }
 
-    private static let sectionMeta: [MacAppModel.Section: (title: String, sub: String, empty: (String, String, String))] = [
-        .reading: ("Currently Reading", "In progress", ("book", "Nothing in progress", "Open a work to begin reading.")),
-        .later: ("Want to Read", "Saved for later", ("pin", "Nothing saved", "Add works to read later.")),
-        .history: ("History", "Recently read", ("clock", "No history yet", "Works you read appear here.")),
-        .bookmarks: ("Bookmarks", "Saved works", ("bookmark", "No bookmarks", "Bookmark works to keep them.")),
-        .downloads: ("Downloaded", "Available offline", ("arrow.down.circle", "No downloads", "Download works to read offline.")),
-    ]
+    private func sectionMeta(for section: MacAppModel.Section) -> (title: String, sub: String, empty: (String, String, String)) {
+        if section == .bookmarks, let listID = model.selectedReadingListID,
+           let list = appState.readingLists.first(where: { $0.id == listID }) {
+            return (list.name, "Reading list", ("bookmark", "Empty list", "Add works to this list from a work's details."))
+        }
+        switch section {
+        case .reading: return ("Currently Reading", "In progress", ("book", "Nothing in progress", "Open a work to begin reading."))
+        case .history: return ("History", "Recently read", ("clock", "No history yet", "Works you read appear here."))
+        case .bookmarks: return ("Bookmarks", "Saved works", ("bookmark", "No bookmarks", "Bookmark works to keep them."))
+        case .downloads: return ("Downloaded", "Available offline", ("arrow.down.circle", "No downloads", "Download works to read offline."))
+        default: return ("Works", "", ("book", "Nothing here", ""))
+        }
+    }
 
-    private func configureEyeButton() {
+    private func subtitleForNetworkList(count: Int, loading: Bool) -> String {
+        if appState.bridge.networkBlocked { return "Tor required — not connected" }
+        if loading && count == 0 { return "Loading…" }
+        if let error = appState.searchError, count == 0 { return error }
+        return "\(count) works"
+    }
+
+    private func networkOverlay(loading: Bool, loadingMessage: String,
+                                emptyIcon: String, emptyTitle: String, emptyMessage: String) -> AnyView? {
+        guard works.isEmpty else { return nil }
+        if appState.bridge.networkBlocked {
+            return AnyView(EmptyStateMac(theme: theme, icon: "shield.lefthalf.filled",
+                                         title: "Waiting for Tor",
+                                         message: "Tor is required in your settings but not connected. Connect from the sidebar's privacy pill."))
+        }
+        if loading {
+            return AnyView(LoadingStateMac(theme: theme, message: loadingMessage,
+                                           detail: "Requests are rate-limited to be kind to the archive."))
+        }
+        if let error = appState.searchError {
+            return AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                         title: "Couldn’t reach the archive", message: error))
+        }
+        return AnyView(EmptyStateMac(theme: theme, icon: emptyIcon, title: emptyTitle, message: emptyMessage))
+    }
+
+    // MARK: - Toolbar buttons
+
+    private func eyeToggleButton() -> ToolButton {
         let eye = eyeButton ?? ToolButton(theme: theme, symbol: "eye", tooltip: "Hide explicit") { [weak self] in
-            guard let self else { return }
-            model.hideExplicit.toggle()
+            self?.model.hideExplicit.toggle()
         }
         eyeButton = eye
         eye.isOn = model.hideExplicit
         eye.setSymbol(model.hideExplicit ? "eye.slash" : "eye")
-        toolbar.setTrailing([eye])
+        return eye
+    }
+
+    private func browseRefreshButton() -> ToolButton {
+        let button = refreshButton ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh") { [weak self] in
+            guard let self else { return }
+            Task { await self.appState.browseLatestWorks(force: true) }
+        }
+        refreshButton = button
+        return button
+    }
+
+    private func searchLoadMoreButton() -> ToolButton {
+        let button = loadMoreButton ?? ToolButton(theme: theme, symbol: "plus.rectangle.on.rectangle", tooltip: "Load more results") { [weak self] in
+            guard let self else { return }
+            Task { await self.appState.searchAO3More() }
+        }
+        loadMoreButton = button
+        button.isHidden = appState.searchResults.isEmpty
+        return button
     }
 
     // MARK: - Content swapping
 
-    private func showWorksContent(section: MacAppModel.Section, chips: Bool, empty: (String, String, String)?) {
+    private func showWorksContent(section: MacAppModel.Section, chips: Bool, overlay: AnyView?) {
         variantHost?.removeFromSuperview()
         variantHost = nil
 
         if chips {
             if chipsHost == nil {
-                let host = NSHostingView(rootView: ChipsBar(theme: theme, model: model))
-                chipsHost = host
+                chipsHost = NSHostingView(rootView: ChipsBar(theme: theme, model: model))
             }
             if chipsHost!.superview == nil {
                 contentStack.insertArrangedSubview(chipsHost!, at: 0)
@@ -172,19 +254,23 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             scrollView.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
 
-        emptyHost?.removeFromSuperview()
-        emptyHost = nil
-        if let empty {
-            let host = NSHostingView(rootView: EmptyStateMac(theme: theme, icon: empty.0, title: empty.1, message: empty.2))
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
+        if let overlay {
+            // Sibling of the scroll view, never inside it — NSScrollView tiles
+            // its own subviews and scrambles constraint-based placement.
+            let host = NSHostingView(rootView: overlay)
             host.translatesAutoresizingMaskIntoConstraints = false
-            scrollView.addSubview(host)
+            view.addSubview(host)
             NSLayoutConstraint.activate([
                 host.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
                 host.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
-                host.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+                host.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor),
             ])
-            emptyHost = host
+            overlayHost = host
         }
+        // Phantom grid lines read as content in an empty table.
+        tableView.gridStyleMask = works.isEmpty ? [] : .solidHorizontalGridLineMask
 
         let sectionChanged = renderedSection != section
         tableView.reloadData()
@@ -206,8 +292,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private func showVariant(_ content: some View, section: MacAppModel.Section) {
         chipsHost?.removeFromSuperview()
         scrollView.removeFromSuperview()
-        emptyHost?.removeFromSuperview()
-        emptyHost = nil
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
         // Rebuild the host when the section changes; re-render otherwise.
         if renderedSection != section || variantHost == nil {
             variantHost?.removeFromSuperview()
@@ -237,7 +323,10 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         let work = works[row]
         // Row chrome: 16 leading + 3 spine + 12 gap + 40 trailing.
         let textWidth = max(100, tableView.bounds.width - 71)
-        cell.configure(with: work, model: model, selected: model.selectedWorkID == work.id,
+        cell.configure(with: work,
+                       progress: model.progress(for: work),
+                       downloaded: appState.downloadedWorkIDs.contains(work.id),
+                       selected: model.selectedWorkID == work.id,
                        summaryExpanded: expandedSummaries.contains(work.id),
                        availableTextWidth: textWidth)
         cell.onToggleSummary = { [weak self] in

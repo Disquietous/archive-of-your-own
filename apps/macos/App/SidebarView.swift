@@ -1,13 +1,13 @@
 import SwiftUI
 
 /// The navigation source list — SwiftUI hosted inside the AppKit split view.
-/// Layout, colors, and grouping follow the Hush macOS handoff.
+/// Layout, colors, and grouping follow the Hush macOS handoff; all counts and
+/// collections come from the shared AppState.
 struct SidebarView: View {
     @Bindable var theme: AppTheme
-    let appState: AppState
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
-    @State private var searchFocused = false
     @State private var privacyShown = false
     @FocusState private var searchFieldFocus: Bool
 
@@ -19,18 +19,20 @@ struct SidebarView: View {
                 VStack(spacing: 6) {
                     topGroup
                     group("Following") {
-                        item(.subscriptions, "bell", "Subscriptions", badge: model.unreadCount)
-                        item(.fandoms, "flame", "Fandoms", count: MacMockData.fandoms.count)
-                        item(.authors, "person", "Authors", count: MacMockData.authors.count)
+                        item(.subscriptions, "bell", "Subscriptions", badge: appState.unreadNotificationCount)
+                        item(.fandoms, "flame", "Fandoms", count: model.libraryFandoms.count)
+                        item(.authors, "person", "Authors", count: model.followedAuthors.count)
                     }
                     group("Saved") {
-                        item(.bookmarks, "bookmark", "Bookmarks", count: model.bookmarks.count)
-                        item(.downloads, "arrow.down.circle", "Offline", count: model.downloaded.count)
+                        item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
+                        item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
                         item(.stats, "chart.bar", "Reading Stats")
                     }
-                    group("Collections") {
-                        ForEach(MacMockData.collections) { c in
-                            collectionRow(c)
+                    if !appState.readingLists.isEmpty {
+                        group("Collections") {
+                            ForEach(appState.readingLists, id: \.id) { list in
+                                collectionRow(list)
+                            }
                         }
                     }
                 }
@@ -67,7 +69,7 @@ struct SidebarView: View {
                 .font(Font(MacFont.ui(13)))
                 .foregroundStyle(theme.ink)
                 .focused($searchFieldFocus)
-                .onSubmit { model.goSection(.search) }
+                .onSubmit { model.submitSearch() }
         }
         .padding(.horizontal, 9)
         .frame(height: 30)
@@ -87,7 +89,6 @@ struct SidebarView: View {
         VStack(spacing: 1) {
             item(.browse, "safari", "Browse")
             item(.reading, "book", "Currently Reading", count: model.currentlyReading.count)
-            item(.later, "pin", "Want to Read", count: 8)
             item(.history, "clock", "History")
         }
         .padding(.top, 6)
@@ -109,7 +110,7 @@ struct SidebarView: View {
 
     private func item(_ section: MacAppModel.Section, _ icon: String, _ label: String,
                       count: Int? = nil, badge: Int = 0) -> some View {
-        let selected = model.section == section
+        let selected = model.section == section && model.selectedReadingListID == nil
         return Button {
             model.goSection(section)
         } label: {
@@ -131,7 +132,7 @@ struct SidebarView: View {
                         .frame(minWidth: 18, minHeight: 18)
                         .background(selected ? Color.white.opacity(0.3) : theme.accent)
                         .clipShape(Capsule())
-                } else if let count {
+                } else if let count, count > 0 {
                     Text("\(count)")
                         .font(Font(MacFont.ui(11, weight: .bold)))
                         .foregroundStyle(selected ? theme.onAccent : theme.ink3)
@@ -151,29 +152,33 @@ struct SidebarView: View {
         .padding(.horizontal, 8)
     }
 
-    private func collectionRow(_ c: MacCollection) -> some View {
-        Button {
-            model.goSection(.bookmarks)
+    private func collectionRow(_ list: UReadingList) -> some View {
+        let selected = model.selectedReadingListID == list.id
+        let count = appState.worksInReadingList(list.id).count
+        return Button {
+            model.goReadingList(list.id)
         } label: {
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(Fandom.spineColorForHue(c.hue))
+                    .fill(selected ? theme.onAccent : theme.accent2)
                     .frame(width: 9, height: 9)
-                Text(c.name)
+                Text(list.name)
                     .font(Font(MacFont.ui(13.5, weight: .medium)))
-                    .foregroundStyle(theme.ink2)
+                    .foregroundStyle(selected ? theme.onAccent : theme.ink2)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                Text("\(c.count)")
+                Text("\(count)")
                     .font(Font(MacFont.ui(11, weight: .bold)))
-                    .foregroundStyle(theme.ink3)
+                    .foregroundStyle(selected ? theme.onAccent : theme.ink3)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 1)
-                    .background(theme.ink.opacity(0.08))
+                    .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
                     .clipShape(Capsule())
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .background(selected ? theme.accent : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
             .contentShape(Rectangle())
         }
         .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
@@ -194,7 +199,7 @@ struct SidebarView: View {
                         Text(torConnected ? "Private · Tor" : "Not connected")
                             .font(Font(MacFont.ui(12.5, weight: .bold)))
                             .foregroundStyle(theme.ink)
-                        Text(torConnected ? "Connected · 3-hop circuit" : appState.torStatus.displayText)
+                        Text(footerSubtitle)
                             .font(Font(MacFont.ui(11)))
                             .foregroundStyle(theme.ink3)
                     }
@@ -220,12 +225,19 @@ struct SidebarView: View {
         }
     }
 
+    private var footerSubtitle: String {
+        if torConnected { return "Connected · 3-hop circuit" }
+        if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
+        if appState.isResolvingCloudflare { return "Resolving challenge…" }
+        return appState.torStatus.displayText
+    }
+
     private var torConnected: Bool {
         appState.torStatus.isConnected
     }
 }
 
-private struct SidebarItemStyle: ButtonStyle {
+struct SidebarItemStyle: ButtonStyle {
     let hover: Color
     @State private var hovering = false
 

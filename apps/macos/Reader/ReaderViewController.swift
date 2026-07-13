@@ -2,10 +2,11 @@ import AppKit
 import SwiftUI
 
 /// In-place reading view: a TextKit 2 text view in a centered column at the
-/// user's measure width, with chapter header, accent drop cap (exclusion
-/// path), chapter-end ornament, and a pinned footer with progress.
+/// user's measure width. Chapters come from the local cache when available
+/// and are fetched over Tor otherwise, mirroring the iOS reader.
 final class ReaderViewController: NSViewController {
     private let theme: AppTheme
+    private let appState: AppState
     private let model: MacAppModel
 
     private let scrollView = NSScrollView()
@@ -22,14 +23,20 @@ final class ReaderViewController: NSViewController {
     private let endNoteBig = NSTextField(labelWithString: "")
     private let endNoteSub = NSTextField(labelWithString: "")
     private let footer: ReadFooterView
+    private var overlayHost: NSHostingView<AnyView>?
 
     private var columnWidth: NSLayoutConstraint!
     private var work: Work?
+    private var chapters: [UChapter]?
     private var chapterIndex = 0
     private var chapterPct: Double = 0
+    private var isLoading = false
+    private var loadError: String?
+    private let chapterTask = NetworkTask()
 
-    init(theme: AppTheme, model: MacAppModel) {
+    init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
+        self.appState = appState
         self.model = model
         self.textView = SelfSizingTextView(usingTextLayoutManager: true)
         self.footer = ReadFooterView(theme: theme)
@@ -102,7 +109,7 @@ final class ReaderViewController: NSViewController {
         column.setCustomSpacing(4, after: endNoteBig)
 
         titleRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        titleRule.widthAnchor.constraint(equalTo: column.widthAnchor, constant: 0).isActive = true
+        titleRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         endRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
         endRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         bodyContainer.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
@@ -165,36 +172,136 @@ final class ReaderViewController: NSViewController {
     func show(work: Work, chapterIndex: Int) {
         self.work = work
         self.chapterIndex = chapterIndex
+        self.chapters = nil
+        self.loadError = nil
         renderChapter()
-        scrollView.contentView.scroll(to: .zero)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
+        scrollToTop()
+        Task { await loadChapters() }
+    }
+
+    // MARK: - Chapter acquisition (cache-first, then Tor)
+
+    private func loadChapters() async {
+        guard let work else { return }
+
+        // Mock/preview works carry their content inline.
+        if UInt64(work.id) == nil {
+            if let content = work.content {
+                chapters = content.enumerated().map { index, chapter in
+                    UChapter(chapterId: Int64(index), number: UInt32(index + 1), title: chapter.title,
+                             contentJson: "", notesBefore: "", notesAfter: "")
+                }
+            }
+            renderChapter()
+            return
+        }
+        guard let workId = UInt64(work.id) else { return }
+
+        // Already fetched this session?
+        if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty {
+            chapters = fetched
+            renderChapter()
+            return
+        }
+
+        // Local database cache (downloaded / recently read works).
+        let cached = appState.bridge.getCachedChapters(workId)
+        if !cached.isEmpty {
+            appState.fetchedChapters[work.id] = cached
+            chapters = cached
+            renderChapter()
+            return
+        }
+
+        // Fetch over the network (Tor-gated inside retryOnTimeout).
+        isLoading = true
+        loadError = nil
+        renderChapter()
+        do {
+            let fetched = try await appState.retryOnTimeout(task: chapterTask, using: appState.bridge) {
+                try await self.appState.bridge.fetchChapters(workId)
+            }
+            appState.fetchedChapters[work.id] = fetched
+            chapters = fetched
+        } catch {
+            if !chapterTask.isCancelled && !"\(error)".contains("cancelled") {
+                loadError = error.localizedDescription
+            }
+        }
+        isLoading = false
+        renderChapter()
+    }
+
+    private func retryLoad() {
+        loadError = nil
+        Task { await loadChapters() }
+    }
+
+    private func cancelLoad() {
+        chapterTask.cancel()
+        appState.bridge.cancelRequest()
+        model.closeReader()
+    }
+
+    // MARK: - Render
+
+    private var currentChapterContent: (title: String, blocks: [ParsedContentBlock])? {
+        guard let work else { return nil }
+        // Inline mock content for preview works.
+        if UInt64(work.id) == nil, let content = work.content, chapterIndex < content.count {
+            let chapter = content[chapterIndex]
+            return (chapter.title, ParsedContentBlock.fromParagraphs(chapter.paragraphs))
+        }
+        guard let chapters, chapterIndex < chapters.count else { return nil }
+        let chapter = chapters[chapterIndex]
+        guard !chapter.contentJson.isEmpty, chapter.contentJson != "[]" else { return nil }
+        let title = chapter.title.isEmpty ? "Chapter \(chapterIndex + 1)" : chapter.title
+        return (title, ParsedContentBlock.fromJSON(chapter.contentJson))
+    }
+
+    private var postedChapterCount: Int {
+        chapters?.count ?? work?.chapterCount ?? 1
     }
 
     private func renderChapter() {
         guard let work else { return }
-        let chapter = MockData.buildChapter(for: work, index: chapterIndex)
-        let blocks = ParsedContentBlock.fromParagraphs(chapter.paragraphs)
         let bodySize = CGFloat(theme.fontSize)
-
         columnWidth.constant = CGFloat(theme.measure)
+        view.layer?.backgroundColor = theme.nsBg.cgColor
 
+        let totalLabel = work.complete ? String(work.totalChapters) : "?"
         metaLabel.attributedStringValue = NSAttributedString(
-            string: "\(work.fandom) · Chapter \(chapterIndex + 1) of \(work.complete ? String(work.totalChapters) : "?")".uppercased(),
+            string: "\(work.fandom) · Chapter \(chapterIndex + 1) of \(totalLabel)".uppercased(),
             attributes: [.font: MacFont.ui(12, weight: .semibold), .kern: 0.8, .foregroundColor: theme.nsInk3])
-        titleLabel.stringValue = chapter.title
-        titleLabel.textColor = theme.nsInk
         titleRule.layer?.backgroundColor = theme.nsLine.cgColor
+        titleLabel.textColor = theme.nsInk
 
+        updateOverlay()
+
+        guard let content = currentChapterContent else {
+            // Loading, error, or no content — clear the body.
+            titleLabel.stringValue = isLoading || loadError != nil ? "" : "Chapter \(chapterIndex + 1)"
+            textView.textStorage?.setAttributedString(NSAttributedString())
+            dropCapLabel.isHidden = true
+            [endRule, ornamentLabel, nextChapterButton, endNoteBig, endNoteSub].forEach { $0.isHidden = true }
+            footer.applyTheme()
+            updateProgress()
+            return
+        }
+
+        titleLabel.stringValue = content.title
         let renderer = ContentBlockRenderer(theme: theme, paragraphStyle: .macReading)
-        let body = NSMutableAttributedString(attributedString: renderer.render(blocks: blocks))
+        let body = NSMutableAttributedString(attributedString: renderer.render(blocks: content.blocks))
         applyDropCap(to: body, bodySize: bodySize)
         textView.textStorage?.setAttributedString(body)
         textView.invalidateIntrinsicContentSize()
 
+        endRule.isHidden = false
+        ornamentLabel.isHidden = false
         endRule.layer?.backgroundColor = theme.nsLine.cgColor
         ornamentLabel.textColor = theme.nsAccent
 
-        let isLastChapter = chapterIndex >= work.chapterCount - 1
+        let isLastChapter = chapterIndex >= postedChapterCount - 1
         nextChapterButton.isHidden = isLastChapter
         endNoteBig.isHidden = !isLastChapter
         endNoteSub.isHidden = !isLastChapter
@@ -212,6 +319,37 @@ final class ReaderViewController: NSViewController {
 
         footer.applyTheme()
         updateProgress()
+    }
+
+    private func updateOverlay() {
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
+        let overlay: AnyView?
+        if isLoading {
+            overlay = AnyView(LoadingStateMac(theme: theme, message: "Fetching chapter…",
+                                              detail: chapterTask.statusMessage ?? "Loading over your private connection.",
+                                              onCancel: { [weak self] in self?.cancelLoad() }))
+        } else if let loadError {
+            overlay = AnyView(VStack(spacing: 12) {
+                EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                              title: "Couldn’t load chapter", message: loadError)
+                Button("Try Again") { [weak self] in self?.retryLoad() }
+                    .keyboardShortcut(.defaultAction)
+            })
+        } else {
+            overlay = nil
+        }
+        if let overlay {
+            let host = NSHostingView(rootView: overlay)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+                host.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+                host.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+            ])
+            overlayHost = host
+        }
     }
 
     /// Accent-colored drop cap: strip the first letter from the body and float
@@ -251,11 +389,16 @@ final class ReaderViewController: NSViewController {
     private func goChapter(_ delta: Int) {
         guard let work else { return }
         let target = chapterIndex + delta
-        guard target >= 0, target < work.chapterCount else { return }
+        guard target >= 0, target < postedChapterCount else { return }
         chapterIndex = target
+        chapterPct = 0
         model.readerChapter = target
-        model.pushHistory(work.id)
+        appState.pushHistory(work.id)
         renderChapter()
+        scrollToTop()
+    }
+
+    private func scrollToTop() {
         scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
@@ -266,18 +409,19 @@ final class ReaderViewController: NSViewController {
         let max = documentHeight - visible.height
         chapterPct = max > 0 ? min(1, Swift.max(0, visible.origin.y / max)) : 0
         updateProgress()
-        if let work {
-            model.recordProgress(workID: work.id, chapter: chapterIndex,
-                                 chapterPct: chapterPct, totalChapters: work.totalChapters)
+        if let work, currentChapterContent != nil {
+            // 1-based chapter; AppState keeps progress monotonic.
+            appState.setProgress(work.id, chapter: chapterIndex + 1, pct: chapterPct)
         }
     }
 
     private func updateProgress() {
         guard let work else { return }
-        let bookPct = (Double(chapterIndex) + chapterPct) / Double(work.totalChapters)
+        let total = Double(Swift.max(1, work.complete ? work.totalChapters : postedChapterCount))
+        let bookPct = (Double(chapterIndex) + chapterPct) / total
         footer.update(chapterPct: chapterPct, bookPct: bookPct,
                       canGoBack: chapterIndex > 0,
-                      canGoForward: chapterIndex < work.chapterCount - 1)
+                      canGoForward: chapterIndex < postedChapterCount - 1)
     }
 }
 
@@ -291,7 +435,6 @@ final class ReadFooterView: NSView {
     private let pctLabel = NSTextField(labelWithString: "0%")
     private let topLine = NSView()
     private var fillWidth: NSLayoutConstraint!
-    private var chapterPct: Double = 0
 
     var onPrevious: (() -> Void)?
     var onNext: (() -> Void)?
@@ -365,7 +508,6 @@ final class ReadFooterView: NSView {
     }
 
     func update(chapterPct: Double, bookPct: Double, canGoBack: Bool, canGoForward: Bool) {
-        self.chapterPct = chapterPct
         layoutSubtreeIfNeeded()
         fillWidth.constant = track.bounds.width * chapterPct
         pctLabel.stringValue = "\(Int((bookPct * 100).rounded()))%"

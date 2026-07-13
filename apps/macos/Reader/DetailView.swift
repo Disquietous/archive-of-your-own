@@ -1,16 +1,20 @@
 import SwiftUI
 
-/// Work detail — the reading pane's master/detail "detail" state.
-/// Centered ~720pt column per the handoff.
+/// Work detail — the reading pane's master/detail "detail" state, backed by
+/// the shared AppState. Centered ~720pt column per the handoff.
 struct DetailView: View {
     @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
     @Bindable var model: MacAppModel
     let work: Work
 
     private var progress: Double { model.progress(for: work) }
     private var started: Bool { progress > 0 }
-    private var currentChapter: Int { model.progressMap[work.id]?.chapter ?? 1 }
+    private var currentChapter: Int { appState.progressMap[work.id]?.chapter ?? 1 }
     private var warnOK: Bool { work.warnings.contains("No Archive") }
+    private var bookmarked: Bool { appState.bookmarkedWorkIDs.contains(work.id) }
+    private var downloaded: Bool { appState.downloadedWorkIDs.contains(work.id) }
+    private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
 
     var body: some View {
         ScrollView {
@@ -28,34 +32,66 @@ struct DetailView: View {
                     + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
                     .font(Font(MacFont.ui(16)))
                     .padding(.bottom, 4)
-                Text(work.relationship)
-                    .font(Font(MacFont.ui(14)))
-                    .foregroundStyle(theme.ink3)
-                    .padding(.bottom, 20)
+                if !work.relationship.isEmpty {
+                    Text(work.relationship)
+                        .font(Font(MacFont.ui(14)))
+                        .foregroundStyle(theme.ink3)
+                        .padding(.bottom, 20)
+                } else {
+                    Spacer().frame(height: 20)
+                }
 
                 pills.padding(.bottom, 22)
                 actions.padding(.bottom, 26)
                 statGrid.padding(.bottom, 24)
-                summaryBox.padding(.bottom, 22)
-                tags.padding(.bottom, 26)
+                if !work.summary.isEmpty {
+                    summaryBox.padding(.bottom, 22)
+                }
+                if !work.tags.isEmpty {
+                    tags.padding(.bottom, 26)
+                }
                 chapters
             }
             .padding(.init(top: 34, leading: 48, bottom: 60, trailing: 48))
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
+        .alert("Remove Synced Bookmark?", isPresented: pendingRemovalBinding) {
+            Button("Remove Everywhere", role: .destructive) {
+                appState.confirmBookmarkRemoval()
+            }
+            Button("Remove Locally Only") {
+                if let id = appState.pendingBookmarkRemoval {
+                    appState.bookmarkedWorkIDs.remove(id)
+                    if let workId = UInt64(id) { appState.bridge.removeBookmark(workId) }
+                    appState.pendingBookmarkRemoval = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                appState.cancelBookmarkRemoval()
+            }
+        } message: {
+            Text("This bookmark is synced with your AO3 account. Remove it from AO3 as well, or only from this device?")
+        }
+    }
+
+    private var pendingRemovalBinding: Binding<Bool> {
+        Binding(get: { appState.pendingBookmarkRemoval != nil },
+                set: { if !$0 { appState.cancelBookmarkRemoval() } })
     }
 
     private var pills: some View {
         FlowLayout(spacing: 8) {
             pill("\(work.rating.letter) · \(work.rating.rawValue)",
                  bg: theme.accent.opacity(0.14), fg: theme.accent)
-            pill(warnOK ? "No warnings" : "Author chose not to warn",
+            pill(warnOK ? "No warnings" : work.warnings,
                  icon: warnOK ? "checkmark.shield" : "eye",
                  bg: (warnOK ? theme.sage : theme.accent2).opacity(0.15),
                  fg: warnOK ? theme.sage : theme.accent2)
             pill(work.complete ? "Complete" : "Work in progress", bg: theme.surface2, fg: theme.ink2)
-            pill("Updated \(work.updated)", bg: theme.surface2, fg: theme.ink3)
+            if !work.updated.isEmpty {
+                pill("Updated \(work.updated)", bg: theme.surface2, fg: theme.ink3)
+            }
         }
     }
 
@@ -94,27 +130,27 @@ struct DetailView: View {
             }
             .buttonStyle(.plain)
 
-            iconButton(model.bookmarks.contains(work.id) ? "bookmark.fill" : "bookmark",
-                       tint: model.bookmarks.contains(work.id) ? theme.accent : theme.ink,
+            iconButton(bookmarked ? "bookmark.fill" : "bookmark",
+                       tint: bookmarked ? theme.accent : theme.ink,
                        help: "Bookmark") {
-                model.toggle(work.id, in: &model.bookmarks)
+                appState.toggleBookmark(work.id)
             }
-            iconButton(model.downloaded.contains(work.id) ? "checkmark.circle" : "arrow.down.circle",
-                       tint: model.downloaded.contains(work.id) ? theme.sage : theme.ink,
-                       help: model.downloaded.contains(work.id) ? "Downloaded" : "Download for offline") {
-                model.toggle(work.id, in: &model.downloaded)
+            iconButton(downloadSymbol,
+                       tint: downloaded ? theme.sage : theme.ink,
+                       help: downloaded ? "Downloaded" : "Download for offline") {
+                appState.toggleDownload(work.id)
             }
 
             Button {
-                model.toggle(work.id, in: &model.kudos)
+                appState.toggleKudos(work.id)
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: model.kudos.contains(work.id) ? "heart.fill" : "heart")
+                    Image(systemName: hasKudos ? "heart.fill" : "heart")
                         .font(.system(size: 14, weight: .semibold))
-                    Text(model.kudos.contains(work.id) ? "Kudos left" : "Kudos")
+                    Text(hasKudos ? "Kudos left" : "Kudos")
                         .font(Font(MacFont.ui(14.5, weight: .bold)))
                 }
-                .foregroundStyle(model.kudos.contains(work.id) ? theme.accent : theme.ink)
+                .foregroundStyle(hasKudos ? theme.accent : theme.ink)
                 .padding(.horizontal, 20)
                 .frame(height: 42)
                 .background(theme.surface)
@@ -123,6 +159,11 @@ struct DetailView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    private var downloadSymbol: String {
+        if appState.isDownloading(work.id) { return "arrow.down.circle.dotted" }
+        return downloaded ? "checkmark.circle" : "arrow.down.circle"
     }
 
     private func iconButton(_ symbol: String, tint: Color, help: String, action: @escaping () -> Void) -> some View {
@@ -141,10 +182,10 @@ struct DetailView: View {
 
     private var statGrid: some View {
         HStack(spacing: 1) {
-            statCell(MacMockData.fmt(work.words), "Words")
+            statCell(Fmt.k(work.words), "Words")
             statCell("\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")", "Chapters")
-            statCell(MacMockData.fmt(work.kudos), "Kudos")
-            statCell(MacMockData.fmt(work.bookmarks), "Saved")
+            statCell(Fmt.k(work.kudos), "Kudos")
+            statCell(Fmt.k(work.bookmarks), "Saved")
         }
         .background(theme.line)
         .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -187,13 +228,18 @@ struct DetailView: View {
     private var tags: some View {
         FlowLayout(spacing: 7) {
             ForEach(work.tags, id: \.self) { tag in
-                Text(tag)
-                    .font(Font(MacFont.ui(12, weight: .medium)))
-                    .foregroundStyle(theme.ink2)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(theme.surface2)
-                    .clipShape(Capsule())
+                Button {
+                    model.searchTag(tag)
+                } label: {
+                    Text(tag)
+                        .font(Font(MacFont.ui(12, weight: .medium)))
+                        .foregroundStyle(theme.ink2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(theme.surface2)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -205,7 +251,7 @@ struct DetailView: View {
                 .kerning(0.8)
                 .foregroundStyle(theme.ink3)
                 .padding(.bottom, 8)
-            ForEach(0..<work.totalChapters, id: \.self) { index in
+            ForEach(0..<max(1, work.totalChapters), id: \.self) { index in
                 chapterRow(index)
             }
         }
@@ -215,7 +261,9 @@ struct DetailView: View {
         let number = index + 1
         let unposted = number > work.chapterCount
         let read = started && number < currentChapter
-        let title = work.content.flatMap { index < $0.count ? $0[index].title : nil } ?? "Chapter \(number)"
+        let fetchedTitle = appState.chaptersForWork(work.id)
+            .flatMap { index < $0.count ? $0[index].title : nil }
+        let title = fetchedTitle?.isEmpty == false ? fetchedTitle! : "Chapter \(number)"
         return Button {
             model.openReader(work.id, chapter: index)
         } label: {

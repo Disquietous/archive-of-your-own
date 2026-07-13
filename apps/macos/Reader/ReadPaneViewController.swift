@@ -35,7 +35,7 @@ final class ReadPaneViewController: NSViewController {
         self.appState = appState
         self.model = model
         self.toolbar = PaneToolbarView(theme: theme)
-        self.readerController = ReaderViewController(theme: theme, model: model)
+        self.readerController = ReaderViewController(theme: theme, appState: appState, model: model)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -58,7 +58,7 @@ final class ReadPaneViewController: NSViewController {
         }
         bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
-            model.toggle(id, in: &model.bookmarks)
+            appState.toggleBookmark(id)
         }
 
         addChild(readerController)
@@ -133,8 +133,9 @@ final class ReadPaneViewController: NSViewController {
         toolbar.configure(title: reading ? work.title : "Details", sub: nil)
         toolbar.setLeading(reading ? [backButton] : [])
         immersiveButton.isOn = model.immersive
-        bookmarkButton.setSymbol(model.bookmarks.contains(work.id) ? "bookmark.fill" : "bookmark")
-        bookmarkButton.tintOverride = model.bookmarks.contains(work.id) ? theme.nsAccent : nil
+        let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
+        bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
+        bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         toolbar.setTrailing(reading ? [settingsButton, immersiveButton, bookmarkButton]
                                     : [settingsButton, bookmarkButton])
 
@@ -142,7 +143,7 @@ final class ReadPaneViewController: NSViewController {
 
         // Detail is SwiftUI and re-renders itself; only rebuild on identity change.
         if case .detail = renderedMode, let host = detailHost {
-            host.rootView = AnyView(DetailView(theme: theme, model: model, work: work))
+            host.rootView = AnyView(DetailView(theme: theme, appState: appState, model: model, work: work))
         }
     }
 
@@ -166,9 +167,9 @@ final class ReadPaneViewController: NSViewController {
         case .detail(let workID):
             readerController.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
-            if let work = model.works.first(where: { $0.id == workID }) {
+            if let work = appState.work(byID: workID) {
                 let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-                host.rootView = AnyView(DetailView(theme: theme, model: model, work: work))
+                host.rootView = AnyView(DetailView(theme: theme, appState: appState, model: model, work: work))
                 detailHost = host
                 pin(host)
             }
@@ -177,7 +178,7 @@ final class ReadPaneViewController: NSViewController {
             detailHost?.removeFromSuperview()
             detailHost = nil
             emptyHost?.removeFromSuperview()
-            if let work = model.works.first(where: { $0.id == workID }) {
+            if let work = appState.work(byID: workID) {
                 pin(readerController.view)
                 readerController.show(work: work, chapterIndex: chapter)
             }

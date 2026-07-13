@@ -111,8 +111,8 @@ final class WorkRowCellView: NSTableCellView {
         onToggleSummary?()
     }
 
-    func configure(with work: Work, model: MacAppModel, selected: Bool, summaryExpanded: Bool,
-                   availableTextWidth: CGFloat) {
+    func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
+                   summaryExpanded: Bool, availableTextWidth: CGFloat) {
         isRowSelected = selected
         summaryLabel.maximumNumberOfLines = summaryExpanded ? 0 : 2
         // Wrapping labels need a known width to report correct heights for
@@ -132,9 +132,10 @@ final class WorkRowCellView: NSTableCellView {
         authorLabel.attributedStringValue = author
 
         summaryLabel.stringValue = work.summary
+        summaryLabel.isHidden = work.summary.isEmpty
 
-        var meta = "♥ \(MacMockData.fmt(work.kudos))   \(MacMockData.fmt(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
-        if model.downloaded.contains(work.id) {
+        var meta = "♥ \(Fmt.k(work.kudos))   \(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
+        if downloaded {
             meta += "   ⤓ Offline"
         }
         metaLabel.stringValue = meta
@@ -142,7 +143,6 @@ final class WorkRowCellView: NSTableCellView {
         ratingBadge.stringValue = work.rating.letter
         ratingBadge.layer?.backgroundColor = NSColor(work.rating.badgeColor).cgColor
 
-        let progress = model.progress(for: work)
         progressTrack.isHidden = progress <= 0
         applyTheme()
         if progress > 0 {
