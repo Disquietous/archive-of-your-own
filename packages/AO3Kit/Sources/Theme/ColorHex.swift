@@ -14,9 +14,7 @@ extension Color {
     }
 
     func toHex() -> String {
-        let uiColor = UIColor(self)
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let (r, g, b, _) = rgbaComponents()
         let ri = Int(round(r * 255))
         let gi = Int(round(g * 255))
         let bi = Int(round(b * 255))

@@ -157,7 +157,7 @@ core/target/
 *.xcworkspace/
 DerivedData/
 AO3Core.xcframework/
-ArchiveOfYourOwn/Generated/
+packages/AO3Kit/Sources/Generated/
 
 # Screenshot build artifacts
 /.build/

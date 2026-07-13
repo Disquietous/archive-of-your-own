@@ -55,6 +55,8 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func configureAudioSession() {
+        // AVAudioSession is iOS-only; macOS routes audio without session categories.
+        #if os(iOS)
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .spokenAudio)
@@ -62,6 +64,7 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         } catch {
             // Best effort — synthesizer may still work without it
         }
+        #endif
     }
 
     func pause() {
@@ -76,7 +79,9 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         isPaused = false
         isActive = false
         currentParagraphIndex = 0
+        #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        #endif
     }
 
     func skipForward() {

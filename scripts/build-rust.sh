@@ -10,7 +10,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # Ensure cargo is on PATH
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
 CORE_DIR="$ROOT_DIR/core"
-GENERATED_DIR="$ROOT_DIR/ArchiveOfYourOwn/Generated"
+GENERATED_DIR="$ROOT_DIR/packages/AO3Kit/Sources/Generated"
 
 PROFILE="debug"
 PROFILE_FLAG=""
@@ -24,18 +24,22 @@ echo "==> Building Rust core ($PROFILE)..."
 cd "$CORE_DIR"
 
 # Ensure targets are available
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim 2>/dev/null || true
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin 2>/dev/null || true
 
-# Build for device and simulator
-# Set deployment target to match project.yml so the linker doesn't warn
+# Build for device, simulator, and macOS
+# Set deployment targets to match project.yml so the linker doesn't warn
 # about objects built for a newer OS than the app targets.
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
+export MACOSX_DEPLOYMENT_TARGET=14.0
 
 echo "  Building for iOS device (aarch64-apple-ios)..."
 cargo build --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor
 
 echo "  Building for iOS simulator (aarch64-apple-ios-sim)..."
 cargo build --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor
+
+echo "  Building for macOS (aarch64-apple-darwin)..."
+cargo build --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor
 
 # Generate Swift bindings
 echo "==> Generating Swift bindings..."
@@ -60,6 +64,7 @@ rm -rf "$FRAMEWORK_DIR"
 
 DEVICE_LIB="target/aarch64-apple-ios/$PROFILE/libao3_core.a"
 SIM_LIB="target/aarch64-apple-ios-sim/$PROFILE/libao3_core.a"
+MACOS_LIB="target/aarch64-apple-darwin/$PROFILE/libao3_core.a"
 
 # Find the generated header (uniffi generates a modulemap + header)
 HEADER_FILE="$GENERATED_DIR/ao3_coreFFI.h"
@@ -75,6 +80,7 @@ if [[ -f "$HEADER_FILE" ]]; then
     xcodebuild -create-xcframework \
         -library "$DEVICE_LIB" -headers "$HEADERS_DIR" \
         -library "$SIM_LIB" -headers "$HEADERS_DIR" \
+        -library "$MACOS_LIB" -headers "$HEADERS_DIR" \
         -output "$FRAMEWORK_DIR"
 
     rm -rf "$HEADERS_DIR"
@@ -82,6 +88,7 @@ else
     xcodebuild -create-xcframework \
         -library "$DEVICE_LIB" \
         -library "$SIM_LIB" \
+        -library "$MACOS_LIB" \
         -output "$FRAMEWORK_DIR"
 fi
 

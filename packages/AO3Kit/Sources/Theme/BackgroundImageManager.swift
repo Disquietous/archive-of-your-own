@@ -1,4 +1,4 @@
-import UIKit
+import SwiftUI
 
 enum BackgroundImageManager {
     private static var backgroundsDirectory: URL {
@@ -10,8 +10,8 @@ enum BackgroundImageManager {
         return dir
     }
 
-    static func saveImage(_ image: UIImage, name: String) -> String? {
-        guard let data = image.jpegData(compressionQuality: 0.85) else { return nil }
+    static func saveImage(_ image: PlatformImage, name: String) -> String? {
+        guard let data = image.jpegEncoded(compressionQuality: 0.85) else { return nil }
         let filename = name.hasSuffix(".jpg") ? name : "\(name).jpg"
         let url = backgroundsDirectory.appendingPathComponent(filename)
         do {
@@ -22,10 +22,10 @@ enum BackgroundImageManager {
         }
     }
 
-    static func loadImage(name: String) -> UIImage? {
+    static func loadImage(name: String) -> PlatformImage? {
         let url = backgroundsDirectory.appendingPathComponent(name)
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return UIImage(data: data)
+        return PlatformImage(data: data)
     }
 
     static func deleteImage(name: String) {
