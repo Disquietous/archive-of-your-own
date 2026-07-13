@@ -48,8 +48,10 @@ final class MacAppModel {
     }
 
     func selectWork(_ id: String) {
-        selectedWorkID = id
-        readerOpen = false
+        // Write only on change — selection sync between the table and model
+        // round-trips through here, and redundant writes would re-notify observers.
+        if selectedWorkID != id { selectedWorkID = id }
+        if readerOpen { readerOpen = false }
     }
 
     func openReader(_ id: String, chapter: Int) {

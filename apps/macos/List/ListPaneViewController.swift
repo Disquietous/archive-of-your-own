@@ -191,6 +191,16 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         if sectionChanged {
             tableView.scroll(.zero)
         }
+        // Keep the table's native selection in sync with the model (reading
+        // model.selectedWorkID here also makes the relay re-render on selection
+        // change, which repaints the previously selected row).
+        if let selectedRow = works.firstIndex(where: { $0.id == model.selectedWorkID }) {
+            if tableView.selectedRow != selectedRow {
+                tableView.selectRowIndexes(IndexSet(integer: selectedRow), byExtendingSelection: false)
+            }
+        } else {
+            tableView.deselectAll(nil)
+        }
     }
 
     private func showVariant(_ content: some View, section: MacAppModel.Section) {
@@ -243,6 +253,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             expandedSummaries.insert(workID)
         }
         guard let row = works.firstIndex(where: { $0.id == workID }) else { return }
+        // Expanding a summary is also an act of focusing that work — select it
+        // (fires tableViewSelectionDidChange → model.selectWork).
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         let indexes = IndexSet(integer: row)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
@@ -253,7 +266,12 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard tableView.selectedRow >= 0, tableView.selectedRow < works.count else { return }
-        model.selectWork(works[tableView.selectedRow].id)
+        let id = works[tableView.selectedRow].id
+        // Ignore no-op changes from programmatic selection sync — selectWork
+        // closes an open reader, which must only happen on a real user click.
+        if model.selectedWorkID != id {
+            model.selectWork(id)
+        }
     }
 
     // The full text belongs in the expanded row, not in the hover overlay.
