@@ -50,6 +50,10 @@ final class AppTheme {
     var useTorByDefault: Bool {
         didSet { UserDefaults.standard.set(useTorByDefault, forKey: "useTorByDefault") }
     }
+    /// Reader column width in points (desktop). Design range 560–860, default 680.
+    var measure: Int {
+        didSet { UserDefaults.standard.set(measure, forKey: "measure") }
+    }
 
     // Lazy-loaded background image
     private var _backgroundImage: PlatformImage?
@@ -94,6 +98,7 @@ final class AppTheme {
         density = Density(rawValue: d.string(forKey: "density") ?? "") ?? .regular
         requestTimeout = d.object(forKey: "requestTimeout") as? Int ?? 30
         useTorByDefault = d.bool(forKey: "useTorByDefault")
+        measure = d.object(forKey: "measure") as? Int ?? 680
     }
 
     // MARK: - Theme switching

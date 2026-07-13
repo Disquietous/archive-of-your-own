@@ -61,7 +61,8 @@ targets:
         GENERATE_INFOPLIST_FILE: false
         INFOPLIST_FILE: apps/macos/Resources/Info.plist
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: P9P8PPRUHR
         OTHER_SWIFT_FLAGS:
           - "-Xcc"
           - "-fmodule-map-file=$(SRCROOT)/packages/AO3Kit/Sources/Generated/ao3_coreFFI.modulemap"

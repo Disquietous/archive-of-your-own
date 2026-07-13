@@ -3,8 +3,10 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let theme = AppTheme()
     let appState = AppState()
+    let model = MacAppModel()
 
     private var mainWindowController: MainWindowController?
+    private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -15,13 +17,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = appState.bridge.createWithAutoKey()
         }
 
-        let controller = MainWindowController(theme: theme, appState: appState)
+        let controller = MainWindowController(theme: theme, appState: appState, model: model)
         controller.showWindow(nil)
         mainWindowController = controller
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    @objc private func openSettings() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(theme: theme, appState: appState, model: model)
+        }
+        settingsWindowController?.show()
     }
 
     // MARK: - Menu
@@ -36,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About \(appName)",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide \(appName)",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
