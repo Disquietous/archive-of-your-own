@@ -67,7 +67,10 @@ final class RustBridge {
     /// Open an existing database. For user-password DBs, pass the user's password.
     /// For auto-key DBs, pass nil to use the Keychain key.
     func open(userPassword: String? = nil) -> Bool {
-        let key = userPassword ?? Self.autoKey()
+        guard let key = userPassword ?? Self.autoKey() else {
+            connectionError = "Could not read the database key from the Keychain. Grant keychain access and relaunch."
+            return false
+        }
         let dbPath = Self.databasePath()
         do {
             app = try Ao3App(dbPath: dbPath, dbPassphrase: key)
@@ -173,20 +176,26 @@ final class RustBridge {
 
     private static let autoKeyAccount = "ao3_auto_db_key"
 
-    private static func autoKey() -> String {
+    private static func autoKey() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrAccount as String: autoKeyAccount,
             kSecReturnData as String: true,
         ]
         var result: AnyObject?
-        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecSuccess,
            let data = result as? Data,
            let key = String(data: data, encoding: .utf8) {
             return key
         }
-        // No key stored — generate one
-        return generateAndStoreAutoKey()
+        // Only mint a new key when none exists. Any other failure (access
+        // denied, keychain locked) must NOT regenerate — replacing the key
+        // would permanently orphan the existing encrypted database.
+        if status == errSecItemNotFound {
+            return generateAndStoreAutoKey()
+        }
+        return nil
     }
 
     private static func generateAndStoreAutoKey() -> String {
