@@ -72,9 +72,12 @@ final class AppState {
 
     func connectTor() async {
         let wasConnected = bridge.torStatus.isConnected
-        if wasConnected {
-            bridge.saveSessionCookies()
-        }
+        // Always persist session cookies before the transport swap wipes the
+        // jar — the Rust side refuses to overwrite authenticated cookies with
+        // an anonymous jar, so this is safe even when logged out. (Previously
+        // gated on wasConnected, which lost sessions established while
+        // disconnected — surfacing as bogus "session expired" moments later.)
+        bridge.saveSessionCookies()
 
         torConnectCancelled = false
         torConnectFailed = false
@@ -98,9 +101,9 @@ final class AppState {
             if healthy {
                 bridge.writeLog(level: "INFO", tag: "health", message: "Circuit passed health check on attempt \(attempts)")
                 await resolveCloudflare()
-                if wasConnected {
-                    bridge.restoreSessionCookies()
-                }
+                // Always restore after the swap, not only on reconnects —
+                // the new transport starts with an empty jar.
+                bridge.restoreSessionCookies()
                 torConnectFailed = false
                 return
             }
@@ -159,6 +162,9 @@ final class AppState {
             cloudflareError = error.localizedDescription
             bridge.writeLog(level: "ERROR", tag: "cloudflare",
                 message: "Resolution failed: \(error.localizedDescription)")
+            // The transport swap emptied the jar before we got here; a failed
+            // challenge must not also cost the login session.
+            bridge.restoreSessionCookies()
         }
 
         isResolvingCloudflare = false

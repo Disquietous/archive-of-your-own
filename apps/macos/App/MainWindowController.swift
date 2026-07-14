@@ -36,6 +36,8 @@ final class MainWindowController: NSWindowController {
             let needsGate = !bridge.isInitialized || bridge.showingRecoveryKey
             DispatchQueue.main.async { self.apply(gate: needsGate) }
         }
+        // Session expiry surfaces in the sidebar's state-hub pill (amber
+        // "Session expired" line) with inline re-auth in its popover.
     }
 
     required init?(coder: NSCoder) {

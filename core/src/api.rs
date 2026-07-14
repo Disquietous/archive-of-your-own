@@ -15,6 +15,21 @@ pub struct ULogEntry {
     pub message: String,
 }
 
+/// One recorded HTTP request for the request-audit UI.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct URequestLogEntry {
+    pub id: i64,
+    pub started_ms: i64,
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    pub duration_ms: i64,
+    pub request_bytes: i64,
+    pub response_bytes: i64,
+    pub error: Option<String>,
+    pub payload: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AO3Error {
     #[error("Network error: {message}")]
@@ -368,6 +383,9 @@ impl AO3App {
         let result = handle.await;
 
         { let mut t = self.active_task.lock().unwrap(); *t = None; }
+
+        // Persist any requests this operation made (durable audit log).
+        self.flush_request_log();
 
         match result {
             Ok(r) => r,
@@ -1942,6 +1960,52 @@ impl AO3App {
     pub fn write_log(&self, level: String, tag: String, message: String) -> Result<(), AO3Error> {
         crate::dlog(&level, &tag, &message);
         Ok(())
+    }
+
+    // -- Request Audit Log --
+
+    /// Persist any buffered requests, then return the most recent `limit` rows
+    /// (newest first) from the encrypted database.
+    pub fn get_request_log(&self, limit: u32) -> Result<Vec<URequestLogEntry>, AO3Error> {
+        self.flush_request_log();
+        let storage = self.storage.blocking_lock();
+        let rows = storage.get_request_logs(limit).map_err(AO3Error::from)?;
+        Ok(rows.into_iter().map(|(id, started, method, url, status, dur, req_b, resp_b, error, payload)| {
+            URequestLogEntry {
+                id, started_ms: started as i64, method, url, status,
+                duration_ms: dur as i64, request_bytes: req_b as i64,
+                response_bytes: resp_b as i64, error, payload,
+            }
+        }).collect())
+    }
+
+    pub fn clear_request_log(&self) -> Result<(), AO3Error> {
+        let _ = crate::client::drain_request_records();
+        let storage = self.storage.blocking_lock();
+        storage.clear_request_logs().map_err(AO3Error::from)
+    }
+
+    /// Drain the in-memory request buffer into the database. Called after every
+    /// runtime operation so requests are durable even without the UI open.
+    fn flush_request_log(&self) {
+        let records = crate::client::drain_request_records();
+        if records.is_empty() { return; }
+        let tuples: Vec<_> = records.into_iter().map(|r| (
+            r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
+            r.request_bytes, r.response_bytes, r.error, r.payload,
+        )).collect();
+        if let Ok(storage) = self.storage.try_lock() {
+            let _ = storage.insert_request_logs(&tuples);
+        } else {
+            // Storage busy — put them back so the next flush persists them.
+            for t in tuples.into_iter().rev() {
+                crate::client::push_request_record(crate::client::RequestRecord {
+                    started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
+                    duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
+                    error: t.7, payload: t.8,
+                });
+            }
+        }
     }
 }
 

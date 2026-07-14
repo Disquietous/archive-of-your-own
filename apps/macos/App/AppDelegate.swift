@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
+    private var requestLogWindowController: RequestLogWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
@@ -27,6 +28,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsWindowController = SettingsWindowController(theme: theme, appState: appState, model: model)
         }
         settingsWindowController?.show()
+    }
+
+    @objc private func openRequestLog() {
+        if requestLogWindowController == nil {
+            requestLogWindowController = RequestLogWindowController(theme: theme, appState: appState)
+        }
+        requestLogWindowController?.show()
     }
 
     // MARK: - Menu
@@ -81,6 +89,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                        keyEquivalent: "s")
         toggleSidebar.keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(toggleSidebar)
+        viewMenu.addItem(.separator())
+        let requestLog = NSMenuItem(title: "Request Log", action: #selector(openRequestLog), keyEquivalent: "l")
+        requestLog.keyEquivalentModifierMask = [.command, .option]
+        requestLog.target = self
+        viewMenu.addItem(requestLog)
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 

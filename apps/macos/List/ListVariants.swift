@@ -101,6 +101,9 @@ struct LoadingStateMac: View {
     @Bindable var theme: AppTheme
     let message: String
     var detail: String? = nil
+    /// Other requests in flight, shown as a summary beneath the primary
+    /// message so the user sees everything underway, not just this one.
+    var otherActivity: [String] = []
     var onCancel: (() -> Void)? = nil
 
     var body: some View {
@@ -114,6 +117,27 @@ struct LoadingStateMac: View {
                 Text(detail)
                     .font(Font(MacFont.ui(12)))
                     .foregroundStyle(theme.ink3)
+                    .multilineTextAlignment(.center)
+            }
+            if !otherActivity.isEmpty {
+                VStack(spacing: 5) {
+                    Text("ALSO IN PROGRESS")
+                        .font(Font(MacFont.ui(9.5, weight: .bold)))
+                        .kerning(0.6)
+                        .foregroundStyle(theme.ink3)
+                    ForEach(otherActivity, id: \.self) { op in
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text(op)
+                                .font(Font(MacFont.ui(11.5)))
+                                .foregroundStyle(theme.ink3)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+                .padding(10)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
             if let onCancel {
                 Button("Cancel", action: onCancel)
@@ -228,25 +252,37 @@ struct SubscriptionsList: View {
                         .padding(.init(top: 12, leading: 16, bottom: 4, trailing: 16))
 
                         ForEach(items, id: \.id) { sub in
+                            let isLoading = model.loadingSubscriptionID == sub.id
+                            let isShowing = group.type == "author" && model.subscriptionWorksTitle == sub.name
                             HStack(spacing: 12) {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(sub.name)
                                         .font(Font(MacFont.ui(14, weight: .semibold)))
-                                        .foregroundStyle(theme.ink)
-                                    Text(group.label.dropLast(group.label.hasSuffix("s") ? 1 : 0))
+                                        .foregroundStyle(isShowing ? theme.accent : theme.ink)
+                                    Text(isLoading ? "Fetching works…" : String(group.label.dropLast(group.label.hasSuffix("s") ? 1 : 0)))
                                         .font(Font(MacFont.ui(12)))
                                         .foregroundStyle(theme.ink3)
                                 }
                                 Spacer()
+                                if isLoading {
+                                    ProgressView().controlSize(.small)
+                                } else if group.type == "author" || group.type == "work" {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(theme.ink3)
+                                }
                             }
                             .padding(.init(top: 10, leading: 16, bottom: 10, trailing: 16))
                             .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
                             .contentShape(Rectangle())
                             .onTapGesture {
+                                guard !isLoading else { return }
+                                // Everything resolves inside Subscriptions —
+                                // works show their detail, authors load their
+                                // works into the reading pane.
                                 if group.type == "work" { model.selectWork(sub.id) }
                                 if group.type == "author" {
-                                    model.query = sub.name
-                                    model.submitSearch()
+                                    model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name)
                                 }
                             }
                         }

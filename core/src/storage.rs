@@ -945,6 +945,66 @@ impl Storage {
         Ok(())
     }
 
+    // -------------------------------------------------------------------
+    // Request Audit Log
+    // -------------------------------------------------------------------
+
+    /// Insert drained request records; caps the table at 2000 rows.
+    #[allow(clippy::type_complexity)]
+    pub fn insert_request_logs(
+        &self,
+        records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>)],
+    ) -> Result<(), AppError> {
+        for (started, method, url, status, dur, req_b, resp_b, error, payload) in records {
+            self.conn.execute(
+                "INSERT INTO request_log
+                 (started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![*started as i64, method, url, *status as i64, *dur as i64,
+                        *req_b as i64, *resp_b as i64, error, payload],
+            ).map_err(map_sql)?;
+        }
+        if !records.is_empty() {
+            self.conn.execute(
+                "DELETE FROM request_log WHERE id NOT IN
+                 (SELECT id FROM request_log ORDER BY id DESC LIMIT 2000)",
+                [],
+            ).map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn get_request_logs(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(i64, u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload
+             FROM request_log ORDER BY id DESC LIMIT ?1"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? as u16,
+                row.get::<_, i64>(5)? as u64,
+                row.get::<_, i64>(6)? as u64,
+                row.get::<_, i64>(7)? as u64,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    pub fn clear_request_logs(&self) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM request_log", []).map_err(map_sql)?;
+        Ok(())
+    }
+
     pub fn dump_logs(&self, limit: u32) -> Result<String, AppError> {
         let logs = self.get_logs(limit)?;
         let mut output = String::new();
@@ -1140,6 +1200,19 @@ impl Storage {
                     level       TEXT NOT NULL,
                     tag         TEXT NOT NULL,
                     message     TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS request_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_ms  INTEGER NOT NULL,
+                    method      TEXT NOT NULL,
+                    url         TEXT NOT NULL,
+                    status      INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    req_bytes   INTEGER NOT NULL,
+                    resp_bytes  INTEGER NOT NULL,
+                    error       TEXT,
+                    payload     TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS custom_themes (
