@@ -24,7 +24,10 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     private var works: [Work] = []
     private var renderedSection: MacAppModel.Section?
+    private var renderedWorkIDs: [String] = []
     private var expandedSummaries: Set<String> = []
+    /// Measures off-screen rows for heightOfRow.
+    private lazy var sizingCell = WorkRowCellView(theme: theme)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -47,7 +50,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.addTableColumn(column)
         tableView.headerView = nil
         tableView.style = .plain
-        tableView.usesAutomaticRowHeights = true
         tableView.selectionHighlightStyle = .none
         tableView.intercellSpacing = .zero
         tableView.gridStyleMask = .solidHorizontalGridLineMask
@@ -273,7 +275,20 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.gridStyleMask = works.isEmpty ? [] : .solidHorizontalGridLineMask
 
         let sectionChanged = renderedSection != section
-        tableView.reloadData()
+        let ids = works.map(\.id)
+        if sectionChanged || ids != renderedWorkIDs {
+            tableView.reloadData()
+        } else {
+            // Same rows — only move the selection highlight. Reloading here
+            // replaces every cell and makes expand/collapse look like a flash.
+            tableView.enumerateAvailableRowViews { [weak self] _, row in
+                guard let self, row < works.count,
+                      let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
+                else { return }
+                cell.setSelected(works[row].id == model.selectedWorkID)
+            }
+        }
+        renderedWorkIDs = ids
         if sectionChanged {
             tableView.scroll(.zero)
         }
@@ -345,12 +360,42 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         // Expanding a summary is also an act of focusing that work — select it
         // (fires tableViewSelectionDidChange → model.selectWork).
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        let indexes = IndexSet(integer: row)
+        // Real in-place expand/collapse: the summary's clip-height constraint
+        // and the row height animate in the same transaction, so the text
+        // reveals/conceals progressively while the row grows or shrinks —
+        // no reload, no cell replacement, no snapping.
+        let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
+        let expanded = expandedSummaries.contains(workID)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            tableView.reloadData(forRowIndexes: indexes, columnIndexes: [0])
-            tableView.noteHeightOfRows(withIndexesChanged: indexes)
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            cell?.setSummaryExpanded(expanded)
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+            tableView.layoutSubtreeIfNeeded()
         }
+    }
+
+    /// Row heights come from the cells' own measurement. The automatic
+    /// row-height engine was measured (see git history) applying height
+    /// changes on reload only upward — a collapsed summary's shorter,
+    /// correctly-measured height was silently discarded, so rows never shrank.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard row < works.count else { return 52 }
+        // Always measure via the sizing cell — querying live row views from
+        // inside heightOfRow is illegal reentrancy (AppKit throws while the
+        // table is mid-tiling), and the sizing cell computes identical layout.
+        let work = works[row]
+        let width = max(320, tableView.bounds.width)
+        sizingCell.configure(with: work,
+                             progress: model.progress(for: work),
+                             downloaded: appState.downloadedWorkIDs.contains(work.id),
+                             selected: false,
+                             summaryExpanded: expandedSummaries.contains(work.id),
+                             availableTextWidth: max(100, width - 71))
+        sizingCell.frame = NSRect(x: 0, y: 0, width: width, height: 10_000)
+        sizingCell.layoutSubtreeIfNeeded()
+        return max(52, sizingCell.fittingSize.height)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
