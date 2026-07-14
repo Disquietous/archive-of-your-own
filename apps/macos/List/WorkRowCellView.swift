@@ -14,6 +14,12 @@ final class WorkRowCellView: NSTableCellView {
     private let titleLabel = NSTextField(wrappingLabelWithString: "")
     private let authorLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(wrappingLabelWithString: "")
+    /// Clipping container whose height constraint is what expand/collapse
+    /// animates — a line-count clamp can't animate, a constraint can.
+    private let summaryClip = NSView()
+    private var summaryHeight: NSLayoutConstraint!
+    private var collapsedSummaryHeight: CGFloat = 0
+    private var fullSummaryHeight: CGFloat = 0
     private let metaLabel = NSTextField(labelWithString: "")
     private let ratingBadge = NSTextField(labelWithString: "")
     private let progressTrack = NSView()
@@ -23,6 +29,9 @@ final class WorkRowCellView: NSTableCellView {
     private var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
     var onToggleSummary: (() -> Void)?
+
+    /// Shared measuring label for summary heights.
+    private static let measureLabel = NSTextField(wrappingLabelWithString: "")
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -40,8 +49,18 @@ final class WorkRowCellView: NSTableCellView {
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = MacFont.ui(12.5)
-        summaryLabel.maximumNumberOfLines = 2
-        summaryLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(summaryClicked)))
+        summaryClip.wantsLayer = true
+        summaryClip.layer?.masksToBounds = true
+        summaryClip.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(summaryClicked)))
+        summaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        summaryClip.addSubview(summaryLabel)
+        summaryHeight = summaryClip.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            summaryHeight,
+            summaryLabel.topAnchor.constraint(equalTo: summaryClip.topAnchor),
+            summaryLabel.leadingAnchor.constraint(equalTo: summaryClip.leadingAnchor),
+            summaryLabel.trailingAnchor.constraint(equalTo: summaryClip.trailingAnchor),
+        ])
         metaLabel.font = MacFont.ui(11, weight: .medium)
         metaLabel.lineBreakMode = .byTruncatingTail
 
@@ -57,14 +76,21 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
 
-        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryLabel, metaLabel, progressTrack])
+        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, metaLabel, progressTrack])
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
         body.setCustomSpacing(2, after: fandomLabel)
         body.setCustomSpacing(6, after: authorLabel)
-        body.setCustomSpacing(7, after: summaryLabel)
+        body.setCustomSpacing(7, after: summaryClip)
         body.setCustomSpacing(7, after: metaLabel)
+        // Labels must refuse to be stretched past their intrinsic height —
+        // otherwise row-height measurement is a one-way ratchet: a currently
+        // tall (expanded) row satisfies its bottom pin by stretching the
+        // labels, so a collapsed summary never measures shorter.
+        for label in [fandomLabel, titleLabel, authorLabel, metaLabel] {
+            label.setContentHuggingPriority(.init(751), for: .vertical)
+        }
 
         for view in [selectionBar, spine, body, ratingBadge] {
             view.translatesAutoresizingMaskIntoConstraints = false
@@ -73,7 +99,15 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.translatesAutoresizingMaskIntoConstraints = false
         progressWidth = progressFill.widthAnchor.constraint(equalToConstant: 0)
 
+        // High-but-not-required: during measurement it pulls the cell's bottom
+        // snugly to the content (labels outrank it at 751, so nothing
+        // stretches), and during the resize animation it degrades gracefully
+        // instead of fighting the in-flight frame.
+        let bodyBottom = body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+        bodyBottom.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
+            bodyBottom,
             selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             selectionBar.topAnchor.constraint(equalTo: topAnchor),
             selectionBar.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -87,13 +121,13 @@ final class WorkRowCellView: NSTableCellView {
             body.leadingAnchor.constraint(equalTo: spine.trailingAnchor, constant: 12),
             body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -40),
             body.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
 
             ratingBadge.topAnchor.constraint(equalTo: topAnchor, constant: 12),
             ratingBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             ratingBadge.widthAnchor.constraint(equalToConstant: 18),
             ratingBadge.heightAnchor.constraint(equalToConstant: 18),
 
+            summaryClip.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressTrack.heightAnchor.constraint(equalToConstant: 3),
             progressTrack.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressFill.leadingAnchor.constraint(equalTo: progressTrack.leadingAnchor),
@@ -111,13 +145,46 @@ final class WorkRowCellView: NSTableCellView {
         onToggleSummary?()
     }
 
+    /// Animate only the summary reveal: the clip container's height constraint
+    /// slides between the 2-line and full measurements. Call inside an
+    /// NSAnimationContext with allowsImplicitAnimation for a smooth reveal.
+    func setSummaryExpanded(_ expanded: Bool) {
+        summaryHeight.constant = expanded ? fullSummaryHeight : collapsedSummaryHeight
+    }
+
+    /// Measure the summary's collapsed (2-line) and full heights at a width.
+    private static func summaryHeights(text: String, width: CGFloat) -> (collapsed: CGFloat, full: CGFloat) {
+        let label = measureLabel
+        label.font = MacFont.ui(12.5)
+        label.stringValue = text
+        label.preferredMaxLayoutWidth = width
+        label.maximumNumberOfLines = 2
+        let collapsed = label.intrinsicContentSize.height
+        label.maximumNumberOfLines = 0
+        label.invalidateIntrinsicContentSize()
+        let full = label.intrinsicContentSize.height
+        return (collapsed, max(full, collapsed))
+    }
+
+    /// Flip only the selection highlight (background fill + accent bar) —
+    /// no label content is touched.
+    func setSelected(_ selected: Bool) {
+        guard selected != isRowSelected else { return }
+        isRowSelected = selected
+        layer?.backgroundColor = selected ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
+        selectionBar.layer?.backgroundColor = selected ? theme.nsAccent.cgColor : NSColor.clear.cgColor
+    }
+
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
                    summaryExpanded: Bool, availableTextWidth: CGFloat) {
         isRowSelected = selected
-        summaryLabel.maximumNumberOfLines = summaryExpanded ? 0 : 2
+        // NSTextField caches its intrinsic size, and changing the line clamp
+        // doesn't flush it — a reused cell going expanded → collapsed kept
+        // measuring at full height. Invalidate exactly when the clamp changes
+        // so the row re-measures symmetrically in both directions.
         // Wrapping labels need a known width to report correct heights for
-        // automatic row sizing. Set it here, never in layout() — invalidating
-        // intrinsic size during layout creates a feedback loop AppKit aborts on.
+        // row sizing. Set it here, never in layout() — invalidating intrinsic
+        // size during layout creates a feedback loop AppKit aborts on.
         titleLabel.preferredMaxLayoutWidth = availableTextWidth
         summaryLabel.preferredMaxLayoutWidth = availableTextWidth
 
@@ -132,7 +199,11 @@ final class WorkRowCellView: NSTableCellView {
         authorLabel.attributedStringValue = author
 
         summaryLabel.stringValue = work.summary
-        summaryLabel.isHidden = work.summary.isEmpty
+        summaryClip.isHidden = work.summary.isEmpty
+        let heights = Self.summaryHeights(text: work.summary, width: availableTextWidth)
+        collapsedSummaryHeight = heights.collapsed
+        fullSummaryHeight = heights.full
+        summaryHeight.constant = summaryExpanded ? fullSummaryHeight : collapsedSummaryHeight
 
         var meta = "♥ \(Fmt.k(work.kudos))   \(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
         if downloaded {
