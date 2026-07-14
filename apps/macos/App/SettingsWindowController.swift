@@ -169,6 +169,33 @@ struct GeneralSettingsPane: View {
             }
 
             AccountSection(theme: theme, appState: appState)
+
+            SettingsGroup(theme: theme, label: "Sample Data") {
+                SettingsCard(theme: theme) {
+                    SettingsInfoRow(theme: theme, label: "Sample works",
+                                    value: model.sampleDataLoaded ? "Loaded" : "Not loaded")
+                }
+                Button {
+                    if model.sampleDataLoaded {
+                        model.clearSampleData()
+                    } else {
+                        model.loadSampleData()
+                    }
+                } label: {
+                    Text(model.sampleDataLoaded ? "Remove Sample Data" : "Load Sample Data")
+                        .font(Font(MacFont.ui(13, weight: .bold)))
+                        .foregroundStyle(model.sampleDataLoaded ? Color(hex: "CE514D") : theme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .background(theme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Text("Fictional works for testing and demos. Samples live in memory only — they never enter your encrypted library or touch the archive, and they disappear on quit.")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(16)
     }

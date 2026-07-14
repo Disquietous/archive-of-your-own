@@ -25,6 +25,9 @@ final class WorkRowCellView: NSTableCellView {
     private let progressTrack = NSView()
     private let progressFill = NSView()
     private var progressWidth: NSLayoutConstraint!
+    /// Per-row bottom hairline (the design's row border) — the table grid is
+    /// off because NSTableView paints phantom lines below the last row.
+    private let separator = NSView()
 
     private var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
@@ -92,7 +95,8 @@ final class WorkRowCellView: NSTableCellView {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
 
-        for view in [selectionBar, spine, body, ratingBadge] {
+        separator.wantsLayer = true
+        for view in [selectionBar, spine, body, ratingBadge, separator] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -108,6 +112,10 @@ final class WorkRowCellView: NSTableCellView {
 
         NSLayoutConstraint.activate([
             bodyBottom,
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
             selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             selectionBar.topAnchor.constraint(equalTo: topAnchor),
             selectionBar.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -225,6 +233,7 @@ final class WorkRowCellView: NSTableCellView {
     func applyTheme() {
         layer?.backgroundColor = isRowSelected ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
         selectionBar.layer?.backgroundColor = isRowSelected ? theme.nsAccent.cgColor : NSColor.clear.cgColor
+        separator.layer?.backgroundColor = theme.nsLine.cgColor
         fandomLabel.textColor = theme.nsAccent
         titleLabel.textColor = theme.nsInk
         summaryLabel.textColor = theme.nsInk2

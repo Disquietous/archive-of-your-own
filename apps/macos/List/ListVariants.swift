@@ -328,114 +328,264 @@ struct NotificationRowView: View {
     }
 }
 
-// MARK: - Fandoms (derived from the local library)
+// MARK: - Followed fandoms
 
-struct FandomsGrid: View {
+struct FollowedFandomsView: View {
     @Bindable var theme: AppTheme
     @Bindable var model: MacAppModel
 
+    @State private var newFandom = ""
+
+    private var suggestions: [MacAppModel.FandomEntry] {
+        model.libraryFandoms.filter { !model.followedFandoms.contains($0.name) }
+    }
+
     var body: some View {
-        if model.libraryFandoms.isEmpty {
-            EmptyStateMac(theme: theme, icon: "flame",
-                          title: "No fandoms yet",
-                          message: "Fandoms from works you browse and save will appear here.")
-        } else {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
-                    ForEach(model.libraryFandoms) { fandom in
-                        Button {
-                            model.query = fandom.name
-                            model.submitSearch()
-                        } label: {
-                            VStack(alignment: .leading, spacing: 0) {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Fandom.spineColor(for: fandom.name))
-                                    .frame(width: 34, height: 34)
-                                    .overlay {
-                                        Image(systemName: "flame")
-                                            .font(.system(size: 14, weight: .medium))
-                                            .foregroundStyle(theme.onAccent)
-                                    }
-                                    .padding(.bottom, 10)
-                                Text(fandom.name)
-                                    .font(Font(MacFont.serif(15, weight: .semibold)))
-                                    .foregroundStyle(theme.ink)
-                                    .multilineTextAlignment(.leading)
-                                    .padding(.bottom, 2)
-                                Text("\(fandom.count) in library")
-                                    .font(Font(MacFont.ui(11.5, weight: .medium)))
-                                    .foregroundStyle(theme.ink3)
-                            }
-                            .padding(.init(top: 15, leading: 14, bottom: 15, trailing: 14))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(theme.surface)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                followField
+
+                if model.followedFandoms.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "flame")
+                            .font(.system(size: 30, weight: .light))
+                            .foregroundStyle(theme.line2)
+                        Text("Follow your fandoms")
+                            .font(Font(MacFont.serif(19, weight: .semibold)))
+                            .foregroundStyle(theme.ink2)
+                        Text("Followed fandoms live here — one click opens that fandom's works on the archive.")
+                            .font(Font(MacFont.ui(13)))
+                            .foregroundStyle(theme.ink3)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
+                        ForEach(model.followedFandoms, id: \.self) { name in
+                            fandomCard(name)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
-                .padding(16)
+
+                if !suggestions.isEmpty {
+                    Text("FROM YOUR LIBRARY")
+                        .font(Font(MacFont.ui(10.5, weight: .bold)))
+                        .kerning(0.6)
+                        .foregroundStyle(theme.ink3)
+                        .padding(.top, 4)
+                    ForEach(suggestions.prefix(8)) { suggestion in
+                        suggestionRow(suggestion)
+                    }
+                }
             }
+            .padding(16)
         }
+    }
+
+    private var followField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.ink3)
+            TextField("Follow a fandom (exact AO3 tag)", text: $newFandom)
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(12.5)))
+                .foregroundStyle(theme.ink)
+                .onSubmit {
+                    model.followFandom(newFandom)
+                    newFandom = ""
+                }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+    }
+
+    private func fandomCard(_ name: String) -> some View {
+        Button {
+            model.searchTag(name)
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Fandom.spineColor(for: name))
+                        .frame(width: 34, height: 34)
+                        .overlay {
+                            Image(systemName: "flame")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(theme.onAccent)
+                        }
+                    Spacer()
+                    Button {
+                        model.unfollowFandom(name)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(theme.ink3)
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Unfollow")
+                }
+                .padding(.bottom, 10)
+                Text(name)
+                    .font(Font(MacFont.serif(15, weight: .semibold)))
+                    .foregroundStyle(theme.ink)
+                    .multilineTextAlignment(.leading)
+                    .padding(.bottom, 2)
+                Text("View works")
+                    .font(Font(MacFont.ui(11.5, weight: .medium)))
+                    .foregroundStyle(theme.accent)
+            }
+            .padding(.init(top: 15, leading: 14, bottom: 15, trailing: 14))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func suggestionRow(_ suggestion: MacAppModel.FandomEntry) -> some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Fandom.spineColor(for: suggestion.name))
+                .frame(width: 9, height: 9)
+            Text(suggestion.name)
+                .font(Font(MacFont.ui(13, weight: .medium)))
+                .foregroundStyle(theme.ink2)
+                .lineLimit(1)
+            Spacer()
+            Text("\(suggestion.count) in library")
+                .font(Font(MacFont.ui(11)))
+                .foregroundStyle(theme.ink3)
+            Button {
+                model.followFandom(suggestion.name)
+            } label: {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.accent)
+            }
+            .buttonStyle(.plain)
+            .help("Follow")
+        }
+        .padding(.vertical, 6)
     }
 }
 
-// MARK: - Authors (from AO3 subscriptions)
+// MARK: - Authors (followed locally + AO3 subscriptions)
 
 struct AuthorsList: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
+    @State private var newAuthor = ""
+
+    /// Local follows first, then AO3 subscription authors not already followed.
+    private var authors: [(name: String, source: String)] {
+        var seen = Set<String>()
+        var result: [(String, String)] = []
+        for name in model.followedAuthorNames where seen.insert(name).inserted {
+            result.append((name, "Followed"))
+        }
+        for sub in model.followedAuthors where seen.insert(sub.name).inserted {
+            result.append((sub.name, "Subscribed on AO3"))
+        }
+        return result
+    }
+
     var body: some View {
-        if appState.ao3Username == nil {
-            EmptyStateMac(theme: theme, icon: "person.crop.circle.badge.questionmark",
-                          title: "Sign in to follow authors",
-                          message: "Author subscriptions from your AO3 account appear here.")
-        } else if model.followedAuthors.isEmpty {
-            EmptyStateMac(theme: theme, icon: "person",
-                          title: "No followed authors",
-                          message: appState.isLoadingSubscriptions ? "Loading subscriptions…" : "Authors you subscribe to on AO3 appear here.")
-        } else {
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(model.followedAuthors, id: \.id) { author in
-                        Button {
-                            model.query = author.name
-                            model.submitSearch()
-                        } label: {
-                            HStack(spacing: 12) {
-                                Circle()
-                                    .fill(theme.accent2)
-                                    .frame(width: 40, height: 40)
-                                    .overlay {
-                                        Text(String(author.name.prefix(1)).uppercased())
-                                            .font(Font(MacFont.serif(18, weight: .semibold)))
-                                            .foregroundStyle(theme.onAccent)
-                                    }
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(author.name)
-                                        .font(Font(MacFont.ui(14.5, weight: .semibold)))
-                                        .foregroundStyle(theme.ink)
-                                    Text("Subscribed on AO3")
-                                        .font(Font(MacFont.ui(12)))
-                                        .foregroundStyle(theme.ink3)
-                                }
-                                Spacer()
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(theme.ink3)
-                            }
-                            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-                            .contentShape(Rectangle())
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                followField
+                    .padding(.init(top: 12, leading: 16, bottom: 2, trailing: 16))
+
+                if authors.isEmpty {
+                    EmptyStateMac(theme: theme, icon: "person",
+                                  title: "No authors yet",
+                                  message: "Follow an author by username, or sign in to see your AO3 author subscriptions.")
+                        .frame(minHeight: 260)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(authors, id: \.name) { author in
+                            authorRow(author.name, source: author.source)
                         }
-                        .buttonStyle(.plain)
-                        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
                     }
                 }
             }
         }
+    }
+
+    private var followField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "plus")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.ink3)
+            TextField("Follow an author (AO3 username)", text: $newAuthor)
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(12.5)))
+                .foregroundStyle(theme.ink)
+                .onSubmit {
+                    model.followAuthor(newAuthor)
+                    newAuthor = ""
+                }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+    }
+
+    private func authorRow(_ name: String, source: String) -> some View {
+        Button {
+            model.openAuthor(name)
+        } label: {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(Fandom.spineColorForHue(abs(name.hashValue % 360)))
+                    .frame(width: 40, height: 40)
+                    .overlay {
+                        Text(String(name.prefix(1)).uppercased())
+                            .font(Font(MacFont.serif(18, weight: .semibold)))
+                            .foregroundStyle(theme.onAccent)
+                    }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name)
+                        .font(Font(MacFont.ui(14.5, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                    Text(source)
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(theme.ink3)
+                }
+                Spacer()
+                if model.followedAuthorNames.contains(name) {
+                    Button {
+                        model.unfollowAuthor(name)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(theme.ink3)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Unfollow")
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.ink3)
+            }
+            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }
 }
 
