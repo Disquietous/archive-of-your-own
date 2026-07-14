@@ -20,12 +20,15 @@ final class ReadPaneViewController: NSViewController {
     private var bookmarkButton: ToolButton!
 
     private let readerController: ReaderViewController
+    private var resultsController: SearchResultsViewController?
+    private var pagerHost: NSHostingView<SearchPagerView>?
+    private var resultsBackButton: ToolButton!
     private var detailHost: NSHostingView<AnyView>?
     private var emptyHost: NSHostingView<AnyView>?
     private var settingsPopover: NSPopover?
 
     private enum Mode: Equatable {
-        case empty, detail(String), reading(String, Int)
+        case empty, searchResults, subscriptionWorks(String), detail(String), reading(String, Int)
     }
 
     private var renderedMode: Mode?
@@ -59,6 +62,9 @@ final class ReadPaneViewController: NSViewController {
         bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
             appState.toggleBookmark(id)
+        }
+        resultsBackButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to results") { [weak self] in
+            self?.model.backToResults()
         }
 
         addChild(readerController)
@@ -110,6 +116,16 @@ final class ReadPaneViewController: NSViewController {
         }
     }
 
+    private var subscriptionCloseBtn: ToolButton?
+
+    private func subscriptionCloseButton() -> ToolButton {
+        let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
+            self?.model.closeSubscriptionWorks()
+        }
+        subscriptionCloseBtn = button
+        return button
+    }
+
     // MARK: - Render
 
     private func render() {
@@ -121,6 +137,31 @@ final class ReadPaneViewController: NSViewController {
         immersiveExit.contentTintColor = theme.nsInk2
         immersiveExit.isHidden = !model.immersive
 
+        // Subscriptions drill-in: an author subscription's works, without
+        // ever leaving the Subscriptions section.
+        if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
+            toolbar.configure(title: title,
+                              sub: model.isLoadingSubscriptionWorks ? "Fetching works…" : "\(model.filteredSubscriptionWorks.count) works")
+            toolbar.setLeading([subscriptionCloseButton()])
+            toolbar.setTrailing([])
+            show(mode: .subscriptionWorks(title))
+            return
+        }
+
+        // Search section with no selection: the pane shows paged results.
+        if model.section == .search, model.selectedWork == nil {
+            let search = model.search
+            toolbar.configure(title: model.searchDisplayTitle ?? "Results",
+                              sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
+            toolbar.setLeading([])
+            if pagerHost == nil {
+                pagerHost = NSHostingView(rootView: SearchPagerView(theme: theme, appState: appState, model: model))
+            }
+            toolbar.setTrailing(search.hasSearched ? [pagerHost!] : [])
+            show(mode: .searchResults)
+            return
+        }
+
         guard let work = model.selectedWork else {
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
@@ -130,8 +171,10 @@ final class ReadPaneViewController: NSViewController {
         }
 
         let reading = model.readerOpen
+        let cameFromResults = model.section == .search
+            || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
         toolbar.configure(title: reading ? work.title : "Details", sub: nil)
-        toolbar.setLeading(reading ? [backButton] : [])
+        toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
@@ -151,8 +194,25 @@ final class ReadPaneViewController: NSViewController {
         guard mode != renderedMode else { return }
 
         switch mode {
+        case .searchResults, .subscriptionWorks:
+            readerController.view.removeFromSuperview()
+            detailHost?.removeFromSuperview()
+            detailHost = nil
+            emptyHost?.removeFromSuperview()
+            if resultsController == nil {
+                let controller = SearchResultsViewController(theme: theme, appState: appState, model: model)
+                addChild(controller)
+                resultsController = controller
+            }
+            resultsController!.context = {
+                if case .subscriptionWorks = mode { return .subscriptionWorks }
+                return .search
+            }()
+            pin(resultsController!.view)
+
         case .empty:
             readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
             detailHost?.removeFromSuperview()
             detailHost = nil
             if emptyHost == nil {
@@ -166,6 +226,7 @@ final class ReadPaneViewController: NSViewController {
 
         case .detail(let workID):
             readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
@@ -177,6 +238,7 @@ final class ReadPaneViewController: NSViewController {
         case .reading(let workID, let chapter):
             detailHost?.removeFromSuperview()
             detailHost = nil
+            resultsController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 pin(readerController.view)

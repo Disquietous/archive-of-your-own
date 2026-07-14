@@ -36,6 +36,23 @@ final class MacAppModel {
         selectedWorkID.flatMap { appState.work(byID: $0) }
     }
 
+    /// Everything the app is fetching right now, for summarized loading
+    /// feedback. Combines shared AppState flags with Mac-local operations.
+    var inFlightOperations: [String] {
+        var ops: [String] = []
+        if appState.isTestingCircuit { ops.append("Testing Tor circuit \(appState.circuitAttempt)") }
+        if appState.isResolvingCloudflare { ops.append("Clearing archive challenge") }
+        if appState.isBrowsing { ops.append("Loading newest works") }
+        if appState.isSearching { ops.append("Searching the archive") }
+        if appState.isLoadingSubscriptions { ops.append("Loading your subscription list") }
+        if appState.isCheckingSubscriptions { ops.append("Checking follows & inbox for new works") }
+        if isLoadingSubscriptionWorks { ops.append("Fetching \(subscriptionWorksTitle ?? "author")’s works") }
+        if isLoadingAuthor { ops.append("Fetching \(authorUsername ?? "author")’s works") }
+        if search.isLoadingForm { ops.append("Loading search criteria") }
+        if let sync = appState.bookmarkSyncTask.statusMessage { ops.append(sync) }
+        return ops
+    }
+
     var hideExplicit: Bool {
         get { appState.hideExplicit }
         set { appState.hideExplicit = newValue }
@@ -46,6 +63,7 @@ final class MacAppModel {
     func goSection(_ s: Section) {
         section = s
         selectedReadingListID = nil
+        subscriptionWorksTitle = nil
         readerOpen = false
         switch s {
         case .browse:
@@ -119,14 +137,15 @@ final class MacAppModel {
         immersive = false
     }
 
-    /// Quick search from the sidebar field: fills the search form's query and runs it.
+    /// Quick search from the sidebar field: fills the criteria query and runs it.
     func submitSearch() {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         searchDisplayTitle = nil
         section = .search
         readerOpen = false
-        Task {
+        selectedWorkID = nil
+        Task { @MainActor in
             await search.loadFormIfNeeded(appState)
             search.setQuery(q)
             search.performSearch(appState)
@@ -139,8 +158,17 @@ final class MacAppModel {
         searchDisplayTitle = tag
         section = .search
         readerOpen = false
-        search.hasSearched = true
-        Task { await appState.searchAO3(tag: tag) }
+        selectedWorkID = nil
+        Task { @MainActor in
+            search.startTagQuery(tag, appState: appState)
+        }
+    }
+
+    /// From a work detail reached via search results: back to the results list.
+    func backToResults() {
+        selectedWorkID = nil
+        readerOpen = false
+        immersive = false
     }
 
     // MARK: - Followed fandoms & authors (device-local follows)
@@ -210,6 +238,58 @@ final class MacAppModel {
             readerOpen = false
             immersive = false
         }
+    }
+
+    // MARK: - Subscription drill-in (stays inside Subscriptions)
+
+    /// When set, the reading pane shows this subscription's associated works.
+    var subscriptionWorksTitle: String?
+    var subscriptionWorksList: [Work] = []
+    var isLoadingSubscriptionWorks = false
+    var subscriptionWorksError: String?
+    /// Drives the inline spinner on the tapped subscription row.
+    var loadingSubscriptionID: String?
+
+    var filteredSubscriptionWorks: [Work] {
+        filtered(subscriptionWorksList)
+    }
+
+    /// Fetch an author subscription's works internally — the user never
+    /// leaves the Subscriptions section.
+    func openSubscriptionAuthorWorks(subscriptionID: String, author: String) {
+        subscriptionWorksTitle = author
+        subscriptionWorksList = []
+        subscriptionWorksError = nil
+        selectedWorkID = nil
+        readerOpen = false
+        loadingSubscriptionID = subscriptionID
+        isLoadingSubscriptionWorks = true
+        Task { @MainActor in
+            do {
+                let summaries = try await appState.retryOnTimeout(task: authorTask, using: appState.bridge) {
+                    try await self.appState.bridge.fetchAuthorWorks(username: author, page: 1)
+                }
+                let works = summaries.map(AppState.workFromSummary)
+                for work in works { appState.fetchedWorks[work.id] = work }
+                // Ignore stale results if the user tapped something else meanwhile.
+                if subscriptionWorksTitle == author {
+                    subscriptionWorksList = works
+                }
+            } catch {
+                if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
+                    subscriptionWorksError = error.localizedDescription
+                }
+            }
+            isLoadingSubscriptionWorks = false
+            loadingSubscriptionID = nil
+        }
+    }
+
+    func closeSubscriptionWorks() {
+        subscriptionWorksTitle = nil
+        subscriptionWorksList = []
+        subscriptionWorksError = nil
+        selectedWorkID = nil
     }
 
     // MARK: - Author works browsing
@@ -314,11 +394,10 @@ final class MacAppModel {
         }
     }
 
-    /// Tag chips for browse/search: most common tags among current results.
+    /// Tag chips for browse: most common tags among current results.
     var availableTags: [String] {
-        let source = section == .search ? appState.searchResults : appState.browseResults
         var counts: [String: Int] = [:]
-        for work in source {
+        for work in appState.browseResults {
             for tag in work.tags { counts[tag, default: 0] += 1 }
         }
         return counts.sorted { $0.value > $1.value }.prefix(10).map(\.key)

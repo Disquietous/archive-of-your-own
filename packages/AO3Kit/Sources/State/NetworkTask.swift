@@ -27,6 +27,7 @@ extension AppState {
         task.reset()
         var sessionRetried = false
         var timeoutCount = 0
+        var blockedCount = 0
         while !task.isCancelled {
             do {
                 return try await operation()
@@ -71,6 +72,25 @@ extension AppState {
                     }
                     task.statusMessage = "Timed out. Retrying… (\(timeoutCount)/3)"
                     continue
+                }
+                // Cloudflare bot rejection of this circuit/session. The fix is
+                // the same as the connect flow's: a fresh circuit + a fresh
+                // challenge clearance, both of which connectTor() performs.
+                if desc.contains("HTTP 403") {
+                    blockedCount += 1
+                    if blockedCount >= 3 {
+                        throw Ao3Error.Network(message: "The archive's protection blocked this connection repeatedly. Try again in a little while.")
+                    }
+                    if bridge.torStatus.isConnected {
+                        task.isReconnecting = true
+                        task.statusMessage = "Blocked by archive protection. Getting new circuit… (\(blockedCount)/3)"
+                        await connectTor()
+                        if task.isCancelled { throw error }
+                        task.isReconnecting = false
+                        task.statusMessage = nil
+                        continue
+                    }
+                    throw Ao3Error.Network(message: "The archive's protection blocked this request. Connecting via Tor lets the app clear the challenge and retry.")
                 }
                 throw error
             }

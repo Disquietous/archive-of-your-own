@@ -12,7 +12,68 @@ use crate::parser;
 pub const BASE_URL: &str = "https://archiveofourown.org";
 
 const APP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0";
-const RATE_LIMIT_DELAY: Duration = Duration::from_millis(1500);
+const RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
+
+// ---------------------------------------------------------------------------
+// Request audit log (dev-console style)
+// ---------------------------------------------------------------------------
+
+/// One recorded HTTP request/response. Populated in the client's fetch/post
+/// paths and drained to the encrypted database by the app layer.
+#[derive(Debug, Clone)]
+pub struct RequestRecord {
+    pub started_at_ms: u64,
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub request_bytes: u64,
+    pub response_bytes: u64,
+    pub error: Option<String>,
+    /// Redacted request payload (POST form params; credentials removed).
+    pub payload: Option<String>,
+}
+
+static REQUEST_LOG: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<RequestRecord>>> =
+    std::sync::OnceLock::new();
+
+fn request_log_buffer() -> &'static std::sync::Mutex<std::collections::VecDeque<RequestRecord>> {
+    REQUEST_LOG.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Append a record to the in-memory buffer (bounded — the DB is the durable store).
+pub fn push_request_record(record: RequestRecord) {
+    if let Ok(mut buf) = request_log_buffer().lock() {
+        buf.push_back(record);
+        while buf.len() > 2000 {
+            buf.pop_front();
+        }
+    }
+}
+
+/// Drain all buffered records (the app layer persists them to the database).
+pub fn drain_request_records() -> Vec<RequestRecord> {
+    request_log_buffer().lock().map(|mut b| b.drain(..).collect()).unwrap_or_default()
+}
+
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Redact credentials/tokens from POST form params before logging.
+pub fn redact_payload(params: &[(&str, &str)]) -> String {
+    params.iter().map(|(k, v)| {
+        let key = k.to_lowercase();
+        let redacted = key.contains("password")
+            || key.contains("authenticity_token")
+            || key.contains("token")
+            || key.contains("secret");
+        format!("{}={}", k, if redacted { "‹redacted›" } else { v })
+    }).collect::<Vec<_>>().join("&")
+}
 
 // ---------------------------------------------------------------------------
 // Transport abstraction
@@ -607,6 +668,26 @@ impl AO3Client {
         let header_timeout = std::time::Duration::from_secs(timeout_secs);
         let body_timeout = std::time::Duration::from_secs(timeout_secs);
         let fetch_start = std::time::Instant::now();
+        let record_started_ms = now_ms();
+        // Approximate request size: request line + a typical header block.
+        let request_bytes = (url.len() + 380) as u64;
+        // Log every terminal outcome of this logical request (one row per call,
+        // transparent retries collapse into the final outcome).
+        macro_rules! audit {
+            ($status:expr, $resp:expr, $err:expr) => {
+                push_request_record(RequestRecord {
+                    started_at_ms: record_started_ms,
+                    method: if ajax { "GET (ajax)".into() } else { "GET".into() },
+                    url: url.to_string(),
+                    status: $status,
+                    duration_ms: fetch_start.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response_bytes: $resp,
+                    error: $err,
+                    payload: None,
+                });
+            };
+        }
         log_debug!("http", " {} header_timeout={}s body_timeout={}s", url, header_timeout.as_secs(), body_timeout.as_secs());
         macro_rules! progress {
             ($status:expr, $recv:expr, $total:expr) => {
@@ -644,11 +725,13 @@ impl AO3Client {
                 Err(_) => {
                     log_debug!("http"," TIMEOUT send phase after {:?} total={:?} {}", send_start.elapsed(), fetch_start.elapsed(), url);
                     progress!(FetchStatus::Failed, 0, None);
+                    audit!(0, 0, Some("timeout".to_string()));
                     return Err(AppError::NetworkError("timeout".to_string()));
                 }
                 Ok(Err(e)) => {
                     log_debug!("http"," ERROR send phase after {:?}: {e} {}", send_start.elapsed(), url);
                     progress!(FetchStatus::Failed, 0, None);
+                    audit!(0, 0, Some(format!("{e}")));
                     return Err(AppError::NetworkError(format!("{e}")));
                 }
                 Ok(Ok(r)) => {
@@ -661,6 +744,7 @@ impl AO3Client {
             let final_url = response.url().to_string();
             if final_url.contains("/users/login") && !url.contains("/users/login") {
                 progress!(FetchStatus::Failed, 0, None);
+                audit!(response.status().as_u16(), 0, Some("session_expired".to_string()));
                 return Err(AppError::NetworkError("session_expired".to_string()));
             }
 
@@ -678,6 +762,7 @@ impl AO3Client {
             }
             if !status.is_success() {
                 progress!(FetchStatus::Failed, 0, None);
+                audit!(code, 0, Some(format!("HTTP {status}")));
                 return Err(AppError::NetworkError(format!("HTTP {status} for {url}")));
             }
 
@@ -693,10 +778,12 @@ impl AO3Client {
                 match tokio::time::timeout(body_timeout, response.chunk()).await {
                     Err(_) => {
                         progress!(FetchStatus::Failed, bytes_received, total_bytes);
+                        audit!(code, bytes_received, Some("timeout".to_string()));
                         return Err(AppError::NetworkError("timeout".to_string()));
                     }
                     Ok(Err(e)) => {
                         progress!(FetchStatus::Failed, bytes_received, total_bytes);
+                        audit!(code, bytes_received, Some(format!("Failed to read body: {e}")));
                         return Err(AppError::NetworkError(format!("Failed to read body: {e}")));
                     }
                     Ok(Ok(None)) => break,
@@ -710,6 +797,7 @@ impl AO3Client {
 
             progress!(FetchStatus::Complete, bytes_received, total_bytes);
             log_debug!("http"," DONE {} bytes in {:?} {}", bytes_received, fetch_start.elapsed(), url);
+            audit!(code, bytes_received, None);
 
             let body = String::from_utf8(body_bytes)
                 .map_err(|e| AppError::NetworkError(format!("Invalid UTF-8: {e}")))?;
@@ -790,12 +878,20 @@ impl AO3Client {
             ("commit", "Log In"),
         ];
 
+        let login_url = format!("{BASE_URL}/users/login");
+        let audit_started = now_ms();
+        let audit_start = std::time::Instant::now();
+        let audit_payload = redact_payload(&params);
+        let audit_req_bytes = (login_url.len() + audit_payload.len() + 380) as u64;
+
         let result = tokio::time::timeout(timeout, async {
-            let resp = client.post(&format!("{BASE_URL}/users/login"))
+            let resp = client.post(&login_url)
                 .form(&params)
                 .send()
                 .await
                 .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+
+            let status = resp.status().as_u16();
 
             // Check for user_credentials cookie in response headers
             let has_cred_cookie = resp.headers().get_all("set-cookie")
@@ -806,14 +902,27 @@ impl AO3Client {
             let body = resp.text().await
                 .map_err(|e| AppError::NetworkError(format!("{e}")))?;
 
-            Ok::<(bool, String, String), AppError>((has_cred_cookie, final_url, body))
+            Ok::<(bool, String, String, u16, usize), AppError>((has_cred_cookie, final_url, body, status, 0))
         }).await;
 
-        let (has_cred_cookie, final_url, _body) = match result {
-            Err(_) => return Err(AppError::NetworkError("timeout".to_string())),
-            Ok(Err(e)) => return Err(e),
+        macro_rules! audit_login {
+            ($status:expr, $resp:expr, $err:expr) => {
+                push_request_record(RequestRecord {
+                    started_at_ms: audit_started, method: "POST".into(), url: login_url.clone(),
+                    status: $status, duration_ms: audit_start.elapsed().as_millis() as u64,
+                    request_bytes: audit_req_bytes, response_bytes: $resp, error: $err,
+                    payload: Some(audit_payload.clone()),
+                });
+            };
+        }
+
+        let (has_cred_cookie, final_url, body, status, _) = match result {
+            Err(_) => { audit_login!(0, 0, Some("timeout".to_string())); return Err(AppError::NetworkError("timeout".to_string())); }
+            Ok(Err(e)) => { audit_login!(0, 0, Some(format!("{e}"))); return Err(e); }
             Ok(Ok(v)) => v,
         };
+        audit_login!(status, body.len() as u64, None);
+        let _body = body;
 
         let logged_in = has_cred_cookie || !final_url.contains("/users/login");
 
@@ -848,19 +957,39 @@ impl AO3Client {
         ];
         form_params.extend_from_slice(params);
 
+        let audit_started = now_ms();
+        let audit_start = std::time::Instant::now();
+        let audit_payload = redact_payload(
+            &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>());
+        let audit_req_bytes = (url.len() + audit_payload.len() + 380) as u64;
+
         let result = tokio::time::timeout(timeout, async {
             let resp = client.post(url)
                 .form(&form_params)
                 .send()
                 .await
                 .map_err(|e| AppError::NetworkError(format!("{e}")))?;
-            resp.text().await
-                .map_err(|e| AppError::NetworkError(format!("{e}")))
+            let status = resp.status().as_u16();
+            let body = resp.text().await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            Ok::<(u16, String), AppError>((status, body))
         }).await;
 
+        macro_rules! audit_post {
+            ($status:expr, $resp:expr, $err:expr) => {
+                push_request_record(RequestRecord {
+                    started_at_ms: audit_started, method: "POST".into(), url: url.to_string(),
+                    status: $status, duration_ms: audit_start.elapsed().as_millis() as u64,
+                    request_bytes: audit_req_bytes, response_bytes: $resp, error: $err,
+                    payload: Some(audit_payload.clone()),
+                });
+            };
+        }
+
         match result {
-            Err(_) => Err(AppError::NetworkError("timeout".to_string())),
-            Ok(r) => r,
+            Err(_) => { audit_post!(0, 0, Some("timeout".to_string())); Err(AppError::NetworkError("timeout".to_string())) }
+            Ok(Err(e)) => { audit_post!(0, 0, Some(format!("{e}"))); Err(e) }
+            Ok(Ok((status, body))) => { audit_post!(status, body.len() as u64, None); Ok(body) }
         }
     }
 

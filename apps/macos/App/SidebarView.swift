@@ -191,6 +191,8 @@ struct SidebarView: View {
         .padding(.horizontal, 8)
     }
 
+    /// The app-state hub pill: connection on the first line, identity on the
+    /// second. Clicking opens the full hub (circuit controls, inline sign-in).
     private var footer: some View {
         VStack(spacing: 8) {
             Button {
@@ -202,21 +204,26 @@ struct SidebarView: View {
                         .frame(width: 8, height: 8)
                         .shadow(color: (torConnected ? theme.sage : theme.ink3).opacity(0.4), radius: 3)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(torConnected ? "Private · Tor" : "Not connected")
+                        Text(torConnected ? "Private · Tor" : connectionLine)
                             .font(Font(MacFont.ui(12.5, weight: .bold)))
                             .foregroundStyle(theme.ink)
-                        Text(footerSubtitle)
-                            .font(Font(MacFont.ui(11)))
-                            .foregroundStyle(theme.ink3)
+                        HStack(spacing: 4) {
+                            Image(systemName: identityIcon)
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundStyle(identityNeedsAttention ? theme.accent2 : theme.ink3)
+                            Text(identityLine)
+                                .font(Font(MacFont.ui(11)))
+                                .foregroundStyle(identityNeedsAttention ? theme.accent2 : theme.ink3)
+                        }
                     }
                     Spacer()
-                    Image(systemName: "checkmark.shield")
+                    Image(systemName: torConnected ? "checkmark.shield" : "shield")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.sage)
+                        .foregroundStyle(torConnected ? theme.sage : theme.ink3)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(theme.sage.opacity(0.12))
+                .background(theme.sage.opacity(torConnected ? 0.12 : 0.07))
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .contentShape(Rectangle())
             }
@@ -231,11 +238,24 @@ struct SidebarView: View {
         }
     }
 
-    private var footerSubtitle: String {
-        if torConnected { return "Connected · 3-hop circuit" }
+    private var connectionLine: String {
         if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
         if appState.isResolvingCloudflare { return "Resolving challenge…" }
-        return appState.torStatus.displayText
+        return "Not connected"
+    }
+
+    private var identityLine: String {
+        if appState.needsReauth { return "Session expired — sign back in" }
+        if let account = appState.ao3Username { return account }
+        return "Not signed in"
+    }
+
+    private var identityIcon: String {
+        appState.needsReauth ? "person.badge.clock" : "person"
+    }
+
+    private var identityNeedsAttention: Bool {
+        appState.needsReauth
     }
 
     private var torConnected: Bool {

@@ -697,6 +697,16 @@ final class RustBridge {
         try? app?.writeLog(level: level, tag: tag, message: message)
     }
 
+    // MARK: - Request Audit Log
+
+    func getRequestLog(limit: UInt32 = 500) -> [URequestLogEntry] {
+        (try? app?.getRequestLog(limit: limit)) ?? []
+    }
+
+    func clearRequestLog() {
+        try? app?.clearRequestLog()
+    }
+
     // MARK: - Subscription Notifications
 
     func fetchSubscriptions(username: String) async throws -> [USubscription] {

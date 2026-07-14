@@ -16,7 +16,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private let tableView = NSTableView()
 
     private var chipsHost: NSHostingView<ChipsBar>?
-    private var searchHost: NSHostingView<SearchFormView>?
     private var variantHost: NSView?
     private var overlayHost: NSView?
     private var eyeButton: ToolButton?
@@ -109,25 +108,10 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                                                      emptyMessage: "Connect and refresh to browse the newest works on the archive."))
 
         case .search:
-            works = model.works(for: .search)
-            toolbar.configure(title: model.searchDisplayTitle ?? "Search",
-                              sub: model.search.hasSearched
-                                ? subtitleForNetworkList(count: works.count, loading: appState.isSearching)
-                                : "The whole archive")
+            toolbar.configure(title: "Search", sub: model.search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
             toolbar.setLeading([])
-            toolbar.setTrailing([searchLoadMoreButton(), eyeToggleButton()])
-            let overlay: AnyView?
-            if !model.search.hasSearched && works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
-                                                title: "Search the archive",
-                                                message: "Search by any field, or open Filters for fandom, rating, completion, and sort."))
-            } else {
-                overlay = networkOverlay(loading: appState.isSearching,
-                                         loadingMessage: "Searching the archive…",
-                                         emptyIcon: "magnifyingglass", emptyTitle: "No works found",
-                                         emptyMessage: "Try different terms or fewer filters.")
-            }
-            showWorksContent(section: section, header: searchFormHeader(), overlay: overlay)
+            toolbar.setTrailing([searchGoButton(), reloadFieldsButton(), eyeToggleButton()])
+            showVariant(SearchFormView(theme: theme, appState: appState, model: model), section: section)
 
         case .authorWorks:
             works = model.works(for: .authorWorks)
@@ -262,13 +246,24 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         return button
     }
 
-    private func searchLoadMoreButton() -> ToolButton {
-        let button = loadMoreButton ?? ToolButton(theme: theme, symbol: "plus.rectangle.on.rectangle", tooltip: "Load more results") { [weak self] in
+    private var searchButton: ToolButton?
+
+    private func searchGoButton() -> ToolButton {
+        let button = searchButton ?? ToolButton(theme: theme, symbol: "magnifyingglass", tooltip: "Search") { [weak self] in
             guard let self else { return }
-            Task { await self.appState.searchAO3More() }
+            model.search.performSearch(appState)
+        }
+        searchButton = button
+        button.isOn = true
+        return button
+    }
+
+    private func reloadFieldsButton() -> ToolButton {
+        let button = loadMoreButton ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Reload search criteria from AO3") { [weak self] in
+            guard let self else { return }
+            Task { await self.model.search.scrapeForm(self.appState) }
         }
         loadMoreButton = button
-        button.isHidden = appState.searchResults.isEmpty
         return button
     }
 
@@ -322,12 +317,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         return chipsHost
     }
 
-    private func searchFormHeader() -> NSView {
-        if searchHost == nil {
-            searchHost = NSHostingView(rootView: SearchFormView(theme: theme, appState: appState, model: model))
-        }
-        return searchHost!
-    }
 
     // MARK: - Content swapping
 
@@ -335,9 +324,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         variantHost?.removeFromSuperview()
         variantHost = nil
 
-        // Swap the pane header (tag chips for browse, search form for search).
-        for candidate in [chipsHost, searchHost] where candidate != nil && candidate !== header {
-            candidate?.removeFromSuperview()
+        // Swap the pane header (tag chips for browse).
+        if chipsHost !== header {
+            chipsHost?.removeFromSuperview()
         }
         if let header, header.superview == nil {
             contentStack.insertArrangedSubview(header, at: 0)
@@ -503,16 +492,28 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         false
     }
 
-    // Swipe right on a Currently Reading row → Remove (clears its saved progress;
-    // the progressMap change re-renders the list and the row slides out).
+    // Swipe right on a row → Remove. Currently Reading clears the saved
+    // progress; Offline deletes the download (cached chapters purge later).
     func tableView(_ tableView: NSTableView, rowActionsForRow row: Int,
                    edge: NSTableView.RowActionEdge) -> [NSTableViewRowAction] {
-        guard model.section == .reading, edge == .leading, row < works.count else { return [] }
+        guard edge == .leading, row < works.count else { return [] }
         let workID = works[row].id
-        let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
-            self?.model.removeFromCurrentlyReading(workID)
-            tableView.rowActionsVisible = false
+        switch model.section {
+        case .reading:
+            let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
+                self?.model.removeFromCurrentlyReading(workID)
+                tableView.rowActionsVisible = false
+            }
+            return [remove]
+        case .downloads:
+            let remove = NSTableViewRowAction(style: .destructive, title: "Delete") { [weak self] _, _ in
+                guard let self, appState.downloadedWorkIDs.contains(workID) else { return }
+                appState.toggleDownload(workID)
+                tableView.rowActionsVisible = false
+            }
+            return [remove]
+        default:
+            return []
         }
-        return [remove]
     }
 }

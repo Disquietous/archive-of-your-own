@@ -20,6 +20,7 @@ final class WorkRowCellView: NSTableCellView {
     private var summaryHeight: NSLayoutConstraint!
     private var collapsedSummaryHeight: CGFloat = 0
     private var fullSummaryHeight: CGFloat = 0
+    private let tagsLabel = NSTextField(wrappingLabelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
     private let ratingBadge = NSTextField(labelWithString: "")
     private let progressTrack = NSView()
@@ -64,6 +65,7 @@ final class WorkRowCellView: NSTableCellView {
             summaryLabel.leadingAnchor.constraint(equalTo: summaryClip.leadingAnchor),
             summaryLabel.trailingAnchor.constraint(equalTo: summaryClip.trailingAnchor),
         ])
+        tagsLabel.maximumNumberOfLines = 2
         metaLabel.font = MacFont.ui(11, weight: .medium)
         metaLabel.lineBreakMode = .byTruncatingTail
 
@@ -79,19 +81,20 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
 
-        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, metaLabel, progressTrack])
+        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, tagsLabel, metaLabel, progressTrack])
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
         body.setCustomSpacing(2, after: fandomLabel)
         body.setCustomSpacing(6, after: authorLabel)
         body.setCustomSpacing(7, after: summaryClip)
+        body.setCustomSpacing(7, after: tagsLabel)
         body.setCustomSpacing(7, after: metaLabel)
         // Labels must refuse to be stretched past their intrinsic height —
         // otherwise row-height measurement is a one-way ratchet: a currently
         // tall (expanded) row satisfies its bottom pin by stretching the
         // labels, so a collapsed summary never measures shorter.
-        for label in [fandomLabel, titleLabel, authorLabel, metaLabel] {
+        for label in [fandomLabel, titleLabel, authorLabel, tagsLabel, metaLabel] {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
 
@@ -195,6 +198,7 @@ final class WorkRowCellView: NSTableCellView {
         // size during layout creates a feedback loop AppKit aborts on.
         titleLabel.preferredMaxLayoutWidth = availableTextWidth
         summaryLabel.preferredMaxLayoutWidth = availableTextWidth
+        tagsLabel.preferredMaxLayoutWidth = availableTextWidth
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
         fandomLabel.stringValue = work.fandom
@@ -208,6 +212,22 @@ final class WorkRowCellView: NSTableCellView {
 
         summaryLabel.stringValue = work.summary
         summaryClip.isHidden = work.summary.isEmpty
+
+        tagsLabel.isHidden = work.tags.isEmpty
+        if !work.tags.isEmpty {
+            let tags = NSMutableAttributedString()
+            for (index, tag) in work.tags.enumerated() {
+                if index > 0 {
+                    tags.append(NSAttributedString(string: "  ", attributes: [.font: MacFont.ui(10.5)]))
+                }
+                tags.append(NSAttributedString(string: " \(tag) ", attributes: [
+                    .font: MacFont.ui(10.5, weight: .semibold),
+                    .foregroundColor: theme.nsInk2,
+                    .backgroundColor: theme.nsSurface2,
+                ]))
+            }
+            tagsLabel.attributedStringValue = tags
+        }
         let heights = Self.summaryHeights(text: work.summary, width: availableTextWidth)
         collapsedSummaryHeight = heights.collapsed
         fullSummaryHeight = heights.full
