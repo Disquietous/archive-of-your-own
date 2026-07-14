@@ -18,10 +18,14 @@ struct SidebarView: View {
             ScrollView {
                 VStack(spacing: 6) {
                     topGroup
+                    group("Discover") {
+                        item(.fandoms, "flame", "Fandoms", count: model.followedFandoms.count)
+                        item(.authors, "person", "Authors",
+                             count: model.followedAuthorNames.count + model.followedAuthors.count)
+                        item(.browse, "safari", "Browse")
+                    }
                     group("Following") {
                         item(.subscriptions, "bell", "Subscriptions", badge: appState.unreadNotificationCount)
-                        item(.fandoms, "flame", "Fandoms", count: model.libraryFandoms.count)
-                        item(.authors, "person", "Authors", count: model.followedAuthors.count)
                     }
                     group("Saved") {
                         item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
@@ -87,8 +91,8 @@ struct SidebarView: View {
 
     private var topGroup: some View {
         VStack(spacing: 1) {
-            item(.browse, "safari", "Browse")
             item(.reading, "book", "Currently Reading", count: model.currentlyReading.count)
+            item(.search, "magnifyingglass", "Search")
             item(.history, "clock", "History")
         }
         .padding(.top, 6)
@@ -110,7 +114,9 @@ struct SidebarView: View {
 
     private func item(_ section: MacAppModel.Section, _ icon: String, _ label: String,
                       count: Int? = nil, badge: Int = 0) -> some View {
-        let selected = model.section == section && model.selectedReadingListID == nil
+        // Author-works browsing keeps Authors highlighted.
+        let effectiveSection = model.section == .authorWorks ? MacAppModel.Section.authors : model.section
+        let selected = effectiveSection == section && model.selectedReadingListID == nil
         return Button {
             model.goSection(section)
         } label: {

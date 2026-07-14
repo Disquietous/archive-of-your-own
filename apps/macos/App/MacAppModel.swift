@@ -8,12 +8,14 @@ import Observation
 final class MacAppModel {
     enum Section: String, CaseIterable {
         case browse, reading, history, subscriptions, fandoms, authors,
-             bookmarks, downloads, stats, search
+             bookmarks, downloads, stats, search, authorWorks
     }
 
     let appState: AppState
+    let search: MacSearchModel
 
-    var section: Section = .browse
+    /// The app opens on Currently Reading — the primary use case.
+    var section: Section = .reading
     var selectedWorkID: String?
     var readerOpen = false
     var readerChapter = 0
@@ -22,9 +24,12 @@ final class MacAppModel {
     var activeTags: Set<String> = []
     /// Reading list shown in the list pane when a collection is selected.
     var selectedReadingListID: Int64?
+    /// Title override for search results driven from elsewhere (fandom cards).
+    var searchDisplayTitle: String?
 
     init(appState: AppState) {
         self.appState = appState
+        self.search = MacSearchModel()
     }
 
     var selectedWork: Work? {
@@ -47,6 +52,8 @@ final class MacAppModel {
             if appState.browseResults.isEmpty {
                 Task { await appState.browseLatestWorks() }
             }
+        case .search:
+            Task { await search.loadFormIfNeeded(appState) }
         case .subscriptions:
             Task { await appState.loadSubscriptions() }
             appState.loadNotifications()
@@ -74,6 +81,10 @@ final class MacAppModel {
         readerChapter = chapter
         readerOpen = true
         appState.pushHistory(id)
+        // Opening a chapter enrolls the work in Currently Reading immediately —
+        // scrolling only refines the position. Progress is monotonic, so
+        // revisiting an earlier chapter never regresses anything.
+        appState.setProgress(id, chapter: chapter + 1, pct: 0)
     }
 
     func closeReader() {
@@ -81,19 +92,174 @@ final class MacAppModel {
         immersive = false
     }
 
+    /// Remove one work from Currently Reading; if it's showing in the reading
+    /// pane, unload it there too.
+    func removeFromCurrentlyReading(_ id: String) {
+        appState.resetProgress(id)
+        if selectedWorkID == id {
+            clearSelection()
+        }
+    }
+
+    /// Clear the whole Currently Reading list (all saved positions, including
+    /// orphaned records), unloading the reading pane if it showed one of them.
+    func removeAllCurrentlyReading() {
+        let ids = Array(appState.progressMap.keys)
+        for id in ids {
+            appState.resetProgress(id)
+        }
+        if let selected = selectedWorkID, ids.contains(selected) {
+            clearSelection()
+        }
+    }
+
+    private func clearSelection() {
+        selectedWorkID = nil
+        readerOpen = false
+        immersive = false
+    }
+
+    /// Quick search from the sidebar field: fills the search form's query and runs it.
     func submitSearch() {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
+        searchDisplayTitle = nil
         section = .search
         readerOpen = false
-        Task { await appState.searchAO3Raw(keys: ["work_search[query]"], values: [q]) }
+        Task {
+            await search.loadFormIfNeeded(appState)
+            search.setQuery(q)
+            search.performSearch(appState)
+        }
     }
 
+    /// A tag pill or fandom card: live tag-scoped results shown in Search.
     func searchTag(_ tag: String) {
         query = tag
+        searchDisplayTitle = tag
         section = .search
         readerOpen = false
+        search.hasSearched = true
         Task { await appState.searchAO3(tag: tag) }
+    }
+
+    // MARK: - Followed fandoms & authors (device-local follows)
+
+    var followedFandoms: [String] = UserDefaults.standard.stringArray(forKey: "followedFandoms") ?? [] {
+        didSet { UserDefaults.standard.set(followedFandoms, forKey: "followedFandoms") }
+    }
+    var followedAuthorNames: [String] = UserDefaults.standard.stringArray(forKey: "followedAuthors") ?? [] {
+        didSet { UserDefaults.standard.set(followedAuthorNames, forKey: "followedAuthors") }
+    }
+
+    func followFandom(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !followedFandoms.contains(trimmed) else { return }
+        followedFandoms.append(trimmed)
+    }
+
+    func unfollowFandom(_ name: String) {
+        followedFandoms.removeAll { $0 == name }
+    }
+
+    func followAuthor(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !followedAuthorNames.contains(trimmed) else { return }
+        followedAuthorNames.append(trimmed)
+    }
+
+    func unfollowAuthor(_ name: String) {
+        followedAuthorNames.removeAll { $0 == name }
+    }
+
+    // MARK: - Sample data (testing/demo)
+
+    /// Sample works use slug IDs ("baker") while real AO3 works use numeric
+    /// IDs — and every bridge persistence call guards on UInt64(id), so
+    /// samples exist in memory only and never touch the encrypted library.
+    var sampleDataLoaded: Bool {
+        appState.fetchedWorks.keys.contains { UInt64($0) == nil }
+    }
+
+    func loadSampleData() {
+        for work in MockData.works {
+            appState.fetchedWorks[work.id] = work
+        }
+        // Seed library state so every section has examples.
+        appState.progressMap["baker"] = ReadingProgress(chapter: 4, pct: 0.38)
+        appState.progressMap["olive"] = ReadingProgress(chapter: 17, pct: 0.71)
+        for id in ["lamplight", "baker"] where !appState.history.contains(id) {
+            appState.history.append(id)
+        }
+        appState.bookmarkedWorkIDs.formUnion(["lamplight", "olive", "garden"])
+        appState.downloadedWorkIDs.formUnion(MockData.works.filter(\.downloaded).map(\.id))
+    }
+
+    func clearSampleData() {
+        let isSample: (String) -> Bool = { UInt64($0) == nil }
+        appState.fetchedWorks = appState.fetchedWorks.filter { !isSample($0.key) }
+        appState.fetchedChapters = appState.fetchedChapters.filter { !isSample($0.key) }
+        appState.progressMap = appState.progressMap.filter { !isSample($0.key) }
+        appState.history.removeAll(where: isSample)
+        appState.lastReadID = appState.history.first
+        appState.bookmarkedWorkIDs = appState.bookmarkedWorkIDs.filter { !isSample($0) }
+        appState.downloadedWorkIDs = appState.downloadedWorkIDs.filter { !isSample($0) }
+        appState.kudosGivenWorkIDs = appState.kudosGivenWorkIDs.filter { !isSample($0) }
+        if let selected = selectedWorkID, isSample(selected) {
+            selectedWorkID = nil
+            readerOpen = false
+            immersive = false
+        }
+    }
+
+    // MARK: - Author works browsing
+
+    var authorUsername: String?
+    var authorWorksList: [Work] = []
+    var isLoadingAuthor = false
+    var authorError: String?
+    var authorPage: UInt32 = 1
+    let authorTask = NetworkTask()
+
+    func openAuthor(_ username: String) {
+        authorUsername = username
+        authorWorksList = []
+        authorPage = 1
+        authorError = nil
+        section = .authorWorks
+        readerOpen = false
+        Task { await loadAuthorWorks(page: 1) }
+    }
+
+    func loadMoreAuthorWorks() {
+        Task { await loadAuthorWorks(page: authorPage + 1) }
+    }
+
+    @MainActor
+    private func loadAuthorWorks(page: UInt32) async {
+        guard let username = authorUsername, !isLoadingAuthor else { return }
+        isLoadingAuthor = true
+        authorError = nil
+        do {
+            let summaries = try await appState.retryOnTimeout(task: authorTask, using: appState.bridge) {
+                try await self.appState.bridge.fetchAuthorWorks(username: username, page: page)
+            }
+            let newWorks = summaries.map(AppState.workFromSummary)
+            // Register in the shared lookup so detail/reader resolve these works.
+            for work in newWorks { appState.fetchedWorks[work.id] = work }
+            if page == 1 {
+                authorWorksList = newWorks
+            } else {
+                let existing = Set(authorWorksList.map(\.id))
+                authorWorksList.append(contentsOf: newWorks.filter { !existing.contains($0.id) })
+            }
+            authorPage = page
+        } catch {
+            if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
+                authorError = error.localizedDescription
+            }
+        }
+        isLoadingAuthor = false
     }
 
     // MARK: - Lists
@@ -132,6 +298,8 @@ final class MacAppModel {
         case .downloads:
             works = appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
                 .sorted { $0.title < $1.title }
+        case .authorWorks:
+            works = authorWorksList
         default:
             works = []
         }

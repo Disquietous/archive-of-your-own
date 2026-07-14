@@ -394,6 +394,8 @@ final class ReaderViewController: NSViewController {
         chapterPct = 0
         model.readerChapter = target
         appState.pushHistory(work.id)
+        // Reaching a chapter records it even if the reader never scrolls.
+        appState.setProgress(work.id, chapter: target + 1, pct: 0)
         renderChapter()
         scrollToTop()
     }

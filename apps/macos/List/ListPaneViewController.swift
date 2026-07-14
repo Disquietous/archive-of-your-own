@@ -16,11 +16,14 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private let tableView = NSTableView()
 
     private var chipsHost: NSHostingView<ChipsBar>?
+    private var searchHost: NSHostingView<SearchFormView>?
     private var variantHost: NSView?
     private var overlayHost: NSView?
     private var eyeButton: ToolButton?
     private var refreshButton: ToolButton?
     private var loadMoreButton: ToolButton?
+    private var authorBackButton: ToolButton?
+    private var authorMoreButton: ToolButton?
 
     private var works: [Work] = []
     private var renderedSection: MacAppModel.Section?
@@ -52,7 +55,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.style = .plain
         tableView.selectionHighlightStyle = .none
         tableView.intercellSpacing = .zero
-        tableView.gridStyleMask = .solidHorizontalGridLineMask
+        // No table grid: NSTableView paints phantom lines below the last row.
+        // Each cell draws its own bottom hairline instead (as the design specs).
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
@@ -89,7 +93,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
-        tableView.gridColor = theme.nsLine
         toolbar.applyTheme()
 
         let section = model.section
@@ -97,8 +100,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         case .browse:
             works = model.works(for: .browse)
             toolbar.configure(title: "Browse", sub: subtitleForNetworkList(count: works.count, loading: appState.isBrowsing))
+            toolbar.setLeading([])
             toolbar.setTrailing([browseRefreshButton(), eyeToggleButton()])
-            showWorksContent(section: section, chips: !model.availableTags.isEmpty,
+            showWorksContent(section: section, header: chipsHeader(),
                              overlay: networkOverlay(loading: appState.isBrowsing,
                                                      loadingMessage: "Fetching latest works…",
                                                      emptyIcon: "safari", emptyTitle: "Nothing here yet",
@@ -106,25 +110,57 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
         case .search:
             works = model.works(for: .search)
-            let query = model.query.trimmingCharacters(in: .whitespaces)
-            toolbar.configure(title: query.isEmpty ? "Search" : "“\(query)”",
-                              sub: subtitleForNetworkList(count: works.count, loading: appState.isSearching))
+            toolbar.configure(title: model.searchDisplayTitle ?? "Search",
+                              sub: model.search.hasSearched
+                                ? subtitleForNetworkList(count: works.count, loading: appState.isSearching)
+                                : "The whole archive")
+            toolbar.setLeading([])
             toolbar.setTrailing([searchLoadMoreButton(), eyeToggleButton()])
-            showWorksContent(section: section, chips: !model.availableTags.isEmpty,
-                             overlay: networkOverlay(loading: appState.isSearching,
-                                                     loadingMessage: "Searching the archive…",
-                                                     emptyIcon: "magnifyingglass", emptyTitle: "No works found",
-                                                     emptyMessage: "Try a different search term, or press Return in the search field to search."))
+            let overlay: AnyView?
+            if !model.search.hasSearched && works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
+                                                title: "Search the archive",
+                                                message: "Search by any field, or open Filters for fandom, rating, completion, and sort."))
+            } else {
+                overlay = networkOverlay(loading: appState.isSearching,
+                                         loadingMessage: "Searching the archive…",
+                                         emptyIcon: "magnifyingglass", emptyTitle: "No works found",
+                                         emptyMessage: "Try different terms or fewer filters.")
+            }
+            showWorksContent(section: section, header: searchFormHeader(), overlay: overlay)
+
+        case .authorWorks:
+            works = model.works(for: .authorWorks)
+            toolbar.configure(title: model.authorUsername ?? "Author",
+                              sub: model.isLoadingAuthor && works.isEmpty ? "Loading…" : "\(works.count) works")
+            toolbar.setLeading([authorBack()])
+            toolbar.setTrailing([authorLoadMore()])
+            let authorOverlay: AnyView?
+            if works.isEmpty {
+                if model.isLoadingAuthor {
+                    authorOverlay = AnyView(LoadingStateMac(theme: theme, message: "Fetching works by \(model.authorUsername ?? "author")…"))
+                } else if let error = model.authorError {
+                    authorOverlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                                          title: "Couldn’t load author", message: error))
+                } else {
+                    authorOverlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
+                                                          title: "No works", message: "This author has no visible works."))
+                }
+            } else {
+                authorOverlay = nil
+            }
+            showWorksContent(section: section, header: nil, overlay: authorOverlay)
 
         case .reading, .history, .bookmarks, .downloads:
             works = model.works(for: section)
             let meta = sectionMeta(for: section)
             toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
-            toolbar.setTrailing([])
+            toolbar.setLeading([])
+            toolbar.setTrailing(section == .reading && !works.isEmpty ? [removeAllReadingButton()] : [])
             let empty = works.isEmpty
                 ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
                 : nil
-            showWorksContent(section: section, chips: false, overlay: empty)
+            showWorksContent(section: section, header: nil, overlay: empty)
 
         case .subscriptions:
             toolbar.configure(title: "Subscriptions", sub: "Followed updates")
@@ -145,12 +181,15 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             showVariant(SubscriptionsList(theme: theme, appState: appState, model: model), section: section)
 
         case .fandoms:
-            toolbar.configure(title: "Fandoms", sub: "\(model.libraryFandoms.count) in library")
+            toolbar.configure(title: "Fandoms", sub: "\(model.followedFandoms.count) followed")
+            toolbar.setLeading([])
             toolbar.setTrailing([])
-            showVariant(FandomsGrid(theme: theme, model: model), section: section)
+            showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
 
         case .authors:
-            toolbar.configure(title: "Authors", sub: "\(model.followedAuthors.count) followed")
+            let count = model.followedAuthorNames.count + model.followedAuthors.count
+            toolbar.configure(title: "Authors", sub: "\(count) followed")
+            toolbar.setLeading([])
             toolbar.setTrailing([])
             showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
 
@@ -233,22 +272,76 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         return button
     }
 
+    private func authorBack() -> ToolButton {
+        let button = authorBackButton ?? ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to authors") { [weak self] in
+            self?.model.goSection(.authors)
+        }
+        authorBackButton = button
+        return button
+    }
+
+    private func authorLoadMore() -> ToolButton {
+        let button = authorMoreButton ?? ToolButton(theme: theme, symbol: "plus.rectangle.on.rectangle", tooltip: "Load more works") { [weak self] in
+            self?.model.loadMoreAuthorWorks()
+        }
+        authorMoreButton = button
+        button.isHidden = model.authorWorksList.isEmpty
+        return button
+    }
+
+    private var removeAllButton: ToolButton?
+
+    private func removeAllReadingButton() -> ToolButton {
+        let button = removeAllButton ?? ToolButton(theme: theme, symbol: "trash", tooltip: "Remove all") { [weak self] in
+            self?.confirmRemoveAllReading()
+        }
+        removeAllButton = button
+        return button
+    }
+
+    private func confirmRemoveAllReading() {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Remove All from Currently Reading?"
+        alert.informativeText = "This clears the saved reading position for every work in the list. The works stay in your history, bookmarks, and downloads."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove All")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            model.removeAllCurrentlyReading()
+        }
+    }
+
+    private func chipsHeader() -> NSView? {
+        guard !model.availableTags.isEmpty else { return nil }
+        if chipsHost == nil {
+            chipsHost = NSHostingView(rootView: ChipsBar(theme: theme, model: model))
+        }
+        return chipsHost
+    }
+
+    private func searchFormHeader() -> NSView {
+        if searchHost == nil {
+            searchHost = NSHostingView(rootView: SearchFormView(theme: theme, appState: appState, model: model))
+        }
+        return searchHost!
+    }
+
     // MARK: - Content swapping
 
-    private func showWorksContent(section: MacAppModel.Section, chips: Bool, overlay: AnyView?) {
+    private func showWorksContent(section: MacAppModel.Section, header: NSView?, overlay: AnyView?) {
         variantHost?.removeFromSuperview()
         variantHost = nil
 
-        if chips {
-            if chipsHost == nil {
-                chipsHost = NSHostingView(rootView: ChipsBar(theme: theme, model: model))
-            }
-            if chipsHost!.superview == nil {
-                contentStack.insertArrangedSubview(chipsHost!, at: 0)
-                chipsHost!.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
-            }
-        } else {
-            chipsHost?.removeFromSuperview()
+        // Swap the pane header (tag chips for browse, search form for search).
+        for candidate in [chipsHost, searchHost] where candidate != nil && candidate !== header {
+            candidate?.removeFromSuperview()
+        }
+        if let header, header.superview == nil {
+            contentStack.insertArrangedSubview(header, at: 0)
+            header.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
 
         if scrollView.superview == nil {
@@ -271,9 +364,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             ])
             overlayHost = host
         }
-        // Phantom grid lines read as content in an empty table.
-        tableView.gridStyleMask = works.isEmpty ? [] : .solidHorizontalGridLineMask
-
         let sectionChanged = renderedSection != section
         let ids = works.map(\.id)
         if sectionChanged || ids != renderedWorkIDs {
@@ -411,5 +501,18 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     // The full text belongs in the expanded row, not in the hover overlay.
     func tableView(_ tableView: NSTableView, shouldShowCellExpansionFor tableColumn: NSTableColumn?, row: Int) -> Bool {
         false
+    }
+
+    // Swipe right on a Currently Reading row → Remove (clears its saved progress;
+    // the progressMap change re-renders the list and the row slides out).
+    func tableView(_ tableView: NSTableView, rowActionsForRow row: Int,
+                   edge: NSTableView.RowActionEdge) -> [NSTableViewRowAction] {
+        guard model.section == .reading, edge == .leading, row < works.count else { return [] }
+        let workID = works[row].id
+        let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
+            self?.model.removeFromCurrentlyReading(workID)
+            tableView.rowActionsVisible = false
+        }
+        return [remove]
     }
 }
