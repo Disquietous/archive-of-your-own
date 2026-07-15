@@ -101,13 +101,13 @@ impl Storage {
                     warnings_json, categories_json, relationships_json,
                     characters_json, tags_json, summary, word_count,
                     chapter_count, total_chapters, kudos, hits,
-                    bookmarks, comments, date_updated, language, complete
+                    bookmarks, comments, date_published, date_updated, language, complete
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5,
                     ?6, ?7, ?8,
                     ?9, ?10, ?11, ?12,
                     ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20, ?21
+                    ?17, ?18, ?19, ?20, ?21, ?22
                 )",
                 params![
                     work.id as i64,
@@ -128,6 +128,7 @@ impl Storage {
                     work.hits as i64,
                     work.bookmarks as i64,
                     work.comments as i64,
+                    work.date_published,
                     work.date_updated,
                     work.language,
                     work.complete as i32,
@@ -146,7 +147,7 @@ impl Storage {
                         warnings_json, categories_json, relationships_json,
                         characters_json, tags_json, summary, word_count,
                         chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_updated, language, complete
+                        bookmarks, comments, date_published, date_updated, language, complete
                  FROM works WHERE id = ?1",
             )
             .map_err(map_sql)?;
@@ -173,7 +174,7 @@ impl Storage {
                         warnings_json, categories_json, relationships_json,
                         characters_json, tags_json, summary, word_count,
                         chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_updated, language, complete
+                        bookmarks, comments, date_published, date_updated, language, complete
                  FROM works",
             )
             .map_err(map_sql)?;
@@ -706,64 +707,132 @@ impl Storage {
     }
 
     // -------------------------------------------------------------------
-    // Subscription snapshots
+    // Subscriptions (persisted list)
     // -------------------------------------------------------------------
 
-    /// Insert or replace a subscription snapshot for diff-based notification detection.
-    pub fn save_snapshot(
+    pub fn save_subscriptions(&self, subs: &[(String, String, String)]) -> Result<(), AppError> {
+        let mut seen = std::collections::HashSet::new();
+        for (sub_type, sub_id, name) in subs {
+            if !seen.insert((sub_type.as_str(), sub_id.as_str())) {
+                crate::dlog("WARN", "storage",
+                    &format!("Duplicate subscription: type={sub_type} id={sub_id} name={name}"));
+            }
+        }
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        tx.execute("DELETE FROM subscriptions", []).map_err(map_sql)?;
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name) VALUES (?1, ?2, ?3)"
+        ).map_err(map_sql)?;
+        for (sub_type, sub_id, name) in subs {
+            stmt.execute(params![sub_type, sub_id, name]).map_err(map_sql)?;
+        }
+        drop(stmt);
+        tx.commit().map_err(map_sql)
+    }
+
+    pub fn get_subscriptions(&self) -> Result<Vec<(String, String, String)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sub_type, sub_id, name FROM subscriptions"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    // -------------------------------------------------------------------
+    // Subscription snapshots (one date per subscription)
+    // -------------------------------------------------------------------
+
+    pub fn save_subscription_snapshot(
         &self,
         sub_type: &str,
         sub_id: &str,
-        work_id: u64,
-        chapter_count: u32,
-        word_count: u64,
         date_updated: &str,
     ) -> Result<(), AppError> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO subscription_snapshots
-                    (sub_type, sub_id, work_id, chapter_count, word_count, date_updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    sub_type,
-                    sub_id,
-                    work_id as i64,
-                    chapter_count as i64,
-                    word_count as i64,
-                    date_updated,
-                ],
+                "INSERT OR REPLACE INTO subscription_snapshots (sub_type, sub_id, date_updated)
+                 VALUES (?1, ?2, ?3)",
+                params![sub_type, sub_id, date_updated],
             )
             .map_err(map_sql)?;
         Ok(())
     }
 
-    /// Get all snapshots for a given subscription (type + id).
-    /// Returns Vec of (work_id, chapter_count, word_count, date_updated).
-    pub fn get_snapshots(
+    pub fn get_subscription_snapshot(
         &self,
         sub_type: &str,
         sub_id: &str,
-    ) -> Result<Vec<(u64, u32, u64, String)>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT work_id, chapter_count, word_count, date_updated
-                 FROM subscription_snapshots
-                 WHERE sub_type = ?1 AND sub_id = ?2",
-            )
-            .map_err(map_sql)?;
+    ) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date_updated FROM subscription_snapshots WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+            row.get::<_, String>(0)
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(d)) => Ok(Some(d)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
 
-        let rows = stmt
-            .query_map(params![sub_type, sub_id], |row| {
-                let work_id: i64 = row.get(0)?;
-                let chapter_count: i64 = row.get(1)?;
-                let word_count: i64 = row.get(2)?;
-                let date_updated: String = row.get(3)?;
-                Ok((work_id as u64, chapter_count as u32, word_count as u64, date_updated))
-            })
-            .map_err(map_sql)?;
+    // -------------------------------------------------------------------
+    // Subscription check queue
+    // -------------------------------------------------------------------
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    pub fn set_check_queue(&self, json: &str) -> Result<(), AppError> {
+        self.set_state("subscription_check_queue", json)
+    }
+
+    pub fn get_check_queue(&self) -> Result<Option<String>, AppError> {
+        self.get_state("subscription_check_queue")
+    }
+
+    pub fn clear_check_queue(&self) -> Result<(), AppError> {
+        self.set_state("subscription_check_queue", "[]")
+    }
+
+    // -------------------------------------------------------------------
+    // Subscription new works (What's New feed)
+    // -------------------------------------------------------------------
+
+    pub fn add_new_work_ids(&self, ids: &[u64]) -> Result<(), AppError> {
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        for id in ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO subscription_new_works (work_id) VALUES (?1)",
+                params![*id as i64],
+            ).map_err(map_sql)?;
+        }
+        tx.commit().map_err(map_sql)
+    }
+
+    pub fn get_new_work_ids(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT work_id FROM subscription_new_works ORDER BY added_at DESC"
+        ).map_err(map_sql)?;
+        let ids = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            Ok(id as u64)
+        }).map_err(map_sql)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
+    pub fn remove_new_work_id(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn.execute(
+            "DELETE FROM subscription_new_works WHERE work_id = ?1",
+            params![work_id as i64],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn clear_new_work_ids(&self) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM subscription_new_works", []).map_err(map_sql)?;
+        Ok(())
     }
 
     // -------------------------------------------------------------------
@@ -1085,6 +1154,7 @@ impl Storage {
                     hits            INTEGER NOT NULL,
                     bookmarks       INTEGER NOT NULL,
                     comments        INTEGER NOT NULL,
+                    date_published  TEXT NOT NULL DEFAULT '',
                     date_updated    TEXT NOT NULL,
                     language        TEXT NOT NULL,
                     complete        INTEGER NOT NULL
@@ -1167,14 +1237,18 @@ impl Storage {
                     FOREIGN KEY (list_id) REFERENCES reading_lists(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    sub_type TEXT NOT NULL,
+                    sub_id   TEXT NOT NULL,
+                    name     TEXT NOT NULL,
+                    PRIMARY KEY (sub_type, sub_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS subscription_snapshots (
-                    sub_type      TEXT NOT NULL,
-                    sub_id        TEXT NOT NULL,
-                    work_id       INTEGER NOT NULL,
-                    chapter_count INTEGER NOT NULL,
-                    word_count    INTEGER NOT NULL,
-                    date_updated  TEXT NOT NULL,
-                    PRIMARY KEY (sub_type, sub_id, work_id)
+                    sub_type     TEXT NOT NULL,
+                    sub_id       TEXT NOT NULL,
+                    date_updated TEXT NOT NULL,
+                    PRIMARY KEY (sub_type, sub_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -1222,6 +1296,11 @@ impl Storage {
                     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 );
+
+                CREATE TABLE IF NOT EXISTS subscription_new_works (
+                    work_id     INTEGER PRIMARY KEY,
+                    added_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                );
                 ",
             )
             .map_err(map_sql)?;
@@ -1267,6 +1346,34 @@ impl Storage {
         // Migration: add account_id column to bookmarks (idempotent)
         self.conn.execute("ALTER TABLE bookmarks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''", []).ok();
 
+        // Migration: add date_published column to works (idempotent)
+        self.conn.execute("ALTER TABLE works ADD COLUMN date_published TEXT NOT NULL DEFAULT ''", []).ok();
+
+        // Migration: rename old per-work subscription_snapshots to _old.
+        // The new table (created above) stores one row per subscription.
+        // For existing DBs the old table has the 3-column PK; renaming it
+        // clears the way for the new schema.  Fresh DBs create the new
+        // table directly and this rename is a harmless no-op.
+        self.conn.execute(
+            "ALTER TABLE subscription_snapshots RENAME TO subscription_snapshots_old",
+            [],
+        ).ok();
+        // Re-create the new-schema table if the rename just consumed it.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS subscriptions (
+                sub_type TEXT NOT NULL,
+                sub_id   TEXT NOT NULL,
+                name     TEXT NOT NULL,
+                PRIMARY KEY (sub_type, sub_id)
+            );
+            CREATE TABLE IF NOT EXISTS subscription_snapshots (
+                sub_type     TEXT NOT NULL,
+                sub_id       TEXT NOT NULL,
+                date_updated TEXT NOT NULL,
+                PRIMARY KEY (sub_type, sub_id)
+            );"
+        ).ok();
+
         Ok(())
     }
 
@@ -1291,9 +1398,10 @@ impl Storage {
         let hits: i64 = row.get(15)?;
         let bookmarks: i64 = row.get(16)?;
         let comments: i64 = row.get(17)?;
-        let date_updated: String = row.get(18)?;
-        let language: String = row.get(19)?;
-        let complete: i32 = row.get(20)?;
+        let date_published: String = row.get(18)?;
+        let date_updated: String = row.get(19)?;
+        let language: String = row.get(20)?;
+        let complete: i32 = row.get(21)?;
 
         // Deserialize JSON columns — use unwrap_or_default so a corrupted
         // row doesn't crash the whole query; the caller can still surface the
@@ -1332,6 +1440,7 @@ impl Storage {
             hits: hits as u64,
             bookmarks: bookmarks as u32,
             comments: comments as u32,
+            date_published,
             date_updated,
             language,
             complete: complete != 0,
@@ -1628,6 +1737,7 @@ mod tests {
             hits: 1000,
             bookmarks: 5,
             comments: 8,
+            date_published: "2024-11-02".into(),
             date_updated: "2025-01-15".into(),
             language: "English".into(),
             complete: false,
@@ -1804,36 +1914,61 @@ mod tests {
     }
 
     #[test]
+    fn test_subscriptions_persistence() {
+        let db = open_test_db();
+
+        assert!(db.get_subscriptions().unwrap().is_empty());
+
+        let subs = vec![
+            ("author".into(), "coolwriter".into(), "CoolWriter".into()),
+            ("work".into(), "12345".into(), "My Fic".into()),
+        ];
+        db.save_subscriptions(&subs).unwrap();
+        let loaded = db.get_subscriptions().unwrap();
+        assert_eq!(loaded.len(), 2);
+
+        // Replacing clears the old set
+        let subs2 = vec![("series".into(), "99".into(), "Big Series".into())];
+        db.save_subscriptions(&subs2).unwrap();
+        assert_eq!(db.get_subscriptions().unwrap().len(), 1);
+    }
+
+    #[test]
     fn test_subscription_snapshots() {
         let db = open_test_db();
 
         // Initially empty
-        let snaps = db.get_snapshots("author", "testuser").unwrap();
-        assert!(snaps.is_empty());
+        assert!(db.get_subscription_snapshot("author", "testuser").unwrap().is_none());
 
-        // Save some snapshots
-        db.save_snapshot("author", "testuser", 100, 5, 10000, "2025-01-15").unwrap();
-        db.save_snapshot("author", "testuser", 200, 3, 5000, "2025-02-01").unwrap();
+        // Save a snapshot
+        db.save_subscription_snapshot("author", "testuser", "2025-01-15").unwrap();
+        assert_eq!(
+            db.get_subscription_snapshot("author", "testuser").unwrap().as_deref(),
+            Some("2025-01-15")
+        );
 
-        let snaps = db.get_snapshots("author", "testuser").unwrap();
-        assert_eq!(snaps.len(), 2);
+        // Update replaces
+        db.save_subscription_snapshot("author", "testuser", "2025-03-01").unwrap();
+        assert_eq!(
+            db.get_subscription_snapshot("author", "testuser").unwrap().as_deref(),
+            Some("2025-03-01")
+        );
 
-        // Find the work 100 snapshot
-        let w100 = snaps.iter().find(|s| s.0 == 100).unwrap();
-        assert_eq!(w100.1, 5);   // chapter_count
-        assert_eq!(w100.2, 10000); // word_count
-        assert_eq!(w100.3, "2025-01-15");
+        // Different sub is separate
+        assert!(db.get_subscription_snapshot("work", "100").unwrap().is_none());
+    }
 
-        // Update existing snapshot (INSERT OR REPLACE)
-        db.save_snapshot("author", "testuser", 100, 7, 15000, "2025-03-01").unwrap();
-        let snaps = db.get_snapshots("author", "testuser").unwrap();
-        assert_eq!(snaps.len(), 2); // still 2, not 3
-        let w100 = snaps.iter().find(|s| s.0 == 100).unwrap();
-        assert_eq!(w100.1, 7); // updated chapter_count
+    #[test]
+    fn test_check_queue_persistence() {
+        let db = open_test_db();
 
-        // Different sub_type/sub_id is separate
-        let snaps2 = db.get_snapshots("work", "100").unwrap();
-        assert!(snaps2.is_empty());
+        assert!(db.get_check_queue().unwrap().is_none());
+
+        db.set_check_queue(r#"[{"sub_type":"author","sub_id":"a","name":"A"}]"#).unwrap();
+        assert!(db.get_check_queue().unwrap().is_some());
+
+        db.clear_check_queue().unwrap();
+        assert_eq!(db.get_check_queue().unwrap().as_deref(), Some("[]"));
     }
 
     #[test]

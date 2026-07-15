@@ -714,9 +714,39 @@ final class RustBridge {
         return try await app.fetchSubscriptions(username: username)
     }
 
-    func checkSubscriptions(username: String) async throws -> [UNotification] {
+    func persistSubscriptions(_ subscriptions: [USubscription]) throws {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.checkSubscriptions(username: username)
+        try app.persistSubscriptions(subscriptions: subscriptions)
+    }
+
+    func getPersistedSubscriptions() -> [USubscription] {
+        (try? app?.getPersistedSubscriptions()) ?? []
+    }
+
+    func startSubscriptionCheck() throws -> UInt32 {
+        guard let app else { throw BridgeError.notInitialized }
+        return try app.startSubscriptionCheck()
+    }
+
+    func checkNextSubscription() async throws -> USubscriptionCheckResult? {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.checkNextSubscription()
+    }
+
+    func resetSubscriptionCheck() {
+        try? app?.resetSubscriptionCheck()
+    }
+
+    func getNewWorkIds() -> [UInt64] {
+        (try? app?.getNewWorkIds()) ?? []
+    }
+
+    func removeNewWork(_ workId: UInt64) {
+        try? app?.removeNewWork(workId: workId)
+    }
+
+    func clearNewWorks() {
+        try? app?.clearNewWorks()
     }
 
     func checkInbox(username: String) async throws -> [UNotification] {

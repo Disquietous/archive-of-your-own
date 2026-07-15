@@ -67,7 +67,7 @@ enum MockData {
             tags: ["Slow Burn", "Hurt/Comfort", "Case Fic", "Victorian", "Pining", "Fireside Conversations", "Foggy London"],
             words: 47213, chapterCount: 12, totalChapters: 12, complete: true,
             kudos: 8421, hits: 96230, bookmarks: 1204, comments: 612,
-            updated: "May 2026", summary: "Three letters arrive at 221B on a foggy afternoon, and Holmes refuses to open any of them — until a frightened young woman climbs the stair and makes the choice for him. A casefic told mostly in the quiet between the danger.",
+            published: "Aug 2025", updated: "May 2026", summary: "Three letters arrive at 221B on a foggy afternoon, and Holmes refuses to open any of them — until a frightened young woman climbs the stair and makes the choice for him. A casefic told mostly in the quiet between the danger.",
             initialProgress: 0.38, lastChapter: 4, downloaded: true,
             content: bakerStreetChapters
         ),
@@ -79,7 +79,7 @@ enum MockData {
             tags: ["Epistolary", "Fluff", "Pining", "Letters", "Slow Burn", "Period Typical"],
             words: 8902, chapterCount: 3, totalChapters: 3, complete: true,
             kudos: 5310, hits: 41008, bookmarks: 802, comments: 240,
-            updated: "Apr 2026", summary: "A courtship conducted almost entirely by letter, in which both parties are far braver on paper than they could ever be across a drawing room.",
+            published: "Apr 2026", updated: "Apr 2026", summary: "A courtship conducted almost entirely by letter, in which both parties are far braver on paper than they could ever be across a drawing room.",
             initialProgress: 0, lastChapter: nil, downloaded: true,
             content: lamplightChapters
         ),
@@ -91,7 +91,7 @@ enum MockData {
             tags: ["Mythology Retelling", "The Seasons", "Angst with a Happy Ending", "Slow Burn", "Found Family", "Pomegranates"],
             words: 122540, chapterCount: 24, totalChapters: 30, complete: false,
             kudos: 19840, hits: 312400, bookmarks: 4102, comments: 2210,
-            updated: "3 days ago", summary: "Six months above, six below, and a marriage negotiated one season at a time. A retelling that takes the long view — geological, even — of two people learning to share a year.",
+            published: "Oct 2024", updated: "3 days ago", summary: "Six months above, six below, and a marriage negotiated one season at a time. A retelling that takes the long view — geological, even — of two people learning to share a year.",
             initialProgress: 0.71, lastChapter: 17, downloaded: false,
             content: nil
         ),
@@ -103,7 +103,7 @@ enum MockData {
             tags: ["Science Fiction", "Found Family", "Slow Burn", "Generation Ship", "Soft", "Engineers in Love"],
             words: 63118, chapterCount: 18, totalChapters: 18, complete: true,
             kudos: 7044, hits: 88120, bookmarks: 1530, comments: 489,
-            updated: "Feb 2026", summary: "Two engineers, one failing life-support array, and forty years of travel left before landfall. They have all the time in the world and absolutely none of it to waste.",
+            published: "Jun 2025", updated: "Feb 2026", summary: "Two engineers, one failing life-support array, and forty years of travel left before landfall. They have all the time in the world and absolutely none of it to waste.",
             initialProgress: 0, lastChapter: nil, downloaded: false,
             content: nil
         ),
@@ -115,7 +115,7 @@ enum MockData {
             tags: ["Gothic", "Second Chances", "Slow Burn", "Atmospheric", "Yorkshire"],
             words: 31455, chapterCount: 9, totalChapters: 9, complete: true,
             kudos: 4120, hits: 52300, bookmarks: 690, comments: 188,
-            updated: "Jan 2026", summary: "Years after the fire, a letter brings her back to the ruin of Thornfield — and to the man who has been waiting there in the dark, certain she would never come.",
+            published: "Nov 2025", updated: "Jan 2026", summary: "Years after the fire, a letter brings her back to the ruin of Thornfield — and to the man who has been waiting there in the dark, certain she would never come.",
             initialProgress: 0, lastChapter: nil, downloaded: false,
             content: nil
         ),
@@ -127,7 +127,7 @@ enum MockData {
             tags: ["Polyamory", "Angst", "Pining", "Camelot", "Letters", "Bittersweet"],
             words: 19004, chapterCount: 7, totalChapters: 7, complete: true,
             kudos: 3380, hits: 38940, bookmarks: 540, comments: 142,
-            updated: "Dec 2025", summary: "Three people who love one another more than they can say, and the letters none of them ever found the courage to deliver.",
+            published: "Sep 2025", updated: "Dec 2025", summary: "Three people who love one another more than they can say, and the letters none of them ever found the courage to deliver.",
             initialProgress: 0, lastChapter: nil, downloaded: false,
             content: nil
         ),
@@ -139,7 +139,7 @@ enum MockData {
             tags: ["Enemies to Lovers", "Modern AU", "Rivals", "Slow Burn", "Coastal Town"],
             words: 88760, chapterCount: 22, totalChapters: 22, complete: true,
             kudos: 12300, hits: 198400, bookmarks: 2890, comments: 980,
-            updated: "Mar 2026", summary: "Two rival radio hosts share a frequency, a coastline, and a grudge that neither can quite remember the origin of. Static makes for poor reception and excellent tension.",
+            published: "May 2025", updated: "Mar 2026", summary: "Two rival radio hosts share a frequency, a coastline, and a grudge that neither can quite remember the origin of. Static makes for poor reception and excellent tension.",
             initialProgress: 0, lastChapter: nil, downloaded: false,
             content: nil
         ),
@@ -151,7 +151,7 @@ enum MockData {
             tags: ["Cottagecore", "Healing", "Found Family", "Fluff", "Yorkshire", "Soft"],
             words: 14500, chapterCount: 5, totalChapters: 5, complete: true,
             kudos: 2980, hits: 31200, bookmarks: 470, comments: 96,
-            updated: "Nov 2025", summary: "Twenty springs on, the garden is overgrown again — and three children who have never met decide, quite independently, that it belongs to them.",
+            published: "Oct 2025", updated: "Nov 2025", summary: "Twenty springs on, the garden is overgrown again — and three children who have never met decide, quite independently, that it belongs to them.",
             initialProgress: 0, lastChapter: nil, downloaded: false,
             content: nil
         ),

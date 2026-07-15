@@ -18,6 +18,7 @@ struct Work: Identifiable, Hashable {
     let hits: Int
     let bookmarks: Int
     let comments: Int
+    let published: String
     let updated: String
     let summary: String
     let initialProgress: Double

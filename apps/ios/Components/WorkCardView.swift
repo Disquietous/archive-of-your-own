@@ -183,6 +183,7 @@ struct WorkCardView: View {
         hits: 18503,
         bookmarks: 412,
         comments: 156,
+        published: "2023-09-04",
         updated: "2024-01-15",
         summary: "When a series of impossible thefts plague the British Museum, Holmes finds himself entangled in a web of secrets that hits closer to home than he'd like.",
         initialProgress: 0,

@@ -38,8 +38,11 @@ final class AppState {
     let subscriptionLoadTask = NetworkTask()
     var unreadNotificationCount: Int = 0
     var notifications: [UNotification] = []
+    var newWorkIDs: [String] = []
     var isCheckingSubscriptions = false
     let subscriptionCheckTask = NetworkTask()
+    var subscriptionCheckTotal: Int = 0
+    var subscriptionCheckRemaining: Int = 0
 
     init() {
         if bridge.launchState == .autoUnlock {
@@ -216,15 +219,25 @@ final class AppState {
             Task { await ensureAO3Login() }
         }
 
-        // Load notifications
+        // Load notifications and What's New works
         loadNotifications()
+        loadNewWorks()
 
-        // Auto-check subscriptions if stale (> 2 hours)
+        // Load persisted subscriptions (no network needed)
+        if ao3Username != nil {
+            let persisted = bridge.getPersistedSubscriptions()
+            if !persisted.isEmpty {
+                subscriptions = persisted
+                subscriptionsLoadedForAccount = ao3Username
+            }
+        }
+
+        // Auto-check subscriptions if stale (> 1 hour)
         if ao3Username != nil {
             let shouldCheck: Bool
             if let lastCheck = bridge.getLastSubscriptionCheck(),
                let epoch = TimeInterval(lastCheck) {
-                shouldCheck = Date().timeIntervalSince1970 - epoch > 2 * 60 * 60
+                shouldCheck = Date().timeIntervalSince1970 - epoch > 1 * 60 * 60
             } else {
                 shouldCheck = true
             }
@@ -586,38 +599,50 @@ final class AppState {
     // MARK: - Subscriptions
 
     func loadSubscriptions(force: Bool = false) async {
-        guard let username = ao3Username else { return }
+        guard let username = ao3Username else {
+            subscriptionError = "Sign in to AO3 in Settings first"
+            return
+        }
         guard !isLoadingSubscriptions else { return }
 
         let accountChanged = subscriptionsLoadedForAccount != username
         let shouldForce = force || accountChanged
 
-        if !shouldForce, let cached = bridge.getSessionCache(key: "subscriptions", sessionId: sessionId) {
-            if let subs = decodeSubscriptions(cached) {
-                subscriptions = subs
+        if !shouldForce {
+            let persisted = bridge.getPersistedSubscriptions()
+            if !persisted.isEmpty {
+                subscriptions = persisted
                 subscriptionsLoadedForAccount = username
                 return
+            }
+            if let cached = bridge.getSessionCache(key: "subscriptions", sessionId: sessionId) {
+                if let subs = decodeSubscriptions(cached) {
+                    subscriptions = subs
+                    subscriptionsLoadedForAccount = username
+                    return
+                }
             }
         }
 
         isLoadingSubscriptions = true
         subscriptionError = nil
         subscriptionLoadTask.reset()
+        defer { isLoadingSubscriptions = false }
 
         do {
             subscriptions = try await retryOnTimeout(task: subscriptionLoadTask, using: bridge) {
                 try await self.bridge.fetchSubscriptions(username: username)
             }
             subscriptionsLoadedForAccount = username
+            try bridge.persistSubscriptions(subscriptions)
             if let json = encodeSubscriptions(subscriptions) {
                 bridge.setSessionCache(key: "subscriptions", data: json, sessionId: sessionId)
             }
         } catch {
             if !subscriptionLoadTask.isCancelled && !"\(error)".contains("cancelled") {
-                subscriptionError = error.localizedDescription
+                subscriptionError = Self.readableError(error)
             }
         }
-        isLoadingSubscriptions = false
     }
 
     private func encodeSubscriptions(_ subs: [USubscription]) -> String? {
@@ -635,23 +660,43 @@ final class AppState {
         }
     }
 
+    static func readableError(_ error: Error) -> String {
+        if let ao3 = error as? Ao3Error {
+            switch ao3 {
+            case .Network(let message), .Parse(let message),
+                 .Storage(let message), .NotFound(let message):
+                return message
+            }
+        }
+        return error.localizedDescription
+    }
+
     func checkSubscriptions() async {
-        guard let username = ao3Username else { return }
+        guard ao3Username != nil else { return }
         guard !isCheckingSubscriptions else { return }
         isCheckingSubscriptions = true
         subscriptionCheckTask.reset()
 
         do {
-            // Run subscription check and inbox check in parallel
-            async let subNotifs = bridge.checkSubscriptions(username: username)
-            async let inboxResult = bridge.checkInbox(username: username)
+            let total = try bridge.startSubscriptionCheck()
+            subscriptionCheckTotal = Int(total)
+            subscriptionCheckRemaining = Int(total)
 
-            let subNotifications = try await subNotifs
-            let inboxNotifications = try await inboxResult
-            inboxUnreadCount = inboxNotifications.isEmpty ? inboxUnreadCount : inboxNotifications.count + inboxUnreadCount
-            loadNotifications()
+            while !subscriptionCheckTask.isCancelled {
+                guard let result = try await bridge.checkNextSubscription() else { break }
+                subscriptionCheckRemaining = Int(result.remaining)
+                if result.changed {
+                    loadNewWorks()
+                    reloadCachedWorks()
+                }
+            }
 
-            if !subNotifications.isEmpty {
+            // Also check inbox
+            if !subscriptionCheckTask.isCancelled, let username = ao3Username {
+                let inboxNotifications = try await bridge.checkInbox(username: username)
+                if !inboxNotifications.isEmpty {
+                    inboxUnreadCount += inboxNotifications.count
+                }
                 loadNotifications()
             }
         } catch {
@@ -660,6 +705,28 @@ final class AppState {
             }
         }
         isCheckingSubscriptions = false
+        subscriptionCheckTotal = 0
+        subscriptionCheckRemaining = 0
+    }
+
+    func loadNewWorks() {
+        newWorkIDs = bridge.getNewWorkIds().map { String($0) }
+    }
+
+    func removeNewWork(_ id: String) {
+        if let workId = UInt64(id) {
+            bridge.removeNewWork(workId)
+        }
+        newWorkIDs.removeAll { $0 == id }
+    }
+
+    func clearNewWorks() {
+        bridge.clearNewWorks()
+        newWorkIDs = []
+    }
+
+    private func reloadCachedWorks() {
+        cachedWorks = bridge.getAllCachedWorks().map(Self.workFromSummary)
     }
 
     func loadNotifications() {
@@ -821,6 +888,7 @@ final class AppState {
             hits: Int(s.hits),
             bookmarks: Int(s.bookmarksCount),
             comments: Int(s.comments),
+            published: s.datePublished,
             updated: s.dateUpdated,
             summary: s.summary,
             initialProgress: 0,
@@ -848,7 +916,7 @@ final class AppState {
              "rating": w.rating.rawValue, "warnings": w.warnings, "tags": w.tags,
              "words": w.words, "chapterCount": w.chapterCount, "totalChapters": w.totalChapters,
              "complete": w.complete, "kudos": w.kudos, "hits": w.hits, "bookmarks": w.bookmarks,
-             "comments": w.comments, "updated": w.updated, "summary": w.summary,
+             "comments": w.comments, "published": w.published, "updated": w.updated, "summary": w.summary,
              "relationship": w.relationship, "category": w.category]
         }
         guard let data = try? JSONSerialization.data(withJSONObject: arr) else { return nil }
@@ -878,6 +946,7 @@ final class AppState {
                 hits: dict["hits"] as? Int ?? 0,
                 bookmarks: dict["bookmarks"] as? Int ?? 0,
                 comments: dict["comments"] as? Int ?? 0,
+                published: dict["published"] as? String ?? "",
                 updated: dict["updated"] as? String ?? "",
                 summary: dict["summary"] as? String ?? "",
                 initialProgress: 0, lastChapter: nil, downloaded: false, content: nil
