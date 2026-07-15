@@ -105,6 +105,7 @@ pub struct WorkSummary {
     pub hits: u64,
     pub bookmarks: u32,
     pub comments: u32,
+    pub date_published: String,
     pub date_updated: String,
     pub language: String,
     pub complete: bool,

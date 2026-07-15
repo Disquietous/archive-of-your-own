@@ -85,6 +85,9 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         hits,
         bookmarks,
         comments,
+        // List blurbs carry a single date (the last-updated date); AO3 only
+        // exposes the publish date on the work page itself.
+        date_published: String::new(),
         date_updated,
         language,
         complete,
@@ -330,7 +333,13 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
     let (word_count, chapter_count, total_chapters, kudos, hits, bookmarks, comments) =
         extract_work_page_stats(&doc);
     let language = extract_work_page_stat(&doc, "dd.language");
-    let date_updated = extract_work_page_stat(&doc, "dd.published");
+    let date_published = extract_work_page_stat(&doc, "dd.published");
+    // dd.status holds the "Updated:"/"Completed:" date; single-chapter works
+    // omit it, in which case the publish date is also the last-updated date.
+    let mut date_updated = extract_work_page_stat(&doc, "dd.status");
+    if date_updated.is_empty() {
+        date_updated = date_published.clone();
+    }
     let complete = total_chapters.map_or(false, |t| chapter_count >= t);
 
     let chapters = parse_chapters_content(&doc);
@@ -354,6 +363,7 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
         hits,
         bookmarks,
         comments,
+        date_published,
         date_updated,
         language,
         complete,
@@ -749,46 +759,43 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
 pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppError> {
     let doc = Html::parse_document(html);
     let mut subs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // AO3 subscriptions are in <dl class="subscription index group">
-    // Each subscription is a <dt> containing a link:
-    //   Author: <a href="/users/Name">Name</a>
-    //   Work:   <a href="/works/ID">Title</a> (Work)
-    //   Series: <a href="/series/ID">Title</a> (Series)
     let dt_sel = sel("dl.subscription dt");
     let link_sel = sel("a[href]");
 
     for dt in doc.select(&dt_sel) {
-        // Get the first link in this dt — that's the subscription target
         let Some(link) = dt.select(&link_sel).next() else { continue };
         let href = link.value().attr("href").unwrap_or("");
         let display = text(&link);
 
-        if let Some(rest) = href.strip_prefix("/users/") {
+        let entry = if let Some(rest) = href.strip_prefix("/users/") {
             let username = rest.split('/').next().unwrap_or("");
             if !username.is_empty() && !href.contains("/subscriptions") {
-                subs.push(Subscription {
-                    sub_type: "author".to_string(),
-                    id: username.to_string(),
-                    name: if display.is_empty() { username.to_string() } else { display },
-                });
-            }
+                Some(("author", username.to_string(),
+                    if display.is_empty() { username.to_string() } else { display }))
+            } else { None }
         } else if let Some(rest) = href.strip_prefix("/works/") {
             let id_str = rest.split('/').next().unwrap_or("");
             if id_str.parse::<u64>().is_ok() {
-                subs.push(Subscription {
-                    sub_type: "work".to_string(),
-                    id: id_str.to_string(),
-                    name: if display.is_empty() { format!("Work {id_str}") } else { display },
-                });
-            }
+                Some(("work", id_str.to_string(),
+                    if display.is_empty() { format!("Work {id_str}") } else { display }))
+            } else { None }
         } else if let Some(rest) = href.strip_prefix("/series/") {
             let id_str = rest.split('/').next().unwrap_or("");
             if id_str.parse::<u64>().is_ok() {
+                Some(("series", id_str.to_string(),
+                    if display.is_empty() { format!("Series {id_str}") } else { display }))
+            } else { None }
+        } else { None };
+
+        if let Some((sub_type, id, name)) = entry {
+            let key = (sub_type.to_string(), id.clone());
+            if seen.insert(key) {
                 subs.push(Subscription {
-                    sub_type: "series".to_string(),
-                    id: id_str.to_string(),
-                    name: if display.is_empty() { format!("Series {id_str}") } else { display },
+                    sub_type: sub_type.to_string(),
+                    id,
+                    name,
                 });
             }
         }
@@ -803,7 +810,7 @@ pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppErro
 
 /// Parse a series page to extract the list of works.
 /// Returns Vec of (work_id, title, chapter_count, word_count).
-pub fn parse_series_page(html: &str) -> Result<Vec<(u64, String, u32, u64)>, AppError> {
+pub fn parse_series_page(html: &str) -> Result<Vec<(u64, String, u32, u64, String)>, AppError> {
     let doc = Html::parse_document(html);
     let blurb_sel = sel("li.work.blurb");
     let mut works = Vec::new();
@@ -816,11 +823,24 @@ pub fn parse_series_page(html: &str) -> Result<Vec<(u64, String, u32, u64)>, App
         let title = extract_blurb_title(&blurb);
         let (word_count, chapter_count, _total, _kudos, _hits, _bookmarks, _comments) =
             extract_blurb_stats(&blurb);
+        let date = extract_blurb_date(&blurb);
 
-        works.push((id, title, chapter_count, word_count));
+        works.push((id, title, chapter_count, word_count, date));
     }
 
     Ok(works)
+}
+
+/// Scan a page for all `p.datetime` elements and return the lexicographically
+/// greatest value.  Works for any blurb-based listing (author works, series,
+/// tag browse).
+pub fn extract_newest_blurb_date(html: &str) -> String {
+    let doc = Html::parse_document(html);
+    let s = sel("p.datetime");
+    doc.select(&s)
+        .map(|el| text(&el))
+        .max()
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

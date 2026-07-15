@@ -1,9 +1,10 @@
 import AppKit
 
 /// One work row in the list pane, drawn per the handoff spec: fandom spine,
-/// accent fandom label, serif title, byline, 2-line summary, meta row,
-/// rating badge, optional progress bar. Selection = accent-soft fill with a
-/// 3px accent bar on the left edge.
+/// accent fandom label, serif title with inline rating badge, byline, 2-line
+/// summary, meta row, published/updated dates in the top-right corner,
+/// optional progress bar. Selection = accent-soft fill with a 3px accent bar
+/// on the left edge.
 final class WorkRowCellView: NSTableCellView {
     static let reuseID = NSUserInterfaceItemIdentifier("WorkRowCell")
 
@@ -22,7 +23,7 @@ final class WorkRowCellView: NSTableCellView {
     private var fullSummaryHeight: CGFloat = 0
     private let tagsLabel = NSTextField(wrappingLabelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
-    private let ratingBadge = NSTextField(labelWithString: "")
+    private let datesLabel = NSTextField(labelWithString: "")
     private let progressTrack = NSView()
     private let progressFill = NSView()
     private var progressWidth: NSLayoutConstraint!
@@ -69,11 +70,9 @@ final class WorkRowCellView: NSTableCellView {
         metaLabel.font = MacFont.ui(11, weight: .medium)
         metaLabel.lineBreakMode = .byTruncatingTail
 
-        ratingBadge.font = MacFont.ui(10, weight: .heavy)
-        ratingBadge.alignment = .center
-        ratingBadge.wantsLayer = true
-        ratingBadge.layer?.cornerRadius = 5
-        ratingBadge.textColor = .white
+        datesLabel.font = MacFont.ui(10, weight: .medium)
+        datesLabel.alignment = .right
+        datesLabel.maximumNumberOfLines = 2
 
         progressTrack.wantsLayer = true
         progressTrack.layer?.cornerRadius = 1.5
@@ -99,7 +98,7 @@ final class WorkRowCellView: NSTableCellView {
         }
 
         separator.wantsLayer = true
-        for view in [selectionBar, spine, body, ratingBadge, separator] {
+        for view in [selectionBar, spine, body, datesLabel, separator] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -130,13 +129,14 @@ final class WorkRowCellView: NSTableCellView {
             spine.widthAnchor.constraint(equalToConstant: 3),
 
             body.leadingAnchor.constraint(equalTo: spine.trailingAnchor, constant: 12),
-            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -40),
+            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             body.topAnchor.constraint(equalTo: topAnchor, constant: 12),
 
-            ratingBadge.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            ratingBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            ratingBadge.widthAnchor.constraint(equalToConstant: 18),
-            ratingBadge.heightAnchor.constraint(equalToConstant: 18),
+            datesLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            // The fandom line shares the dates' vertical band — cap it so a
+            // long fandom truncates instead of running under the dates.
+            fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: datesLabel.leadingAnchor, constant: -8),
 
             summaryClip.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressTrack.heightAnchor.constraint(equalToConstant: 3),
@@ -161,6 +161,29 @@ final class WorkRowCellView: NSTableCellView {
     /// NSAnimationContext with allowsImplicitAnimation for a smooth reveal.
     func setSummaryExpanded(_ expanded: Bool) {
         summaryHeight.constant = expanded ? fullSummaryHeight : collapsedSummaryHeight
+    }
+
+    private static let badgeSize: CGFloat = 16
+
+    /// Rounded-rect rating letter drawn as an image so it can ride inline at
+    /// the end of the title as a text attachment. Cached per rating.
+    private static var badgeImages: [Rating: NSImage] = [:]
+    private static func ratingBadgeImage(for rating: Rating) -> NSImage {
+        if let cached = badgeImages[rating] { return cached }
+        let size = NSSize(width: badgeSize, height: badgeSize)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor(rating.badgeColor).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+            let letter = NSAttributedString(string: rating.letter, attributes: [
+                .font: MacFont.ui(9, weight: .heavy),
+                .foregroundColor: NSColor.white,
+            ])
+            let s = letter.size()
+            letter.draw(at: NSPoint(x: (rect.width - s.width) / 2, y: (rect.height - s.height) / 2))
+            return true
+        }
+        badgeImages[rating] = image
+        return image
     }
 
     /// Measure the summary's collapsed (2-line) and full heights at a width.
@@ -196,13 +219,38 @@ final class WorkRowCellView: NSTableCellView {
         // Wrapping labels need a known width to report correct heights for
         // row sizing. Set it here, never in layout() — invalidating intrinsic
         // size during layout creates a feedback loop AppKit aborts on.
-        titleLabel.preferredMaxLayoutWidth = availableTextWidth
         summaryLabel.preferredMaxLayoutWidth = availableTextWidth
         tagsLabel.preferredMaxLayoutWidth = availableTextWidth
 
+        // Published/updated dates in the top-right corner. Blurb data only
+        // carries an updated date; a work page carries both (identical for
+        // single-chapter works — collapse to the published line then).
+        var dateLines: [String] = []
+        if !work.published.isEmpty { dateLines.append("Published \(work.published)") }
+        if !work.updated.isEmpty && work.updated != work.published {
+            dateLines.append("Updated \(work.updated)")
+        }
+        datesLabel.stringValue = dateLines.joined(separator: "\n")
+        datesLabel.isHidden = dateLines.isEmpty
+        // The title shares the dates' vertical band — wrap it short of them.
+        let datesReserve = dateLines.isEmpty ? 0 : datesLabel.intrinsicContentSize.width + 8
+        titleLabel.preferredMaxLayoutWidth = max(60, availableTextWidth - datesReserve)
+
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
         fandomLabel.stringValue = work.fandom
-        titleLabel.stringValue = work.title
+
+        // Serif title with the rating badge inline after the last word — a
+        // non-breaking space keeps the badge from wrapping onto its own line.
+        let titleFont = MacFont.serif(16, weight: .semibold)
+        let title = NSMutableAttributedString(
+            string: work.title + "\u{00A0}",
+            attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
+        let badge = NSTextAttachment()
+        badge.image = Self.ratingBadgeImage(for: work.rating)
+        badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - Self.badgeSize) / 2,
+                              width: Self.badgeSize, height: Self.badgeSize)
+        title.append(NSAttributedString(attachment: badge))
+        titleLabel.attributedStringValue = title
 
         let author = NSMutableAttributedString(
             string: "by ", attributes: [.font: MacFont.ui(12), .foregroundColor: theme.nsInk3])
@@ -239,9 +287,6 @@ final class WorkRowCellView: NSTableCellView {
         }
         metaLabel.stringValue = meta
 
-        ratingBadge.stringValue = work.rating.letter
-        ratingBadge.layer?.backgroundColor = NSColor(work.rating.badgeColor).cgColor
-
         progressTrack.isHidden = progress <= 0
         applyTheme()
         if progress > 0 {
@@ -258,6 +303,7 @@ final class WorkRowCellView: NSTableCellView {
         titleLabel.textColor = theme.nsInk
         summaryLabel.textColor = theme.nsInk2
         metaLabel.textColor = theme.nsInk3
+        datesLabel.textColor = theme.nsInk3
         progressTrack.layer?.backgroundColor = theme.nsSurface3.cgColor
         progressFill.layer?.backgroundColor = theme.nsAccent.cgColor
     }

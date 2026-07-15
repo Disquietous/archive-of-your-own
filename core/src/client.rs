@@ -559,11 +559,11 @@ impl AO3Client {
     }
 
     /// Fetch works in a series.
-    /// Returns Vec of (work_id, title, chapter_count, word_count).
+    /// Returns Vec of (work_id, title, chapter_count, word_count, date).
     pub async fn fetch_series_works(
         &self,
         series_id: u64,
-    ) -> Result<Vec<(u64, String, u32, u64)>, AppError> {
+    ) -> Result<Vec<(u64, String, u32, u64, String)>, AppError> {
         let url = format!("{BASE_URL}/series/{series_id}");
         let html = self.fetch(&url).await?;
         parser::parse_series_page(&html)
@@ -1482,13 +1482,14 @@ mod tests {
         client.enforce_rate_limit().await;
         let start = Instant::now();
 
-        // Second call should wait ~1.5s
+        // Second call should wait ~RATE_LIMIT_DELAY (with a little slack)
         client.enforce_rate_limit().await;
         let elapsed = start.elapsed();
 
         assert!(
-            elapsed >= Duration::from_millis(1400),
-            "Rate limiting should enforce ~1.5s delay, got {:?}",
+            elapsed >= RATE_LIMIT_DELAY - Duration::from_millis(100),
+            "Rate limiting should enforce ~{:?} delay, got {:?}",
+            RATE_LIMIT_DELAY,
             elapsed
         );
     }

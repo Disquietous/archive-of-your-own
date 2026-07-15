@@ -77,6 +77,7 @@ pub struct UWorkSummary {
     pub hits: u64,
     pub bookmarks_count: u32,
     pub comments: u32,
+    pub date_published: String,
     pub date_updated: String,
     pub language: String,
     pub complete: bool,
@@ -103,6 +104,7 @@ impl From<WorkSummary> for UWorkSummary {
             hits: w.hits,
             bookmarks_count: w.bookmarks,
             comments: w.comments,
+            date_published: w.date_published,
             date_updated: w.date_updated,
             language: w.language,
             complete: w.complete,
@@ -312,6 +314,15 @@ impl From<crate::models::Subscription> for USubscription {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct USubscriptionCheckResult {
+    pub sub_type: String,
+    pub sub_id: String,
+    pub name: String,
+    pub changed: bool,
+    pub remaining: u32,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct UNotification {
     pub id: i64,
     pub notif_type: String,
@@ -391,6 +402,26 @@ impl AO3App {
             Ok(r) => r,
             Err(e) if e.is_cancelled() => Err(AO3Error::Network { message: "cancelled".to_string() }),
             Err(e) => Err(AO3Error::Network { message: e.to_string() }),
+        }
+    }
+
+    fn flush_request_log(&self) {
+        let records = crate::client::drain_request_records();
+        if records.is_empty() { return; }
+        let tuples: Vec<_> = records.into_iter().map(|r| (
+            r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
+            r.request_bytes, r.response_bytes, r.error, r.payload,
+        )).collect();
+        if let Ok(storage) = self.storage.try_lock() {
+            let _ = storage.insert_request_logs(&tuples);
+        } else {
+            for t in tuples.into_iter().rev() {
+                crate::client::push_request_record(crate::client::RequestRecord {
+                    started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
+                    duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
+                    error: t.7, payload: t.8,
+                });
+            }
         }
     }
 }
@@ -1500,6 +1531,7 @@ impl AO3App {
         let progress = self.register_progress("subscriptions");
         let result = self.run_on_runtime(move |client, _storage| async move {
             let mut all_subs = Vec::new();
+            let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
             loop {
                 let c = client.read().await;
@@ -1509,7 +1541,12 @@ impl AO3App {
                     .map_err(AO3Error::from)?;
                 c.clear_active_progress();
                 drop(c);
-                all_subs.extend(subs.into_iter().map(USubscription::from));
+                for s in subs {
+                    let u = USubscription::from(s);
+                    if seen.insert((u.sub_type.clone(), u.id.clone())) {
+                        all_subs.push(u);
+                    }
+                }
                 if !has_more { break; }
                 page += 1;
             }
@@ -1519,235 +1556,173 @@ impl AO3App {
         result
     }
 
-    /// Main orchestrator: fetch all subscriptions, diff against snapshots,
-    /// generate notifications for new works/chapters.
-    pub async fn check_subscriptions(&self, username: String) -> Result<Vec<UNotification>, AO3Error> {
+    // -- Subscription persistence (user-triggered refresh) --
+
+    pub fn persist_subscriptions(&self, subscriptions: Vec<USubscription>) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        let tuples: Vec<(String, String, String)> = subscriptions
+            .into_iter()
+            .map(|u| (u.sub_type, u.id, u.name))
+            .collect();
+        s.save_subscriptions(&tuples).map_err(AO3Error::from)
+    }
+
+    pub fn get_persisted_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let rows = s.get_subscriptions().map_err(AO3Error::from)?;
+        Ok(rows.into_iter().map(|(t, id, name)| USubscription { sub_type: t, id, name }).collect())
+    }
+
+    // -- Sequential subscription check queue --
+
+    pub fn start_subscription_check(&self) -> Result<u32, AO3Error> {
+        let s = self.storage.blocking_lock();
+        // Resume if a queue already exists
+        if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
+            let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
+            if !arr.is_empty() {
+                return Ok(arr.len() as u32);
+            }
+        }
+        // Build a fresh queue from persisted subscriptions
+        let subs = s.get_subscriptions().map_err(AO3Error::from)?;
+        let arr: Vec<serde_json::Value> = subs.iter().map(|(t, id, name)| {
+            serde_json::json!({"sub_type": t, "sub_id": id, "name": name})
+        }).collect();
+        let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
+        s.set_check_queue(&json).map_err(AO3Error::from)?;
+        Ok(arr.len() as u32)
+    }
+
+    pub fn reset_subscription_check(&self) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.clear_check_queue().map_err(AO3Error::from)
+    }
+
+    // -- What's New work list --
+
+    pub fn get_new_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_new_work_ids().map_err(AO3Error::from)
+    }
+
+    pub fn remove_new_work(&self, work_id: u64) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.remove_new_work_id(work_id).map_err(AO3Error::from)
+    }
+
+    pub fn clear_new_works(&self) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.clear_new_work_ids().map_err(AO3Error::from)
+    }
+
+    pub async fn check_next_subscription(&self) -> Result<Option<USubscriptionCheckResult>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            // 1. Fetch all subscriptions (paginate if needed)
-            let mut all_subs = Vec::new();
-            let mut page = 1u32;
-            loop {
-                let c = client.read().await;
-                let (subs, has_more) = c.fetch_subscriptions(&username, page)
-                    .await
-                    .map_err(AO3Error::from)?;
-                drop(c);
-                all_subs.extend(subs);
-                if !has_more {
-                    break;
-                }
-                page += 1;
-            }
-
-            // 2. Build fetch URLs for each subscription
-            let base = crate::client::BASE_URL;
-            let mut fetch_tasks: Vec<(String, String, String)> = Vec::new(); // (url, sub_type, sub_id)
-            for sub in &all_subs {
-                match sub.sub_type.as_str() {
-                    "author" => {
-                        let url = format!("{base}/users/{}/works", sub.id);
-                        fetch_tasks.push((url, sub.sub_type.clone(), sub.id.clone()));
-                    }
-                    "work" => {
-                        // For work subscriptions, fetch the work page to get current metadata
-                        let url = format!("{base}/works/{}?view_adult=true", sub.id);
-                        fetch_tasks.push((url, sub.sub_type.clone(), sub.id.clone()));
-                    }
-                    "series" => {
-                        let url = format!("{base}/series/{}", sub.id);
-                        fetch_tasks.push((url, sub.sub_type.clone(), sub.id.clone()));
-                    }
-                    _ => continue,
-                }
-            }
-
-            // 3. Batch fetch concurrently
-            let urls: Vec<String> = fetch_tasks.iter().map(|(url, _, _)| url.clone()).collect();
-            let c = client.read().await;
-            let results = c.fetch_concurrent(urls, 5).await;
-            drop(c);
-
-            // 4. Diff against snapshots and generate notifications
-            let mut new_notifications = Vec::new();
             let s = storage.lock().await;
-
-            for (i, result) in results.into_iter().enumerate() {
-                let html = match result {
-                    Ok(html) => html,
-                    Err(_) => continue, // Skip failed fetches
-                };
-
-                let (sub_type, sub_id) = (&fetch_tasks[i].1, &fetch_tasks[i].2);
-                let sub_name = all_subs.iter()
-                    .find(|s| s.sub_type == *sub_type && s.id == *sub_id)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-
-                // Get old snapshots for diffing
-                let old_snapshots = s.get_snapshots(sub_type, sub_id)
-                    .unwrap_or_default();
-                let old_map: std::collections::HashMap<u64, (u32, u64, String)> = old_snapshots
-                    .into_iter()
-                    .map(|(wid, ch, wc, du)| (wid, (ch, wc, du)))
-                    .collect();
-
-                match sub_type.as_str() {
-                    "author" => {
-                        let works = crate::parser::parse_work_listings(&html).unwrap_or_default();
-                        for work in &works {
-                            let author = work.authors.first().map(|a| a.as_str()).unwrap_or(&sub_name);
-                            if let Some((old_ch, _old_wc, _old_du)) = old_map.get(&work.id) {
-                                // Existing work — check for new chapters
-                                if work.chapter_count > *old_ch {
-                                    let msg = format!(
-                                        "{} updated \"{}\" ({}ch -> {}ch)",
-                                        author, work.title, old_ch, work.chapter_count
-                                    );
-                                    let notif_id = s.add_notification(
-                                        "new_chapter", work.id, author, &work.title, &msg
-                                    ).unwrap_or(-1);
-                                    if notif_id > 0 {
-                                        new_notifications.push(UNotification {
-                                            id: notif_id,
-                                            notif_type: "new_chapter".to_string(),
-                                            work_id: work.id,
-                                            author: author.to_string(),
-                                            title: work.title.clone(),
-                                            message: msg,
-                                            created_at: String::new(),
-                                            read: false,
-                                        });
-                                    }
-                                }
-                            } else {
-                                // New work from this author
-                                let msg = format!(
-                                    "{} posted a new work: \"{}\"",
-                                    author, work.title
-                                );
-                                let notif_id = s.add_notification(
-                                    "new_work", work.id, author, &work.title, &msg
-                                ).unwrap_or(-1);
-                                if notif_id > 0 {
-                                    new_notifications.push(UNotification {
-                                        id: notif_id,
-                                        notif_type: "new_work".to_string(),
-                                        work_id: work.id,
-                                        author: author.to_string(),
-                                        title: work.title.clone(),
-                                        message: msg,
-                                        created_at: String::new(),
-                                        read: false,
-                                    });
-                                }
-                            }
-                            // Update snapshot
-                            let _ = s.save_snapshot(
-                                sub_type, sub_id, work.id,
-                                work.chapter_count, work.word_count, &work.date_updated,
-                            );
-                        }
-                    }
-                    "work" => {
-                        // Parse as a work page to get chapter count
-                        if let Ok((work, _chapters)) = crate::parser::parse_work_page(&html) {
-                            let work_id: u64 = sub_id.parse().unwrap_or(0);
-                            let author = work.authors.first().map(|a| a.as_str()).unwrap_or("Unknown");
-                            if let Some((old_ch, _old_wc, _old_du)) = old_map.get(&work_id) {
-                                if work.chapter_count > *old_ch {
-                                    let msg = format!(
-                                        "\"{}\" has new chapters ({}ch -> {}ch)",
-                                        work.title, old_ch, work.chapter_count
-                                    );
-                                    let notif_id = s.add_notification(
-                                        "new_chapter", work_id, author, &work.title, &msg
-                                    ).unwrap_or(-1);
-                                    if notif_id > 0 {
-                                        new_notifications.push(UNotification {
-                                            id: notif_id,
-                                            notif_type: "new_chapter".to_string(),
-                                            work_id,
-                                            author: author.to_string(),
-                                            title: work.title.clone(),
-                                            message: msg,
-                                            created_at: String::new(),
-                                            read: false,
-                                        });
-                                    }
-                                }
-                            }
-                            // Update snapshot (even for first check — no notification on first run)
-                            let _ = s.save_snapshot(
-                                sub_type, sub_id, work_id,
-                                work.chapter_count, work.word_count, &work.date_updated,
-                            );
-                        }
-                    }
-                    "series" => {
-                        let series_works = crate::parser::parse_series_page(&html).unwrap_or_default();
-                        for (work_id, title, chapter_count, word_count) in &series_works {
-                            if let Some((old_ch, _old_wc, _old_du)) = old_map.get(work_id) {
-                                // Existing work in series — check chapter count
-                                if *chapter_count > *old_ch {
-                                    let msg = format!(
-                                        "\"{}\" in series \"{}\" updated ({}ch -> {}ch)",
-                                        title, sub_name, old_ch, chapter_count
-                                    );
-                                    let notif_id = s.add_notification(
-                                        "new_chapter", *work_id, &sub_name, title, &msg
-                                    ).unwrap_or(-1);
-                                    if notif_id > 0 {
-                                        new_notifications.push(UNotification {
-                                            id: notif_id,
-                                            notif_type: "new_chapter".to_string(),
-                                            work_id: *work_id,
-                                            author: sub_name.clone(),
-                                            title: title.clone(),
-                                            message: msg,
-                                            created_at: String::new(),
-                                            read: false,
-                                        });
-                                    }
-                                }
-                            } else {
-                                // New work in series
-                                let msg = format!(
-                                    "New work in series \"{}\": \"{}\"",
-                                    sub_name, title
-                                );
-                                let notif_id = s.add_notification(
-                                    "new_work_in_series", *work_id, &sub_name, title, &msg
-                                ).unwrap_or(-1);
-                                if notif_id > 0 {
-                                    new_notifications.push(UNotification {
-                                        id: notif_id,
-                                        notif_type: "new_work_in_series".to_string(),
-                                        work_id: *work_id,
-                                        author: sub_name.clone(),
-                                        title: title.clone(),
-                                        message: msg,
-                                        created_at: String::new(),
-                                        read: false,
-                                    });
-                                }
-                            }
-                            // Update snapshot
-                            let _ = s.save_snapshot(
-                                sub_type, sub_id, *work_id,
-                                *chapter_count, *word_count, "",
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+            // Pop the first item from the queue
+            let queue_json = s.get_check_queue().map_err(AO3Error::from)?
+                .unwrap_or_else(|| "[]".to_string());
+            let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json)
+                .unwrap_or_default();
+            if queue.is_empty() {
+                return Ok(None);
             }
+            let item = queue.remove(0);
+            let sub_type = item["sub_type"].as_str().unwrap_or("").to_string();
+            let sub_id = item["sub_id"].as_str().unwrap_or("").to_string();
+            let sub_name = item["name"].as_str().unwrap_or("").to_string();
 
-            // 5. Update last check time
-            let now = chrono_now();
-            let _ = s.set_last_check_time(&now);
+            // Persist updated queue before the fetch (so a crash mid-fetch
+            // skips this item rather than retrying it forever).
+            let remaining = queue.len() as u32;
+            let updated_json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
+            let _ = s.set_check_queue(&updated_json);
             drop(s);
 
-            Ok(new_notifications)
+            // Build URL
+            let base = crate::client::BASE_URL;
+            let url = match sub_type.as_str() {
+                "author" => format!("{base}/users/{sub_id}/works"),
+                "work" => format!("{base}/works/{sub_id}?view_adult=true"),
+                "series" => format!("{base}/series/{sub_id}"),
+                _ => return Ok(Some(USubscriptionCheckResult {
+                    sub_type, sub_id, name: sub_name, changed: false, remaining,
+                })),
+            };
+
+            // Fetch (rate-limited via enforce_rate_limit inside fetch_with_progress)
+            let c = client.read().await;
+            let html = match c.fetch_with_progress(&url, 30, None).await {
+                Ok(h) => h,
+                Err(_) => return Ok(Some(USubscriptionCheckResult {
+                    sub_type, sub_id, name: sub_name, changed: false, remaining,
+                })),
+            };
+            drop(c);
+
+            // Parse works and extract the newest date
+            let (newest_date, parsed_works) = match sub_type.as_str() {
+                "author" | "series" => {
+                    // Both author pages and series pages use li.work.blurb
+                    let works = crate::parser::parse_work_listings(&html).unwrap_or_default();
+                    let date = works.iter()
+                        .map(|w| w.date_updated.as_str())
+                        .max()
+                        .unwrap_or("")
+                        .to_string();
+                    (date, works)
+                }
+                "work" => {
+                    if let Ok((w, _)) = crate::parser::parse_work_page(&html) {
+                        let date = w.date_updated.clone();
+                        (date, vec![w])
+                    } else {
+                        (String::new(), vec![])
+                    }
+                }
+                _ => (String::new(), vec![]),
+            };
+
+            // Diff against snapshot
+            let s = storage.lock().await;
+            let old_date = s.get_subscription_snapshot(&sub_type, &sub_id)
+                .unwrap_or(None);
+            let changed = if newest_date.is_empty() {
+                false
+            } else if let Some(ref old) = old_date {
+                newest_date != *old
+            } else {
+                false // first run — seed silently
+            };
+
+            // Cache works and mark new/updated ones for the What's New feed
+            if changed {
+                let old_ref = old_date.as_deref().unwrap_or("");
+                let new_ids: Vec<u64> = parsed_works.iter()
+                    .filter(|w| w.date_updated.as_str() > old_ref)
+                    .map(|w| w.id)
+                    .collect();
+                for w in &parsed_works {
+                    let _ = s.save_work(w);
+                }
+                if !new_ids.is_empty() {
+                    let _ = s.add_new_work_ids(&new_ids);
+                }
+            }
+
+            // Save snapshot (always, even on first run)
+            if !newest_date.is_empty() {
+                let _ = s.save_subscription_snapshot(&sub_type, &sub_id, &newest_date);
+            }
+
+            // If queue is now empty, mark the check as complete
+            if remaining == 0 {
+                let _ = s.set_last_check_time(&chrono_now());
+            }
+
+            Ok(Some(USubscriptionCheckResult {
+                sub_type, sub_id, name: sub_name, changed, remaining,
+            }))
         }).await
     }
 
@@ -1985,28 +1960,6 @@ impl AO3App {
         storage.clear_request_logs().map_err(AO3Error::from)
     }
 
-    /// Drain the in-memory request buffer into the database. Called after every
-    /// runtime operation so requests are durable even without the UI open.
-    fn flush_request_log(&self) {
-        let records = crate::client::drain_request_records();
-        if records.is_empty() { return; }
-        let tuples: Vec<_> = records.into_iter().map(|r| (
-            r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
-            r.request_bytes, r.response_bytes, r.error, r.payload,
-        )).collect();
-        if let Ok(storage) = self.storage.try_lock() {
-            let _ = storage.insert_request_logs(&tuples);
-        } else {
-            // Storage busy — put them back so the next flush persists them.
-            for t in tuples.into_iter().rev() {
-                crate::client::push_request_record(crate::client::RequestRecord {
-                    started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
-                    duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
-                    error: t.7, payload: t.8,
-                });
-            }
-        }
-    }
 }
 
 /// Generate a timestamp string without pulling in the chrono crate.
@@ -2022,6 +1975,16 @@ fn chrono_now() -> String {
         }
         Err(_) => "0".to_string(),
     }
+}
+
+fn sub_id_to_work_id(sub_type: &str, sub_id: &str) -> u64 {
+    let key = format!("{sub_type}:{sub_id}");
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for b in key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    hash
 }
 
 // scaffolding is in lib.rs

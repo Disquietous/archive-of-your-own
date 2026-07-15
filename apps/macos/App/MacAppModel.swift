@@ -16,6 +16,7 @@ final class MacAppModel {
 
     /// The app opens on Currently Reading — the primary use case.
     var section: Section = .reading
+    var subscriptionSubTab: String = "new"
     var selectedWorkID: String?
     var readerOpen = false
     var readerChapter = 0
@@ -45,7 +46,14 @@ final class MacAppModel {
         if appState.isBrowsing { ops.append("Loading newest works") }
         if appState.isSearching { ops.append("Searching the archive") }
         if appState.isLoadingSubscriptions { ops.append("Loading your subscription list") }
-        if appState.isCheckingSubscriptions { ops.append("Checking follows & inbox for new works") }
+        if appState.isCheckingSubscriptions {
+            let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
+            if appState.subscriptionCheckTotal > 0 {
+                ops.append("Checking subscriptions (\(done)/\(appState.subscriptionCheckTotal))")
+            } else {
+                ops.append("Checking subscriptions")
+            }
+        }
         if isLoadingSubscriptionWorks { ops.append("Fetching \(subscriptionWorksTitle ?? "author")’s works") }
         if isLoadingAuthor { ops.append("Fetching \(authorUsername ?? "author")’s works") }
         if search.isLoadingForm { ops.append("Loading search criteria") }
@@ -380,6 +388,8 @@ final class MacAppModel {
                 .sorted { $0.title < $1.title }
         case .authorWorks:
             works = authorWorksList
+        case .subscriptions:
+            works = appState.newWorkIDs.compactMap { appState.work(byID: $0) }
         default:
             works = []
         }

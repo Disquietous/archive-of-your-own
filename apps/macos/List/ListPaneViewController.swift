@@ -25,9 +25,14 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private var authorMoreButton: ToolButton?
 
     private var works: [Work] = []
+    private var displayedSubscriptions: [USubscription] = []
     private var renderedSection: MacAppModel.Section?
     private var renderedWorkIDs: [String] = []
+    private var renderedSubscriptionIDs: [String] = []
     private var expandedSummaries: Set<String> = []
+    private var isShowingSubscriptionList: Bool {
+        model.section == .subscriptions && model.subscriptionSubTab == "following"
+    }
     /// Measures off-screen rows for heightOfRow.
     private lazy var sizingCell = WorkRowCellView(theme: theme)
 
@@ -147,22 +152,105 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             showWorksContent(section: section, header: nil, overlay: empty)
 
         case .subscriptions:
-            toolbar.configure(title: "Subscriptions", sub: "Followed updates")
-            var buttons: [NSView] = []
-            if appState.unreadNotificationCount > 0 {
-                buttons.append(ToolButton(theme: theme, symbol: "checkmark", tooltip: "Mark all read") { [weak self] in
-                    self?.appState.markAllNotificationsRead()
-                })
-            }
-            buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check now") { [weak self] in
-                guard let self else { return }
-                Task {
-                    await self.appState.loadSubscriptions(force: true)
-                    await self.appState.checkSubscriptions()
+            if model.subscriptionSubTab == "new" {
+                works = model.works(for: .subscriptions)
+                let checkStatus = appState.subscriptionCheckTask.statusMessage
+                let checkSub: String
+                if appState.isCheckingSubscriptions {
+                    let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
+                    checkSub = "Checking… (\(done)/\(appState.subscriptionCheckTotal))"
+                } else if let status = checkStatus, !status.isEmpty {
+                    checkSub = status
+                } else if works.isEmpty {
+                    checkSub = "No updates"
+                } else {
+                    checkSub = "\(works.count) updated"
                 }
-            })
-            toolbar.setTrailing(buttons)
-            showVariant(SubscriptionsList(theme: theme, appState: appState, model: model), section: section)
+                toolbar.configure(title: "What's New", sub: checkSub)
+                var buttons: [NSView] = []
+                if !works.isEmpty {
+                    buttons.append(ToolButton(theme: theme, symbol: "trash", tooltip: "Clear all") { [weak self] in
+                        self?.appState.clearNewWorks()
+                    })
+                }
+                buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for updates") { [weak self] in
+                    guard let self else { return }
+                    Task {
+                        self.appState.bridge.resetSubscriptionCheck()
+                        await self.appState.checkSubscriptions()
+                    }
+                })
+                toolbar.setLeading([subscriptionTabButtons()])
+                toolbar.setTrailing(buttons)
+                let overlay: AnyView?
+                if appState.isCheckingSubscriptions {
+                    let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
+                    overlay = AnyView(LoadingStateMac(theme: theme,
+                        message: "Checking subscriptions…",
+                        detail: "Checked \(done) of \(appState.subscriptionCheckTotal)"))
+                } else if works.isEmpty {
+                    overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
+                                                    title: "Nothing new",
+                                                    message: checkStatus ?? "Updates from works and authors you follow appear here."))
+                } else {
+                    overlay = nil
+                }
+                showWorksContent(section: section, header: nil, overlay: overlay)
+            } else {
+                displayedSubscriptions = appState.subscriptions
+                works = []
+                let subtitle: String
+                if appState.isLoadingSubscriptions {
+                    subtitle = "Loading from AO3…"
+                } else if let err = appState.subscriptionError, !err.isEmpty {
+                    subtitle = "Error — \(err)"
+                } else {
+                    subtitle = "\(displayedSubscriptions.count) subscriptions"
+                }
+                toolbar.configure(title: "Following", sub: subtitle)
+                toolbar.setLeading([subscriptionTabButtons()])
+                toolbar.setTrailing([ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
+                    guard let self else { return }
+                    guard appState.ao3Username != nil else {
+                        appState.subscriptionError = "Sign in to AO3 in Settings first"
+                        return
+                    }
+                    guard !appState.isLoadingSubscriptions else { return }
+                    appState.subscriptionError = nil
+                    Task { await self.appState.loadSubscriptions(force: true) }
+                }])
+                let overlay: AnyView?
+                if appState.isLoadingSubscriptions {
+                    overlay = AnyView(LoadingStateMac(theme: theme, message: "Refreshing subscriptions from AO3…",
+                                                     detail: "This may take a moment over Tor.")
+                        .background(theme.bg))
+                } else if let err = appState.subscriptionError, !err.isEmpty {
+                    overlay = AnyView(VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 28, weight: .light))
+                            .foregroundStyle(theme.line2)
+                        Text("Couldn't load subscriptions")
+                            .font(Font(MacFont.serif(18, weight: .semibold)))
+                            .foregroundStyle(theme.ink2)
+                        Text(err)
+                            .font(Font(MacFont.ui(13)))
+                            .foregroundStyle(theme.ink3)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity)
+                    .background(theme.bg))
+                } else if displayedSubscriptions.isEmpty {
+                    overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
+                                                   title: "No subscriptions",
+                                                   message: "Works, series, and authors you subscribe to on AO3 appear here."))
+                } else {
+                    overlay = nil
+                }
+                showSubscriptionsContent(section: section, overlay: overlay)
+            }
 
         case .fandoms:
             toolbar.configure(title: "Fandoms", sub: "\(model.followedFandoms.count) followed")
@@ -284,6 +372,21 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         return button
     }
 
+    private func subscriptionTabButtons() -> NSView {
+        let seg = NSSegmentedControl(labels: ["What's New", "Following"], trackingMode: .selectOne,
+                                     target: self, action: #selector(subscriptionTabChanged(_:)))
+        seg.selectedSegment = model.subscriptionSubTab == "new" ? 0 : 1
+        seg.segmentStyle = .texturedRounded
+        seg.controlSize = .small
+        (seg.cell as? NSSegmentedCell)?.trackingMode = .selectOne
+        return seg
+    }
+
+    @objc private func subscriptionTabChanged(_ sender: NSSegmentedControl) {
+        model.subscriptionSubTab = sender.selectedSegment == 0 ? "new" : "following"
+        renderedSection = nil
+    }
+
     private var removeAllButton: ToolButton?
 
     private func removeAllReadingButton() -> ToolButton {
@@ -383,6 +486,43 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    private func showSubscriptionsContent(section: MacAppModel.Section, overlay: AnyView?) {
+        variantHost?.removeFromSuperview()
+        variantHost = nil
+        chipsHost?.removeFromSuperview()
+
+        if scrollView.superview == nil {
+            contentStack.addArrangedSubview(scrollView)
+            scrollView.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+        }
+
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
+        if let overlay {
+            let host = NSHostingView(rootView: overlay)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+                host.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+                host.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor),
+            ])
+            overlayHost = host
+        }
+
+        let sectionChanged = renderedSection != section
+        let ids = displayedSubscriptions.map(\.id)
+        if sectionChanged || ids != renderedSubscriptionIDs {
+            tableView.reloadData()
+        }
+        renderedSubscriptionIDs = ids
+        renderedWorkIDs = []
+        if sectionChanged {
+            tableView.scroll(.zero)
+        }
+        tableView.deselectAll(nil)
+    }
+
     private func showVariant(_ content: some View, section: MacAppModel.Section) {
         chipsHost?.removeFromSuperview()
         scrollView.removeFromSuperview()
@@ -403,10 +543,26 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        works.count
+        isShowingSubscriptionList ? displayedSubscriptions.count : works.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if isShowingSubscriptionList {
+            guard row < displayedSubscriptions.count else { return nil }
+            let cell: SubscriptionRowCellView
+            if let reused = tableView.makeView(withIdentifier: SubscriptionRowCellView.reuseID, owner: self) as? SubscriptionRowCellView {
+                cell = reused
+            } else {
+                cell = SubscriptionRowCellView(theme: theme)
+                cell.identifier = SubscriptionRowCellView.reuseID
+            }
+            let sub = displayedSubscriptions[row]
+            cell.configure(with: sub,
+                           isLoading: model.loadingSubscriptionID == sub.id,
+                           isActive: sub.subType.lowercased().contains("author") && model.subscriptionWorksTitle == sub.name)
+            return cell
+        }
+
         let cell: WorkRowCellView
         if let reused = tableView.makeView(withIdentifier: WorkRowCellView.reuseID, owner: self) as? WorkRowCellView {
             cell = reused
@@ -415,8 +571,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             cell.identifier = WorkRowCellView.reuseID
         }
         let work = works[row]
-        // Row chrome: 16 leading + 3 spine + 12 gap + 40 trailing.
-        let textWidth = max(100, tableView.bounds.width - 71)
+        let textWidth = max(100, tableView.bounds.width - 45)
         cell.configure(with: work,
                        progress: model.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
@@ -460,6 +615,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     /// changes on reload only upward — a collapsed summary's shorter,
     /// correctly-measured height was silently discarded, so rows never shrank.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if isShowingSubscriptionList { return 52 }
         guard row < works.count else { return 52 }
         // Always measure via the sizing cell — querying live row views from
         // inside heightOfRow is illegal reentrancy (AppKit throws while the
@@ -471,17 +627,31 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                              downloaded: appState.downloadedWorkIDs.contains(work.id),
                              selected: false,
                              summaryExpanded: expandedSummaries.contains(work.id),
-                             availableTextWidth: max(100, width - 71))
+                             availableTextWidth: max(100, width - 45))
         sizingCell.frame = NSRect(x: 0, y: 0, width: width, height: 10_000)
         sizingCell.layoutSubtreeIfNeeded()
         return max(52, sizingCell.fittingSize.height)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard tableView.selectedRow >= 0, tableView.selectedRow < works.count else { return }
-        let id = works[tableView.selectedRow].id
-        // Ignore no-op changes from programmatic selection sync — selectWork
-        // closes an open reader, which must only happen on a real user click.
+        let row = tableView.selectedRow
+        guard row >= 0 else { return }
+
+        if isShowingSubscriptionList {
+            guard row < displayedSubscriptions.count else { return }
+            let sub = displayedSubscriptions[row]
+            let type = sub.subType.lowercased()
+            if type.contains("author") || type.contains("user") {
+                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name)
+            } else if type.contains("work") {
+                model.selectWork(sub.id)
+            }
+            tableView.deselectAll(nil)
+            return
+        }
+
+        guard row < works.count else { return }
+        let id = works[row].id
         if model.selectedWorkID != id {
             model.selectWork(id)
         }
@@ -509,6 +679,12 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let remove = NSTableViewRowAction(style: .destructive, title: "Delete") { [weak self] _, _ in
                 guard let self, appState.downloadedWorkIDs.contains(workID) else { return }
                 appState.toggleDownload(workID)
+                tableView.rowActionsVisible = false
+            }
+            return [remove]
+        case .subscriptions where model.subscriptionSubTab == "new":
+            let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
+                self?.appState.removeNewWork(workID)
                 tableView.rowActionsVisible = false
             }
             return [remove]

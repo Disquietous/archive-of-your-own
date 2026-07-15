@@ -9,23 +9,36 @@ static GLOBAL_LOG_DB: std::sync::OnceLock<std::sync::Mutex<rusqlite::Connection>
 pub fn init_logging(db_path: &str, passphrase: &str) {
     if GLOBAL_LOG_DB.get().is_some() { return; }
     let log_path = format!("{}.log", db_path);
-    if let Ok(conn) = rusqlite::Connection::open(&log_path) {
-        if !passphrase.is_empty() {
-            let _ = conn.pragma_update(None, "key", passphrase);
-        }
-        let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
-        let _ = conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS debug_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-                level TEXT NOT NULL,
-                tag TEXT NOT NULL,
-                message TEXT NOT NULL
-            );"
-        );
+    if let Some(conn) = open_log_db(&log_path, passphrase)
+        .or_else(|| {
+            // Key mismatch from a previous session — delete and retry.
+            let _ = std::fs::remove_file(&log_path);
+            let _ = std::fs::remove_file(format!("{}-wal", &log_path));
+            let _ = std::fs::remove_file(format!("{}-shm", &log_path));
+            open_log_db(&log_path, passphrase)
+        })
+    {
         let _ = GLOBAL_LOG_DB.set(std::sync::Mutex::new(conn));
     }
+}
+
+fn open_log_db(path: &str, passphrase: &str) -> Option<rusqlite::Connection> {
+    let conn = rusqlite::Connection::open(path).ok()?;
+    if !passphrase.is_empty() {
+        conn.pragma_update(None, "key", passphrase).ok()?;
+    }
+    conn.pragma_update(None, "journal_mode", "WAL").ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000)).ok()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS debug_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            level TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            message TEXT NOT NULL
+        );"
+    ).ok()?;
+    Some(conn)
 }
 
 pub fn with_log_db<F, R>(f: F) -> Option<R>

@@ -170,7 +170,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        summaryExpanded: true,
-                       availableTextWidth: max(100, tableWidth - 71))
+                       availableTextWidth: max(100, tableWidth - 45))
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {

@@ -88,6 +88,7 @@ struct ResumeCardView: View {
         hits: 8000,
         bookmarks: 200,
         comments: 80,
+        published: "2023-10-12",
         updated: "2024-02-01",
         summary: "A return to Baker Street.",
         initialProgress: 0.38,
