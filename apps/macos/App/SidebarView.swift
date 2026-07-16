@@ -9,6 +9,7 @@ struct SidebarView: View {
     @Bindable var model: MacAppModel
 
     @State private var privacyShown = false
+    @State private var torPulse = false
     @FocusState private var searchFieldFocus: Bool
 
     var body: some View {
@@ -26,6 +27,7 @@ struct SidebarView: View {
                     }
                     group("Following") {
                         item(.subscriptions, "bell", "Subscriptions", badge: appState.unreadNotificationCount)
+                        item(.inbox, "tray", "Inbox", badge: appState.inboxUnreadCount)
                     }
                     group("Saved") {
                         item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
@@ -200,9 +202,10 @@ struct SidebarView: View {
             } label: {
                 HStack(spacing: 10) {
                     Circle()
-                        .fill(torConnected ? theme.sage : theme.ink3)
+                        .fill(torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3)
                         .frame(width: 8, height: 8)
-                        .shadow(color: (torConnected ? theme.sage : theme.ink3).opacity(0.4), radius: 3)
+                        .shadow(color: (torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3).opacity(0.4), radius: 3)
+                        .opacity(torConnecting ? (torPulse ? 1.0 : 0.3) : 1.0)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(torConnected ? "Private · Tor" : connectionLine)
                             .font(Font(MacFont.ui(12.5, weight: .bold)))
@@ -217,19 +220,36 @@ struct SidebarView: View {
                         }
                     }
                     Spacer()
-                    Image(systemName: torConnected ? "checkmark.shield" : "shield")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(torConnected ? theme.sage : theme.ink3)
+                    if torConnecting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: torConnected ? "checkmark.shield" : "shield")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(torConnected ? theme.sage : theme.ink3)
+                    }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(theme.sage.opacity(torConnected ? 0.12 : 0.07))
+                .background(torConnecting
+                    ? theme.accent2.opacity(0.1)
+                    : theme.sage.opacity(torConnected ? 0.12 : 0.07))
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .popover(isPresented: $privacyShown, arrowEdge: .top) {
                 PrivacyPopoverView(theme: theme, appState: appState, model: model)
+            }
+            .onChange(of: torConnecting) { _, connecting in
+                if connecting {
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                        torPulse = true
+                    }
+                } else {
+                    withAnimation(.default) { torPulse = false }
+                }
             }
         }
         .padding(.init(top: 10, leading: 12, bottom: 10, trailing: 12))
@@ -239,8 +259,9 @@ struct SidebarView: View {
     }
 
     private var connectionLine: String {
-        if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
         if appState.isResolvingCloudflare { return "Resolving challenge…" }
+        if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
+        if appState.torStatus == .connecting { return "Connecting…" }
         return "Not connected"
     }
 
@@ -260,6 +281,10 @@ struct SidebarView: View {
 
     private var torConnected: Bool {
         appState.torStatus.isConnected
+    }
+
+    private var torConnecting: Bool {
+        appState.torStatus == .connecting || appState.isTestingCircuit || appState.isResolvingCloudflare
     }
 }
 

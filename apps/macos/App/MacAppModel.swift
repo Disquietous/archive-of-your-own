@@ -7,7 +7,7 @@ import Observation
 @Observable
 final class MacAppModel {
     enum Section: String, CaseIterable {
-        case browse, reading, history, subscriptions, fandoms, authors,
+        case browse, reading, history, subscriptions, inbox, fandoms, authors,
              bookmarks, downloads, stats, search, authorWorks
     }
 
@@ -69,6 +69,12 @@ final class MacAppModel {
     // MARK: - Intents
 
     func goSection(_ s: Section) {
+        if section == .inbox && s != .inbox {
+            appState.clearInboxSelection()
+        }
+        if section == .authors && s != .authors {
+            closeAuthorWorks()
+        }
         section = s
         selectedReadingListID = nil
         subscriptionWorksTitle = nil
@@ -83,6 +89,9 @@ final class MacAppModel {
         case .subscriptions:
             Task { await appState.loadSubscriptions() }
             appState.loadNotifications()
+        case .inbox:
+            appState.loadCachedInbox()
+            Task { await appState.checkInbox() }
         default:
             break
         }
@@ -257,19 +266,36 @@ final class MacAppModel {
     var subscriptionWorksError: String?
     /// Drives the inline spinner on the tapped subscription row.
     var loadingSubscriptionID: String?
+    /// Subscription identity for cache persistence.
+    var subscriptionWorksSubType: String = ""
+    var subscriptionWorksSubId: String?
 
     var filteredSubscriptionWorks: [Work] {
         filtered(subscriptionWorksList)
     }
 
-    /// Fetch an author subscription's works internally — the user never
-    /// leaves the Subscriptions section.
-    func openSubscriptionAuthorWorks(subscriptionID: String, author: String) {
+    /// Show a subscription's works — loads from DB cache instantly, fetches
+    /// from AO3 only on first view (no cache) or when `force` is true.
+    func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author", force: Bool = false) {
         subscriptionWorksTitle = author
-        subscriptionWorksList = []
         subscriptionWorksError = nil
         selectedWorkID = nil
         readerOpen = false
+        subscriptionWorksSubType = subType
+        subscriptionWorksSubId = subscriptionID
+
+        // Load cached works from DB
+        if !force {
+            let cached = appState.bridge.getSubscriptionWorks(subType: subscriptionWorksSubType, subId: subscriptionID)
+            if !cached.isEmpty {
+                let works = cached.map(AppState.workFromSummary)
+                for work in works { appState.fetchedWorks[work.id] = work }
+                subscriptionWorksList = works
+                return
+            }
+        }
+
+        subscriptionWorksList = force ? subscriptionWorksList : []
         loadingSubscriptionID = subscriptionID
         isLoadingSubscriptionWorks = true
         Task { @MainActor in
@@ -279,9 +305,15 @@ final class MacAppModel {
                 }
                 let works = summaries.map(AppState.workFromSummary)
                 for work in works { appState.fetchedWorks[work.id] = work }
-                // Ignore stale results if the user tapped something else meanwhile.
                 if subscriptionWorksTitle == author {
                     subscriptionWorksList = works
+                    // Persist works and the association
+                    let ids = works.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
+                    appState.bridge.saveSubscriptionWorks(
+                        subType: subscriptionWorksSubType,
+                        subId: subscriptionID,
+                        workIds: ids
+                    )
                 }
             } catch {
                 if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
@@ -293,10 +325,16 @@ final class MacAppModel {
         }
     }
 
+    func refreshSubscriptionWorks() {
+        guard let title = subscriptionWorksTitle, let subId = subscriptionWorksSubId else { return }
+        openSubscriptionAuthorWorks(subscriptionID: subId, author: title, force: true)
+    }
+
     func closeSubscriptionWorks() {
         subscriptionWorksTitle = nil
         subscriptionWorksList = []
         subscriptionWorksError = nil
+        subscriptionWorksSubId = nil
         selectedWorkID = nil
     }
 
@@ -306,48 +344,60 @@ final class MacAppModel {
     var authorWorksList: [Work] = []
     var isLoadingAuthor = false
     var authorError: String?
-    var authorPage: UInt32 = 1
     let authorTask = NetworkTask()
 
     func openAuthor(_ username: String) {
         authorUsername = username
-        authorWorksList = []
-        authorPage = 1
         authorError = nil
-        section = .authorWorks
+        selectedWorkID = nil
         readerOpen = false
-        Task { await loadAuthorWorks(page: 1) }
+
+        // Load cached works from DB by author name
+        let cached = appState.bridge.getWorksByAuthor(username: username)
+        if !cached.isEmpty {
+            let works = cached.map(AppState.workFromSummary)
+            for work in works { appState.fetchedWorks[work.id] = work }
+            authorWorksList = works
+            return
+        }
+
+        // No cache — fetch from AO3
+        authorWorksList = []
+        isLoadingAuthor = true
+        Task { await fetchAuthorWorks(username: username) }
     }
 
-    func loadMoreAuthorWorks() {
-        Task { await loadAuthorWorks(page: authorPage + 1) }
+    func refreshAuthorWorks() {
+        guard let username = authorUsername else { return }
+        isLoadingAuthor = true
+        authorError = nil
+        Task { await fetchAuthorWorks(username: username) }
     }
 
     @MainActor
-    private func loadAuthorWorks(page: UInt32) async {
-        guard let username = authorUsername, !isLoadingAuthor else { return }
-        isLoadingAuthor = true
-        authorError = nil
+    private func fetchAuthorWorks(username: String) async {
         do {
             let summaries = try await appState.retryOnTimeout(task: authorTask, using: appState.bridge) {
-                try await self.appState.bridge.fetchAuthorWorks(username: username, page: page)
+                try await self.appState.bridge.fetchAuthorWorks(username: username, page: 1)
             }
-            let newWorks = summaries.map(AppState.workFromSummary)
-            // Register in the shared lookup so detail/reader resolve these works.
-            for work in newWorks { appState.fetchedWorks[work.id] = work }
-            if page == 1 {
-                authorWorksList = newWorks
-            } else {
-                let existing = Set(authorWorksList.map(\.id))
-                authorWorksList.append(contentsOf: newWorks.filter { !existing.contains($0.id) })
+            let works = summaries.map(AppState.workFromSummary)
+            for work in works { appState.fetchedWorks[work.id] = work }
+            if authorUsername == username {
+                authorWorksList = works
             }
-            authorPage = page
         } catch {
             if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
                 authorError = error.localizedDescription
             }
         }
         isLoadingAuthor = false
+    }
+
+    func closeAuthorWorks() {
+        authorUsername = nil
+        authorWorksList = []
+        authorError = nil
+        selectedWorkID = nil
     }
 
     // MARK: - Lists
@@ -431,7 +481,10 @@ final class MacAppModel {
 
     /// Authors the user follows (from AO3 subscriptions).
     var followedAuthors: [USubscription] {
-        appState.subscriptions.filter { $0.subType.lowercased().contains("user") }
+        appState.subscriptions.filter {
+            let t = $0.subType.lowercased()
+            return t.contains("user") || t.contains("author")
+        }
     }
 
     struct LocalStats {

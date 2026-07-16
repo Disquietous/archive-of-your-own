@@ -21,8 +21,16 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private var eyeButton: ToolButton?
     private var refreshButton: ToolButton?
     private var loadMoreButton: ToolButton?
-    private var authorBackButton: ToolButton?
-    private var authorMoreButton: ToolButton?
+
+    private var statusBar: NSView!
+    private var statusLabel: NSTextField!
+    private var statusSpinner: NSProgressIndicator!
+    private var statusBarHeight: NSLayoutConstraint!
+
+    private var inboxPrevButton: ToolButton?
+    private var inboxNextButton: ToolButton?
+    private var inboxPageField: NSTextField?
+    private var inboxPageContainer: NSView?
 
     private var works: [Work] = []
     private var displayedSubscriptions: [USubscription] = []
@@ -73,10 +81,48 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         contentStack.spacing = 0
         contentStack.distribution = .fill
 
+        let bar = NSView()
+        bar.wantsLayer = true
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: "")
+        label.font = MacFont.ui(11.5, weight: .medium)
+        label.textColor = theme.nsInk3
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(spinner)
+        bar.addSubview(label)
+        let sep = NSView()
+        sep.wantsLayer = true
+        sep.layer?.backgroundColor = theme.nsLine.cgColor
+        sep.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(sep)
+        NSLayoutConstraint.activate([
+            spinner.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            spinner.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: spinner.trailingAnchor, constant: 6),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: bar.trailingAnchor, constant: -12),
+            label.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            sep.topAnchor.constraint(equalTo: bar.topAnchor),
+            sep.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            sep.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            sep.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        statusBar = bar
+        statusLabel = label
+        statusSpinner = spinner
+        let barH = bar.heightAnchor.constraint(equalToConstant: 0)
+        statusBarHeight = barH
+
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         contentStack.translatesAutoresizingMaskIntoConstraints = false
+        bar.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar)
         root.addSubview(contentStack)
+        root.addSubview(bar)
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: root.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -84,7 +130,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             contentStack.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentStack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            contentStack.bottomAnchor.constraint(equalTo: bar.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            barH,
         ])
         view = root
 
@@ -119,26 +169,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             showVariant(SearchFormView(theme: theme, appState: appState, model: model), section: section)
 
         case .authorWorks:
-            works = model.works(for: .authorWorks)
-            toolbar.configure(title: model.authorUsername ?? "Author",
-                              sub: model.isLoadingAuthor && works.isEmpty ? "Loading…" : "\(works.count) works")
-            toolbar.setLeading([authorBack()])
-            toolbar.setTrailing([authorLoadMore()])
-            let authorOverlay: AnyView?
-            if works.isEmpty {
-                if model.isLoadingAuthor {
-                    authorOverlay = AnyView(LoadingStateMac(theme: theme, message: "Fetching works by \(model.authorUsername ?? "author")…"))
-                } else if let error = model.authorError {
-                    authorOverlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                          title: "Couldn’t load author", message: error))
-                } else {
-                    authorOverlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
-                                                          title: "No works", message: "This author has no visible works."))
-                }
-            } else {
-                authorOverlay = nil
-            }
-            showWorksContent(section: section, header: nil, overlay: authorOverlay)
+            break
 
         case .reading, .history, .bookmarks, .downloads:
             works = model.works(for: section)
@@ -154,14 +185,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         case .subscriptions:
             if model.subscriptionSubTab == "new" {
                 works = model.works(for: .subscriptions)
-                let checkStatus = appState.subscriptionCheckTask.statusMessage
                 let checkSub: String
-                if appState.isCheckingSubscriptions {
-                    let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
-                    checkSub = "Checking… (\(done)/\(appState.subscriptionCheckTotal))"
-                } else if let status = checkStatus, !status.isEmpty {
-                    checkSub = status
-                } else if works.isEmpty {
+                if works.isEmpty {
                     checkSub = "No updates"
                 } else {
                     checkSub = "\(works.count) updated"
@@ -183,12 +208,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 toolbar.setLeading([subscriptionTabButtons()])
                 toolbar.setTrailing(buttons)
                 let overlay: AnyView?
-                if appState.isCheckingSubscriptions {
-                    let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
-                    overlay = AnyView(LoadingStateMac(theme: theme,
-                        message: "Checking subscriptions…",
-                        detail: "Checked \(done) of \(appState.subscriptionCheckTotal)"))
-                } else if works.isEmpty {
+                if !appState.isCheckingSubscriptions && works.isEmpty {
+                    let checkStatus = appState.subscriptionCheckTask.statusMessage
                     overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
                                                     title: "Nothing new",
                                                     message: checkStatus ?? "Updates from works and authors you follow appear here."))
@@ -220,11 +241,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                     Task { await self.appState.loadSubscriptions(force: true) }
                 }])
                 let overlay: AnyView?
-                if appState.isLoadingSubscriptions {
-                    overlay = AnyView(LoadingStateMac(theme: theme, message: "Refreshing subscriptions from AO3…",
-                                                     detail: "This may take a moment over Tor.")
-                        .background(theme.bg))
-                } else if let err = appState.subscriptionError, !err.isEmpty {
+                if let err = appState.subscriptionError, !err.isEmpty, !appState.isLoadingSubscriptions {
                     overlay = AnyView(VStack(spacing: 12) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 28, weight: .light))
@@ -252,6 +269,20 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 showSubscriptionsContent(section: section, overlay: overlay)
             }
 
+        case .inbox:
+            let sub: String
+            if appState.isLoadingInbox && appState.inboxMessages.isEmpty {
+                sub = "Loading…"
+            } else if appState.inboxUnreadCount > 0 {
+                sub = "\(appState.inboxUnreadCount) unread"
+            } else {
+                sub = "\(appState.inboxMessages.count) messages"
+            }
+            toolbar.configure(title: "Inbox", sub: sub)
+            toolbar.setLeading([])
+            toolbar.setTrailing(inboxToolbarButtons())
+            showVariant(InboxView(theme: theme, appState: appState), section: section)
+
         case .fandoms:
             toolbar.configure(title: "Fandoms", sub: "\(model.followedFandoms.count) followed")
             toolbar.setLeading([])
@@ -271,6 +302,68 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             showVariant(StatsView(theme: theme, model: model), section: section)
         }
         renderedSection = section
+        updateStatusBar(section: section)
+    }
+
+    private func updateStatusBar(section: MacAppModel.Section) {
+        var message: String?
+        var active = false
+
+        switch section {
+        case .subscriptions where model.subscriptionSubTab == "new":
+            if appState.subscriptionCheckTask.isReconnecting,
+               let msg = appState.subscriptionCheckTask.statusMessage {
+                message = msg
+                active = true
+            } else if appState.isCheckingSubscriptions {
+                let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
+                message = "Checking \(done) of \(appState.subscriptionCheckTotal)"
+                active = true
+            } else if let msg = appState.subscriptionCheckTask.statusMessage, !msg.isEmpty {
+                message = msg
+            }
+        case .subscriptions where model.subscriptionSubTab == "following":
+            if appState.isLoadingSubscriptions {
+                message = "Refreshing subscriptions from AO3…"
+                active = true
+            }
+        case .inbox:
+            if appState.isCheckingInbox {
+                message = "Checking for new messages…"
+                active = true
+            } else if appState.isLoadingInbox {
+                message = "Loading inbox…"
+                active = true
+            } else if let msg = appState.inboxCheckTask.statusMessage, !msg.isEmpty {
+                message = msg
+            }
+        case .browse:
+            if appState.isBrowsing {
+                message = "Fetching latest works…"
+                active = true
+            }
+        default:
+            break
+        }
+
+        if let message {
+            statusLabel.stringValue = message
+            statusLabel.textColor = theme.nsInk3
+            statusBar.layer?.backgroundColor = theme.nsSurface.cgColor
+            statusBarHeight.constant = 26
+            statusBar.isHidden = false
+            if active {
+                statusSpinner.startAnimation(nil)
+                statusSpinner.isHidden = false
+            } else {
+                statusSpinner.stopAnimation(nil)
+                statusSpinner.isHidden = true
+            }
+        } else {
+            statusBarHeight.constant = 0
+            statusBar.isHidden = true
+            statusSpinner.stopAnimation(nil)
+        }
     }
 
     private func sectionMeta(for section: MacAppModel.Section) -> (title: String, sub: String, empty: (String, String, String)) {
@@ -355,23 +448,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         return button
     }
 
-    private func authorBack() -> ToolButton {
-        let button = authorBackButton ?? ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to authors") { [weak self] in
-            self?.model.goSection(.authors)
-        }
-        authorBackButton = button
-        return button
-    }
-
-    private func authorLoadMore() -> ToolButton {
-        let button = authorMoreButton ?? ToolButton(theme: theme, symbol: "plus.rectangle.on.rectangle", tooltip: "Load more works") { [weak self] in
-            self?.model.loadMoreAuthorWorks()
-        }
-        authorMoreButton = button
-        button.isHidden = model.authorWorksList.isEmpty
-        return button
-    }
-
     private func subscriptionTabButtons() -> NSView {
         let seg = NSSegmentedControl(labels: ["What's New", "Following"], trackingMode: .selectOne,
                                      target: self, action: #selector(subscriptionTabChanged(_:)))
@@ -410,6 +486,76 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             guard let self, response == .alertFirstButtonReturn else { return }
             model.removeAllCurrentlyReading()
         }
+    }
+
+    private func inboxToolbarButtons() -> [NSView] {
+        let prev = inboxPrevButton ?? ToolButton(theme: theme, symbol: "chevron.left", tooltip: "Previous page") { [weak self] in
+            guard let self else { return }
+            let page = self.appState.inboxPage
+            guard page > 1 else { return }
+            self.appState.loadCachedInbox(page: page - 1)
+        }
+        inboxPrevButton = prev
+        prev.isEnabled = appState.inboxPage > 1
+
+        let next = inboxNextButton ?? ToolButton(theme: theme, symbol: "chevron.right", tooltip: "Next page") { [weak self] in
+            guard let self else { return }
+            guard self.appState.inboxHasMore else { return }
+            self.appState.loadCachedInbox(page: self.appState.inboxPage + 1)
+        }
+        inboxNextButton = next
+        next.isEnabled = appState.inboxHasMore
+
+        let container: NSView
+        if let existing = inboxPageContainer {
+            container = existing
+        } else {
+            let label = NSTextField(labelWithString: "Page")
+            label.font = MacFont.ui(11, weight: .medium)
+            label.textColor = theme.nsInk3
+            label.translatesAutoresizingMaskIntoConstraints = false
+
+            let field = NSTextField()
+            field.font = MacFont.ui(12, weight: .medium)
+            field.alignment = .center
+            field.isBordered = true
+            field.isBezeled = true
+            field.bezelStyle = .roundedBezel
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.target = self
+            field.action = #selector(inboxPageFieldCommitted)
+            NSLayoutConstraint.activate([
+                field.widthAnchor.constraint(equalToConstant: 36),
+                field.heightAnchor.constraint(equalToConstant: 22),
+            ])
+            inboxPageField = field
+
+            let stack = NSStackView(views: [label, field])
+            stack.orientation = .horizontal
+            stack.spacing = 4
+            stack.alignment = .centerY
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            inboxPageContainer = stack
+            container = stack
+        }
+
+        inboxPageField?.stringValue = "\(appState.inboxPage)"
+
+        let refresh = ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for new messages") { [weak self] in
+            guard let self else { return }
+            Task { await self.appState.checkInbox() }
+        }
+
+        return [prev, container, next, refresh]
+    }
+
+    @objc private func inboxPageFieldCommitted() {
+        guard let text = inboxPageField?.stringValue,
+              let page = UInt32(text), page >= 1 else {
+            inboxPageField?.stringValue = "\(appState.inboxPage)"
+            return
+        }
+        appState.loadCachedInbox(page: page)
     }
 
     private func chipsHeader() -> NSView? {
@@ -642,7 +788,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let sub = displayedSubscriptions[row]
             let type = sub.subType.lowercased()
             if type.contains("author") || type.contains("user") {
-                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name)
+                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name, subType: "author")
             } else if type.contains("work") {
                 model.selectWork(sub.id)
             }

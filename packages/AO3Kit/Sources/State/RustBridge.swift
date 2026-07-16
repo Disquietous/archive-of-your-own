@@ -306,6 +306,17 @@ final class RustBridge {
         circuitHops = app.getCircuitHops()
     }
 
+    func newCircuit() async -> Bool {
+        guard let app else { return false }
+        do {
+            try await app.newCircuit()
+            circuitHops = app.getCircuitHops()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func checkCircuitHealth() async -> Bool {
         guard let app else { return false }
         return (try? await app.checkCircuitHealth()) ?? false
@@ -723,6 +734,18 @@ final class RustBridge {
         (try? app?.getPersistedSubscriptions()) ?? []
     }
 
+    func saveSubscriptionWorks(subType: String, subId: String, workIds: [UInt64]) {
+        try? app?.saveSubscriptionWorks(subType: subType, subId: subId, workIds: workIds)
+    }
+
+    func getSubscriptionWorks(subType: String, subId: String) -> [UWorkSummary] {
+        (try? app?.getSubscriptionWorks(subType: subType, subId: subId)) ?? []
+    }
+
+    func getWorksByAuthor(username: String) -> [UWorkSummary] {
+        (try? app?.getWorksByAuthor(username: username)) ?? []
+    }
+
     func startSubscriptionCheck() throws -> UInt32 {
         guard let app else { throw BridgeError.notInitialized }
         return try app.startSubscriptionCheck()
@@ -757,6 +780,16 @@ final class RustBridge {
     func fetchInbox(username: String, page: UInt32) async throws -> String {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchInbox(username: username, page: page)
+    }
+
+    func getCachedInbox(page: UInt32) -> String {
+        guard let app else { return "{}" }
+        return (try? app.getCachedInbox(page: page)) ?? "{}"
+    }
+
+    func fetchCommentThread(workUrl: String, commentId: UInt64) async throws -> String {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchCommentThread(workUrl: workUrl, commentId: commentId)
     }
 
     func getNotifications() -> [UNotification] {

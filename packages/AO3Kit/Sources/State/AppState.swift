@@ -30,6 +30,21 @@ final class AppState {
 
     // Inbox
     var inboxUnreadCount: Int = 0
+    var inboxMessages: [InboxItem] = []
+    var isLoadingInbox = false
+    var inboxError: String?
+    var inboxPage: UInt32 = 1
+    var inboxHasMore = false
+    let inboxTask = NetworkTask()
+    var isCheckingInbox = false
+    let inboxCheckTask = NetworkTask()
+    var inboxCheckTotal: Int = 0
+
+    // Inbox thread (3rd pane)
+    var selectedInboxItem: InboxItem?
+    var inboxThread: [InboxThreadComment] = []
+    var isLoadingThread = false
+    var threadError: String?
 
     // Subscriptions
     var subscriptions: [USubscription] = []
@@ -60,10 +75,13 @@ final class AppState {
     var cloudflareError: String?
     var torConnectCancelled = false
     var torConnectFailed = false
+    var showTorConnectOverlay = false
     var needsReauth = false
 
     func ensureAO3Login() async {
-        guard !bridge.networkBlocked else { return }
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
         bridge.writeLog(level: "INFO", tag: "auth", message: "Ensuring AO3 login")
         let loggedIn = await bridge.ensureLoggedIn()
         bridge.writeLog(level: "INFO", tag: "auth", message: "Login result: \(loggedIn)")
@@ -120,6 +138,46 @@ final class AppState {
         }
     }
 
+    func rotateCircuit() async {
+        bridge.saveSessionCookies()
+
+        torConnectCancelled = false
+        torConnectFailed = false
+        var attempts = 0
+
+        while !torConnectCancelled {
+            let ok = await bridge.newCircuit()
+            if !ok {
+                bridge.writeLog(level: "WARN", tag: "circuit", message: "new_circuit() failed, falling back to full reconnect")
+                await connectTor()
+                return
+            }
+
+            attempts += 1
+            isTestingCircuit = true
+            circuitAttempt = attempts
+            let healthy = await bridge.checkCircuitHealth()
+            isTestingCircuit = false
+
+            if torConnectCancelled { break }
+
+            if healthy {
+                bridge.writeLog(level: "INFO", tag: "circuit", message: "New circuit passed health check on attempt \(attempts)")
+                await resolveCloudflare()
+                bridge.restoreSessionCookies()
+                torConnectFailed = false
+                return
+            }
+
+            bridge.writeLog(level: "WARN", tag: "circuit", message: "New circuit failed health check (\(attempts)), trying another")
+        }
+
+        if torConnectCancelled {
+            bridge.writeLog(level: "INFO", tag: "circuit", message: "Circuit search cancelled by user after \(attempts) attempts")
+            torConnectFailed = true
+        }
+    }
+
     func cancelTorConnect() {
         torConnectCancelled = true
         isTestingCircuit = false
@@ -131,6 +189,20 @@ final class AppState {
         torConnectFailed = false
         bridge.writeLog(level: "WARN", tag: "health", message: "User chose to proceed with untested circuit")
         await resolveCloudflare()
+    }
+
+    func ensureTorConnected() async -> Bool {
+        guard bridge.torRequired else { return true }
+        if bridge.torStatus.isConnected { return true }
+
+        showTorConnectOverlay = true
+        await connectTor()
+
+        if bridge.torStatus.isConnected {
+            showTorConnectOverlay = false
+            return true
+        }
+        return false
     }
 
     /// Load AO3 in a hidden WKWebView routed through our Tor SOCKS proxy to
@@ -204,7 +276,7 @@ final class AppState {
         // Intentionally downloaded works
         downloadedWorkIDs = Set(bridge.getDownloadedIds().map { String($0) })
 
-        // Purge chapters for works that aren't downloaded or currently being read
+        // Purge chapters for works that aren't downloaded or in currently reading
         bridge.purgeStaleChapters()
 
         // Load reading lists
@@ -574,7 +646,6 @@ final class AppState {
         lastReadID = id
         if let workId = UInt64(id) {
             bridge.addToHistory(workId)
-            bridge.setCurrentWork(workId)
             bridge.purgeStaleChapters()
         }
     }
@@ -671,42 +742,170 @@ final class AppState {
         return error.localizedDescription
     }
 
+    var subscriptionCheckFailed: Int = 0
+
     func checkSubscriptions() async {
         guard ao3Username != nil else { return }
         guard !isCheckingSubscriptions else { return }
+
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
+
         isCheckingSubscriptions = true
         subscriptionCheckTask.reset()
+        subscriptionCheckFailed = 0
 
         do {
             let total = try bridge.startSubscriptionCheck()
             subscriptionCheckTotal = Int(total)
             subscriptionCheckRemaining = Int(total)
 
+            var consecutiveRetries = 0
             while !subscriptionCheckTask.isCancelled {
                 guard let result = try await bridge.checkNextSubscription() else { break }
                 subscriptionCheckRemaining = Int(result.remaining)
-                if result.changed {
-                    loadNewWorks()
-                    reloadCachedWorks()
+
+                if let error = result.error {
+                    let isRetryable = error.lowercased().contains("timeout") || error.contains("HTTP 403")
+                    if isRetryable && consecutiveRetries < 3 {
+                        consecutiveRetries += 1
+                        let reason = error.lowercased().contains("timeout") ? "Timed out" : "Blocked"
+                        subscriptionCheckTask.isReconnecting = true
+                        subscriptionCheckTask.statusMessage = "\(reason). Getting new circuit… (\(consecutiveRetries)/3)"
+                        await rotateCircuit()
+                        if subscriptionCheckTask.isCancelled { break }
+                        subscriptionCheckTask.isReconnecting = false
+                        subscriptionCheckTask.statusMessage = nil
+                        continue
+                    }
+                    subscriptionCheckFailed += 1
+                    consecutiveRetries = 0
+                } else {
+                    consecutiveRetries = 0
+                    if result.changed {
+                        loadNewWorks()
+                        reloadCachedWorks()
+                    }
                 }
             }
 
-            // Also check inbox
-            if !subscriptionCheckTask.isCancelled, let username = ao3Username {
-                let inboxNotifications = try await bridge.checkInbox(username: username)
-                if !inboxNotifications.isEmpty {
-                    inboxUnreadCount += inboxNotifications.count
-                }
+            if !subscriptionCheckTask.isCancelled {
                 loadNotifications()
             }
         } catch {
             if !subscriptionCheckTask.isCancelled {
-                subscriptionCheckTask.statusMessage = "Check failed: \(error.localizedDescription)"
+                subscriptionCheckTask.statusMessage = "Check failed: \(Self.readableError(error))"
             }
+        }
+        if subscriptionCheckFailed > 0 {
+            subscriptionCheckTask.statusMessage = "\(subscriptionCheckFailed) subscription\(subscriptionCheckFailed == 1 ? "" : "s") failed to fetch"
         }
         isCheckingSubscriptions = false
         subscriptionCheckTotal = 0
         subscriptionCheckRemaining = 0
+    }
+
+    func loadCachedInbox(page: UInt32 = 1) {
+        let json = bridge.getCachedInbox(page: page)
+        guard let data = json.data(using: .utf8),
+              let response = try? JSONDecoder().decode(InboxResponse.self, from: data) else { return }
+        inboxMessages = response.items
+        inboxUnreadCount = Int(response.unreadCount)
+        inboxHasMore = response.hasNextPage
+        inboxPage = page
+    }
+
+    func loadInbox(page: UInt32 = 1) async {
+        guard let username = ao3Username else {
+            inboxError = "Sign in to AO3 first"
+            return
+        }
+        guard !isLoadingInbox else { return }
+
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
+
+        isLoadingInbox = true
+        inboxError = nil
+        do {
+            let json = try await retryOnTimeout(task: inboxTask, using: bridge) {
+                try await self.bridge.fetchInbox(username: username, page: page)
+            }
+            guard let data = json.data(using: .utf8),
+                  let response = try? JSONDecoder().decode(InboxResponse.self, from: data) else {
+                inboxError = "Couldn't parse inbox data"
+                isLoadingInbox = false
+                return
+            }
+            inboxMessages = response.items
+            inboxUnreadCount = Int(response.unreadCount)
+            inboxHasMore = response.hasNextPage
+            inboxPage = page
+        } catch {
+            if !inboxTask.isCancelled {
+                inboxError = Self.readableError(error)
+            }
+        }
+        isLoadingInbox = false
+    }
+
+    func checkInbox() async {
+        guard let username = ao3Username else { return }
+        guard !isCheckingInbox else { return }
+
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
+
+        isCheckingInbox = true
+        inboxCheckTask.reset()
+        do {
+            _ = try await retryOnTimeout(task: inboxCheckTask, using: bridge) {
+                try await self.bridge.checkInbox(username: username)
+            }
+            loadCachedInbox(page: inboxPage)
+        } catch {
+            if !inboxCheckTask.isCancelled {
+                inboxCheckTask.statusMessage = "Inbox check failed: \(Self.readableError(error))"
+            }
+        }
+        isCheckingInbox = false
+    }
+
+    func selectInboxMessage(_ item: InboxItem) {
+        selectedInboxItem = item
+        inboxThread = []
+        threadError = nil
+        isLoadingThread = true
+        Task { @MainActor in
+            do {
+                let json = try await retryOnTimeout(task: inboxTask, using: bridge) {
+                    try await self.bridge.fetchCommentThread(workUrl: item.workUrl, commentId: item.commentId)
+                }
+                guard let data = json.data(using: .utf8),
+                      let response = try? JSONDecoder().decode(InboxThreadResponse.self, from: data) else {
+                    threadError = "Couldn't parse thread data"
+                    isLoadingThread = false
+                    return
+                }
+                if let thread = response.thread {
+                    inboxThread = [thread]
+                } else {
+                    threadError = "Comment thread not found"
+                }
+            } catch {
+                threadError = Self.readableError(error)
+            }
+            isLoadingThread = false
+        }
+    }
+
+    func clearInboxSelection() {
+        selectedInboxItem = nil
+        inboxThread = []
+        threadError = nil
     }
 
     func loadNewWorks() {
@@ -754,7 +953,9 @@ final class AppState {
     var lastSearchValues: [String] = []
 
     func browseLatestWorks(force: Bool = false) async {
-        guard !bridge.networkBlocked else { return }
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
         guard !isBrowsing else { return }
 
         // Load from cache on first page if not forcing

@@ -210,7 +210,27 @@ fn extract_blurb_summary(blurb: &ElementRef) -> String {
 
 fn extract_blurb_date(blurb: &ElementRef) -> String {
     let s = sel("p.datetime");
-    blurb.select(&s).next().map(|el| text(&el)).unwrap_or_default()
+    let raw = blurb.select(&s).next().map(|el| text(&el)).unwrap_or_default();
+    normalize_ao3_date(&raw)
+}
+
+const AO3_DATE_FORMATS: &[&str] = &[
+    "%d %b %Y",  // "15 Jul 2026" — blurb listings
+    "%Y-%m-%d",  // "2026-07-15"  — work page stats
+    "%b %d, %Y", // "Jul 15, 2026" — occasionally seen
+];
+
+pub fn normalize_ao3_date(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    for fmt in AO3_DATE_FORMATS {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(raw, fmt) {
+            return d.format("%Y-%m-%d").to_string();
+        }
+    }
+    raw.to_string()
 }
 
 fn extract_stat_text(blurb: &ElementRef, selector: &str) -> String {
@@ -333,10 +353,8 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
     let (word_count, chapter_count, total_chapters, kudos, hits, bookmarks, comments) =
         extract_work_page_stats(&doc);
     let language = extract_work_page_stat(&doc, "dd.language");
-    let date_published = extract_work_page_stat(&doc, "dd.published");
-    // dd.status holds the "Updated:"/"Completed:" date; single-chapter works
-    // omit it, in which case the publish date is also the last-updated date.
-    let mut date_updated = extract_work_page_stat(&doc, "dd.status");
+    let date_published = normalize_ao3_date(&extract_work_page_stat(&doc, "dd.published"));
+    let mut date_updated = normalize_ao3_date(&extract_work_page_stat(&doc, "dd.status"));
     if date_updated.is_empty() {
         date_updated = date_published.clone();
     }
