@@ -6,7 +6,7 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks
+        case search, subscriptionWorks, authorWorks
     }
 
     /// What this listing shows; set by the pane before presenting.
@@ -69,7 +69,11 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
 
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
-        works = context == .search ? model.works(for: .search) : model.filteredSubscriptionWorks
+        switch context {
+        case .search: works = model.works(for: .search)
+        case .subscriptionWorks: works = model.filteredSubscriptionWorks
+        case .authorWorks: works = model.authorWorksList
+        }
 
         overlayHost?.removeFromSuperview()
         overlayHost = nil
@@ -110,6 +114,23 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
                                                 title: "No works",
                                                 message: "No visible works for this subscription."))
+            } else {
+                overlay = nil
+            }
+        case .authorWorks:
+            if model.isLoadingAuthor && works.isEmpty {
+                let who = model.authorUsername ?? "author"
+                overlay = AnyView(LoadingStateMac(theme: theme,
+                                                  message: "Fetching works by \(who)…",
+                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  otherActivity: otherActivity(excluding: "Fetching \(who)")))
+            } else if let error = model.authorError, works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                                title: "Couldn’t load works", message: error))
+            } else if works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
+                                                title: "No works",
+                                                message: "No visible works for this author."))
             } else {
                 overlay = nil
             }

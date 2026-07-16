@@ -9,6 +9,7 @@ final class MainWindowController: NSWindowController {
     private var splitController: MainSplitViewController?
     private var showingGate: Bool?
     private var torAutoStarted = false
+    private var torOverlayView: NSView?
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -36,8 +37,11 @@ final class MainWindowController: NSWindowController {
             let needsGate = !bridge.isInitialized || bridge.showingRecoveryKey
             DispatchQueue.main.async { self.apply(gate: needsGate) }
         }
-        // Session expiry surfaces in the sidebar's state-hub pill (amber
-        // "Session expired" line) with inline re-auth in its popover.
+        ObservationRelay.track { [weak self] in
+            guard let self else { return }
+            let show = appState.showTorConnectOverlay
+            DispatchQueue.main.async { self.applyTorOverlay(show: show) }
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -66,6 +70,30 @@ final class MainWindowController: NSWindowController {
             autoConnectTorIfEnabled()
         }
         window.setFrame(frame, display: true)
+    }
+
+    private func applyTorOverlay(show: Bool) {
+        guard let window else { return }
+        if show {
+            guard torOverlayView == nil else { return }
+            let hosting = NSHostingController(
+                rootView: TorConnectOverlayView(theme: theme, appState: appState))
+            let overlay = hosting.view
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+            window.contentView?.addSubview(overlay)
+            if let parent = window.contentView {
+                NSLayoutConstraint.activate([
+                    overlay.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
+                    overlay.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
+                    overlay.topAnchor.constraint(equalTo: parent.topAnchor),
+                    overlay.bottomAnchor.constraint(equalTo: parent.bottomAnchor),
+                ])
+            }
+            torOverlayView = overlay
+        } else {
+            torOverlayView?.removeFromSuperview()
+            torOverlayView = nil
+        }
     }
 
     private func autoConnectTorIfEnabled() {

@@ -28,7 +28,7 @@ final class ReadPaneViewController: NSViewController {
     private var settingsPopover: NSPopover?
 
     private enum Mode: Equatable {
-        case empty, searchResults, subscriptionWorks(String), detail(String), reading(String, Int)
+        case empty, searchResults, subscriptionWorks(String), detail(String), reading(String, Int), inboxThread(UInt64)
     }
 
     private var renderedMode: Mode?
@@ -49,6 +49,7 @@ final class ReadPaneViewController: NSViewController {
     override func loadView() {
         let root = NSView()
         root.wantsLayer = true
+        root.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         backButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to details") { [weak self] in
             self?.model.closeReader()
@@ -92,8 +93,9 @@ final class ReadPaneViewController: NSViewController {
         immersiveExit.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(immersiveExit)
 
+        toolbarTop = toolbar.topAnchor.constraint(equalTo: root.topAnchor)
         NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: root.topAnchor),
+            toolbarTop,
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             container.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
@@ -104,7 +106,7 @@ final class ReadPaneViewController: NSViewController {
             privacyDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             privacyDot.widthAnchor.constraint(equalToConstant: 8),
             privacyDot.heightAnchor.constraint(equalToConstant: 8),
-            immersiveExit.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
+            immersiveExit.topAnchor.constraint(equalTo: toolbar.topAnchor, constant: 9),
             immersiveExit.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             immersiveExit.widthAnchor.constraint(equalToConstant: 34),
             immersiveExit.heightAnchor.constraint(equalToConstant: 34),
@@ -116,7 +118,11 @@ final class ReadPaneViewController: NSViewController {
         }
     }
 
+    private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
+    private var subscriptionRefreshBtn: ToolButton?
+    private var authorCloseBtn: ToolButton?
+    private var authorRefreshBtn: ToolButton?
 
     private func subscriptionCloseButton() -> ToolButton {
         let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
@@ -126,11 +132,36 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    private func subscriptionRefreshButton() -> ToolButton {
+        let button = subscriptionRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh works") { [weak self] in
+            self?.model.refreshSubscriptionWorks()
+        }
+        subscriptionRefreshBtn = button
+        return button
+    }
+
+    private func authorCloseButton() -> ToolButton {
+        let button = authorCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
+            self?.model.closeAuthorWorks()
+        }
+        authorCloseBtn = button
+        return button
+    }
+
+    private func authorRefreshButton() -> ToolButton {
+        let button = authorRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh works") { [weak self] in
+            self?.model.refreshAuthorWorks()
+        }
+        authorRefreshBtn = button
+        return button
+    }
+
     // MARK: - Render
 
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
+        toolbarTop.constant = model.immersive ? 20 : 0
         privacyDot.layer?.backgroundColor = theme.nsSage.cgColor
         immersiveExit.layer?.backgroundColor = theme.nsSurface.cgColor
         immersiveExit.layer?.borderColor = theme.nsLine.cgColor
@@ -143,8 +174,18 @@ final class ReadPaneViewController: NSViewController {
             toolbar.configure(title: title,
                               sub: model.isLoadingSubscriptionWorks ? "Fetching works…" : "\(model.filteredSubscriptionWorks.count) works")
             toolbar.setLeading([subscriptionCloseButton()])
-            toolbar.setTrailing([])
+            toolbar.setTrailing([subscriptionRefreshButton()])
             show(mode: .subscriptionWorks(title))
+            return
+        }
+
+        // Authors drill-in: an author's works shown in the reading pane.
+        if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
+            toolbar.configure(title: author,
+                              sub: model.isLoadingAuthor ? "Fetching works…" : "\(model.authorWorksList.count) works")
+            toolbar.setLeading([authorCloseButton()])
+            toolbar.setTrailing([authorRefreshButton()])
+            show(mode: .subscriptionWorks(author))
             return
         }
 
@@ -162,6 +203,18 @@ final class ReadPaneViewController: NSViewController {
             return
         }
 
+        if model.section == .inbox, let item = appState.selectedInboxItem {
+            toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
+            toolbar.setLeading([])
+            toolbar.setTrailing([])
+            let mode = Mode.inboxThread(item.commentId)
+            show(mode: mode)
+            if case .inboxThread = renderedMode, let host = detailHost {
+                host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))
+            }
+            return
+        }
+
         guard let work = model.selectedWork else {
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
@@ -173,6 +226,7 @@ final class ReadPaneViewController: NSViewController {
         let reading = model.readerOpen
         let cameFromResults = model.section == .search
             || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
+            || (model.section == .authors && model.authorUsername != nil)
         toolbar.configure(title: reading ? work.title : "Details", sub: nil)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
@@ -205,7 +259,9 @@ final class ReadPaneViewController: NSViewController {
                 resultsController = controller
             }
             resultsController!.context = {
-                if case .subscriptionWorks = mode { return .subscriptionWorks }
+                if case .subscriptionWorks = mode {
+                    return model.section == .authors ? .authorWorks : .subscriptionWorks
+                }
                 return .search
             }()
             pin(resultsController!.view)
@@ -244,6 +300,15 @@ final class ReadPaneViewController: NSViewController {
                 pin(readerController.view)
                 readerController.show(work: work, chapterIndex: chapter)
             }
+
+        case .inboxThread:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))
+            detailHost = host
+            pin(host)
         }
         renderedMode = mode
     }

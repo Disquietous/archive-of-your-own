@@ -25,7 +25,8 @@ final class ReaderViewController: NSViewController {
     private let footer: ReadFooterView
     private var overlayHost: NSHostingView<AnyView>?
 
-    private var columnWidth: NSLayoutConstraint!
+    private var columnCap: NSLayoutConstraint!
+    private var columnFill: NSLayoutConstraint!
     private var work: Work?
     private var chapters: [UChapter]?
     private var chapterIndex = 0
@@ -54,6 +55,7 @@ final class ReaderViewController: NSViewController {
         metaLabel.font = MacFont.ui(12, weight: .semibold)
         titleLabel.font = MacFont.serif(30, weight: .semibold)
         titleLabel.maximumNumberOfLines = 0
+        titleLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         titleRule.wantsLayer = true
 
         textView.isEditable = false
@@ -97,6 +99,7 @@ final class ReaderViewController: NSViewController {
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 0
+        column.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         column.edgeInsets = NSEdgeInsets(top: 46, left: 0, bottom: 120, right: 0)
         [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel,
          nextChapterButton, endNoteBig, endNoteSub].forEach { column.addArrangedSubview($0) }
@@ -120,14 +123,14 @@ final class ReaderViewController: NSViewController {
         let document = FlippedView()
         column.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(column)
-        columnWidth = column.widthAnchor.constraint(equalToConstant: 680)
-        columnWidth.priority = .defaultHigh
+        columnFill = column.widthAnchor.constraint(equalTo: document.widthAnchor, constant: -80)
+        columnCap = column.widthAnchor.constraint(lessThanOrEqualToConstant: 680)
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: document.topAnchor),
             column.bottomAnchor.constraint(equalTo: document.bottomAnchor),
             column.centerXAnchor.constraint(equalTo: document.centerXAnchor),
-            columnWidth,
-            column.widthAnchor.constraint(lessThanOrEqualTo: document.widthAnchor, constant: -80),
+            columnFill,
+            columnCap,
         ])
 
         scrollView.documentView = document
@@ -164,7 +167,7 @@ final class ReaderViewController: NSViewController {
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             // Reading settings that require re-render.
-            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure)
+            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure, model.immersive)
             DispatchQueue.main.async { self.renderChapter() }
         }
     }
@@ -266,7 +269,8 @@ final class ReaderViewController: NSViewController {
     private func renderChapter() {
         guard let work else { return }
         let bodySize = CGFloat(theme.fontSize)
-        columnWidth.constant = CGFloat(theme.measure)
+        columnCap.isActive = !model.immersive
+        columnCap.constant = CGFloat(theme.measure)
         view.layer?.backgroundColor = theme.nsBg.cgColor
 
         let totalLabel = work.complete ? String(work.totalChapters) : "?"

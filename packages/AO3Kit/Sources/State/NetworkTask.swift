@@ -22,7 +22,10 @@ final class NetworkTask {
 extension AppState {
     func retryOnTimeout<T>(task: NetworkTask, using bridge: RustBridge, _ operation: () async throws -> T) async throws -> T {
         if bridge.networkBlocked {
-            throw Ao3Error.Network(message: "Tor is enabled in settings but not connected. Connect via Tor or disable it in Settings.")
+            let connected = await ensureTorConnected()
+            if !connected {
+                throw Ao3Error.Network(message: "Tor connection failed. Try again or disable Tor in Settings.")
+            }
         }
         task.reset()
         var sessionRetried = false
@@ -64,7 +67,7 @@ extension AppState {
                     if bridge.torStatus.isConnected {
                         task.isReconnecting = true
                         task.statusMessage = "Timed out. Getting new circuit… (\(timeoutCount)/3)"
-                        await connectTor()
+                        await rotateCircuit()
                         if task.isCancelled { throw error }
                         task.isReconnecting = false
                         task.statusMessage = nil
@@ -84,7 +87,7 @@ extension AppState {
                     if bridge.torStatus.isConnected {
                         task.isReconnecting = true
                         task.statusMessage = "Blocked by archive protection. Getting new circuit… (\(blockedCount)/3)"
-                        await connectTor()
+                        await rotateCircuit()
                         if task.isCancelled { throw error }
                         task.isReconnecting = false
                         task.statusMessage = nil

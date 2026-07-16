@@ -320,6 +320,7 @@ pub struct USubscriptionCheckResult {
     pub name: String,
     pub changed: bool,
     pub remaining: u32,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -706,11 +707,13 @@ impl AO3App {
 
     pub async fn fetch_author_works(&self, username: String, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let progress = self.register_progress("author_works");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
             let works = c.fetch_author_works(&username, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.save_work(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("author_works");
@@ -1133,11 +1136,7 @@ impl AO3App {
 
     pub fn purge_stale_chapters(&self) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        let current = storage.get_state("current_work_id")
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse::<u64>().ok());
-        storage.purge_non_retained_chapters(current).map_err(AO3Error::from)
+        storage.purge_non_retained_chapters().map_err(AO3Error::from)
     }
 
     // -- Saved searches --
@@ -1573,6 +1572,23 @@ impl AO3App {
         Ok(rows.into_iter().map(|(t, id, name)| USubscription { sub_type: t, id, name }).collect())
     }
 
+    pub fn save_subscription_works(&self, sub_type: String, sub_id: String, work_ids: Vec<u64>) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.save_subscription_works(&sub_type, &sub_id, &work_ids).map_err(AO3Error::from)
+    }
+
+    pub fn get_subscription_works(&self, sub_type: String, sub_id: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let works = s.get_subscription_works(&sub_type, &sub_id).map_err(AO3Error::from)?;
+        Ok(works.into_iter().map(UWorkSummary::from).collect())
+    }
+
+    pub fn get_works_by_author(&self, username: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let works = s.get_works_by_author(&username).map_err(AO3Error::from)?;
+        Ok(works.into_iter().map(UWorkSummary::from).collect())
+    }
+
     // -- Sequential subscription check queue --
 
     pub fn start_subscription_check(&self) -> Result<u32, AO3Error> {
@@ -1647,6 +1663,7 @@ impl AO3App {
                 "series" => format!("{base}/series/{sub_id}"),
                 _ => return Ok(Some(USubscriptionCheckResult {
                     sub_type, sub_id, name: sub_name, changed: false, remaining,
+                    error: Some(format!("Unknown subscription type")),
                 })),
             };
 
@@ -1654,9 +1671,31 @@ impl AO3App {
             let c = client.read().await;
             let html = match c.fetch_with_progress(&url, 30, None).await {
                 Ok(h) => h,
-                Err(_) => return Ok(Some(USubscriptionCheckResult {
-                    sub_type, sub_id, name: sub_name, changed: false, remaining,
-                })),
+                Err(e) => {
+                    let msg = format!("{e}");
+                    log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
+                    drop(c);
+
+                    let retryable = msg.to_lowercase().contains("timeout") || msg.contains("HTTP 403");
+                    if retryable {
+                        let s = storage.lock().await;
+                        if let Ok(Some(json)) = s.get_check_queue() {
+                            if let Ok(mut q) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                                q.insert(0, serde_json::json!({
+                                    "sub_type": &sub_type,
+                                    "sub_id": &sub_id,
+                                    "name": &sub_name,
+                                }));
+                                let _ = s.set_check_queue(&serde_json::to_string(&q).unwrap_or_default());
+                            }
+                        }
+                    }
+                    return Ok(Some(USubscriptionCheckResult {
+                        sub_type, sub_id, name: sub_name, changed: false,
+                        remaining: if retryable { remaining + 1 } else { remaining },
+                        error: Some(msg),
+                    }));
+                }
             };
             drop(c);
 
@@ -1686,7 +1725,8 @@ impl AO3App {
             // Diff against snapshot
             let s = storage.lock().await;
             let old_date = s.get_subscription_snapshot(&sub_type, &sub_id)
-                .unwrap_or(None);
+                .unwrap_or(None)
+                .map(|d| crate::parser::normalize_ao3_date(&d));
             let changed = if newest_date.is_empty() {
                 false
             } else if let Some(ref old) = old_date {
@@ -1696,15 +1736,19 @@ impl AO3App {
             };
 
             // Cache works and mark new/updated ones for the What's New feed
+            for w in &parsed_works {
+                let _ = s.save_work(w);
+            }
+            let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+            if !all_ids.is_empty() {
+                let _ = s.save_subscription_works(&sub_type, &sub_id, &all_ids);
+            }
             if changed {
                 let old_ref = old_date.as_deref().unwrap_or("");
                 let new_ids: Vec<u64> = parsed_works.iter()
                     .filter(|w| w.date_updated.as_str() > old_ref)
                     .map(|w| w.id)
                     .collect();
-                for w in &parsed_works {
-                    let _ = s.save_work(w);
-                }
                 if !new_ids.is_empty() {
                     let _ = s.add_new_work_ids(&new_ids);
                 }
@@ -1722,6 +1766,7 @@ impl AO3App {
 
             Ok(Some(USubscriptionCheckResult {
                 sub_type, sub_id, name: sub_name, changed, remaining,
+                error: None,
             }))
         }).await
     }
@@ -1745,6 +1790,9 @@ impl AO3App {
             drop(c);
 
             let s = storage.lock().await;
+
+            // Persist all fetched messages
+            let _ = s.save_inbox_messages(&all_items);
 
             // Get the last seen inbox comment ID
             let last_seen_id: u64 = s.get_state("last_inbox_comment_id")
@@ -1807,9 +1855,17 @@ impl AO3App {
     }
 
     pub async fn fetch_inbox(&self, username: String, page: u32) -> Result<String, AO3Error> {
-        self.run_on_runtime(move |client, _storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             let inbox = c.fetch_inbox(&username, page).await.map_err(AO3Error::from)?;
+            drop(c);
+
+            // Persist fetched messages
+            {
+                let s = storage.lock().await;
+                let _ = s.save_inbox_messages(&inbox.items);
+            }
+
             let items: Vec<serde_json::Value> = inbox.items.into_iter().map(|item| {
                 serde_json::json!({
                     "comment_id": item.comment_id,
@@ -1827,6 +1883,132 @@ impl AO3App {
                 "items": items,
                 "unread_count": inbox.unread_count,
                 "has_next_page": inbox.has_next_page,
+            });
+            Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()))
+        }).await
+    }
+
+    /// Read cached inbox messages from the database (no network).
+    pub fn get_cached_inbox(&self, page: u32) -> Result<String, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        let per_page: u32 = 25;
+        let rows = storage.get_inbox_messages(page, per_page).map_err(AO3Error::from)?;
+        let (total, unread) = storage.get_inbox_message_count().map_err(AO3Error::from)?;
+        let has_next = (page * per_page) < total;
+        let items: Vec<serde_json::Value> = rows.into_iter().map(|(comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json)| {
+            serde_json::json!({
+                "comment_id": comment_id,
+                "author": author,
+                "author_url": author_url,
+                "avatar_url": avatar_url,
+                "work_reference": work_reference,
+                "work_url": work_url,
+                "posted_at": posted_at,
+                "is_unread": is_unread,
+                "content_json": content_json,
+            })
+        }).collect();
+        let result = serde_json::json!({
+            "items": items,
+            "unread_count": unread,
+            "has_next_page": has_next,
+        });
+        Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()))
+    }
+
+    /// Fetch a comment thread from AO3 (or cache) for display in the reading pane.
+    /// Checks the local DB first; if the comment isn't cached, paginates
+    /// through the work's comment pages until found.
+    pub async fn fetch_comment_thread(&self, work_url: String, comment_id: u64) -> Result<String, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let work_id: u64 = work_url.split('/')
+                .find(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            if work_id == 0 {
+                return Err(AO3Error::Network { message: "Invalid work URL".to_string() });
+            }
+
+            fn find_root_thread(comments: &[Comment], target_id: u64) -> Option<Comment> {
+                fn contains(comment: &Comment, id: u64) -> bool {
+                    if comment.id == id { return true; }
+                    comment.replies.iter().any(|r| contains(r, id))
+                }
+                for comment in comments {
+                    if contains(comment, target_id) {
+                        return Some(comment.clone());
+                    }
+                }
+                None
+            }
+
+            fn comment_to_json(comment: &Comment) -> serde_json::Value {
+                serde_json::json!({
+                    "id": comment.id,
+                    "author": comment.author.username,
+                    "author_url": comment.author.profile_url.as_deref().unwrap_or(""),
+                    "avatar_url": comment.author.avatar_url.as_deref().unwrap_or(""),
+                    "posted_at": comment.posted_at,
+                    "content_json": serde_json::to_string(&comment.content).unwrap_or("[]".to_string()),
+                    "replies": comment.replies.iter().map(comment_to_json).collect::<Vec<_>>(),
+                })
+            }
+
+            // 1. Check DB cache first
+            {
+                let s = storage.lock().await;
+                if let Ok(Some(root)) = s.get_comment_thread(comment_id) {
+                    let result = serde_json::json!({
+                        "thread": comment_to_json(&root),
+                        "target_comment_id": comment_id,
+                    });
+                    return Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()));
+                }
+            }
+
+            // 2. Not cached — paginate through comment pages until found
+            let mut page = 1u32;
+            let mut total_pages = 1u32;
+            let mut found_thread: Option<Comment> = None;
+
+            while page <= total_pages {
+                let c = client.read().await;
+                let comments_page = c.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)?;
+                drop(c);
+
+                total_pages = comments_page.total_pages.max(1);
+
+                // Persist all comments from this page
+                {
+                    let s = storage.lock().await;
+                    for comment in &comments_page.comments {
+                        let _ = s.save_comment(work_id, 0, comment);
+                    }
+                }
+
+                // Check if the target is on this page
+                if let Some(root) = find_root_thread(&comments_page.comments, comment_id) {
+                    found_thread = Some(root);
+                    break;
+                }
+
+                page += 1;
+            }
+
+            // 3. If we paginated through everything and found nothing in the
+            //    parsed trees, the comment might have been persisted during
+            //    pagination as a child — check the DB one more time.
+            if found_thread.is_none() {
+                let s = storage.lock().await;
+                if let Ok(Some(root)) = s.get_comment_thread(comment_id) {
+                    found_thread = Some(root);
+                }
+            }
+
+            let result = serde_json::json!({
+                "thread": found_thread.as_ref().map(comment_to_json),
+                "target_comment_id": comment_id,
             });
             Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()))
         }).await

@@ -190,6 +190,33 @@ impl Storage {
         Ok(works)
     }
 
+    /// Return works whose `authors_json` contains the given username.
+    pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
+                        w.warnings_json, w.categories_json, w.relationships_json,
+                        w.characters_json, w.tags_json, w.summary, w.word_count,
+                        w.chapter_count, w.total_chapters, w.kudos, w.hits,
+                        w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete
+                 FROM works w, json_each(w.authors_json) j
+                 WHERE j.value = ?1
+                 ORDER BY w.date_updated DESC",
+            )
+            .map_err(map_sql)?;
+
+        let rows = stmt
+            .query_map(params![username], |row| Ok(Self::work_from_row(row)))
+            .map_err(map_sql)?;
+
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        Ok(works)
+    }
+
     /// Delete a work (and its chapters, progress, bookmark, and history).
     pub fn delete_work(&self, work_id: u64) -> Result<(), AppError> {
         let id = work_id as i64;
@@ -779,6 +806,49 @@ impl Storage {
     }
 
     // -------------------------------------------------------------------
+    // Subscription works cache
+    // -------------------------------------------------------------------
+
+    pub fn save_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        tx.execute(
+            "DELETE FROM subscription_works WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id],
+        ).map_err(map_sql)?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO subscription_works (sub_type, sub_id, work_id) VALUES (?1, ?2, ?3)"
+        ).map_err(map_sql)?;
+        for id in work_ids {
+            stmt.execute(params![sub_type, sub_id, *id as i64]).map_err(map_sql)?;
+        }
+        drop(stmt);
+        tx.commit().map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
+                    w.warnings_json, w.categories_json, w.relationships_json,
+                    w.characters_json, w.tags_json, w.summary, w.word_count,
+                    w.chapter_count, w.total_chapters, w.kudos, w.hits,
+                    w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete
+             FROM subscription_works sw
+             JOIN works w ON w.id = sw.work_id
+             WHERE sw.sub_type = ?1 AND sw.sub_id = ?2
+             ORDER BY w.date_updated DESC"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![sub_type, sub_id], |row| {
+            Ok(Self::work_from_row(row))
+        }).map_err(map_sql)?;
+        let mut works = Vec::new();
+        for r in rows {
+            if let Ok(Ok(w)) = r { works.push(w); }
+        }
+        Ok(works)
+    }
+
+    // -------------------------------------------------------------------
     // Subscription check queue
     // -------------------------------------------------------------------
 
@@ -1118,11 +1188,11 @@ impl Storage {
     // Cleanup — purge chapters for works that aren't downloaded or currently reading
     // -------------------------------------------------------------------
 
-    pub fn purge_non_retained_chapters(&self, current_work_id: Option<u64>) -> Result<(), AppError> {
-        let current = current_work_id.unwrap_or(0) as i64;
+    pub fn purge_non_retained_chapters(&self) -> Result<(), AppError> {
         self.conn.execute(
-            "DELETE FROM chapters WHERE work_id NOT IN (SELECT work_id FROM downloads) AND work_id != ?1",
-            params![current],
+            "DELETE FROM chapters WHERE work_id NOT IN (SELECT work_id FROM downloads)
+                                    AND work_id NOT IN (SELECT work_id FROM reading_progress)",
+            [],
         ).map_err(map_sql)?;
         Ok(())
     }
@@ -1301,6 +1371,20 @@ impl Storage {
                     work_id     INTEGER PRIMARY KEY,
                     added_at    TEXT NOT NULL DEFAULT (datetime('now'))
                 );
+
+                CREATE TABLE IF NOT EXISTS inbox_messages (
+                    comment_id   INTEGER PRIMARY KEY,
+                    author       TEXT NOT NULL,
+                    author_url   TEXT NOT NULL DEFAULT '',
+                    avatar_url   TEXT NOT NULL DEFAULT '',
+                    work_reference TEXT NOT NULL,
+                    work_url     TEXT NOT NULL DEFAULT '',
+                    posted_at    TEXT NOT NULL,
+                    is_unread    INTEGER NOT NULL DEFAULT 1,
+                    content_json TEXT NOT NULL DEFAULT '[]',
+                    fetched_at   TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_inbox_fetched ON inbox_messages(fetched_at DESC);
                 ",
             )
             .map_err(map_sql)?;
@@ -1371,6 +1455,12 @@ impl Storage {
                 sub_id       TEXT NOT NULL,
                 date_updated TEXT NOT NULL,
                 PRIMARY KEY (sub_type, sub_id)
+            );
+            CREATE TABLE IF NOT EXISTS subscription_works (
+                sub_type TEXT NOT NULL,
+                sub_id   TEXT NOT NULL,
+                work_id  INTEGER NOT NULL,
+                PRIMARY KEY (sub_type, sub_id, work_id)
             );"
         ).ok();
 
@@ -1553,6 +1643,71 @@ impl Storage {
 
     // -- Comments -------------------------------------------------------------
 
+    // -- Inbox persistence ---------------------------------------------------
+
+    pub fn save_inbox_messages(&self, items: &[crate::models::InboxItem]) -> Result<(), AppError> {
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO inbox_messages
+                 (comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            ).map_err(map_sql)?;
+            for item in items {
+                let content_json = serde_json::to_string(&item.content).unwrap_or_else(|_| "[]".to_string());
+                stmt.execute(params![
+                    item.comment_id as i64,
+                    item.author,
+                    item.author_url.as_deref().unwrap_or(""),
+                    item.avatar_url.as_deref().unwrap_or(""),
+                    item.work_reference,
+                    item.work_url.as_deref().unwrap_or(""),
+                    item.posted_at,
+                    item.is_unread as i32,
+                    content_json,
+                ]).map_err(map_sql)?;
+            }
+        }
+        tx.commit().map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_inbox_messages(&self, page: u32, per_page: u32) -> Result<Vec<(u64, String, String, String, String, String, String, bool, String)>, AppError> {
+        let offset = (page.saturating_sub(1)) * per_page;
+        let mut stmt = self.conn.prepare(
+            "SELECT comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json
+             FROM inbox_messages ORDER BY comment_id DESC LIMIT ?1 OFFSET ?2"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![per_page, offset], |row| {
+            let id: i64 = row.get(0)?;
+            let is_unread: i32 = row.get(7)?;
+            Ok((
+                id as u64,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                is_unread != 0,
+                row.get::<_, String>(8)?,
+            ))
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_inbox_message_count(&self) -> Result<(u32, u32), AppError> {
+        let total: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM inbox_messages", [], |row| row.get(0)
+        ).unwrap_or(0);
+        let unread: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM inbox_messages WHERE is_unread = 1", [], |row| row.get(0)
+        ).unwrap_or(0);
+        Ok((total, unread))
+    }
+
+    // -- Comment operations ---------------------------------------------------
+
     pub fn save_comment(&self, work_id: u64, chapter_id: u64, comment: &Comment) -> Result<(), AppError> {
         self.save_comment_recursive(work_id, chapter_id, 0, comment)
     }
@@ -1696,6 +1851,51 @@ impl Storage {
 
         top_level.reverse();
         Ok(top_level)
+    }
+
+    /// Walk up from `comment_id` to the root via parent_id, then return the
+    /// full thread tree starting from that root.  Returns None if the comment
+    /// isn't in the cache.
+    pub fn get_comment_thread(&self, comment_id: u64) -> Result<Option<Comment>, AppError> {
+        // 1. Find the root by walking parent_id
+        let mut current = comment_id;
+        loop {
+            let parent: i64 = self.conn.query_row(
+                "SELECT parent_id FROM comments WHERE id = ?1",
+                params![current as i64],
+                |row| row.get(0),
+            ).unwrap_or(-1);
+            if parent <= 0 { break; }
+            current = parent as u64;
+        }
+
+        // If the comment doesn't exist at all, return None
+        if current == comment_id {
+            let exists: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM comments WHERE id = ?1",
+                params![comment_id as i64],
+                |row| row.get(0),
+            ).unwrap_or(false);
+            if !exists { return Ok(None); }
+        }
+
+        // 2. Load the whole subtree from root
+        let root_id = current;
+        let work_id: i64 = self.conn.query_row(
+            "SELECT work_id FROM comments WHERE id = ?1",
+            params![root_id as i64],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        // Load all comments for this work and find the root thread
+        let all = self.get_comments(work_id as u64, 0)?;
+        fn find_root<'a>(comments: &'a [Comment], root_id: u64) -> Option<&'a Comment> {
+            for c in comments {
+                if c.id == root_id { return Some(c); }
+            }
+            None
+        }
+        Ok(find_root(&all, root_id).cloned())
     }
 
     pub fn clear_comments(&self, work_id: u64, chapter_id: u64) -> Result<(), AppError> {

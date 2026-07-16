@@ -46,6 +46,7 @@ final class MainSplitViewController: NSSplitViewController {
         let readController = ReadPaneViewController(theme: theme, appState: appState, model: model)
         let readerItem = NSSplitViewItem(viewController: readController)
         readerItem.minimumThickness = 400
+        readerItem.holdingPriority = .defaultLow
         addSplitViewItem(readerItem)
 
         ObservationRelay.track { [weak self] in

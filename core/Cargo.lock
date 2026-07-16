@@ -116,6 +116,7 @@ name = "ao3-core"
 version = "0.1.0"
 dependencies = [
  "arti-client",
+ "chrono",
  "ego-tree",
  "reqwest",
  "rusqlite",
