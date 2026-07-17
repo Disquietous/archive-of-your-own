@@ -18,11 +18,9 @@ final class SubscriptionRowCellView: NSTableCellView {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.contentTintColor = theme.nsAccent
 
-        nameLabel.font = MacFont.ui(14, weight: .semibold)
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.maximumNumberOfLines = 1
 
-        typeLabel.font = MacFont.ui(12)
         typeLabel.lineBreakMode = .byTruncatingTail
 
         chevron.image = NSImage(systemSymbolName: "chevron.right",
@@ -83,6 +81,8 @@ final class SubscriptionRowCellView: NSTableCellView {
             iconName = "book.closed"
         }
 
+        nameLabel.font = MacFont.ui(14, weight: .semibold)
+        typeLabel.font = MacFont.ui(12)
         nameLabel.stringValue = sub.name
         typeLabel.stringValue = isLoading ? "Fetching works…" : typeName
         iconView.image = NSImage(systemSymbolName: iconName,

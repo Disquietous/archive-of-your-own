@@ -28,6 +28,7 @@ struct RequestLogView: View {
     let appState: AppState
 
     @State private var entries: [URequestLogEntry] = []
+    @State private var active: [UActiveRequest] = []
     @State private var selectedID: Int64?
     @State private var filter = ""
     @State private var failuresOnly = false
@@ -49,9 +50,14 @@ struct RequestLogView: View {
     }
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(spacing: 0) {
             toolbar
             Divider()
+            if !active.isEmpty {
+                inFlightStrip
+                Divider()
+            }
             HSplitView {
                 requestTable
                     .frame(minWidth: 460)
@@ -76,6 +82,11 @@ struct RequestLogView: View {
                 .toggleStyle(.checkbox)
                 .font(Font(MacFont.ui(12)))
             Spacer()
+            if !active.isEmpty {
+                Text("\(active.count) in flight")
+                    .font(Font(MacFont.ui(11, weight: .semibold)))
+                    .foregroundStyle(theme.accent)
+            }
             Text("\(filtered.count) of \(entries.count)")
                 .font(Font(MacFont.ui(11)))
                 .foregroundStyle(theme.ink3)
@@ -90,6 +101,38 @@ struct RequestLogView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Requests that have started but not yet resolved — refreshed by the
+    /// same 1s live timer as the table.
+    private var inFlightStrip: some View {
+        VStack(spacing: 0) {
+            ForEach(active, id: \.self) { a in
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                    Text(a.method)
+                        .font(Font(MacFont.ui(11, weight: .semibold)))
+                        .foregroundStyle(a.method.hasPrefix("POST") ? theme.accent2 : theme.ink2)
+                        .frame(width: 72, alignment: .leading)
+                    Text(shortURL(a.url))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+                        .help(a.url)
+                    Spacer()
+                    Text(elapsed(a.elapsedMs))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.ink3)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+            }
+        }
+        .padding(.vertical, 2)
+        .background(theme.accentSoft.opacity(0.35))
     }
 
     private var requestTable: some View {
@@ -196,6 +239,11 @@ struct RequestLogView: View {
 
     private func reload() {
         entries = appState.bridge.getRequestLog(limit: 500)
+        active = appState.bridge.getActiveRequests()
+    }
+
+    private func elapsed(_ ms: Int64) -> String {
+        ms < 1000 ? "\(ms) ms…" : String(format: "%.1f s…", Double(ms) / 1000)
     }
 
     private func statusColor(_ e: URequestLogEntry) -> Color {

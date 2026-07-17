@@ -37,6 +37,30 @@ final class WorkRowCellView: NSTableCellView {
     /// off because NSTableView paints phantom lines below the last row.
     private let separator = NSView()
 
+    /// Density-driven metrics (Settings → Spacing). Updated in configure().
+    private var bodyStack: NSStackView!
+    private var bodyTop: NSLayoutConstraint!
+    private var bodyBottom: NSLayoutConstraint!
+    private var spineTop: NSLayoutConstraint!
+    private var spineBottom: NSLayoutConstraint!
+    private var datesTop: NSLayoutConstraint!
+
+    private static func verticalPad(for density: Density) -> CGFloat {
+        switch density {
+        case .compact: 8
+        case .regular: 12
+        case .comfy: 17
+        }
+    }
+
+    private static func sectionGap(for density: Density) -> CGFloat {
+        switch density {
+        case .compact: 5
+        case .regular: 7
+        case .comfy: 10
+        }
+    }
+
     private var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
     var onToggleSummary: (() -> Void)?
@@ -103,6 +127,7 @@ final class WorkRowCellView: NSTableCellView {
         progressTrack.addSubview(progressFill)
 
         let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, tagsClip, metaLabel, progressTrack])
+        bodyStack = body
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
@@ -131,8 +156,12 @@ final class WorkRowCellView: NSTableCellView {
         // snugly to the content (labels outrank it at 751, so nothing
         // stretches), and during the resize animation it degrades gracefully
         // instead of fighting the in-flight frame.
-        let bodyBottom = body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+        bodyBottom = body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
         bodyBottom.priority = .defaultHigh
+        bodyTop = body.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+        spineTop = spine.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+        spineBottom = spine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+        datesTop = datesLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12)
 
         NSLayoutConstraint.activate([
             bodyBottom,
@@ -146,15 +175,15 @@ final class WorkRowCellView: NSTableCellView {
             selectionBar.widthAnchor.constraint(equalToConstant: 3),
 
             spine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            spine.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            spine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            spineTop,
+            spineBottom,
             spine.widthAnchor.constraint(equalToConstant: 3),
 
             body.leadingAnchor.constraint(equalTo: spine.trailingAnchor, constant: 12),
             body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            body.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            bodyTop,
 
-            datesLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            datesTop,
             datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             // The fandom line shares the dates' vertical band — cap it so a
             // long fandom truncates instead of running under the dates.
@@ -267,6 +296,25 @@ final class WorkRowCellView: NSTableCellView {
         // size during layout creates a feedback loop AppKit aborts on.
         summaryLabel.preferredMaxLayoutWidth = availableTextWidth
         tagsLabel.preferredMaxLayoutWidth = availableTextWidth
+
+        // Chrome fonts are assigned here, not in init, so the app text-size
+        // setting (MacFont.scale) applies on every (re)configure.
+        fandomLabel.font = MacFont.ui(11, weight: .bold)
+        summaryLabel.font = MacFont.ui(12.5)
+        metaLabel.font = MacFont.ui(11, weight: .medium)
+        datesLabel.font = MacFont.ui(10, weight: .medium)
+
+        // Density (Settings → Spacing) sets the row's breathing room.
+        let vPad = Self.verticalPad(for: theme.density)
+        let gap = Self.sectionGap(for: theme.density)
+        bodyTop.constant = vPad
+        bodyBottom.constant = -vPad
+        spineTop.constant = vPad
+        spineBottom.constant = -vPad
+        datesTop.constant = vPad
+        bodyStack.setCustomSpacing(gap, after: summaryClip)
+        bodyStack.setCustomSpacing(gap, after: tagsClip)
+        bodyStack.setCustomSpacing(gap, after: metaLabel)
 
         // Published/updated dates in the top-right corner. Blurb data only
         // carries an updated date; a work page carries both (identical for

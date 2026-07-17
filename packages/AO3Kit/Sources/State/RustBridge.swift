@@ -714,6 +714,11 @@ final class RustBridge {
         (try? app?.getRequestLog(limit: limit)) ?? []
     }
 
+    /// Requests currently in flight (for the request log's live view).
+    func getActiveRequests() -> [UActiveRequest] {
+        app?.getActiveRequests() ?? []
+    }
+
     func clearRequestLog() {
         try? app?.clearRequestLog()
     }
@@ -817,6 +822,11 @@ final class RustBridge {
     }
 
     // MARK: - Community Actions
+
+    /// Works this device has successfully left kudos on (persisted in Rust).
+    func getKudosGiven() -> [UInt64] {
+        (try? app?.getKudosGiven()) ?? []
+    }
 
     func leaveKudos(workId: UInt64) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }

@@ -54,6 +54,11 @@ final class AppTheme {
     var measure: Int {
         didSet { UserDefaults.standard.set(measure, forKey: "measure") }
     }
+    /// Text scale for app chrome — lists, toolbars, sidebar — separate from
+    /// the reading text size. 1.0 = design sizes; range 0.9–1.3.
+    var uiFontScale: Double {
+        didSet { UserDefaults.standard.set(uiFontScale, forKey: "uiFontScale") }
+    }
 
     // Lazy-loaded background image
     private var _backgroundImage: PlatformImage?
@@ -99,6 +104,7 @@ final class AppTheme {
         requestTimeout = d.object(forKey: "requestTimeout") as? Int ?? 30
         useTorByDefault = d.bool(forKey: "useTorByDefault")
         measure = d.object(forKey: "measure") as? Int ?? 680
+        uiFontScale = d.object(forKey: "uiFontScale") as? Double ?? 1.0
     }
 
     // MARK: - Theme switching

@@ -1430,6 +1430,9 @@ impl Storage {
                 CREATE INDEX IF NOT EXISTS idx_comments_work ON comments(work_id);
                 CREATE INDEX IF NOT EXISTS idx_comments_chapter ON comments(chapter_id);
                 CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
+                CREATE TABLE IF NOT EXISTS kudos_given (
+                    work_id INTEGER PRIMARY KEY
+                );
                 ",
             )
             .map_err(map_sql)?;
@@ -1480,6 +1483,24 @@ impl Storage {
         ).ok();
 
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Kudos (permanent on AO3 — recorded once, never removed)
+    // -------------------------------------------------------------------
+
+    pub fn mark_kudos_given(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO kudos_given (work_id) VALUES (?1)",
+            params![work_id as i64],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_kudos_given(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare("SELECT work_id FROM kudos_given").map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0)).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).map(|id| id as u64).collect())
     }
 
     /// Map a row from the `works` SELECT into a `WorkSummary`.

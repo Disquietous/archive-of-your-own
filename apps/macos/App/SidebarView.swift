@@ -13,7 +13,10 @@ struct SidebarView: View {
     @FocusState private var searchFieldFocus: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Track the app text-size setting: MacFont reads it via a plain static,
+        // so this observable read is what re-renders the sidebar when it changes.
+        let _ = theme.uiFontScale
+        return VStack(spacing: 0) {
             header
             searchField
             ScrollView {

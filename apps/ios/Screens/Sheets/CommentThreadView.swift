@@ -1,31 +1,6 @@
 import SwiftUI
 
-struct ParsedComment: Identifiable, Codable {
-    let id: UInt64
-    let authorId: String
-    let authorName: String
-    let authorProfileUrl: String
-    let authorAvatarUrl: String
-    let postedAt: String
-    let contentJson: String
-    let replies: [ParsedComment]
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case authorId = "author_id"
-        case authorName = "author_name"
-        case authorProfileUrl = "author_profile_url"
-        case authorAvatarUrl = "author_avatar_url"
-        case postedAt = "posted_at"
-        case contentJson = "content_json"
-        case replies
-    }
-
-    static func fromJSON(_ json: String) -> [ParsedComment] {
-        guard let data = json.data(using: .utf8) else { return [] }
-        return (try? JSONDecoder().decode([ParsedComment].self, from: data)) ?? []
-    }
-}
+// ParsedComment lives in AO3Kit (Models/ParsedComment.swift) — shared with macOS.
 
 struct CommentThreadView: View {
     @Environment(AppTheme.self) private var theme

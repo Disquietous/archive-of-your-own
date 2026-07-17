@@ -31,6 +31,10 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private var works: [Work] = []
     private var renderedWorkIDs: [String] = []
     private var expandedTags: Set<String> = []
+    private var renderedDensity: Density?
+    private var renderedUIScale: Double?
+    /// Width the rows were last measured at — see ListPaneViewController.
+    private var lastLayoutWidth: CGFloat = 0
     private lazy var sizingCell = WorkRowCellView(theme: theme)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
@@ -77,8 +81,23 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         }
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = tableView.bounds.width
+        guard width > 0, abs(width - lastLayoutWidth) > 0.5 else { return }
+        lastLayoutWidth = width
+        tableView.reloadData()
+    }
+
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
+        // Density and app text size change row metrics — force a reload so
+        // rows re-measure.
+        if renderedDensity != theme.density || renderedUIScale != theme.uiFontScale {
+            renderedDensity = theme.density
+            renderedUIScale = theme.uiFontScale
+            renderedWorkIDs = []
+        }
         switch context {
         case .search: works = model.works(for: .search)
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
@@ -256,6 +275,7 @@ struct SearchPagerView: View {
     @Bindable var model: MacAppModel
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         let search = model.search
         let current = Int(search.currentPage)
         let lower = max(1, current - 2)

@@ -276,6 +276,9 @@ final class AppState {
         // Intentionally downloaded works
         downloadedWorkIDs = Set(bridge.getDownloadedIds().map { String($0) })
 
+        // Kudos already left on AO3 (permanent — keeps the heart truthful)
+        kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
+
         // Purge chapters for works that aren't downloaded or in currently reading
         bridge.purgeStaleChapters()
 
@@ -538,22 +541,26 @@ final class AppState {
         }
     }
 
-    func toggleKudos(_ id: String) {
-        if kudosGivenWorkIDs.contains(id) {
-            kudosGivenWorkIDs.remove(id)
-        } else {
-            kudosGivenWorkIDs.insert(id)
-            if let workId = UInt64(id) {
-                Task {
-                    do {
-                        let success = try await bridge.leaveKudos(workId: workId)
-                        if !success {
-                            _ = await MainActor.run { kudosGivenWorkIDs.remove(id) }
-                        }
-                    } catch {
-                        _ = await MainActor.run { kudosGivenWorkIDs.remove(id) }
-                    }
+    /// Work ID of the last kudos POST that failed, for inline error display.
+    var kudosFailedWorkID: String?
+
+    /// Leave kudos on AO3. One-way — kudos are permanent on the archive, so
+    /// there is no local toggle-off. The heart fills optimistically and
+    /// reverts (with kudosFailedWorkID set) only if the archive rejects it.
+    func giveKudos(_ id: String) {
+        guard !kudosGivenWorkIDs.contains(id), let workId = UInt64(id) else { return }
+        kudosGivenWorkIDs.insert(id)
+        kudosFailedWorkID = nil
+        Task { @MainActor in
+            do {
+                let success = try await bridge.leaveKudos(workId: workId)
+                if !success {
+                    kudosGivenWorkIDs.remove(id)
+                    kudosFailedWorkID = id
                 }
+            } catch {
+                kudosGivenWorkIDs.remove(id)
+                kudosFailedWorkID = id
             }
         }
     }
