@@ -56,6 +56,57 @@ pub fn drain_request_records() -> Vec<RequestRecord> {
     request_log_buffer().lock().map(|mut b| b.drain(..).collect()).unwrap_or_default()
 }
 
+/// A request currently in flight, for the request-log UI's live view.
+#[derive(Debug, Clone)]
+pub struct ActiveRequest {
+    pub id: u64,
+    pub started_at_ms: u64,
+    pub method: String,
+    pub url: String,
+}
+
+static ACTIVE_REQUESTS: std::sync::OnceLock<std::sync::Mutex<Vec<ActiveRequest>>> =
+    std::sync::OnceLock::new();
+static NEXT_ACTIVE_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn active_requests() -> &'static std::sync::Mutex<Vec<ActiveRequest>> {
+    ACTIVE_REQUESTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// RAII registration of an in-flight request: registers on creation and
+/// unregisters on drop — including early returns, retries that give up,
+/// and task aborts — so the live view can never leak a phantom entry.
+pub struct ActiveRequestGuard {
+    id: u64,
+}
+
+impl ActiveRequestGuard {
+    pub fn new(method: &str, url: &str) -> Self {
+        let id = NEXT_ACTIVE_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut list) = active_requests().lock() {
+            list.push(ActiveRequest {
+                id,
+                started_at_ms: now_ms(),
+                method: method.to_string(),
+                url: url.to_string(),
+            });
+        }
+        Self { id }
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        if let Ok(mut list) = active_requests().lock() {
+            list.retain(|r| r.id != self.id);
+        }
+    }
+}
+
+pub fn active_requests_snapshot() -> Vec<ActiveRequest> {
+    active_requests().lock().map(|l| l.clone()).unwrap_or_default()
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -416,6 +467,7 @@ impl AO3Client {
     }
 
     pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {
+        let _active = ActiveRequestGuard::new("GET (image)", url);
         self.enforce_rate_limit().await;
         let client = match &self.transport {
             Transport::Direct(c) => c,
@@ -668,6 +720,7 @@ impl AO3Client {
     }
 
     async fn fetch_with_progress_inner(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>, ajax: bool) -> Result<String, AppError> {
+        let _active = ActiveRequestGuard::new(if ajax { "GET (ajax)" } else { "GET" }, url);
         let mut retries = 0;
         let header_timeout = std::time::Duration::from_secs(timeout_secs);
         let body_timeout = std::time::Duration::from_secs(timeout_secs);
@@ -883,6 +936,7 @@ impl AO3Client {
         ];
 
         let login_url = format!("{BASE_URL}/users/login");
+        let _active = ActiveRequestGuard::new("POST", &login_url);
         let audit_started = now_ms();
         let audit_start = std::time::Instant::now();
         let audit_payload = redact_payload(&params);
@@ -961,6 +1015,7 @@ impl AO3Client {
         ];
         form_params.extend_from_slice(params);
 
+        let _active = ActiveRequestGuard::new("POST", url);
         let audit_started = now_ms();
         let audit_start = std::time::Instant::now();
         let audit_payload = redact_payload(

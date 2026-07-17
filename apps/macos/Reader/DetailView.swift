@@ -16,7 +16,10 @@ struct DetailView: View {
     private var downloaded: Bool { appState.downloadedWorkIDs.contains(work.id) }
     private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
 
+    @State private var showComments = false
+
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Text(work.fandom)
@@ -42,7 +45,13 @@ struct DetailView: View {
                 }
 
                 pills.padding(.bottom, 22)
-                actions.padding(.bottom, 26)
+                actions.padding(.bottom, appState.kudosFailedWorkID == work.id ? 8 : 26)
+                if appState.kudosFailedWorkID == work.id {
+                    Text("Couldn’t leave kudos — the archive rejected the request. Try again.")
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(Color(hex: "CE514D"))
+                        .padding(.bottom, 18)
+                }
                 statGrid.padding(.bottom, 24)
                 if !work.summary.isEmpty {
                     summaryBox.padding(.bottom, 22)
@@ -72,6 +81,14 @@ struct DetailView: View {
             }
         } message: {
             Text("This bookmark is synced with your AO3 account. Remove it from AO3 as well, or only from this device?")
+        }
+        .sheet(isPresented: $showComments) {
+            MacCommentsView(theme: theme, appState: appState,
+                            workID: work.id,
+                            chapterID: nil,
+                            title: work.title,
+                            subtitle: nil,
+                            onClose: { showComments = false })
         }
     }
 
@@ -142,7 +159,7 @@ struct DetailView: View {
             }
 
             Button {
-                appState.toggleKudos(work.id)
+                appState.giveKudos(work.id)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: hasKudos ? "heart.fill" : "heart")
@@ -151,6 +168,26 @@ struct DetailView: View {
                         .font(Font(MacFont.ui(14.5, weight: .bold)))
                 }
                 .foregroundStyle(hasKudos ? theme.accent : theme.ink)
+                .padding(.horizontal, 20)
+                .frame(height: 42)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(theme.line, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(hasKudos)
+            .help(hasKudos ? "Kudos are permanent on AO3" : "Leave kudos on AO3")
+
+            Button {
+                showComments = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "bubble.right")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(work.comments > 0 ? "Comments · \(Fmt.k(work.comments))" : "Comments")
+                        .font(Font(MacFont.ui(14.5, weight: .bold)))
+                }
+                .foregroundStyle(theme.ink)
                 .padding(.horizontal, 20)
                 .frame(height: 42)
                 .background(theme.surface)
@@ -208,14 +245,17 @@ struct DetailView: View {
     }
 
     private var summaryBox: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        // The summary is reading prose — honor the reader's typeface, size,
+        // and spacing settings (scaled slightly down from chapter body text).
+        let size = CGFloat(theme.fontSize) * 0.9
+        return VStack(alignment: .leading, spacing: 9) {
             Text("SUMMARY")
                 .font(Font(MacFont.ui(11, weight: .bold)))
                 .kerning(0.9)
                 .foregroundStyle(theme.ink3)
             Text(work.summary)
-                .font(Font(MacFont.serif(17)).italic())
-                .lineSpacing(5)
+                .font(Font(MacFont.reading(named: theme.readingFont.fontName, size: size)).italic())
+                .lineSpacing(size * (theme.readLeading - 1) * 0.45)
                 .foregroundStyle(theme.ink)
         }
         .padding(.init(top: 18, leading: 20, bottom: 18, trailing: 20))

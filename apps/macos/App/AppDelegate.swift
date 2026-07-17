@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var requestLogWindowController: RequestLogWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        MacFont.scale = CGFloat(theme.uiFontScale)
         buildMainMenu()
         // Database creation/unlock is handled by the launch gate — first
         // launch shows Protect Your Library, a password-protected library

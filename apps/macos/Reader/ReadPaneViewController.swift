@@ -18,6 +18,7 @@ final class ReadPaneViewController: NSViewController {
     private var settingsButton: ToolButton!
     private var immersiveButton: ToolButton!
     private var bookmarkButton: ToolButton!
+    private var commentsButton: ToolButton!
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
@@ -63,6 +64,9 @@ final class ReadPaneViewController: NSViewController {
         bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
             appState.toggleBookmark(id)
+        }
+        commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Chapter comments") { [weak self] in
+            self?.showChapterComments()
         }
         resultsBackButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to results") { [weak self] in
             self?.model.backToResults()
@@ -170,6 +174,8 @@ final class ReadPaneViewController: NSViewController {
     // MARK: - Render
 
     private func render() {
+        // Track the app text-size setting so toolbar fonts refresh with it.
+        _ = theme.uiFontScale
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
         toolbarTop.constant = model.immersive ? 20 : 0
@@ -248,7 +254,7 @@ final class ReadPaneViewController: NSViewController {
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
-        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, bookmarkButton]
+        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, commentsButton, bookmarkButton]
                                     : [settingsButton, bookmarkButton])
 
         show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))
@@ -351,6 +357,29 @@ final class ReadPaneViewController: NSViewController {
 
     @objc private func exitImmersive() {
         model.immersive = false
+    }
+
+    /// Comments for the chapter currently open in the reader, as a sheet.
+    private func showChapterComments() {
+        guard let work = model.selectedWork else { return }
+        let chapterIndex = model.readerChapter
+        var chapterId: UInt64?
+        if let chapters = appState.chaptersForWork(work.id), chapterIndex < chapters.count {
+            let id = chapters[chapterIndex].chapterId
+            chapterId = id > 0 ? UInt64(id) : nil
+        }
+        var dismissRef: () -> Void = {}
+        let view = MacCommentsView(theme: theme, appState: appState,
+                                   workID: work.id,
+                                   chapterID: chapterId,
+                                   title: work.title,
+                                   subtitle: "Chapter \(chapterIndex + 1)",
+                                   onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
+        }
+        presentAsSheet(hosting)
     }
 }
 

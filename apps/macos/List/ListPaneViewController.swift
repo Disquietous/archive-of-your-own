@@ -39,6 +39,12 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private var renderedSubscriptionIDs: [String] = []
     private var expandedSummaries: Set<String> = []
     private var expandedTags: Set<String> = []
+    private var renderedDensity: Density?
+    private var renderedUIScale: Double?
+    /// Width the rows were last measured at. Row heights depend on wrap width,
+    /// and the first render happens before layout gives the table its real
+    /// width — rows measured at the fallback width keep excess bottom space.
+    private var lastLayoutWidth: CGFloat = 0
     private var isShowingSubscriptionList: Bool {
         model.section == .subscriptions && model.subscriptionSubTab == "following"
     }
@@ -144,11 +150,29 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = tableView.bounds.width
+        guard width > 0, abs(width - lastLayoutWidth) > 0.5 else { return }
+        lastLayoutWidth = width
+        tableView.reloadData()
+    }
+
     // MARK: - Render
 
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
+
+        // Density and app text size change row metrics — drop the rendered-ID
+        // caches so the table reloads and re-measures. (Reading them here also
+        // makes the relay re-render when the settings change.)
+        if renderedDensity != theme.density || renderedUIScale != theme.uiFontScale {
+            renderedDensity = theme.density
+            renderedUIScale = theme.uiFontScale
+            renderedWorkIDs = []
+            renderedSubscriptionIDs = []
+        }
 
         let section = model.section
         switch section {

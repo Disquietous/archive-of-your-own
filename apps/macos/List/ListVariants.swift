@@ -10,6 +10,7 @@ struct ChipsBar: View {
     @Bindable var model: MacAppModel
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         FlowLayout(spacing: 7) {
             ForEach(model.availableTags, id: \.self) { tag in
                 chip(tag, on: model.activeTags.contains(tag))
@@ -77,6 +78,7 @@ struct EmptyStateMac: View {
     let icon: String, title: String, message: String
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(spacing: 0) {
             Image(systemName: icon)
                 .font(.system(size: 34, weight: .light))
@@ -107,6 +109,7 @@ struct LoadingStateMac: View {
     var onCancel: (() -> Void)? = nil
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(spacing: 14) {
             ProgressView()
                 .controlSize(.regular)
@@ -164,6 +167,7 @@ struct FollowedFandomsView: View {
     }
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 followField
@@ -323,6 +327,7 @@ struct AuthorsList: View {
     }
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 followField
@@ -419,6 +424,7 @@ struct StatsView: View {
     @Bindable var model: MacAppModel
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         let stats = model.localStats
         ScrollView {
             VStack(spacing: 14) {

@@ -74,10 +74,34 @@ struct ReadingSettingsView: View {
                 .background(theme.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+
+            group("App text size") {
+                HStack {
+                    stepButton("minus") { setUIScale(theme.uiFontScale - 0.05) }
+                    Spacer()
+                    Text("\(Int((theme.uiFontScale * 100).rounded())) %")
+                        .font(Font(MacFont.ui(14, weight: .bold)))
+                        .foregroundStyle(theme.ink)
+                    Spacer()
+                    stepButton("plus") { setUIScale(theme.uiFontScale + 0.05) }
+                }
+                .padding(5)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.line, lineWidth: 1))
+            }
         }
         .padding(16)
         .frame(width: 320)
         .background(themedBackground ? theme.surface : .clear)
+    }
+
+    /// Update the chrome font scale before the observable write so every
+    /// re-render triggered by the change already sees the new scale.
+    private func setUIScale(_ raw: Double) {
+        let clamped = min(1.3, max(0.9, (raw * 20).rounded() / 20))
+        MacFont.scale = CGFloat(clamped)
+        theme.uiFontScale = clamped
     }
 
     private func group(_ label: String, @ViewBuilder content: () -> some View) -> some View {

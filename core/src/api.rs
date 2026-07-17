@@ -30,6 +30,15 @@ pub struct URequestLogEntry {
     pub payload: Option<String>,
 }
 
+/// A request currently in flight — shown live at the top of the request log.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UActiveRequest {
+    pub started_ms: i64,
+    pub method: String,
+    pub url: String,
+    pub elapsed_ms: i64,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AO3Error {
     #[error("Network error: {message}")]
@@ -1395,7 +1404,7 @@ impl AO3App {
     // -- Kudos --
 
     pub async fn leave_kudos(&self, work_id: u64) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, _storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             let params = vec![
                 ("kudo[commentable_id]".to_string(), work_id.to_string()),
@@ -1403,8 +1412,21 @@ impl AO3App {
             ];
             let url = format!("{}/kudos", crate::client::BASE_URL);
             let body = c.post_form(&url, &params).await.map_err(AO3Error::from)?;
-            Ok(body.contains("left kudos") || body.contains("already left kudos"))
+            let accepted = body.contains("left kudos") || body.contains("already left kudos");
+            if accepted {
+                // Kudos are permanent on AO3 — record it so the UI stays
+                // truthful across launches.
+                let s = storage.lock().await;
+                let _ = s.mark_kudos_given(work_id);
+            }
+            Ok(accepted)
         }).await
+    }
+
+    /// Works this device has successfully left kudos on.
+    pub fn get_kudos_given(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_kudos_given().map_err(AO3Error::from)
     }
 
     pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<bool, AO3Error> {
@@ -2154,6 +2176,17 @@ impl AO3App {
         let _ = crate::client::drain_request_records();
         let storage = self.storage.blocking_lock();
         storage.clear_request_logs().map_err(AO3Error::from)
+    }
+
+    /// Requests currently in flight (started but not yet resolved), newest last.
+    pub fn get_active_requests(&self) -> Vec<UActiveRequest> {
+        let now = crate::client::now_ms();
+        crate::client::active_requests_snapshot().into_iter().map(|r| UActiveRequest {
+            started_ms: r.started_at_ms as i64,
+            method: r.method,
+            url: r.url,
+            elapsed_ms: now.saturating_sub(r.started_at_ms) as i64,
+        }).collect()
     }
 
 }

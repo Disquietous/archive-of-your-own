@@ -45,7 +45,13 @@ extension Color {
 /// reading serif for titles/body. Fall back to system fonts if the bundled
 /// faces fail to load.
 enum MacFont {
+    /// App-chrome text scale (Settings → App text size). Synced from
+    /// AppTheme.uiFontScale at launch and when the setting changes. Applies
+    /// to ui/serif chrome fonts only — reading fonts have their own size.
+    static var scale: CGFloat = 1
+
     static func ui(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let size = size * scale
         if let font = NSFont(name: "Hanken Grotesk", size: size) ?? NSFont(name: "HankenGrotesk", size: size) {
             return weight == .regular ? font : withWeight(font, weight)
         }
@@ -53,6 +59,7 @@ enum MacFont {
     }
 
     static func serif(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let size = size * scale
         if let font = NSFont(name: "Newsreader", size: size) {
             return weight == .regular ? font : withWeight(font, weight)
         }
@@ -65,7 +72,15 @@ enum MacFont {
     }
 
     static func reading(named name: String, size: CGFloat) -> NSFont {
-        NSFont(name: name, size: size) ?? serif(size)
+        if let font = NSFont(name: name, size: size) { return font }
+        // Unscaled serif fallback — reading text size is user-controlled
+        // directly and must not compound with the app-chrome scale.
+        let base = NSFont.systemFont(ofSize: size)
+        if let descriptor = base.fontDescriptor.withDesign(.serif),
+           let font = NSFont(descriptor: descriptor, size: size) {
+            return font
+        }
+        return base
     }
 
     /// Variable fonts: select a weight via the variation axis when possible.

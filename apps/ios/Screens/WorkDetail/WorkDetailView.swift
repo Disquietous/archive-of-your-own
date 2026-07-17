@@ -315,9 +315,9 @@ struct WorkDetailView: View {
 
     private func engagementRow(_ work: Work) -> some View {
         HStack(spacing: 16) {
-            // Kudos toggle
+            // Kudos — one-way; permanent on AO3
             Button {
-                state.toggleKudos(workID)
+                state.giveKudos(workID)
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: hasKudos ? "heart.fill" : "heart")
@@ -329,6 +329,7 @@ struct WorkDetailView: View {
                 }
             }
             .buttonStyle(IconButtonPressStyle())
+            .disabled(hasKudos)
 
             // Comments (read-only count — commenting is per-chapter in the reader)
             HStack(spacing: 5) {

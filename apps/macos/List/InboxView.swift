@@ -5,6 +5,7 @@ struct InboxView: View {
     @Bindable var appState: AppState
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             if appState.isLoadingInbox && appState.inboxMessages.isEmpty {
                 LoadingStateMac(theme: theme, message: "Loading inbox…")

@@ -25,6 +25,7 @@ struct AccountSection: View {
     }
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         SettingsGroup(theme: theme, label: "AO3 Account") {
             if accounts.isEmpty {
                 loginForm

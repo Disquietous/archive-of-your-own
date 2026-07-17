@@ -9,6 +9,7 @@ struct LaunchGateView: View {
     let appState: AppState
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         Group {
             switch appState.bridge.launchState {
             case .firstLaunch:

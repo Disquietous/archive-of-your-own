@@ -9,6 +9,7 @@ struct SearchFormView: View {
     @Bindable var model: MacAppModel
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         @Bindable var search = model.search
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {

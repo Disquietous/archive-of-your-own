@@ -13,9 +13,7 @@ final class PaneToolbarView: NSView {
         self.theme = theme
         super.init(frame: .zero)
 
-        titleLabel.font = MacFont.ui(15, weight: .bold)
         titleLabel.lineBreakMode = .byTruncatingTail
-        subLabel.font = MacFont.ui(12, weight: .medium)
         subLabel.lineBreakMode = .byTruncatingTail
 
         let titleStack = NSStackView(views: [titleLabel, subLabel])
@@ -77,6 +75,10 @@ final class PaneToolbarView: NSView {
     }
 
     func applyTheme() {
+        // Fonts live here (not init) so the app text-size setting applies on
+        // the next render after it changes.
+        titleLabel.font = MacFont.ui(15, weight: .bold)
+        subLabel.font = MacFont.ui(12, weight: .medium)
         titleLabel.textColor = theme.nsInk
         subLabel.textColor = theme.nsInk3
         separator.layer?.backgroundColor = theme.nsLine.cgColor

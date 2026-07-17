@@ -143,6 +143,7 @@ struct GeneralSettingsPane: View {
     private let timeouts = [15, 30, 60, 120]
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(alignment: .leading, spacing: 16) {
             SettingsGroup(theme: theme, label: "Content") {
                 SettingsCard(theme: theme) {
@@ -225,6 +226,7 @@ struct PrivacySettingsPane: View {
     @State private var showRemoveConfirm = false
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(alignment: .leading, spacing: 16) {
             SettingsGroup(theme: theme, label: "Protection") {
                 SettingsCard(theme: theme) {

@@ -5,6 +5,7 @@ struct TorConnectOverlayView: View {
     let appState: AppState
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ZStack {
             theme.bg.opacity(0.92)
 

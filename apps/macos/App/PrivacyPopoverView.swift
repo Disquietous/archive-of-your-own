@@ -28,6 +28,7 @@ struct PrivacyPopoverView: View {
     ]
 
     var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(alignment: .leading, spacing: 0) {
             connectionSection
             divider.padding(.vertical, 12)
