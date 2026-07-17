@@ -269,71 +269,82 @@ final class MacAppModel {
     /// Subscription identity for cache persistence.
     var subscriptionWorksSubType: String = ""
     var subscriptionWorksSubId: String?
+    /// Progress line while a full works crawl is running ("Page 3 of 12 · 47 works…").
+    var subscriptionWorksFetchStatus: String?
 
     var filteredSubscriptionWorks: [Work] {
         filtered(subscriptionWorksList)
     }
 
-    /// Show a subscription's works — loads from DB cache instantly, fetches
-    /// from AO3 only on first view (no cache) or when `force` is true.
-    func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author", force: Bool = false) {
+    /// Show a subscription's locally stored works. Never fetches — a complete,
+    /// current list comes from the user pressing Refresh Works.
+    /// `subscriptionID` is the parsed AO3 username for author subscriptions;
+    /// `author` is only the display name and may differ from it.
+    func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
+        authorTask.cancel()
         subscriptionWorksTitle = author
         subscriptionWorksError = nil
+        subscriptionWorksFetchStatus = nil
+        isLoadingSubscriptionWorks = false
+        loadingSubscriptionID = nil
         selectedWorkID = nil
         readerOpen = false
         subscriptionWorksSubType = subType
         subscriptionWorksSubId = subscriptionID
 
-        // Load cached works from DB
-        if !force {
-            let cached = appState.bridge.getSubscriptionWorks(subType: subscriptionWorksSubType, subId: subscriptionID)
-            if !cached.isEmpty {
-                let works = cached.map(AppState.workFromSummary)
-                for work in works { appState.fetchedWorks[work.id] = work }
-                subscriptionWorksList = works
-                return
-            }
-        }
+        let cached = appState.bridge.getSubscriptionWorks(subType: subType, subId: subscriptionID)
+        let works = cached.map(AppState.workFromSummary)
+        for work in works { appState.fetchedWorks[work.id] = work }
+        subscriptionWorksList = works
+    }
 
-        subscriptionWorksList = force ? subscriptionWorksList : []
-        loadingSubscriptionID = subscriptionID
+    /// Fetch the author's complete works list — every page on AO3.
+    func refreshSubscriptionWorks() {
+        guard let subId = subscriptionWorksSubId, !isLoadingSubscriptionWorks else { return }
+        let subType = subscriptionWorksSubType
+        subscriptionWorksError = nil
         isLoadingSubscriptionWorks = true
+        loadingSubscriptionID = subId
+        let task = NetworkTask()
+        authorTask = task
         Task { @MainActor in
             do {
-                let summaries = try await appState.retryOnTimeout(task: authorTask, using: appState.bridge) {
-                    try await self.appState.bridge.fetchAuthorWorks(username: author, page: 1)
-                }
-                let works = summaries.map(AppState.workFromSummary)
-                for work in works { appState.fetchedWorks[work.id] = work }
-                if subscriptionWorksTitle == author {
-                    subscriptionWorksList = works
-                    // Persist works and the association
-                    let ids = works.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
-                    appState.bridge.saveSubscriptionWorks(
-                        subType: subscriptionWorksSubType,
-                        subId: subscriptionID,
-                        workIds: ids
-                    )
+                let all = try await crawlAllAuthorWorks(
+                    username: subId, task: task,
+                    status: { [weak self] in self?.subscriptionWorksFetchStatus = $0 },
+                    partial: { [weak self] works in
+                        guard let self, subscriptionWorksSubId == subId else { return }
+                        subscriptionWorksList = works
+                    })
+                if subscriptionWorksSubId == subId && !task.isCancelled {
+                    subscriptionWorksList = all
+                    let ids = all.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
+                    appState.bridge.saveSubscriptionWorks(subType: subType, subId: subId, workIds: ids)
                 }
             } catch {
-                if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
+                if !task.isCancelled && !"\(error)".contains("cancelled"),
+                   subscriptionWorksSubId == subId {
                     subscriptionWorksError = error.localizedDescription
                 }
             }
-            isLoadingSubscriptionWorks = false
-            loadingSubscriptionID = nil
+            if subscriptionWorksSubId == subId {
+                isLoadingSubscriptionWorks = false
+                subscriptionWorksFetchStatus = nil
+                loadingSubscriptionID = nil
+            }
         }
     }
 
-    func refreshSubscriptionWorks() {
-        guard let title = subscriptionWorksTitle, let subId = subscriptionWorksSubId else { return }
-        openSubscriptionAuthorWorks(subscriptionID: subId, author: title, force: true)
+    func cancelSubscriptionWorksRefresh() {
+        authorTask.cancel()
     }
 
     func closeSubscriptionWorks() {
+        authorTask.cancel()
         subscriptionWorksTitle = nil
         subscriptionWorksList = []
         subscriptionWorksError = nil
+        subscriptionWorksFetchStatus = nil
         subscriptionWorksSubId = nil
         selectedWorkID = nil
     }
@@ -344,60 +355,107 @@ final class MacAppModel {
     var authorWorksList: [Work] = []
     var isLoadingAuthor = false
     var authorError: String?
-    let authorTask = NetworkTask()
+    /// Progress line while a full works crawl is running.
+    var authorFetchStatus: String?
+    /// The in-flight crawl's task. Each crawl gets its own instance so that
+    /// cancelling one can never be undone by a later crawl's retry reset.
+    private(set) var authorTask = NetworkTask()
 
+    /// Show an author's locally stored works. Never fetches — a complete,
+    /// current list comes from the user pressing Refresh Works.
     func openAuthor(_ username: String) {
+        authorTask.cancel()
         authorUsername = username
         authorError = nil
+        authorFetchStatus = nil
+        isLoadingAuthor = false
         selectedWorkID = nil
         readerOpen = false
 
-        // Load cached works from DB by author name
         let cached = appState.bridge.getWorksByAuthor(username: username)
-        if !cached.isEmpty {
-            let works = cached.map(AppState.workFromSummary)
-            for work in works { appState.fetchedWorks[work.id] = work }
-            authorWorksList = works
-            return
-        }
-
-        // No cache — fetch from AO3
-        authorWorksList = []
-        isLoadingAuthor = true
-        Task { await fetchAuthorWorks(username: username) }
+        let works = cached.map(AppState.workFromSummary)
+        for work in works { appState.fetchedWorks[work.id] = work }
+        authorWorksList = works
     }
 
+    /// Fetch the author's complete works list — every page on AO3.
     func refreshAuthorWorks() {
-        guard let username = authorUsername else { return }
-        isLoadingAuthor = true
+        guard let username = authorUsername, !isLoadingAuthor else { return }
         authorError = nil
-        Task { await fetchAuthorWorks(username: username) }
-    }
-
-    @MainActor
-    private func fetchAuthorWorks(username: String) async {
-        do {
-            let summaries = try await appState.retryOnTimeout(task: authorTask, using: appState.bridge) {
-                try await self.appState.bridge.fetchAuthorWorks(username: username, page: 1)
+        isLoadingAuthor = true
+        let task = NetworkTask()
+        authorTask = task
+        Task { @MainActor in
+            do {
+                let all = try await crawlAllAuthorWorks(
+                    username: username, task: task,
+                    status: { [weak self] in self?.authorFetchStatus = $0 },
+                    partial: { [weak self] works in
+                        guard let self, authorUsername == username else { return }
+                        authorWorksList = works
+                    })
+                if authorUsername == username && !task.isCancelled {
+                    authorWorksList = all
+                }
+            } catch {
+                if !task.isCancelled && !"\(error)".contains("cancelled"),
+                   authorUsername == username {
+                    authorError = error.localizedDescription
+                }
             }
-            let works = summaries.map(AppState.workFromSummary)
-            for work in works { appState.fetchedWorks[work.id] = work }
             if authorUsername == username {
-                authorWorksList = works
-            }
-        } catch {
-            if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
-                authorError = error.localizedDescription
+                isLoadingAuthor = false
+                authorFetchStatus = nil
             }
         }
-        isLoadingAuthor = false
+    }
+
+    func cancelAuthorWorksRefresh() {
+        authorTask.cancel()
     }
 
     func closeAuthorWorks() {
+        authorTask.cancel()
         authorUsername = nil
         authorWorksList = []
         authorError = nil
+        authorFetchStatus = nil
         selectedWorkID = nil
+    }
+
+    /// Walk every page of an author's works on AO3, delivering the accumulated
+    /// list after each page and a human-readable progress line before each
+    /// request. Works are persisted to the library by the Rust layer as they
+    /// arrive. Stops early (returning what it has) if `task` is cancelled.
+    @MainActor
+    private func crawlAllAuthorWorks(username: String,
+                                     task: NetworkTask,
+                                     status: (String) -> Void,
+                                     partial: ([Work]) -> Void) async throws -> [Work] {
+        var all: [Work] = []
+        var seen = Set<String>()
+        var page: UInt32 = 1
+        var totalPages: UInt32 = 1
+        while true {
+            if page == 1 {
+                status("Fetching works from AO3…")
+            } else {
+                status("Fetching page \(page) of \(totalPages) · \(all.count) works so far…")
+            }
+            let result = try await appState.retryOnTimeout(task: task, using: appState.bridge) {
+                try await self.appState.bridge.fetchAuthorWorks(username: username, page: page)
+            }
+            totalPages = max(result.totalPages, page)
+            let works = result.works.map(AppState.workFromSummary)
+            for work in works where seen.insert(work.id).inserted {
+                appState.fetchedWorks[work.id] = work
+                all.append(work)
+            }
+            partial(all)
+            if !result.hasNextPage || task.isCancelled { break }
+            page += 1
+        }
+        return all
     }
 
     // MARK: - Lists

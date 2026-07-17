@@ -12,6 +12,7 @@ struct AuthorWorksView: View {
     @State private var isLoading = false
     @State private var error: String?
     @State private var currentPage: UInt32 = 0
+    @State private var hasMore = true
     @State private var authorTask = NetworkTask()
 
     private var cacheKey: String { "author_works_\(username)" }
@@ -42,7 +43,7 @@ struct AuthorWorksView: View {
                                 )
                             }
 
-                            if !isLoading {
+                            if !isLoading && hasMore {
                                 Button {
                                     Task { await loadMore() }
                                 } label: {
@@ -139,11 +140,12 @@ struct AuthorWorksView: View {
         error = nil
         currentPage = 0
         do {
-            let works = try await state.retryOnTimeout(task: authorTask, using: state.bridge) {
+            let result = try await state.retryOnTimeout(task: authorTask, using: state.bridge) {
                 try await state.bridge.fetchAuthorWorks(username: username, page: 1)
             }
-            results = works.map(AppState.workFromSummary)
+            results = result.works.map(AppState.workFromSummary)
             currentPage = 1
+            hasMore = result.hasNextPage
             saveToCache(results)
         } catch {
             if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
@@ -158,14 +160,15 @@ struct AuthorWorksView: View {
         isLoading = true
         let page = currentPage + 1
         do {
-            let works = try await state.retryOnTimeout(task: authorTask, using: state.bridge) {
+            let result = try await state.retryOnTimeout(task: authorTask, using: state.bridge) {
                 try await state.bridge.fetchAuthorWorks(username: username, page: page)
             }
-            let newWorks = works.map(AppState.workFromSummary)
+            let newWorks = result.works.map(AppState.workFromSummary)
             let existingIDs = Set(results.map(\.id))
             let unique = newWorks.filter { !existingIDs.contains($0.id) }
             results.append(contentsOf: unique)
             currentPage = page
+            hasMore = result.hasNextPage
             saveToCache(results)
         } catch {
             if !authorTask.isCancelled && !"\(error)".contains("cancelled") {

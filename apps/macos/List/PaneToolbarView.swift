@@ -25,12 +25,18 @@ final class PaneToolbarView: NSView {
 
         leadingStack.orientation = .horizontal
         leadingStack.spacing = 8
+        // Center views on the midline explicitly: hosted SwiftUI views have no
+        // meaningful baseline, and baseline-derived alignment pins their top
+        // edge to the midline instead.
+        leadingStack.alignment = .centerY
         trailingStack.orientation = .horizontal
         trailingStack.spacing = 4
+        trailingStack.alignment = .centerY
 
         let bar = NSStackView(views: [leadingStack, titleStack, NSView(), trailingStack])
         bar.orientation = .horizontal
         bar.spacing = 10
+        bar.alignment = .centerY
         bar.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bar)
 
@@ -74,6 +80,80 @@ final class PaneToolbarView: NSView {
         titleLabel.textColor = theme.nsInk
         subLabel.textColor = theme.nsInk3
         separator.layer?.backgroundColor = theme.nsLine.cgColor
+    }
+}
+
+/// Compact labeled toolbar button ("Refresh Works" / "Cancel") — bordered
+/// pill, icon + text, same hover treatment as ToolButton.
+final class LabelToolButton: NSButton {
+    private let theme: AppTheme
+    private let callback: () -> Void
+    private var hovering = false
+
+    init(theme: AppTheme, action: @escaping () -> Void) {
+        self.theme = theme
+        self.callback = action
+        super.init(frame: .zero)
+        isBordered = false
+        imagePosition = .imageLeading
+        // Keep the icon next to the label and center both in the padded frame —
+        // otherwise the icon pins to the button's leading edge.
+        imageHugsTitle = true
+        alignment = .center
+        setButtonType(.momentaryPushIn)
+        target = self
+        self.action = #selector(fire)
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        layer?.borderWidth = 1
+        translatesAutoresizingMaskIntoConstraints = false
+        let tracking = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self)
+        addTrackingArea(tracking)
+        refresh()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func configure(title: String, symbol: String, tooltip: String) {
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: MacFont.ui(11.5, weight: .semibold),
+            .foregroundColor: theme.nsInk2,
+        ])
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)?
+            .withSymbolConfiguration(.init(pointSize: 10.5, weight: .semibold))
+        contentTintColor = theme.nsInk2
+        toolTip = tooltip
+        invalidateIntrinsicContentSize()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        size.width += 16
+        size.height = 24
+        return size
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovering = true
+        refresh()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        refresh()
+    }
+
+    private func refresh() {
+        layer?.borderColor = theme.nsLine.cgColor
+        layer?.backgroundColor = hovering
+            ? theme.nsInk.withAlphaComponent(0.08).cgColor
+            : theme.nsSurface.cgColor
+    }
+
+    @objc private func fire() {
+        callback()
     }
 }
 

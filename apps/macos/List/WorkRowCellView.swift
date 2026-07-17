@@ -22,6 +22,12 @@ final class WorkRowCellView: NSTableCellView {
     private var collapsedSummaryHeight: CGFloat = 0
     private var fullSummaryHeight: CGFloat = 0
     private let tagsLabel = NSTextField(wrappingLabelWithString: "")
+    /// Same clip-and-animate treatment as the summary: collapsed shows two
+    /// rows of tag pills, clicking reveals the full set.
+    private let tagsClip = NSView()
+    private var tagsHeight: NSLayoutConstraint!
+    private var collapsedTagsHeight: CGFloat = 0
+    private var fullTagsHeight: CGFloat = 0
     private let metaLabel = NSTextField(labelWithString: "")
     private let datesLabel = NSTextField(labelWithString: "")
     private let progressTrack = NSView()
@@ -34,9 +40,14 @@ final class WorkRowCellView: NSTableCellView {
     private var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
     var onToggleSummary: (() -> Void)?
+    /// Called when the user clicks the tags to expand/collapse the full list.
+    var onToggleTags: (() -> Void)?
 
     /// Shared measuring label for summary heights.
     private static let measureLabel = NSTextField(wrappingLabelWithString: "")
+    /// Separate measuring label for tags so attributed content never bleeds
+    /// into the summary measurements.
+    private static let tagsMeasureLabel = NSTextField(wrappingLabelWithString: "")
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -66,7 +77,18 @@ final class WorkRowCellView: NSTableCellView {
             summaryLabel.leadingAnchor.constraint(equalTo: summaryClip.leadingAnchor),
             summaryLabel.trailingAnchor.constraint(equalTo: summaryClip.trailingAnchor),
         ])
-        tagsLabel.maximumNumberOfLines = 2
+        tagsClip.wantsLayer = true
+        tagsClip.layer?.masksToBounds = true
+        tagsClip.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(tagsClicked)))
+        tagsLabel.translatesAutoresizingMaskIntoConstraints = false
+        tagsClip.addSubview(tagsLabel)
+        tagsHeight = tagsClip.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            tagsHeight,
+            tagsLabel.topAnchor.constraint(equalTo: tagsClip.topAnchor),
+            tagsLabel.leadingAnchor.constraint(equalTo: tagsClip.leadingAnchor),
+            tagsLabel.trailingAnchor.constraint(equalTo: tagsClip.trailingAnchor),
+        ])
         metaLabel.font = MacFont.ui(11, weight: .medium)
         metaLabel.lineBreakMode = .byTruncatingTail
 
@@ -80,20 +102,20 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
 
-        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, tagsLabel, metaLabel, progressTrack])
+        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, tagsClip, metaLabel, progressTrack])
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
         body.setCustomSpacing(2, after: fandomLabel)
         body.setCustomSpacing(6, after: authorLabel)
         body.setCustomSpacing(7, after: summaryClip)
-        body.setCustomSpacing(7, after: tagsLabel)
+        body.setCustomSpacing(7, after: tagsClip)
         body.setCustomSpacing(7, after: metaLabel)
         // Labels must refuse to be stretched past their intrinsic height —
         // otherwise row-height measurement is a one-way ratchet: a currently
         // tall (expanded) row satisfies its bottom pin by stretching the
         // labels, so a collapsed summary never measures shorter.
-        for label in [fandomLabel, titleLabel, authorLabel, tagsLabel, metaLabel] {
+        for label in [fandomLabel, titleLabel, authorLabel, metaLabel] {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
 
@@ -139,6 +161,7 @@ final class WorkRowCellView: NSTableCellView {
             fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: datesLabel.leadingAnchor, constant: -8),
 
             summaryClip.widthAnchor.constraint(equalTo: body.widthAnchor),
+            tagsClip.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressTrack.heightAnchor.constraint(equalToConstant: 3),
             progressTrack.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressFill.leadingAnchor.constraint(equalTo: progressTrack.leadingAnchor),
@@ -156,11 +179,20 @@ final class WorkRowCellView: NSTableCellView {
         onToggleSummary?()
     }
 
+    @objc private func tagsClicked() {
+        onToggleTags?()
+    }
+
     /// Animate only the summary reveal: the clip container's height constraint
     /// slides between the 2-line and full measurements. Call inside an
     /// NSAnimationContext with allowsImplicitAnimation for a smooth reveal.
     func setSummaryExpanded(_ expanded: Bool) {
         summaryHeight.constant = expanded ? fullSummaryHeight : collapsedSummaryHeight
+    }
+
+    /// Same animated reveal for the tags list.
+    func setTagsExpanded(_ expanded: Bool) {
+        tagsHeight.constant = expanded ? fullTagsHeight : collapsedTagsHeight
     }
 
     private static let badgeSize: CGFloat = 16
@@ -200,6 +232,20 @@ final class WorkRowCellView: NSTableCellView {
         return (collapsed, max(full, collapsed))
     }
 
+    /// Measure the tag pills' collapsed (2-line) and full heights at a width.
+    private static func tagsHeights(text: NSAttributedString, width: CGFloat) -> (collapsed: CGFloat, full: CGFloat) {
+        let label = tagsMeasureLabel
+        label.attributedStringValue = text
+        label.preferredMaxLayoutWidth = width
+        label.maximumNumberOfLines = 2
+        label.invalidateIntrinsicContentSize()
+        let collapsed = label.intrinsicContentSize.height
+        label.maximumNumberOfLines = 0
+        label.invalidateIntrinsicContentSize()
+        let full = label.intrinsicContentSize.height
+        return (collapsed, max(full, collapsed))
+    }
+
     /// Flip only the selection highlight (background fill + accent bar) —
     /// no label content is touched.
     func setSelected(_ selected: Bool) {
@@ -210,7 +256,7 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
-                   summaryExpanded: Bool, availableTextWidth: CGFloat) {
+                   summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         isRowSelected = selected
         // NSTextField caches its intrinsic size, and changing the line clamp
         // doesn't flush it — a reused cell going expanded → collapsed kept
@@ -261,7 +307,7 @@ final class WorkRowCellView: NSTableCellView {
         summaryLabel.stringValue = work.summary
         summaryClip.isHidden = work.summary.isEmpty
 
-        tagsLabel.isHidden = work.tags.isEmpty
+        tagsClip.isHidden = work.tags.isEmpty
         if !work.tags.isEmpty {
             let tags = NSMutableAttributedString()
             for (index, tag) in work.tags.enumerated() {
@@ -275,6 +321,10 @@ final class WorkRowCellView: NSTableCellView {
                 ]))
             }
             tagsLabel.attributedStringValue = tags
+            let tagHeights = Self.tagsHeights(text: tags, width: availableTextWidth)
+            collapsedTagsHeight = tagHeights.collapsed
+            fullTagsHeight = tagHeights.full
+            tagsHeight.constant = tagsExpanded ? fullTagsHeight : collapsedTagsHeight
         }
         let heights = Self.summaryHeights(text: work.summary, width: availableTextWidth)
         collapsedSummaryHeight = heights.collapsed
