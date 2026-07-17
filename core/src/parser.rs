@@ -337,6 +337,17 @@ pub fn has_next_page(html: &str) -> bool {
     doc.select(&next_sel1).next().is_some() || doc.select(&next_sel2).next().is_some()
 }
 
+/// Total page count from the pagination bar — the highest numbered page link.
+/// Returns 1 when the page has no pagination.
+pub fn total_pages(html: &str) -> u32 {
+    let doc = Html::parse_document(html);
+    let s = sel("ol.pagination a");
+    doc.select(&s)
+        .filter_map(|a| text(&a).trim().parse::<u32>().ok())
+        .max()
+        .unwrap_or(1)
+}
+
 // ---------------------------------------------------------------------------
 // Work page parser (single work with metadata + chapter content)
 // ---------------------------------------------------------------------------
@@ -1408,6 +1419,24 @@ mod tests {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
+
+    #[test]
+    fn test_total_pages() {
+        // Real AO3 pagy markup shape: numbered links, a gap, last number = total.
+        let html = r#"
+        <ol class="pagination actions pagy" role="navigation" aria-label="Pagination">
+            <li class="previous"><span class="disabled">← Previous</span></li>
+            <li><a role="link" aria-disabled="true" aria-current="page" class="current">1</a></li>
+            <li><a href="/users/x/works?page=2">2</a></li>
+            <li><a href="/users/x/works?page=3">3</a></li>
+            <li><span class="gap">&hellip;</span></li>
+            <li><a href="/users/x/works?page=27">27</a></li>
+            <li class="next"><a href="/users/x/works?page=2">Next →</a></li>
+        </ol>
+        "#;
+        assert_eq!(total_pages(html), 27);
+        assert_eq!(total_pages("<html><body><p>no pagination</p></body></html>"), 1);
+    }
 
     #[test]
     fn test_parse_subscriptions_page_authors() {

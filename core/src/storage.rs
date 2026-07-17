@@ -826,6 +826,21 @@ impl Storage {
         Ok(())
     }
 
+    /// Add works to a subscription's cached set without dropping existing
+    /// associations (unlike save_subscription_works, which replaces the set).
+    pub fn add_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO subscription_works (sub_type, sub_id, work_id) VALUES (?1, ?2, ?3)"
+        ).map_err(map_sql)?;
+        for id in work_ids {
+            stmt.execute(params![sub_type, sub_id, *id as i64]).map_err(map_sql)?;
+        }
+        drop(stmt);
+        tx.commit().map_err(map_sql)?;
+        Ok(())
+    }
+
     pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,

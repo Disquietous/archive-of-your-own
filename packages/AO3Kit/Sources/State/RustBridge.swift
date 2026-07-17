@@ -345,7 +345,7 @@ final class RustBridge {
         return try await app.fetchSearchForm()
     }
 
-    func fetchAuthorWorks(username: String, page: UInt32 = 1) async throws -> [UWorkSummary] {
+    func fetchAuthorWorks(username: String, page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchAuthorWorks(username: username, page: page)
     }

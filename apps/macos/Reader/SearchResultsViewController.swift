@@ -9,8 +9,17 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case search, subscriptionWorks, authorWorks
     }
 
-    /// What this listing shows; set by the pane before presenting.
-    var context: Context = .search
+    /// What this listing shows. Derived from observable model state inside
+    /// render() so a section change re-renders — a stored var assigned from
+    /// outside would neither trigger nor be seen by observation tracking,
+    /// leaving the pane showing the previous context's (possibly empty) list.
+    private var context: Context {
+        switch model.section {
+        case .authors, .authorWorks: return .authorWorks
+        case .subscriptions: return .subscriptionWorks
+        default: return .search
+        }
+    }
 
     private let theme: AppTheme
     private let appState: AppState
@@ -21,6 +30,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private var overlayHost: NSView?
     private var works: [Work] = []
     private var renderedWorkIDs: [String] = []
+    private var expandedTags: Set<String> = []
     private lazy var sizingCell = WorkRowCellView(theme: theme)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
@@ -101,36 +111,36 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = nil
             }
         case .subscriptionWorks:
+            let who = model.subscriptionWorksTitle ?? "this author"
             if model.isLoadingSubscriptionWorks && works.isEmpty {
-                let who = model.subscriptionWorksTitle ?? "author"
                 overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: "Fetching works by \(who)…",
-                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  message: model.subscriptionWorksFetchStatus ?? "Fetching works by \(who)…",
+                                                  detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
                                                   otherActivity: otherActivity(excluding: "Fetching \(who)")))
             } else if let error = model.subscriptionWorksError, works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load works", message: error))
             } else if works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
-                                                title: "No works",
-                                                message: "No visible works for this subscription."))
+                                                title: "No works stored",
+                                                message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
             } else {
                 overlay = nil
             }
         case .authorWorks:
+            let who = model.authorUsername ?? "this author"
             if model.isLoadingAuthor && works.isEmpty {
-                let who = model.authorUsername ?? "author"
                 overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: "Fetching works by \(who)…",
-                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  message: model.authorFetchStatus ?? "Fetching works by \(who)…",
+                                                  detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
                                                   otherActivity: otherActivity(excluding: "Fetching \(who)")))
             } else if let error = model.authorError, works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load works", message: error))
             } else if works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
-                                                title: "No works",
-                                                message: "No visible works for this author."))
+                                                title: "No works stored",
+                                                message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
             } else {
                 overlay = nil
             }
@@ -191,7 +201,30 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        summaryExpanded: true,
+                       tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: max(100, tableWidth - 45))
+        cell.onToggleTags = { [weak self] in
+            self?.toggleTags(workID: work.id)
+        }
+    }
+
+    private func toggleTags(workID: String) {
+        if expandedTags.contains(workID) {
+            expandedTags.remove(workID)
+        } else {
+            expandedTags.insert(workID)
+        }
+        guard let row = works.firstIndex(where: { $0.id == workID }) else { return }
+        let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
+        let expanded = expandedTags.contains(workID)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            cell?.setTagsExpanded(expanded)
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+            tableView.layoutSubtreeIfNeeded()
+        }
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {

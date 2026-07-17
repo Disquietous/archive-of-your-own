@@ -113,6 +113,14 @@ impl From<WorkSummary> for UWorkSummary {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct UPagedWorks {
+    pub works: Vec<UWorkSummary>,
+    pub has_next_page: bool,
+    /// Highest page number shown in the listing's pagination bar (1 = no pagination).
+    pub total_pages: u32,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct UChapter {
     pub chapter_id: i64,
     pub number: u32,
@@ -705,16 +713,20 @@ impl AO3App {
         }).await
     }
 
-    pub async fn fetch_author_works(&self, username: String, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
+    pub async fn fetch_author_works(&self, username: String, page: u32) -> Result<UPagedWorks, AO3Error> {
         let progress = self.register_progress("author_works");
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let works = c.fetch_author_works(&username, page).await.map_err(AO3Error::from)?;
+            let (works, has_next, total) = c.fetch_author_works(&username, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             for w in &works { let _ = s.save_work(w); }
-            Ok(works.into_iter().map(UWorkSummary::from).collect())
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+            })
         }).await;
         self.clear_progress("author_works");
         result
@@ -1739,9 +1751,11 @@ impl AO3App {
             for w in &parsed_works {
                 let _ = s.save_work(w);
             }
+            // Merge (not replace): the check only sees page 1, and a full
+            // "Refresh Works" crawl may have cached the author's complete list.
             let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
             if !all_ids.is_empty() {
-                let _ = s.save_subscription_works(&sub_type, &sub_id, &all_ids);
+                let _ = s.add_subscription_works(&sub_type, &sub_id, &all_ids);
             }
             if changed {
                 let old_ref = old_date.as_deref().unwrap_or("");

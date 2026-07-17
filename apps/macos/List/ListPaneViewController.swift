@@ -38,6 +38,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private var renderedWorkIDs: [String] = []
     private var renderedSubscriptionIDs: [String] = []
     private var expandedSummaries: Set<String> = []
+    private var expandedTags: Set<String> = []
     private var isShowingSubscriptionList: Bool {
         model.section == .subscriptions && model.subscriptionSubTab == "following"
     }
@@ -723,9 +724,13 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        summaryExpanded: expandedSummaries.contains(work.id),
+                       tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)
         cell.onToggleSummary = { [weak self] in
             self?.toggleSummary(workID: work.id)
+        }
+        cell.onToggleTags = { [weak self] in
+            self?.toggleTags(workID: work.id)
         }
         return cell
     }
@@ -756,6 +761,26 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    private func toggleTags(workID: String) {
+        if expandedTags.contains(workID) {
+            expandedTags.remove(workID)
+        } else {
+            expandedTags.insert(workID)
+        }
+        guard let row = works.firstIndex(where: { $0.id == workID }) else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
+        let expanded = expandedTags.contains(workID)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            cell?.setTagsExpanded(expanded)
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+            tableView.layoutSubtreeIfNeeded()
+        }
+    }
+
     /// Row heights come from the cells' own measurement. The automatic
     /// row-height engine was measured (see git history) applying height
     /// changes on reload only upward — a collapsed summary's shorter,
@@ -773,6 +798,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                              downloaded: appState.downloadedWorkIDs.contains(work.id),
                              selected: false,
                              summaryExpanded: expandedSummaries.contains(work.id),
+                             tagsExpanded: expandedTags.contains(work.id),
                              availableTextWidth: max(100, width - 45))
         sizingCell.frame = NSRect(x: 0, y: 0, width: width, height: 10_000)
         sizingCell.layoutSubtreeIfNeeded()

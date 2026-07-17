@@ -120,23 +120,15 @@ final class ReadPaneViewController: NSViewController {
 
     private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
-    private var subscriptionRefreshBtn: ToolButton?
     private var authorCloseBtn: ToolButton?
-    private var authorRefreshBtn: ToolButton?
+    private var authorRefreshBtn: LabelToolButton?
+    private var subscriptionRefreshBtn: LabelToolButton?
 
     private func subscriptionCloseButton() -> ToolButton {
         let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
             self?.model.closeSubscriptionWorks()
         }
         subscriptionCloseBtn = button
-        return button
-    }
-
-    private func subscriptionRefreshButton() -> ToolButton {
-        let button = subscriptionRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh works") { [weak self] in
-            self?.model.refreshSubscriptionWorks()
-        }
-        subscriptionRefreshBtn = button
         return button
     }
 
@@ -148,11 +140,30 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    private func authorRefreshButton() -> ToolButton {
-        let button = authorRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh works") { [weak self] in
-            self?.model.refreshAuthorWorks()
+    /// The drill-in header button: "Refresh Works" idle, "Cancel" while a
+    /// crawl runs. render() re-invokes this every pass, so the label always
+    /// tracks the current state.
+    private func refreshWorksButton(forAuthor: Bool) -> LabelToolButton {
+        let button: LabelToolButton
+        if forAuthor {
+            button = authorRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
+                guard let model = self?.model else { return }
+                model.isLoadingAuthor ? model.cancelAuthorWorksRefresh() : model.refreshAuthorWorks()
+            }
+            authorRefreshBtn = button
+        } else {
+            button = subscriptionRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
+                guard let model = self?.model else { return }
+                model.isLoadingSubscriptionWorks ? model.cancelSubscriptionWorksRefresh() : model.refreshSubscriptionWorks()
+            }
+            subscriptionRefreshBtn = button
         }
-        authorRefreshBtn = button
+        let loading = forAuthor ? model.isLoadingAuthor : model.isLoadingSubscriptionWorks
+        button.configure(title: loading ? "Cancel" : "Refresh Works",
+                         symbol: loading ? "xmark" : "arrow.clockwise",
+                         tooltip: loading
+                            ? "Stop fetching — works fetched so far are kept"
+                            : "Fetch this author’s complete works list from AO3, page by page")
         return button
     }
 
@@ -171,20 +182,24 @@ final class ReadPaneViewController: NSViewController {
         // Subscriptions drill-in: an author subscription's works, without
         // ever leaving the Subscriptions section.
         if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
-            toolbar.configure(title: title,
-                              sub: model.isLoadingSubscriptionWorks ? "Fetching works…" : "\(model.filteredSubscriptionWorks.count) works")
+            let sub = model.isLoadingSubscriptionWorks
+                ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
+                : "\(model.filteredSubscriptionWorks.count) works stored"
+            toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
-            toolbar.setTrailing([subscriptionRefreshButton()])
+            toolbar.setTrailing([refreshWorksButton(forAuthor: false)])
             show(mode: .subscriptionWorks(title))
             return
         }
 
         // Authors drill-in: an author's works shown in the reading pane.
         if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
-            toolbar.configure(title: author,
-                              sub: model.isLoadingAuthor ? "Fetching works…" : "\(model.authorWorksList.count) works")
+            let sub = model.isLoadingAuthor
+                ? (model.authorFetchStatus ?? "Fetching works from AO3…")
+                : "\(model.authorWorksList.count) works stored"
+            toolbar.configure(title: author, sub: sub)
             toolbar.setLeading([authorCloseButton()])
-            toolbar.setTrailing([authorRefreshButton()])
+            toolbar.setTrailing([refreshWorksButton(forAuthor: true)])
             show(mode: .subscriptionWorks(author))
             return
         }
@@ -258,12 +273,6 @@ final class ReadPaneViewController: NSViewController {
                 addChild(controller)
                 resultsController = controller
             }
-            resultsController!.context = {
-                if case .subscriptionWorks = mode {
-                    return model.section == .authors ? .authorWorks : .subscriptionWorks
-                }
-                return .search
-            }()
             pin(resultsController!.view)
 
         case .empty:
@@ -344,3 +353,4 @@ final class ReadPaneViewController: NSViewController {
         model.immersive = false
     }
 }
+

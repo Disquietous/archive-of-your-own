@@ -537,19 +537,23 @@ impl AO3Client {
         Ok((subs, has_more))
     }
 
-    /// Fetch the most recent works by an author (page 1 only).
+    /// Fetch one page of an author's works.
+    /// Returns (works, has_next_page, total_pages).
     pub async fn fetch_author_works(
         &self,
         username: &str,
         page: u32,
-    ) -> Result<Vec<WorkSummary>, AppError> {
+    ) -> Result<(Vec<WorkSummary>, bool, u32), AppError> {
         let url = format!("{BASE_URL}/users/{username}/works?page={page}");
         log_info!("http"," Starting: {url}");
         let start = std::time::Instant::now();
         match self.fetch(&url).await {
             Ok(html) => {
                 log_info!("http"," Success in {:?}: {} bytes from {url}", start.elapsed(), html.len());
-                parser::parse_work_listings(&html)
+                let works = parser::parse_work_listings(&html)?;
+                let has_next = parser::has_next_page(&html);
+                let total = parser::total_pages(&html);
+                Ok((works, has_next, total))
             }
             Err(e) => {
                 log_info!("http"," Failed in {:?}: {e} for {url}", start.elapsed());
