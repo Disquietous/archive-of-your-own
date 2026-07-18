@@ -550,6 +550,17 @@ final class RustBridge {
         try? app?.updateBookmarkNote(workId: workId, note: note)
     }
 
+    /// Full AO3 bookmark object (notes, tags, collections, private/rec).
+    func getBookmarkDetails(_ workId: UInt64) -> UBookmarkDetails? {
+        (try? app?.getBookmarkDetails(workId: workId)) ?? nil
+    }
+
+    func updateBookmarkDetails(_ workId: UInt64, note: String, tagString: String,
+                               collectionNames: String, private isPrivate: Bool, rec: Bool) {
+        try? app?.updateBookmarkDetails(workId: workId, note: note, tagString: tagString,
+                                        collectionNames: collectionNames, private: isPrivate, rec: rec)
+    }
+
     func updateBookmarkSync(_ workId: UInt64, sync: Bool) {
         try? app?.updateBookmarkSync(workId: workId, sync: sync)
     }

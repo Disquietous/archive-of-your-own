@@ -512,6 +512,49 @@ impl Storage {
         Ok(())
     }
 
+    /// Update the full AO3 bookmark object (notes, own tags, collections,
+    /// private/rec flags).
+    pub fn update_bookmark_details(&self, work_id: u64, note: &str, tag_string: &str,
+                                   collection_names: &str, private: bool, rec: bool) -> Result<(), AppError> {
+        let acct = self.active_account_id();
+        self.conn.execute(
+            "UPDATE bookmarks SET note = ?3, tag_string = ?4, collection_names = ?5,
+                                  private = ?6, rec = ?7
+             WHERE account_id = ?1 AND work_id = ?2",
+            params![acct, work_id as i64, note, tag_string, collection_names,
+                    private as i32, rec as i32],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Full bookmark row: (note, tag_string, collection_names, private, rec,
+    /// sync_to_ao3, ao3_bookmark_id).
+    #[allow(clippy::type_complexity)]
+    pub fn get_bookmark_details(&self, work_id: u64)
+        -> Result<Option<(String, String, String, bool, bool, bool, Option<u64>)>, AppError> {
+        let acct = self.active_account_id();
+        let mut stmt = self.conn.prepare(
+            "SELECT note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id
+             FROM bookmarks WHERE account_id = ?1 AND work_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![acct, work_id as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)? != 0,
+                row.get::<_, i32>(4)? != 0,
+                row.get::<_, i32>(5)? != 0,
+                row.get::<_, Option<i64>>(6)?.map(|v| v as u64),
+            ))
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(Some(v)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
     pub fn update_bookmark_sync(&self, work_id: u64, sync: bool) -> Result<(), AppError> {
         let acct = self.active_account_id();
         self.conn.execute(
@@ -1557,6 +1600,14 @@ impl Storage {
                 [],
             )
             .ok();
+
+        // Migration: AO3 bookmarks are rich objects — notes, own tags,
+        // collections, private/rec flags (private defaults on, per the
+        // app's privacy-first stance).
+        self.conn.execute("ALTER TABLE bookmarks ADD COLUMN tag_string TEXT NOT NULL DEFAULT ''", []).ok();
+        self.conn.execute("ALTER TABLE bookmarks ADD COLUMN collection_names TEXT NOT NULL DEFAULT ''", []).ok();
+        self.conn.execute("ALTER TABLE bookmarks ADD COLUMN private INTEGER NOT NULL DEFAULT 1", []).ok();
+        self.conn.execute("ALTER TABLE bookmarks ADD COLUMN rec INTEGER NOT NULL DEFAULT 0", []).ok();
 
         // Migration: add account_id column to bookmarks (idempotent)
         self.conn.execute("ALTER TABLE bookmarks ADD COLUMN account_id TEXT NOT NULL DEFAULT ''", []).ok();

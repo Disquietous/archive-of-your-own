@@ -937,6 +937,9 @@ extension ListPaneViewController: NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(menuItem(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
                               #selector(menuToggleBookmark(_:)), row))
+        if appState.bookmarkedWorkIDs.contains(work.id) {
+            menu.addItem(menuItem("Edit Bookmark…", #selector(menuEditBookmark(_:)), row))
+        }
         menu.addItem(menuItem(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
                               #selector(menuToggleDownload(_:)), row))
         if UInt64(work.id) != nil {
@@ -1000,6 +1003,19 @@ extension ListPaneViewController: NSMenuDelegate {
     @objc private func menuExportEpub(_ sender: NSMenuItem) {
         guard let work = clickedWork(sender) else { return }
         EpubExporter.export(work: work, appState: appState)
+    }
+
+    @objc private func menuEditBookmark(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        var dismissRef: () -> Void = {}
+        let view = MacBookmarkEditView(theme: theme, appState: appState,
+                                       workID: work.id, workTitle: work.title,
+                                       onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
+        }
+        presentAsSheet(hosting)
     }
 
     @objc private func menuRemoveFromReading(_ sender: NSMenuItem) {
