@@ -75,6 +75,17 @@ struct ReadingSettingsView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
 
+            group("Layout") {
+                HStack(spacing: 14) {
+                    Toggle("Hyphenation", isOn: $theme.readHyphenation)
+                    Toggle("Justify text", isOn: $theme.readJustified)
+                    Spacer()
+                }
+                .toggleStyle(.checkbox)
+                .font(Font(MacFont.ui(12.5, weight: .medium)))
+                .foregroundStyle(theme.ink2)
+            }
+
             group("App text size") {
                 HStack {
                     stepButton("minus") { setUIScale(theme.uiFontScale - 0.05) }

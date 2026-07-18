@@ -44,6 +44,13 @@ struct SidebarView: View {
                             }
                         }
                     }
+                    if !model.search.savedSearches.isEmpty {
+                        group("Saved Searches") {
+                            ForEach(model.search.savedSearches, id: \.id) { saved in
+                                savedSearchRow(saved)
+                            }
+                        }
+                    }
                 }
                 .padding(.bottom, 8)
             }
@@ -101,6 +108,35 @@ struct SidebarView: View {
             item(.history, "clock", "History")
         }
         .padding(.top, 6)
+    }
+
+    private func savedSearchRow(_ saved: USavedSearch) -> some View {
+        Button {
+            model.goSection(.search)
+            model.search.runSavedSearch(saved, appState: appState)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "star")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 17)
+                    .foregroundStyle(theme.ink3)
+                Text(saved.name)
+                    .font(Font(MacFont.ui(13.5, weight: .medium)))
+                    .foregroundStyle(theme.ink2)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
+        .padding(.horizontal, 8)
+        .contextMenu {
+            Button("Delete Saved Search", role: .destructive) {
+                model.search.deleteSavedSearch(saved.id, appState: appState)
+            }
+        }
     }
 
     private func group(_ label: String, @ViewBuilder content: () -> some View) -> some View {

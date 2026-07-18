@@ -13,7 +13,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private let toolbar: PaneToolbarView
     private let contentStack = NSStackView()
     private let scrollView = NSScrollView()
-    private let tableView = NSTableView()
+    private let tableView = KeyNavTableView()
 
     private var chipsHost: NSHostingView<ChipsBar>?
     private var variantHost: NSView?
@@ -50,6 +50,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     }
     /// Measures off-screen rows for heightOfRow.
     private lazy var sizingCell = WorkRowCellView(theme: theme)
+    private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -79,6 +80,17 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
+        // Return opens the reader for the selected work at its saved position.
+        tableView.onReturn = { [weak self] in
+            guard let self, !isShowingSubscriptionList,
+                  let id = model.selectedWorkID else { return }
+            let chapter = max(0, (appState.progressMap[id]?.chapter ?? 1) - 1)
+            model.openReader(id, chapter: chapter)
+        }
+        // Right-click menu — keyboard/AX-reachable equivalent of every swipe action.
+        let rowMenu = NSMenu()
+        rowMenu.delegate = self
+        tableView.menu = rowMenu
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -190,7 +202,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         case .search:
             toolbar.configure(title: "Search", sub: model.search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
             toolbar.setLeading([])
-            toolbar.setTrailing([searchGoButton(), reloadFieldsButton(), eyeToggleButton()])
+            toolbar.setTrailing([searchGoButton(), saveSearchButton(), reloadFieldsButton(), eyeToggleButton()])
             showVariant(SearchFormView(theme: theme, appState: appState, model: model), section: section)
 
         case .authorWorks:
@@ -201,7 +213,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let meta = sectionMeta(for: section)
             toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
             toolbar.setLeading([])
-            toolbar.setTrailing(section == .reading && !works.isEmpty ? [removeAllReadingButton()] : [])
+            var trailing: [NSView] = [sortFilterMenu.makeButton(for: section)]
+            if section == .reading && !works.isEmpty {
+                trailing.insert(removeAllReadingButton(), at: 0)
+            }
+            toolbar.setTrailing(trailing)
             let empty = works.isEmpty
                 ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
                 : nil
@@ -730,7 +746,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let sub = displayedSubscriptions[row]
             cell.configure(with: sub,
                            isLoading: model.loadingSubscriptionID == sub.id,
-                           isActive: sub.subType.lowercased().contains("author") && model.subscriptionWorksTitle == sub.name)
+                           isActive: model.subscriptionWorksSubId == sub.id
+                               && model.subscriptionWorksSubType == normalizedSubType(sub))
             return cell
         }
 
@@ -837,8 +854,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             guard row < displayedSubscriptions.count else { return }
             let sub = displayedSubscriptions[row]
             let type = sub.subType.lowercased()
-            if type.contains("author") || type.contains("user") {
-                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name, subType: "author")
+            if type.contains("author") || type.contains("user") || type.contains("series") {
+                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name,
+                                                  subType: normalizedSubType(sub))
             } else if type.contains("work") {
                 model.selectWork(sub.id)
             }
@@ -887,5 +905,159 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         default:
             return []
         }
+    }
+}
+
+// MARK: - Row context menu
+
+extension ListPaneViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard row >= 0 else { return }
+
+        if isShowingSubscriptionList {
+            guard row < displayedSubscriptions.count else { return }
+            let sub = displayedSubscriptions[row]
+            let type = sub.subType.lowercased()
+            if type.contains("author") || type.contains("user") || type.contains("series") {
+                menu.addItem(menuItem("Show Works", #selector(menuShowSubscriptionWorks(_:)), row))
+            }
+            menu.addItem(menuItem("Copy AO3 Link", #selector(menuCopySubscriptionLink(_:)), row))
+            return
+        }
+
+        guard row < works.count else { return }
+        let work = works[row]
+        let started = (appState.progressMap[work.id]?.chapter ?? 0) > 0
+
+        menu.addItem(menuItem("Open", #selector(menuOpenWork(_:)), row))
+        menu.addItem(menuItem(started ? "Continue Reading" : "Start Reading",
+                              #selector(menuReadWork(_:)), row))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
+                              #selector(menuToggleBookmark(_:)), row))
+        menu.addItem(menuItem(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
+                              #selector(menuToggleDownload(_:)), row))
+        if UInt64(work.id) != nil {
+            menu.addItem(menuItem("Copy AO3 Link", #selector(menuCopyWorkLink(_:)), row))
+        }
+        if appState.downloadedWorkIDs.contains(work.id) {
+            menu.addItem(menuItem("Export as EPUB…", #selector(menuExportEpub(_:)), row))
+        }
+
+        // Section-specific destructive action (the swipe action's menu twin).
+        switch model.section {
+        case .reading:
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Remove from Currently Reading", #selector(menuRemoveFromReading(_:)), row))
+        case .subscriptions where model.subscriptionSubTab == "new":
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Remove from What’s New", #selector(menuRemoveFromNew(_:)), row))
+        default:
+            break
+        }
+    }
+
+    private func menuItem(_ title: String, _ action: Selector, _ row: Int) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.tag = row
+        return item
+    }
+
+    private func clickedWork(_ sender: NSMenuItem) -> Work? {
+        sender.tag >= 0 && sender.tag < works.count ? works[sender.tag] : nil
+    }
+
+    @objc private func menuOpenWork(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        model.selectWork(work.id)
+    }
+
+    @objc private func menuReadWork(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        let chapter = max(0, (appState.progressMap[work.id]?.chapter ?? 1) - 1)
+        model.openReader(work.id, chapter: chapter)
+    }
+
+    @objc private func menuToggleBookmark(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        appState.toggleBookmark(work.id)
+    }
+
+    @objc private func menuToggleDownload(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        appState.toggleDownload(work.id)
+    }
+
+    @objc private func menuCopyWorkLink(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender), UInt64(work.id) != nil else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("https://archiveofourown.org/works/\(work.id)", forType: .string)
+    }
+
+    @objc private func menuExportEpub(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        EpubExporter.export(work: work, appState: appState)
+    }
+
+    @objc private func menuRemoveFromReading(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        model.removeFromCurrentlyReading(work.id)
+    }
+
+    @objc private func menuRemoveFromNew(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        appState.removeNewWork(work.id)
+    }
+
+    @objc private func menuShowSubscriptionWorks(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }
+        let sub = displayedSubscriptions[sender.tag]
+        model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name,
+                                          subType: normalizedSubType(sub))
+    }
+
+    /// The drill-in/cache key for a subscription ("author" or "series").
+    private func normalizedSubType(_ sub: USubscription) -> String {
+        sub.subType.lowercased().contains("series") ? "series" : "author"
+    }
+
+    /// Star button on the search toolbar — names and saves the current criteria.
+    fileprivate func saveSearchButton() -> ToolButton {
+        ToolButton(theme: theme, symbol: "star", tooltip: "Save this search") { [weak self] in
+            guard let self else { return }
+            let alert = NSAlert()
+            alert.messageText = "Save Search"
+            alert.informativeText = "The current criteria will appear under Saved Searches in the sidebar."
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+            field.placeholderString = "Name"
+            field.stringValue = model.search.queryText
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            model.search.saveCurrentSearch(named: name, appState: appState)
+        }
+    }
+
+    @objc private func menuCopySubscriptionLink(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }
+        let sub = displayedSubscriptions[sender.tag]
+        let type = sub.subType.lowercased()
+        let url: String
+        if type.contains("author") || type.contains("user") {
+            url = "https://archiveofourown.org/users/\(sub.id)"
+        } else if type.contains("series") {
+            url = "https://archiveofourown.org/series/\(sub.id)"
+        } else {
+            url = "https://archiveofourown.org/works/\(sub.id)"
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
     }
 }

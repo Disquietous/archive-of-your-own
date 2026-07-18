@@ -27,6 +27,12 @@ extension AppState {
                 throw Ao3Error.Network(message: "Tor connection failed. Try again or disable Tor in Settings.")
             }
         }
+        // Mark a user-initiated fetch in flight — the subscription checker
+        // yields between its items while this counter is non-zero.
+        await MainActor.run { activeUserFetches += 1 }
+        defer {
+            Task { @MainActor in self.activeUserFetches -= 1 }
+        }
         task.reset()
         var sessionRetried = false
         var timeoutCount = 0

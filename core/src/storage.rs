@@ -76,6 +76,9 @@ impl Storage {
 
         let storage = Self { conn };
         storage.create_tables()?;
+        // One-time: seed the autocomplete tag cache from works cached before
+        // the known_tags table existed.
+        let _ = storage.backfill_known_tags();
         Ok(storage)
     }
 
@@ -135,7 +138,104 @@ impl Storage {
                 ],
             )
             .map_err(map_sql)?;
+        // Seeing a work's details anywhere feeds the autocomplete tag cache.
+        let _ = self.harvest_work_tags(work);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Known tags (autocomplete cache — harvested from every viewed work)
+    // -------------------------------------------------------------------
+
+    /// Cache every tag on a work for autocomplete. Idempotent: new tags
+    /// insert, known tags bump their use count and freshness.
+    pub fn harvest_work_tags(&self, work: &WorkSummary) -> Result<(), AppError> {
+        let mut tags: Vec<(&str, &str)> = Vec::new();
+        for f in &work.fandoms { tags.push((f, "fandom")); }
+        for c in &work.characters { tags.push((c, "character")); }
+        for r in &work.relationships { tags.push((r, "relationship")); }
+        for t in &work.tags { tags.push((t, "freeform")); }
+        for a in &work.authors { tags.push((a, "creator")); }
+        self.upsert_known_tags(&tags)
+    }
+
+    pub fn upsert_known_tags(&self, tags: &[(&str, &str)]) -> Result<(), AppError> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO known_tags (name, tag_type) VALUES (?1, ?2)
+                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                     uses = uses + 1,
+                     last_seen = datetime('now')"
+            ).map_err(map_sql)?;
+            for (name, tag_type) in tags {
+                let trimmed = name.trim();
+                if trimmed.is_empty() { continue; }
+                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+            }
+        }
+        tx.commit().map_err(map_sql)
+    }
+
+    /// Record names confirmed by AO3's autocomplete as canonical.
+    pub fn mark_tags_canonical(&self, tag_type: &str, names: &[String]) -> Result<(), AppError> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO known_tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
+                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                     canonical = 1,
+                     last_seen = datetime('now')"
+            ).map_err(map_sql)?;
+            for name in names {
+                let trimmed = name.trim();
+                if trimmed.is_empty() { continue; }
+                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+            }
+        }
+        tx.commit().map_err(map_sql)
+    }
+
+    /// Local autocomplete: substring match, ranked starts-with first, then
+    /// AO3-confirmed canonical names, then by how often the tag was seen.
+    pub fn search_known_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+        let escaped = term.trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM known_tags
+             WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
+             ORDER BY (name LIKE ?3 ESCAPE '\\') DESC,
+                      canonical DESC, uses DESC, name COLLATE NOCASE
+             LIMIT ?4"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![tag_type, contains, prefix, limit], |row| {
+            row.get::<_, String>(0)
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// One-time seed of known_tags from works cached before the table existed.
+    fn backfill_known_tags(&self) -> Result<(), AppError> {
+        if self.get_state("known_tags_backfilled")?.is_some() {
+            return Ok(());
+        }
+        for work in self.get_all_works()? {
+            let _ = self.harvest_work_tags(&work);
+        }
+        self.set_state("known_tags_backfilled", "1")
     }
 
     /// Retrieve a single work by its AO3 id, or `None` if not stored.
@@ -842,7 +942,10 @@ impl Storage {
     }
 
     pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
-        let mut stmt = self.conn.prepare(
+        // Series works keep their crawl (reading) order; author works sort
+        // newest-first like the live listing.
+        let order = if sub_type == "series" { "sw.rowid ASC" } else { "w.date_updated DESC" };
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
                     w.warnings_json, w.categories_json, w.relationships_json,
                     w.characters_json, w.tags_json, w.summary, w.word_count,
@@ -851,8 +954,8 @@ impl Storage {
              FROM subscription_works sw
              JOIN works w ON w.id = sw.work_id
              WHERE sw.sub_type = ?1 AND sw.sub_id = ?2
-             ORDER BY w.date_updated DESC"
-        ).map_err(map_sql)?;
+             ORDER BY {order}"
+        )).map_err(map_sql)?;
         let rows = stmt.query_map(params![sub_type, sub_id], |row| {
             Ok(Self::work_from_row(row))
         }).map_err(map_sql)?;
@@ -1433,6 +1536,16 @@ impl Storage {
                 CREATE TABLE IF NOT EXISTS kudos_given (
                     work_id INTEGER PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS known_tags (
+                    name      TEXT NOT NULL,
+                    tag_type  TEXT NOT NULL,
+                    uses      INTEGER NOT NULL DEFAULT 1,
+                    canonical INTEGER NOT NULL DEFAULT 0,
+                    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (name, tag_type)
+                );
+                CREATE INDEX IF NOT EXISTS idx_known_tags_lookup
+                    ON known_tags(tag_type, name COLLATE NOCASE);
                 ",
             )
             .map_err(map_sql)?;
@@ -1680,6 +1793,14 @@ impl Storage {
     // -- Comments -------------------------------------------------------------
 
     // -- Inbox persistence ---------------------------------------------------
+
+    /// Whether an inbox message is already stored locally.
+    pub fn has_inbox_message(&self, comment_id: u64) -> Result<bool, AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT 1 FROM inbox_messages WHERE comment_id = ?1 LIMIT 1")
+            .map_err(map_sql)?;
+        stmt.exists(params![comment_id as i64]).map_err(map_sql)
+    }
 
     pub fn save_inbox_messages(&self, items: &[crate::models::InboxItem]) -> Result<(), AppError> {
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
@@ -2003,6 +2124,46 @@ mod tests {
 
     fn open_test_db() -> Storage {
         Storage::open_in_memory("test-passphrase").expect("open in-memory db")
+    }
+
+    #[test]
+    fn test_known_tags_harvested_on_save_work() {
+        let db = open_test_db();
+        db.save_work(&sample_work(42)).unwrap();
+
+        // sample_work carries authors Author1/Author2 — harvested as creators.
+        let creators = db.search_known_tags("creator", "Author", 10).unwrap();
+        assert!(creators.contains(&"Author1".to_string()));
+        assert!(creators.contains(&"Author2".to_string()));
+        // Wrong type finds nothing.
+        assert!(db.search_known_tags("fandom", "Author", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_known_tags_ranking() {
+        let db = open_test_db();
+        // "Steve" seen 3 times, "Ever Steve" once, canonical "Steve Rogers".
+        for _ in 0..3 { db.upsert_known_tags(&[("Steve Harrington", "character")]).unwrap(); }
+        db.upsert_known_tags(&[("Ever Steve", "character")]).unwrap();
+        db.mark_tags_canonical("character", &["Steve Rogers".to_string()]).unwrap();
+
+        let results = db.search_known_tags("character", "steve", 10).unwrap();
+        // Starts-with beats substring; canonical beats use-count within starts-with.
+        assert_eq!(results[0], "Steve Rogers");
+        assert_eq!(results[1], "Steve Harrington");
+        assert_eq!(results[2], "Ever Steve");
+
+        // LIKE metacharacters are escaped, not wildcards.
+        assert!(db.search_known_tags("character", "%", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_known_tags_canonical_upsert_preserves_uses() {
+        let db = open_test_db();
+        for _ in 0..5 { db.upsert_known_tags(&[("Fluff", "freeform")]).unwrap(); }
+        db.mark_tags_canonical("freeform", &["Fluff".to_string()]).unwrap();
+        let results = db.search_known_tags("freeform", "Fluff", 10).unwrap();
+        assert_eq!(results, vec!["Fluff".to_string()]);
     }
 
     #[test]

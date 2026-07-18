@@ -26,7 +26,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private let model: MacAppModel
 
     private let scrollView = NSScrollView()
-    private let tableView = NSTableView()
+    private let tableView = KeyNavTableView()
     private var overlayHost: NSView?
     private var works: [Work] = []
     private var renderedWorkIDs: [String] = []
@@ -62,6 +62,16 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
+        // Return opens the reader for the selected work at its saved position.
+        tableView.onReturn = { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            let chapter = max(0, (appState.progressMap[id]?.chapter ?? 1) - 1)
+            model.openReader(id, chapter: chapter)
+        }
+        // Right-click menu — mirrors the list pane's row actions.
+        let rowMenu = NSMenu()
+        rowMenu.delegate = self
+        tableView.menu = rowMenu
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -101,7 +111,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         switch context {
         case .search: works = model.works(for: .search)
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
-        case .authorWorks: works = model.authorWorksList
+        case .authorWorks: works = model.filteredAuthorWorks
         }
 
         overlayHost?.removeFromSuperview()
@@ -265,6 +275,68 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
 
     func tableView(_ tableView: NSTableView, shouldShowCellExpansionFor tableColumn: NSTableColumn?, row: Int) -> Bool {
         false
+    }
+}
+
+// MARK: - Row context menu
+
+extension SearchResultsViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard row >= 0, row < works.count else { return }
+        let work = works[row]
+        let started = (appState.progressMap[work.id]?.chapter ?? 0) > 0
+
+        menu.addItem(menuItem("Open", #selector(menuOpenWork(_:)), row))
+        menu.addItem(menuItem(started ? "Continue Reading" : "Start Reading",
+                              #selector(menuReadWork(_:)), row))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
+                              #selector(menuToggleBookmark(_:)), row))
+        menu.addItem(menuItem(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
+                              #selector(menuToggleDownload(_:)), row))
+        if UInt64(work.id) != nil {
+            menu.addItem(menuItem("Copy AO3 Link", #selector(menuCopyWorkLink(_:)), row))
+        }
+    }
+
+    private func menuItem(_ title: String, _ action: Selector, _ row: Int) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.tag = row
+        return item
+    }
+
+    private func clickedWork(_ sender: NSMenuItem) -> Work? {
+        sender.tag >= 0 && sender.tag < works.count ? works[sender.tag] : nil
+    }
+
+    @objc private func menuOpenWork(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        model.selectWork(work.id)
+    }
+
+    @objc private func menuReadWork(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        let chapter = max(0, (appState.progressMap[work.id]?.chapter ?? 1) - 1)
+        model.openReader(work.id, chapter: chapter)
+    }
+
+    @objc private func menuToggleBookmark(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        appState.toggleBookmark(work.id)
+    }
+
+    @objc private func menuToggleDownload(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        appState.toggleDownload(work.id)
+    }
+
+    @objc private func menuCopyWorkLink(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender), UInt64(work.id) != nil else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("https://archiveofourown.org/works/\(work.id)", forType: .string)
     }
 }
 

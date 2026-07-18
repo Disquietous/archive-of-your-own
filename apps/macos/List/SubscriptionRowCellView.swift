@@ -89,7 +89,13 @@ final class SubscriptionRowCellView: NSTableCellView {
                                  accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
         nameLabel.textColor = isActive ? theme.nsAccent : theme.nsInk
-        chevron.isHidden = sub.subType.lowercased().contains("series")
+        // Works, authors, and series all drill in now.
+        chevron.isHidden = false
+
+        // One VoiceOver element per row.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("\(sub.name), \(typeName) subscription")
     }
 
     func applyTheme() {

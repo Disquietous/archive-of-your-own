@@ -59,6 +59,14 @@ final class AppTheme {
     var uiFontScale: Double {
         didSet { UserDefaults.standard.set(uiFontScale, forKey: "uiFontScale") }
     }
+    /// Hyphenate reading text at line breaks.
+    var readHyphenation: Bool {
+        didSet { UserDefaults.standard.set(readHyphenation, forKey: "readHyphenation") }
+    }
+    /// Justify reading text instead of ragged-right.
+    var readJustified: Bool {
+        didSet { UserDefaults.standard.set(readJustified, forKey: "readJustified") }
+    }
 
     // Lazy-loaded background image
     private var _backgroundImage: PlatformImage?
@@ -105,6 +113,8 @@ final class AppTheme {
         useTorByDefault = d.bool(forKey: "useTorByDefault")
         measure = d.object(forKey: "measure") as? Int ?? 680
         uiFontScale = d.object(forKey: "uiFontScale") as? Double ?? 1.0
+        readHyphenation = d.object(forKey: "readHyphenation") as? Bool ?? false
+        readJustified = d.object(forKey: "readJustified") as? Bool ?? false
     }
 
     // MARK: - Theme switching

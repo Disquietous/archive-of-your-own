@@ -167,16 +167,22 @@ final class ReaderViewController: NSViewController {
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             // Reading settings that require re-render.
-            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure, model.immersive)
+            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure,
+                 theme.readHyphenation, theme.readJustified, model.immersive)
             DispatchQueue.main.async { self.renderChapter() }
         }
     }
+
+    /// Saved scroll fraction to restore once the chapter content renders.
+    private var pendingRestorePct: Double?
 
     func show(work: Work, chapterIndex: Int) {
         self.work = work
         self.chapterIndex = chapterIndex
         self.chapters = nil
         self.loadError = nil
+        pendingRestorePct = model.readerResumePct > 0.02 ? model.readerResumePct : nil
+        model.readerResumePct = 0
         renderChapter()
         scrollToTop()
         Task { await loadChapters() }
@@ -323,6 +329,23 @@ final class ReaderViewController: NSViewController {
 
         footer.applyTheme()
         updateProgress()
+
+        // Land where the reader left off (Continue, chapter list, relaunch).
+        if let pct = pendingRestorePct {
+            pendingRestorePct = nil
+            DispatchQueue.main.async { [weak self] in
+                self?.restoreScroll(to: pct)
+            }
+        }
+    }
+
+    private func restoreScroll(to pct: Double) {
+        view.layoutSubtreeIfNeeded()
+        guard let documentHeight = scrollView.documentView?.bounds.height else { return }
+        let maxOffset = documentHeight - scrollView.contentView.bounds.height
+        guard maxOffset > 0 else { return }
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxOffset * pct))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private func updateOverlay() {
@@ -388,6 +411,11 @@ final class ReaderViewController: NSViewController {
 
     @objc private func nextChapter() {
         goChapter(1)
+    }
+
+    /// Keyboard navigation entry point (← / → in the reading pane).
+    func goToAdjacentChapter(_ delta: Int) {
+        goChapter(delta)
     }
 
     private func goChapter(_ delta: Int) {

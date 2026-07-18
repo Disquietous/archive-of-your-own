@@ -66,6 +66,70 @@ final class MacAppModel {
         set { appState.hideExplicit = newValue }
     }
 
+    // MARK: - Sorting & filtering
+
+    enum WorkSort: String, CaseIterable {
+        case natural, updated, kudos, words, title
+
+        var label: String {
+            switch self {
+            case .natural: "Default Order"
+            case .updated: "Recently Updated"
+            case .kudos: "Most Kudos"
+            case .words: "Longest"
+            case .title: "Title A–Z"
+            }
+        }
+    }
+
+    enum CompletionFilter: String, CaseIterable {
+        case all, complete, inProgress
+
+        var label: String {
+            switch self {
+            case .all: "All Works"
+            case .complete: "Complete Only"
+            case .inProgress: "In Progress Only"
+            }
+        }
+    }
+
+    /// Per-section sort choice (persisted; sections not present sort naturally).
+    private var workSorts: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "workSorts") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(workSorts, forKey: "workSorts") }
+    }
+
+    func workSort(for section: Section) -> WorkSort {
+        WorkSort(rawValue: workSorts[String(describing: section)] ?? "") ?? .natural
+    }
+
+    func setWorkSort(_ sort: WorkSort, for section: Section) {
+        workSorts[String(describing: section)] = sort.rawValue
+    }
+
+    var completionFilter: CompletionFilter =
+        CompletionFilter(rawValue: UserDefaults.standard.string(forKey: "completionFilter") ?? "") ?? .all {
+        didSet { UserDefaults.standard.set(completionFilter.rawValue, forKey: "completionFilter") }
+    }
+
+    var ratingFilter: Rating? =
+        UserDefaults.standard.string(forKey: "ratingFilter").flatMap(Rating.init(rawValue:)) {
+        didSet { UserDefaults.standard.set(ratingFilter?.rawValue, forKey: "ratingFilter") }
+    }
+
+    /// Sort a filtered list by the section's persisted choice. Dates are
+    /// ISO-normalized (yyyy-mm-dd) so string comparison orders correctly.
+    func sorted(_ works: [Work], for section: Section) -> [Work] {
+        switch workSort(for: section) {
+        case .natural: works
+        case .updated: works.sorted { $0.updated > $1.updated }
+        case .kudos: works.sorted { $0.kudos > $1.kudos }
+        case .words: works.sorted { $0.words > $1.words }
+        case .title: works.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        }
+    }
+
     // MARK: - Intents
 
     func goSection(_ s: Section) {
@@ -103,6 +167,79 @@ final class MacAppModel {
         readerOpen = false
     }
 
+    /// Route an archiveofourown.org link to the matching screen.
+    /// Returns false when the URL isn't something the app can open (yet).
+    @discardableResult
+    func openAO3URL(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let candidate = trimmed.hasPrefix("http") ? trimmed : "https://\(trimmed)"
+        guard let url = URL(string: candidate) else { return false }
+        if let host = url.host, !host.hasSuffix("archiveofourown.org") { return false }
+        let parts = url.path.split(separator: "/").map(String.init)
+
+        if let i = parts.firstIndex(of: "works"), i + 1 < parts.count, UInt64(parts[i + 1]) != nil {
+            openWorkByID(parts[i + 1])
+            return true
+        }
+        if let i = parts.firstIndex(of: "users"), i + 1 < parts.count, !parts[i + 1].isEmpty {
+            goSection(.authors)
+            openAuthor(parts[i + 1])
+            return true
+        }
+        if let i = parts.firstIndex(of: "series"), i + 1 < parts.count, UInt64(parts[i + 1]) != nil {
+            goSection(.subscriptions)
+            subscriptionSubTab = "following"
+            openSubscriptionAuthorWorks(subscriptionID: parts[i + 1],
+                                        author: "Series \(parts[i + 1])",
+                                        subType: "series")
+            return true
+        }
+        return false
+    }
+
+    /// Show a work's detail page, fetching its metadata first when it isn't
+    /// known locally (e.g. opened from a pasted URL).
+    func openWorkByID(_ id: String) {
+        if appState.work(byID: id) != nil {
+            selectWork(id)
+            return
+        }
+        Task { @MainActor in
+            await appState.fetchWorkMetadata(id)
+            if appState.work(byID: id) != nil {
+                selectWork(id)
+            }
+        }
+    }
+
+    /// Escape: close the innermost open context.
+    /// Returns false when there was nothing left to close.
+    @discardableResult
+    func escapeInnermost() -> Bool {
+        if immersive {
+            immersive = false
+            return true
+        }
+        if readerOpen {
+            closeReader()
+            return true
+        }
+        if selectedWorkID != nil {
+            clearSelection()
+            return true
+        }
+        if section == .subscriptions && subscriptionWorksTitle != nil {
+            closeSubscriptionWorks()
+            return true
+        }
+        if section == .authors && authorUsername != nil {
+            closeAuthorWorks()
+            return true
+        }
+        return false
+    }
+
     func selectWork(_ id: String) {
         if selectedWorkID != id { selectedWorkID = id }
         if readerOpen { readerOpen = false }
@@ -112,6 +249,13 @@ final class MacAppModel {
     }
 
     func openReader(_ id: String, chapter: Int) {
+        // Stash the saved in-chapter position before setProgress(pct: 0)
+        // overwrites it — the reader consumes this to restore the scroll.
+        if let existing = appState.progressMap[id], existing.chapter == chapter + 1 {
+            readerResumePct = existing.pct
+        } else {
+            readerResumePct = 0
+        }
         selectedWorkID = id
         readerChapter = chapter
         readerOpen = true
@@ -121,6 +265,10 @@ final class MacAppModel {
         // revisiting an earlier chapter never regresses anything.
         appState.setProgress(id, chapter: chapter + 1, pct: 0)
     }
+
+    /// Saved scroll position (0–1) for the chapter being opened; consumed by
+    /// the reader on its first successful render.
+    var readerResumePct: Double = 0
 
     func closeReader() {
         readerOpen = false
@@ -273,12 +421,12 @@ final class MacAppModel {
     var subscriptionWorksFetchStatus: String?
 
     var filteredSubscriptionWorks: [Work] {
-        filtered(subscriptionWorksList)
+        sorted(filtered(subscriptionWorksList), for: .subscriptions)
     }
 
-    /// Show a subscription's locally stored works. Never fetches — a complete,
-    /// current list comes from the user pressing Refresh Works.
-    /// `subscriptionID` is the parsed AO3 username for author subscriptions;
+    /// Show a subscription's locally stored works (author or series). Never
+    /// fetches — a complete, current list comes from Refresh Works.
+    /// `subscriptionID` is the parsed AO3 username (author) or series ID;
     /// `author` is only the display name and may differ from it.
     func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
         authorTask.cancel()
@@ -298,7 +446,8 @@ final class MacAppModel {
         subscriptionWorksList = works
     }
 
-    /// Fetch the author's complete works list — every page on AO3.
+    /// Fetch the subscription's complete works list — every page on AO3.
+    /// Author subscriptions crawl /users/{name}/works; series crawl /series/{id}.
     func refreshSubscriptionWorks() {
         guard let subId = subscriptionWorksSubId, !isLoadingSubscriptionWorks else { return }
         let subType = subscriptionWorksSubType
@@ -307,10 +456,20 @@ final class MacAppModel {
         loadingSubscriptionID = subId
         let task = NetworkTask()
         authorTask = task
+        let fetchPage: (UInt32) async throws -> UPagedWorks
+        if subType.lowercased().contains("series"), let seriesId = UInt64(subId) {
+            fetchPage = { [appState] in
+                try await appState.bridge.fetchSeriesWorksPaged(seriesId: seriesId, page: $0)
+            }
+        } else {
+            fetchPage = { [appState] in
+                try await appState.bridge.fetchAuthorWorks(username: subId, page: $0)
+            }
+        }
         Task { @MainActor in
             do {
-                let all = try await crawlAllAuthorWorks(
-                    username: subId, task: task,
+                let all = try await crawlAllWorks(
+                    fetchPage: fetchPage, task: task,
                     status: { [weak self] in self?.subscriptionWorksFetchStatus = $0 },
                     partial: { [weak self] works in
                         guard let self, subscriptionWorksSubId == subId else { return }
@@ -353,6 +512,10 @@ final class MacAppModel {
 
     var authorUsername: String?
     var authorWorksList: [Work] = []
+
+    var filteredAuthorWorks: [Work] {
+        sorted(filtered(authorWorksList), for: .authors)
+    }
     var isLoadingAuthor = false
     var authorError: String?
     /// Progress line while a full works crawl is running.
@@ -387,8 +550,11 @@ final class MacAppModel {
         authorTask = task
         Task { @MainActor in
             do {
-                let all = try await crawlAllAuthorWorks(
-                    username: username, task: task,
+                let all = try await crawlAllWorks(
+                    fetchPage: { [appState] in
+                        try await appState.bridge.fetchAuthorWorks(username: username, page: $0)
+                    },
+                    task: task,
                     status: { [weak self] in self?.authorFetchStatus = $0 },
                     partial: { [weak self] works in
                         guard let self, authorUsername == username else { return }
@@ -423,15 +589,16 @@ final class MacAppModel {
         selectedWorkID = nil
     }
 
-    /// Walk every page of an author's works on AO3, delivering the accumulated
-    /// list after each page and a human-readable progress line before each
-    /// request. Works are persisted to the library by the Rust layer as they
-    /// arrive. Stops early (returning what it has) if `task` is cancelled.
+    /// Walk every page of a works listing on AO3 (author or series),
+    /// delivering the accumulated list after each page and a human-readable
+    /// progress line before each request. Works are persisted to the library
+    /// by the Rust layer as they arrive. Stops early (returning what it has)
+    /// if `task` is cancelled.
     @MainActor
-    private func crawlAllAuthorWorks(username: String,
-                                     task: NetworkTask,
-                                     status: (String) -> Void,
-                                     partial: ([Work]) -> Void) async throws -> [Work] {
+    private func crawlAllWorks(fetchPage: @escaping (UInt32) async throws -> UPagedWorks,
+                               task: NetworkTask,
+                               status: (String) -> Void,
+                               partial: ([Work]) -> Void) async throws -> [Work] {
         var all: [Work] = []
         var seen = Set<String>()
         var page: UInt32 = 1
@@ -443,7 +610,7 @@ final class MacAppModel {
                 status("Fetching page \(page) of \(totalPages) · \(all.count) works so far…")
             }
             let result = try await appState.retryOnTimeout(task: task, using: appState.bridge) {
-                try await self.appState.bridge.fetchAuthorWorks(username: username, page: page)
+                try await fetchPage(page)
             }
             totalPages = max(result.totalPages, page)
             let works = result.works.map(AppState.workFromSummary)
@@ -501,14 +668,20 @@ final class MacAppModel {
         default:
             works = []
         }
-        return filtered(works)
+        return sorted(filtered(works), for: section)
     }
 
     private func filtered(_ works: [Work]) -> [Work] {
         works.filter { w in
-            let passesRating = !hideExplicit || w.rating != .explicit
+            let passesExplicit = !hideExplicit || w.rating != .explicit
             let matchesTags = activeTags.allSatisfy { w.tags.contains($0) }
-            return passesRating && matchesTags
+            let passesCompletion = switch completionFilter {
+            case .all: true
+            case .complete: w.complete
+            case .inProgress: !w.complete
+            }
+            let passesRating = ratingFilter == nil || w.rating == ratingFilter
+            return passesExplicit && matchesTags && passesCompletion && passesRating
         }
     }
 

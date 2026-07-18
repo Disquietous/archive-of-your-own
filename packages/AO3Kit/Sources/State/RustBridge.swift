@@ -350,6 +350,11 @@ final class RustBridge {
         return try await app.fetchAuthorWorks(username: username, page: page)
     }
 
+    func fetchSeriesWorksPaged(seriesId: UInt64, page: UInt32 = 1) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchSeriesWorksPaged(seriesId: seriesId, page: page)
+    }
+
     func browseWorks(page: UInt32 = 1) async throws -> [UWorkSummary] {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.browseWorks(page: page)
@@ -717,6 +722,23 @@ final class RustBridge {
     /// Requests currently in flight (for the request log's live view).
     func getActiveRequests() -> [UActiveRequest] {
         app?.getActiveRequests() ?? []
+    }
+
+    /// Local tag autocomplete — instant, DB-only, never touches the network.
+    func searchLocalTags(tagType: String, term: String, limit: UInt32 = 12) -> [String] {
+        (try? app?.searchLocalTags(tagType: tagType, term: term, limit: limit)) ?? []
+    }
+
+    /// Explicit AO3 autocomplete lookup; results are cached as canonical.
+    func autocompleteTagsRemote(tagType: String, term: String) async throws -> [String] {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.autocompleteTagsRemote(tagType: tagType, term: term)
+    }
+
+    /// Export a downloaded work as an EPUB3 file at `path`.
+    func exportEpub(workId: UInt64, path: String) throws {
+        guard let app else { throw BridgeError.notInitialized }
+        try app.exportEpub(workId: workId, destPath: path)
     }
 
     func clearRequestLog() {

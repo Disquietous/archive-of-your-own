@@ -162,6 +162,42 @@ final class MacSearchModel {
         setQuery(query)
     }
 
+    // MARK: - Saved searches (criteria persisted in the encrypted DB)
+
+    var savedSearches: [USavedSearch] = []
+
+    func loadSavedSearches(_ appState: AppState) {
+        savedSearches = appState.bridge.getSavedSearches()
+    }
+
+    /// Persist the current criteria (query, fields, checkboxes) under a name.
+    func saveCurrentSearch(named name: String, appState: AppState) {
+        let payload: [String: Any] = [
+            "fieldValues": fieldValues,
+            "checkboxValues": checkboxValues.mapValues { Array($0) },
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        appState.bridge.saveSearch(name: name, paramsJson: json)
+        loadSavedSearches(appState)
+    }
+
+    /// Restore a saved search's criteria into the form and run it.
+    @MainActor
+    func runSavedSearch(_ saved: USavedSearch, appState: AppState) {
+        guard let data = saved.paramsJson.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        fieldValues = payload["fieldValues"] as? [String: String] ?? [:]
+        let boxes = payload["checkboxValues"] as? [String: [String]] ?? [:]
+        checkboxValues = boxes.mapValues(Set.init)
+        performSearch(appState)
+    }
+
+    func deleteSavedSearch(_ id: Int64, appState: AppState) {
+        appState.bridge.deleteSavedSearch(id)
+        loadSavedSearches(appState)
+    }
+
     // MARK: - Form JSON (same shape the iOS cache uses)
 
     private static func encodeForm(_ fields: [UFormField]) -> String? {

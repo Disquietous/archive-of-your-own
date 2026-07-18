@@ -227,6 +227,10 @@ struct ContentBlockRenderer {
     private func bodyParagraphStyle(indentLevel: Int) -> NSMutableParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = theme.readLeading
+        style.hyphenationFactor = theme.readHyphenation ? 0.9 : 0
+        if theme.readJustified {
+            style.alignment = .justified
+        }
         style.headIndent = CGFloat(indentLevel) * 24
         switch paragraphStyle {
         case .indented:

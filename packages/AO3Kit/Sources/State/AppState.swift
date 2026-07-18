@@ -70,6 +70,13 @@ final class AppState {
     // Connection state
     var isTestingCircuit = false
     var circuitAttempt = 0
+    /// Count of user-initiated fetches currently in flight (retryOnTimeout
+    /// wraps them all). The subscription checker yields between items while
+    /// this is non-zero so background traffic never crowds out the user.
+    var activeUserFetches = 0
+    /// True while a circuit rotation is running — concurrent rotation
+    /// requests coalesce into one instead of thrashing the transport.
+    var isRotatingCircuit = false
     var isResolvingCloudflare = false
     var cloudflareResolved = false
     var cloudflareError: String?
@@ -139,6 +146,28 @@ final class AppState {
     }
 
     func rotateCircuit() async {
+        // Coalesce: if a rotation is already running (another request hit the
+        // same dead circuit), wait for it instead of rotating again — the
+        // caller retries on the fresh circuit either way.
+        if isRotatingCircuit {
+            while isRotatingCircuit {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            return
+        }
+        isRotatingCircuit = true
+        defer { isRotatingCircuit = false }
+
+        // Let other in-flight requests settle before replacing the transport —
+        // rotating mid-flight kills them, and their timeouts would trigger
+        // another rotation in a cascade. Cap the wait: on a truly dead
+        // circuit those requests only end at their own timeout anyway.
+        var waitedMs = 0
+        while !bridge.getActiveRequests().isEmpty && waitedMs < 15_000 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            waitedMs += 500
+        }
+
         bridge.saveSessionCookies()
 
         torConnectCancelled = false
@@ -751,6 +780,10 @@ final class AppState {
 
     var subscriptionCheckFailed: Int = 0
 
+    /// Platform hook: called with the number of works newly added to What's
+    /// New by a completed check. macOS posts a system notification from it.
+    @ObservationIgnored var onNewWorksFound: ((Int) -> Void)?
+
     func checkSubscriptions() async {
         guard ao3Username != nil else { return }
         guard !isCheckingSubscriptions else { return }
@@ -762,6 +795,7 @@ final class AppState {
         isCheckingSubscriptions = true
         subscriptionCheckTask.reset()
         subscriptionCheckFailed = 0
+        let newWorksBefore = Set(newWorkIDs)
 
         do {
             let total = try bridge.startSubscriptionCheck()
@@ -770,6 +804,22 @@ final class AppState {
 
             var consecutiveRetries = 0
             while !subscriptionCheckTask.isCancelled {
+                // Yield to the user: while they're actively fetching something,
+                // pause between items so the background check never competes
+                // for the circuit or the rate limiter.
+                var pausedForUser = false
+                while activeUserFetches > 0 && !subscriptionCheckTask.isCancelled {
+                    if !pausedForUser {
+                        pausedForUser = true
+                        subscriptionCheckTask.statusMessage = "Paused while you browse…"
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                if subscriptionCheckTask.isCancelled { break }
+                if pausedForUser {
+                    subscriptionCheckTask.statusMessage = nil
+                }
+
                 guard let result = try await bridge.checkNextSubscription() else { break }
                 subscriptionCheckRemaining = Int(result.remaining)
 
@@ -799,6 +849,10 @@ final class AppState {
 
             if !subscriptionCheckTask.isCancelled {
                 loadNotifications()
+                let added = newWorkIDs.filter { !newWorksBefore.contains($0) }.count
+                if added > 0 {
+                    onNewWorksFound?(added)
+                }
             }
         } catch {
             if !subscriptionCheckTask.isCancelled {

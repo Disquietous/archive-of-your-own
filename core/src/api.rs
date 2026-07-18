@@ -741,13 +741,34 @@ impl AO3App {
         result
     }
 
+    pub async fn fetch_series_works_paged(&self, series_id: u64, page: u32) -> Result<UPagedWorks, AO3Error> {
+        let progress = self.register_progress("series_works");
+        let result = self.run_on_runtime(move |client, storage| async move {
+            let c = client.read().await;
+            c.set_active_progress(progress);
+            let (works, has_next, total) = c.fetch_series_works_page(series_id, page).await.map_err(AO3Error::from)?;
+            c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.save_work(w); }
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+            })
+        }).await;
+        self.clear_progress("series_works");
+        result
+    }
+
     pub async fn browse_works(&self, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let progress = self.register_progress("browse");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
             let works = c.browse_works(page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.harvest_work_tags(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("browse");
@@ -757,11 +778,13 @@ impl AO3App {
     pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
         let progress = self.register_progress("search");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
             let works = c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.harvest_work_tags(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("search");
@@ -771,11 +794,13 @@ impl AO3App {
     pub async fn search_works(&self, params: USearchParams, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let search_params: SearchParams = params.into();
         let progress = self.register_progress("search");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
             let works = c.search_works(&search_params, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.harvest_work_tags(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("search");
@@ -784,11 +809,13 @@ impl AO3App {
 
     pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let progress = self.register_progress("tag_browse");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
             let works = c.search_by_tag(&tag, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            let s = storage.lock().await;
+            for w in &works { let _ = s.harvest_work_tags(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("tag_browse");
@@ -836,6 +863,10 @@ impl AO3App {
             c.clear_active_progress();
             let s = storage.lock().await;
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
+            // Content pages carry the posting credentials (CSRF token, pseud) —
+            // persist what the fetch harvested so later kudos/comment POSTs
+            // need no preparatory request.
+            persist_posting_credentials(&c, &s);
             Ok(chapters.into_iter().map(UChapter::from).collect())
         }).await;
         self.clear_progress("chapters");
@@ -1406,17 +1437,16 @@ impl AO3App {
     pub async fn leave_kudos(&self, work_id: u64) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
-            let params = vec![
-                ("kudo[commentable_id]".to_string(), work_id.to_string()),
-                ("kudo[commentable_type]".to_string(), "Work".to_string()),
-            ];
-            let url = format!("{}/kudos", crate::client::BASE_URL);
-            let body = c.post_form(&url, &params).await.map_err(AO3Error::from)?;
-            let accepted = body.contains("left kudos") || body.contains("already left kudos");
+            {
+                let s = storage.lock().await;
+                seed_posting_credentials(&c, &s);
+            }
+            let accepted = c.leave_kudos(work_id).await.map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            persist_posting_credentials(&c, &s);
             if accepted {
                 // Kudos are permanent on AO3 — record it so the UI stays
                 // truthful across launches.
-                let s = storage.lock().await;
                 let _ = s.mark_kudos_given(work_id);
             }
             Ok(accepted)
@@ -1430,18 +1460,25 @@ impl AO3App {
     }
 
     pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, _storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
-            let params = vec![
-                ("comment[comment_content]".to_string(), comment),
-            ];
-            let url = if chapter_id == 0 {
-                format!("{}/works/{}/comments", crate::client::BASE_URL, work_id)
+            {
+                let s = storage.lock().await;
+                seed_posting_credentials(&c, &s);
+            }
+            let base = crate::client::BASE_URL;
+            let (endpoint, controller, form_page) = if chapter_id == 0 {
+                (format!("{base}/works/{work_id}/comments"), "works",
+                 format!("{base}/works/{work_id}?show_comments=true&view_adult=true"))
             } else {
-                format!("{}/chapters/{}/comments", crate::client::BASE_URL, chapter_id)
+                (format!("{base}/chapters/{chapter_id}/comments"), "chapters",
+                 format!("{base}/works/{work_id}/chapters/{chapter_id}?show_comments=true&view_adult=true"))
             };
-            let body = c.post_form(&url, &params).await.map_err(AO3Error::from)?;
-            Ok(body.contains("Comment created") || body.contains("was added"))
+            let posted = c.post_comment_direct(&endpoint, controller, &form_page, &comment)
+                .await.map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            persist_posting_credentials(&c, &s);
+            Ok(posted)
         }).await
     }
 
@@ -1497,9 +1534,16 @@ impl AO3App {
     }
 
     pub async fn post_reply(&self, parent_comment_id: u64, comment: String) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, _storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
-            c.post_reply(parent_comment_id, &comment).await.map_err(AO3Error::from)
+            {
+                let s = storage.lock().await;
+                seed_posting_credentials(&c, &s);
+            }
+            let posted = c.post_reply(parent_comment_id, &comment).await.map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            persist_posting_credentials(&c, &s);
+            Ok(posted)
         }).await
     }
 
@@ -1810,22 +1854,26 @@ impl AO3App {
     pub async fn check_inbox(&self, username: String) -> Result<Vec<UNotification>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
+            let s = storage.lock().await;
 
-            // Fetch first page
-            let mut inbox = c.fetch_inbox(&username, 1).await.map_err(AO3Error::from)?;
-            let mut all_items = inbox.items;
-
-            // Fetch remaining pages if paginated
-            let mut page = 2u32;
-            while inbox.has_next_page {
-                inbox = c.fetch_inbox(&username, page).await.map_err(AO3Error::from)?;
+            // The inbox is sorted newest-first, and every sync stores messages
+            // until it reaches ones it already has — so the moment a fetched
+            // page contains ANY locally-known message, everything older is
+            // guaranteed to be stored already. Stop paginating there.
+            let mut all_items = Vec::new();
+            let mut page = 1u32;
+            loop {
+                let inbox = c.fetch_inbox(&username, page).await.map_err(AO3Error::from)?;
+                let reached_known = inbox.items.iter()
+                    .any(|m| s.has_inbox_message(m.comment_id).unwrap_or(false));
+                let has_next = inbox.has_next_page;
                 all_items.extend(inbox.items);
+                if !has_next || reached_known || page >= 10 {
+                    break;
+                }
                 page += 1;
-                if page > 10 { break; }
             }
             drop(c);
-
-            let s = storage.lock().await;
 
             // Persist all fetched messages
             let _ = s.save_inbox_messages(&all_items);
@@ -2178,6 +2226,38 @@ impl AO3App {
         storage.clear_request_logs().map_err(AO3Error::from)
     }
 
+    /// Local tag autocomplete — instant, DB-only, works offline. Suggests
+    /// from tags harvested off every work the user has seen.
+    pub fn search_local_tags(&self, tag_type: String, term: String, limit: u32) -> Result<Vec<String>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.search_known_tags(&tag_type, &term, limit).map_err(AO3Error::from)
+    }
+
+    /// Explicit AO3 autocomplete lookup (user-triggered only). Successful
+    /// results are cached as canonical, permanently improving local
+    /// suggestions.
+    pub async fn autocomplete_tags_remote(&self, tag_type: String, term: String) -> Result<Vec<String>, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let c = client.read().await;
+            let names = c.autocomplete(&tag_type, &term).await.map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            let _ = s.mark_tags_canonical(&tag_type, &names);
+            Ok(names)
+        }).await
+    }
+
+    /// Export a downloaded work as an EPUB3 file. Requires cached chapters.
+    pub fn export_epub(&self, work_id: u64, dest_path: String) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        let work = s.get_work(work_id).map_err(AO3Error::from)?
+            .ok_or(AO3Error::Network { message: "This work isn’t in the local library.".to_string() })?;
+        let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+        if chapters.is_empty() {
+            return Err(AO3Error::Network { message: "No downloaded chapters — download the work first.".to_string() });
+        }
+        crate::epub::export_epub(&work, &chapters, &dest_path).map_err(AO3Error::from)
+    }
+
     /// Requests currently in flight (started but not yet resolved), newest last.
     pub fn get_active_requests(&self) -> Vec<UActiveRequest> {
         let now = crate::client::now_ms();
@@ -2189,6 +2269,26 @@ impl AO3App {
         }).collect()
     }
 
+}
+
+/// Seed the client's posting credentials (CSRF token, comment pseud id)
+/// from persisted state — fills gaps only, freshly harvested values win.
+/// Lets kudos/comment POSTs go out with no preparatory fetch even on a
+/// fresh launch.
+fn seed_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::Storage) {
+    let token = s.get_state("csrf_token").ok().flatten();
+    let pseud = s.get_state("comment_pseud_id").ok().flatten();
+    c.seed_credentials(token, pseud);
+}
+
+/// Persist the freshest harvested posting credentials for the next launch.
+fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::Storage) {
+    if let Some(token) = c.cached_csrf_token() {
+        let _ = s.set_state("csrf_token", &token);
+    }
+    if let Some(pseud) = c.cached_pseud_id() {
+        let _ = s.set_state("comment_pseud_id", &pseud);
+    }
 }
 
 /// Generate a timestamp string without pulling in the chrono crate.
