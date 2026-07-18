@@ -107,6 +107,20 @@ pub fn active_requests_snapshot() -> Vec<ActiveRequest> {
     active_requests().lock().map(|l| l.clone()).unwrap_or_default()
 }
 
+/// Find `marker` in `html`, then extract the quoted value of `attr_prefix`
+/// (e.g. `value="`) within the same tag. Attribute order-independent, no DOM.
+fn scan_attr_near(html: &str, marker: &str, attr_prefix: &str) -> Option<String> {
+    let idx = html.find(marker)?;
+    let tag_start = html[..idx].rfind('<')?;
+    let tag_end = idx + html[idx..].find('>')?;
+    let tag = &html[tag_start..tag_end];
+    let value_start = tag.find(attr_prefix)? + attr_prefix.len();
+    let rest = &tag[value_start..];
+    let value_end = rest.find('"')?;
+    let value = &rest[..value_end];
+    if value.is_empty() { None } else { Some(value.to_string()) }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -180,6 +194,12 @@ pub struct AO3Client {
     timeout_secs: Arc<std::sync::atomic::AtomicU64>,
     active_progress: Arc<std::sync::Mutex<Option<ProgressHandle>>>,
     socks_port: Option<u16>,
+    /// Posting credentials harvested opportunistically from pages fetched
+    /// for content — so kudos/comments POST directly, with no preparatory
+    /// GET. The CSRF token is session-scoped (any page's token validates
+    /// until the login session changes); the pseud id is per-account.
+    csrf_token: Arc<std::sync::Mutex<Option<String>>>,
+    pseud_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AO3Client {
@@ -215,6 +235,8 @@ impl AO3Client {
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
             active_progress: Arc::new(std::sync::Mutex::new(None)),
             socks_port: None,
+            csrf_token: Arc::new(std::sync::Mutex::new(None)),
+            pseud_id: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -287,6 +309,8 @@ impl AO3Client {
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
             active_progress: Arc::new(std::sync::Mutex::new(None)),
             socks_port: Some(port),
+            csrf_token: Arc::new(std::sync::Mutex::new(None)),
+            pseud_id: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -509,12 +533,10 @@ impl AO3Client {
     }
 
     pub async fn post_reply(&self, parent_comment_id: u64, comment: &str) -> Result<bool, AppError> {
-        let url = format!("{BASE_URL}/comments/{parent_comment_id}/comments");
-        let params = vec![
-            ("comment[comment_content]".to_string(), comment.to_string()),
-        ];
-        let body = self.post_form(&url, &params).await?;
-        Ok(body.contains("Comment created") || body.contains("was added"))
+        let endpoint = format!("{BASE_URL}/comments/{parent_comment_id}/comments");
+        // Credential-refresh page on failure: the parent comment's thread.
+        let form_page = format!("{BASE_URL}/comments/{parent_comment_id}");
+        self.post_comment_direct(&endpoint, "comments", &form_page, comment).await
     }
 
     // -- Bookmark operations -------------------------------------------------
@@ -612,6 +634,22 @@ impl AO3Client {
                 Err(e)
             }
         }
+    }
+
+    /// Fetch one page of a series' works as full blurbs (series pages use the
+    /// same li.work.blurb markup as author pages).
+    /// Returns (works, has_next_page, total_pages).
+    pub async fn fetch_series_works_page(
+        &self,
+        series_id: u64,
+        page: u32,
+    ) -> Result<(Vec<WorkSummary>, bool, u32), AppError> {
+        let url = format!("{BASE_URL}/series/{series_id}?page={page}");
+        let html = self.fetch(&url).await?;
+        let works = parser::parse_work_listings(&html)?;
+        let has_next = parser::has_next_page(&html);
+        let total = parser::total_pages(&html);
+        Ok((works, has_next, total))
     }
 
     /// Fetch works in a series.
@@ -859,7 +897,42 @@ impl AO3Client {
             let body = String::from_utf8(body_bytes)
                 .map_err(|e| AppError::NetworkError(format!("Invalid UTF-8: {e}")))?;
 
+            self.harvest_credentials(&body);
             return Ok(body);
+        }
+    }
+
+    // -- Posting credentials (harvested from content fetches) ---------------
+
+    /// Cheap string scans — no DOM parse — run on every fetched page so the
+    /// posting credentials stay fresh as a side effect of normal browsing.
+    fn harvest_credentials(&self, html: &str) {
+        if let Some(token) = scan_attr_near(html, "name=\"csrf-token\"", "content=\"") {
+            *self.csrf_token.lock().unwrap() = Some(token);
+        }
+        if let Some(pseud) = scan_attr_near(html, "name=\"comment[pseud_id]\"", "value=\"") {
+            *self.pseud_id.lock().unwrap() = Some(pseud);
+        }
+    }
+
+    pub fn cached_csrf_token(&self) -> Option<String> {
+        self.csrf_token.lock().unwrap().clone()
+    }
+
+    pub fn cached_pseud_id(&self) -> Option<String> {
+        self.pseud_id.lock().unwrap().clone()
+    }
+
+    /// Restore credentials persisted from a previous session (only fills
+    /// gaps — freshly harvested values win).
+    pub fn seed_credentials(&self, csrf_token: Option<String>, pseud_id: Option<String>) {
+        if let Some(t) = csrf_token {
+            let mut cached = self.csrf_token.lock().unwrap();
+            if cached.is_none() { *cached = Some(t); }
+        }
+        if let Some(p) = pseud_id {
+            let mut cached = self.pseud_id.lock().unwrap();
+            if cached.is_none() { *cached = Some(p); }
         }
     }
 
@@ -987,17 +1060,88 @@ impl AO3Client {
         Ok(logged_in)
     }
 
-    /// POST a form to AO3 (for kudos, comments, bookmarks).
+    /// POST a form to AO3, scraping the CSRF token from the POST URL itself.
+    /// Only valid when GET on that URL renders a page (bookmarks, deletes) —
+    /// for endpoints with no GET route use post_form_from with a token page.
     pub async fn post_form(&self, url: &str, params: &[(String, String)]) -> Result<String, AppError> {
-        // First get the page to extract authenticity_token
-        let page = self.fetch(url).await?;
-        let token = scraper::Html::parse_document(&page)
-            .select(&scraper::Selector::parse("input[name='authenticity_token']").unwrap())
-            .next()
-            .and_then(|el| el.value().attr("value"))
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        self.post_form_from(url, url, params).await
+    }
 
+    /// POST a form to AO3 with the CSRF token scraped from `token_page` —
+    /// the page that hosts the form. Falls back to the csrf-token meta tag
+    /// (present on every AO3 page; session-scoped, so any page's token is
+    /// valid), and refuses to POST with an empty token — that's a guaranteed
+    /// Rails 500.
+    pub async fn post_form_from(&self, url: &str, token_page: &str, params: &[(String, String)]) -> Result<String, AppError> {
+        let page = self.fetch(token_page).await?;
+        let token = {
+            let doc = scraper::Html::parse_document(&page);
+            doc.select(&scraper::Selector::parse("input[name='authenticity_token']").unwrap())
+                .next()
+                .and_then(|el| el.value().attr("value").map(str::to_string))
+                .or_else(|| {
+                    doc.select(&scraper::Selector::parse("meta[name='csrf-token']").unwrap())
+                        .next()
+                        .and_then(|el| el.value().attr("content").map(str::to_string))
+                })
+                .unwrap_or_default()
+        };
+        if token.is_empty() {
+            return Err(AppError::ParseError(format!("no CSRF token found on {token_page}")));
+        }
+
+        let mut form_params: Vec<(String, String)> = vec![
+            ("authenticity_token".to_string(), token),
+        ];
+        form_params.extend_from_slice(params);
+        self.post_form_raw(url, form_params).await
+    }
+
+    /// POST a comment from cached credentials — no preparatory GET. The form
+    /// fields mirror AO3's comment form exactly: authenticity_token,
+    /// comment[pseud_id], controller_name, comment[comment_content], commit.
+    /// If credentials are missing or the archive rejects them, `form_page`
+    /// is fetched ONCE (which re-harvests both) and the POST retried.
+    pub async fn post_comment_direct(&self, endpoint: &str, controller_name: &str,
+                                     form_page: &str, content: &str) -> Result<bool, AppError> {
+        let mut refreshed = false;
+        loop {
+            let (token, pseud) = (self.cached_csrf_token(), self.cached_pseud_id());
+            let (Some(token), Some(pseud)) = (token, pseud) else {
+                if refreshed {
+                    return Err(AppError::ParseError(format!(
+                        "no posting credentials found on {form_page} — are you signed in?")));
+                }
+                self.fetch(form_page).await?; // harvest hook fills the cache
+                refreshed = true;
+                continue;
+            };
+            let params = vec![
+                ("authenticity_token".to_string(), token),
+                ("comment[pseud_id]".to_string(), pseud),
+                ("controller_name".to_string(), controller_name.to_string()),
+                ("comment[comment_content]".to_string(), content.to_string()),
+                ("commit".to_string(), "Comment".to_string()),
+            ];
+            let body = self.post_form_raw(endpoint, params).await?;
+            if body.contains("Comment created") || body.contains("was added") || body.contains(content) {
+                return Ok(true);
+            }
+            if !refreshed {
+                // Stale token (session changed since it was harvested) —
+                // refresh once and retry.
+                refreshed = true;
+                self.fetch(form_page).await?;
+                continue;
+            }
+            log_info!("comment", "Rejected POST to {endpoint}: {}",
+                      body.chars().take(300).collect::<String>());
+            return Ok(false);
+        }
+    }
+
+    /// POST pre-assembled form params (token already included).
+    async fn post_form_raw(&self, url: &str, form_params: Vec<(String, String)>) -> Result<String, AppError> {
         self.enforce_rate_limit().await;
 
         let client = match &self.transport {
@@ -1009,11 +1153,6 @@ impl AO3Client {
         let timeout = std::time::Duration::from_secs(
             self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
         );
-
-        let mut form_params: Vec<(String, String)> = vec![
-            ("authenticity_token".to_string(), token),
-        ];
-        form_params.extend_from_slice(params);
 
         let _active = ActiveRequestGuard::new("POST", url);
         let audit_started = now_ms();
@@ -1050,6 +1189,130 @@ impl AO3Client {
             Ok(Err(e)) => { audit_post!(0, 0, Some(format!("{e}"))); Err(e) }
             Ok(Ok((status, body))) => { audit_post!(status, body.len() as u64, None); Ok(body) }
         }
+    }
+
+    /// Leave kudos on a work using the cached CSRF token — no preparatory
+    /// GET. On a cache miss or a stale-token rejection, the work page is
+    /// fetched ONCE (re-harvesting the token) and the POST retried.
+    pub async fn leave_kudos(&self, work_id: u64) -> Result<bool, AppError> {
+        let work_url = format!("{BASE_URL}/works/{work_id}?view_adult=true");
+        let mut refreshed = false;
+        loop {
+            let Some(token) = self.cached_csrf_token() else {
+                if refreshed {
+                    return Err(AppError::ParseError("no CSRF token available — are you signed in?".to_string()));
+                }
+                self.fetch(&work_url).await?; // harvest hook fills the cache
+                refreshed = true;
+                continue;
+            };
+            let (status, body) = self.post_kudos_raw(work_id, &token, &work_url).await?;
+            let already = body.contains("already left kudos");
+            if status < 300 || already {
+                return Ok(true);
+            }
+            if !refreshed {
+                refreshed = true;
+                self.fetch(&work_url).await?;
+                continue;
+            }
+            log_info!("kudos", "Rejected (HTTP {status}): {}", body.chars().take(300).collect::<String>());
+            return Ok(false);
+        }
+    }
+
+    async fn post_kudos_raw(&self, work_id: u64, token: &str, work_url: &str) -> Result<(u16, String), AppError> {
+        let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"));
+        self.enforce_rate_limit().await;
+
+        let client = match &self.transport {
+            Transport::Direct(c) => c,
+            #[cfg(feature = "tor")]
+            Transport::Tor { client, .. } => client,
+        };
+        let timeout = std::time::Duration::from_secs(
+            self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let id_string = work_id.to_string();
+        let params = [
+            ("authenticity_token", token),
+            ("kudo[commentable_id]", id_string.as_str()),
+            ("kudo[commentable_type]", "Work"),
+        ];
+        let kudos_url = format!("{BASE_URL}/kudos");
+        let audit_started = now_ms();
+        let audit_start = std::time::Instant::now();
+        let audit_payload = redact_payload(&params);
+        let audit_req_bytes = (kudos_url.len() + audit_payload.len() + 380) as u64;
+
+        let result = tokio::time::timeout(timeout, async {
+            let resp = client.post(&kudos_url)
+                // Match the site's own AJAX submission: JSON responses, and a
+                // 422 (not a redirect chain) for "already left kudos".
+                .header("X-Requested-With", "XMLHttpRequest")
+                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                .header("Referer", work_url)
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            let status = resp.status().as_u16();
+            let body = resp.text().await
+                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+            Ok::<(u16, String), AppError>((status, body))
+        }).await;
+
+        macro_rules! audit_kudos {
+            ($status:expr, $resp:expr, $err:expr) => {
+                push_request_record(RequestRecord {
+                    started_at_ms: audit_started, method: "POST".into(), url: kudos_url.clone(),
+                    status: $status, duration_ms: audit_start.elapsed().as_millis() as u64,
+                    request_bytes: audit_req_bytes, response_bytes: $resp, error: $err,
+                    payload: Some(audit_payload.clone()),
+                });
+            };
+        }
+
+        match result {
+            Err(_) => {
+                audit_kudos!(0, 0, Some("timeout".to_string()));
+                Err(AppError::NetworkError("timeout".to_string()))
+            }
+            Ok(Err(e)) => {
+                audit_kudos!(0, 0, Some(format!("{e}")));
+                Err(e)
+            }
+            Ok(Ok((status, body))) => {
+                let accepted = status < 300 || body.contains("already left kudos");
+                audit_kudos!(status, body.len() as u64,
+                             if accepted { None } else { Some(format!("HTTP {status}")) });
+                Ok((status, body))
+            }
+        }
+    }
+
+    /// AO3's JSON autocomplete for canonical tag names — fired ONLY on an
+    /// explicit user action, never on keystrokes (local cache handles those).
+    /// tag_type: fandom | character | relationship | freeform | creator.
+    pub async fn autocomplete(&self, tag_type: &str, term: &str) -> Result<Vec<String>, AppError> {
+        let endpoint = match tag_type {
+            "creator" => "pseud",
+            other => other,
+        };
+        let url = format!("{BASE_URL}/autocomplete/{}?term={}", endpoint, urlencoded(term));
+        let body = self.fetch_ajax(&url).await?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| AppError::ParseError(format!("autocomplete JSON: {e}")))?;
+        let mut names = Vec::new();
+        if let Some(items) = parsed.as_array() {
+            for item in items {
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// Check if the current session is logged in.

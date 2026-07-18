@@ -19,6 +19,8 @@ final class ReadPaneViewController: NSViewController {
     private var immersiveButton: ToolButton!
     private var bookmarkButton: ToolButton!
     private var commentsButton: ToolButton!
+    private var chaptersButton: ToolButton!
+    private var chaptersPopover: NSPopover?
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
@@ -67,6 +69,9 @@ final class ReadPaneViewController: NSViewController {
         }
         commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Chapter comments") { [weak self] in
             self?.showChapterComments()
+        }
+        chaptersButton = ToolButton(theme: theme, symbol: "list.bullet", tooltip: "Chapters") { [weak self] in
+            self?.toggleChaptersPopover()
         }
         resultsBackButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to results") { [weak self] in
             self?.model.backToResults()
@@ -120,13 +125,49 @@ final class ReadPaneViewController: NSViewController {
         ObservationRelay.track { [weak self] in
             self?.render()
         }
+
+        // App-wide reading keys: ← / → change chapters while reading; Escape
+        // backs out of the innermost context (immersive → reader → selection
+        // → drill-in). Never fires while typing in an editable text control
+        // or while a sheet is up.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self,
+                  let window = view.window,
+                  event.window === window,
+                  window.attachedSheet == nil
+            else { return event }
+            if let editor = window.firstResponder as? NSTextView, editor.isEditable {
+                return event
+            }
+            let hasModifiers = !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+            switch event.keyCode {
+            case 123 where model.readerOpen && !hasModifiers: // ←
+                readerController.goToAdjacentChapter(-1)
+                return nil
+            case 124 where model.readerOpen && !hasModifiers: // →
+                readerController.goToAdjacentChapter(1)
+                return nil
+            case 53 where !hasModifiers: // Escape
+                if let popover = settingsPopover, popover.isShown { return event }
+                if let popover = chaptersPopover, popover.isShown { return event }
+                return model.escapeInnermost() ? nil : event
+            default:
+                return event
+            }
+        }
     }
 
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+    }
+
+    private var keyMonitor: Any?
     private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
     private var authorCloseBtn: ToolButton?
     private var authorRefreshBtn: LabelToolButton?
     private var subscriptionRefreshBtn: LabelToolButton?
+    private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
 
     private func subscriptionCloseButton() -> ToolButton {
         let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
@@ -193,7 +234,7 @@ final class ReadPaneViewController: NSViewController {
                 : "\(model.filteredSubscriptionWorks.count) works stored"
             toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
-            toolbar.setTrailing([refreshWorksButton(forAuthor: false)])
+            toolbar.setTrailing([sortFilterMenu.makeButton(for: .subscriptions), refreshWorksButton(forAuthor: false)])
             show(mode: .subscriptionWorks(title))
             return
         }
@@ -202,10 +243,10 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
             let sub = model.isLoadingAuthor
                 ? (model.authorFetchStatus ?? "Fetching works from AO3…")
-                : "\(model.authorWorksList.count) works stored"
+                : "\(model.filteredAuthorWorks.count) works stored"
             toolbar.configure(title: author, sub: sub)
             toolbar.setLeading([authorCloseButton()])
-            toolbar.setTrailing([refreshWorksButton(forAuthor: true)])
+            toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors), refreshWorksButton(forAuthor: true)])
             show(mode: .subscriptionWorks(author))
             return
         }
@@ -254,7 +295,7 @@ final class ReadPaneViewController: NSViewController {
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
-        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, commentsButton, bookmarkButton]
+        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, chaptersButton, commentsButton, bookmarkButton]
                                     : [settingsButton, bookmarkButton])
 
         show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))
@@ -359,6 +400,26 @@ final class ReadPaneViewController: NSViewController {
         model.immersive = false
     }
 
+    private func toggleChaptersPopover() {
+        if let popover = chaptersPopover, popover.isShown {
+            popover.close()
+            chaptersPopover = nil
+            return
+        }
+        guard let work = model.selectedWork else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(
+            rootView: ChapterListPopover(theme: theme, appState: appState, model: model,
+                                         workID: work.id,
+                                         onSelect: { [weak self] in
+                                             self?.chaptersPopover?.close()
+                                             self?.chaptersPopover = nil
+                                         }))
+        popover.show(relativeTo: chaptersButton.bounds, of: chaptersButton, preferredEdge: .maxY)
+        chaptersPopover = popover
+    }
+
     /// Comments for the chapter currently open in the reader, as a sheet.
     private func showChapterComments() {
         guard let work = model.selectedWork else { return }
@@ -383,3 +444,63 @@ final class ReadPaneViewController: NSViewController {
     }
 }
 
+
+/// Chapter list for the reader toolbar — jump anywhere in the work.
+struct ChapterListPopover: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
+    let workID: String
+    let onSelect: () -> Void
+
+    var body: some View {
+        let chapters = appState.chaptersForWork(workID) ?? []
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
+                        chapterRow(index: index, chapter: chapter)
+                            .id(index)
+                    }
+                    if chapters.isEmpty {
+                        Text("Chapters are still loading…")
+                            .font(Font(MacFont.ui(12.5)))
+                            .foregroundStyle(theme.ink3)
+                            .padding(16)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+            .onAppear { proxy.scrollTo(model.readerChapter, anchor: .center) }
+        }
+        .frame(width: 300, height: 360)
+        .background(theme.surface)
+    }
+
+    private func chapterRow(index: Int, chapter: UChapter) -> some View {
+        let current = index == model.readerChapter
+        let title = chapter.title.isEmpty ? "Chapter \(index + 1)" : chapter.title
+        return Button {
+            model.openReader(workID, chapter: index)
+            onSelect()
+        } label: {
+            HStack(spacing: 10) {
+                Text("\(index + 1)")
+                    .font(Font(MacFont.ui(11, weight: .bold)))
+                    .foregroundStyle(current ? theme.onAccent : theme.ink3)
+                    .frame(minWidth: 22, minHeight: 22)
+                    .background(current ? theme.accent : theme.surface2)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                Text(title)
+                    .font(Font(MacFont.ui(12.5, weight: current ? .semibold : .regular)))
+                    .foregroundStyle(current ? theme.ink : theme.ink2)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}

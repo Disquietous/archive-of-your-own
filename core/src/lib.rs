@@ -85,6 +85,7 @@ macro_rules! log_error {
 pub mod parser;
 pub mod client;
 pub mod api;
+pub mod epub;
 
 pub use error::AppError;
 pub use models::*;

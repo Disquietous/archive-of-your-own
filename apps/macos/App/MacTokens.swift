@@ -41,6 +41,20 @@ extension Color {
     }
 }
 
+/// NSTableView that reports Return/Enter so lists can open the selected row;
+/// ↑/↓ selection comes from AppKit once the table is first responder.
+final class KeyNavTableView: NSTableView {
+    var onReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76, let onReturn {
+            onReturn()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 /// Font helpers matching the handoff: Hanken Grotesk for UI, the user's
 /// reading serif for titles/body. Fall back to system fonts if the bundled
 /// faces fail to load.

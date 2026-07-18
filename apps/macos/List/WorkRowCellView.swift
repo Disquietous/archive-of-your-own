@@ -386,11 +386,29 @@ final class WorkRowCellView: NSTableCellView {
         metaLabel.stringValue = meta
 
         progressTrack.isHidden = progress <= 0
+
+        // One VoiceOver element per row — reads the work as a sentence
+        // instead of a soup of unlabeled text fragments.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(Self.axDescription(for: work, progress: progress, downloaded: downloaded))
+
         applyTheme()
         if progress > 0 {
             layoutSubtreeIfNeeded()
             progressWidth.constant = progressTrack.bounds.width * progress
         }
+    }
+
+    private static func axDescription(for work: Work, progress: Double, downloaded: Bool) -> String {
+        var parts: [String] = [work.title, "by \(work.author)"]
+        if !work.fandom.isEmpty { parts.append(work.fandom) }
+        parts.append("rated \(work.rating.rawValue)")
+        parts.append("\(Fmt.k(work.words)) words")
+        parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")
+        if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
+        if downloaded { parts.append("available offline") }
+        return parts.joined(separator: ", ")
     }
 
     func applyTheme() {

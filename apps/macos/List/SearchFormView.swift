@@ -53,13 +53,21 @@ struct SearchFormView: View {
                         }
                     }
                     ForEach(search.filterFields, id: \.name) { field in
-                        switch field.fieldType {
-                        case "select":
-                            selectControl(field)
-                        case "checkboxes":
-                            checkboxControl(field)
-                        default:
-                            textControl(field)
+                        if let tagType = Self.tagType(for: field.name) {
+                            TagTokenField(theme: theme, appState: appState,
+                                          label: field.label, tagType: tagType,
+                                          value: Binding(
+                                              get: { search.fieldValues[field.name] ?? "" },
+                                              set: { search.fieldValues[field.name] = $0 }))
+                        } else {
+                            switch field.fieldType {
+                            case "select":
+                                selectControl(field)
+                            case "checkboxes":
+                                checkboxControl(field)
+                            default:
+                                textControl(field)
+                            }
                         }
                     }
                 }
@@ -90,6 +98,19 @@ struct SearchFormView: View {
             .background(theme.surface)
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+        }
+    }
+
+    /// AO3's canonical-tag inputs get the token field with local-cache
+    /// autocomplete; everything else renders as before.
+    static func tagType(for fieldName: String) -> String? {
+        switch fieldName {
+        case "work_search[fandom_names]": "fandom"
+        case "work_search[character_names]": "character"
+        case "work_search[relationship_names]": "relationship"
+        case "work_search[freeform_names]": "freeform"
+        case "work_search[creators]": "creator"
+        default: nil
         }
     }
 
