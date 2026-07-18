@@ -294,6 +294,9 @@ extension SearchResultsViewController: NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(menuItem(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
                               #selector(menuToggleBookmark(_:)), row))
+        if appState.bookmarkedWorkIDs.contains(work.id) {
+            menu.addItem(menuItem("Edit Bookmark…", #selector(menuEditBookmark(_:)), row))
+        }
         menu.addItem(menuItem(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
                               #selector(menuToggleDownload(_:)), row))
         if UInt64(work.id) != nil {
@@ -337,6 +340,19 @@ extension SearchResultsViewController: NSMenuDelegate {
         guard let work = clickedWork(sender), UInt64(work.id) != nil else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("https://archiveofourown.org/works/\(work.id)", forType: .string)
+    }
+
+    @objc private func menuEditBookmark(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        var dismissRef: () -> Void = {}
+        let view = MacBookmarkEditView(theme: theme, appState: appState,
+                                       workID: work.id, workTitle: work.title,
+                                       onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
+        }
+        presentAsSheet(hosting)
     }
 }
 

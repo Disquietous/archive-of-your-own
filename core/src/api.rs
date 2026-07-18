@@ -30,6 +30,18 @@ pub struct URequestLogEntry {
     pub payload: Option<String>,
 }
 
+/// The full AO3 bookmark object for one work.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UBookmarkDetails {
+    pub note: String,
+    pub tag_string: String,
+    pub collection_names: String,
+    pub private: bool,
+    pub rec: bool,
+    pub sync_to_ao3: bool,
+    pub ao3_bookmark_id: Option<u64>,
+}
+
 /// A request currently in flight — shown live at the top of the request log.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UActiveRequest {
@@ -1389,27 +1401,49 @@ impl AO3App {
 
     pub async fn push_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let note = {
+            let c = client.read().await;
+            let details = {
                 let s = storage.lock().await;
-                s.get_bookmark_full(work_id)
-                    .map_err(AO3Error::from)?
-                    .map(|(note, _, _)| note)
-                    .unwrap_or_default()
+                seed_posting_credentials(&c, &s);
+                s.get_bookmark_details(work_id).map_err(AO3Error::from)?
+            };
+            let Some((note, tags, collections, private, rec, _, _)) = details else {
+                return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
             };
 
-            let c = client.read().await;
-            let ao3_id = c.create_ao3_bookmark(work_id, &note)
+            let ao3_id = c.create_ao3_bookmark(work_id, &note, &tags, &collections, private, rec)
                 .await
                 .map_err(AO3Error::from)?;
             drop(c);
 
-            if let Some(id) = ao3_id {
-                let s = storage.lock().await;
-                s.set_ao3_bookmark_id(work_id, id).map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            {
+                let c = client.read().await;
+                persist_posting_credentials(&c, &s);
             }
-
-            Ok(true)
+            if let Some(id) = ao3_id {
+                s.set_ao3_bookmark_id(work_id, id).map_err(AO3Error::from)?;
+                Ok(true)
+            } else {
+                Err(AO3Error::Network { message: "The archive didn’t accept the bookmark.".to_string() })
+            }
         }).await
+    }
+
+    /// Full bookmark object for a work (notes, tags, collections, flags).
+    pub fn get_bookmark_details(&self, work_id: u64) -> Result<Option<UBookmarkDetails>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_bookmark_details(work_id).map_err(AO3Error::from)?
+            .map(|(note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id)| {
+                UBookmarkDetails { note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id }
+            }))
+    }
+
+    pub fn update_bookmark_details(&self, work_id: u64, note: String, tag_string: String,
+                                   collection_names: String, private: bool, rec: bool) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.update_bookmark_details(work_id, &note, &tag_string, &collection_names, private, rec)
+            .map_err(AO3Error::from)
     }
 
     pub async fn delete_ao3_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {

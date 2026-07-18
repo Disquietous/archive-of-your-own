@@ -17,6 +17,7 @@ struct DetailView: View {
     private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
 
     @State private var showComments = false
+    @State private var showBookmarkEdit = false
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -90,6 +91,12 @@ struct DetailView: View {
                             subtitle: nil,
                             onClose: { showComments = false })
         }
+        .sheet(isPresented: $showBookmarkEdit) {
+            MacBookmarkEditView(theme: theme, appState: appState,
+                                workID: work.id,
+                                workTitle: work.title,
+                                onClose: { showBookmarkEdit = false })
+        }
     }
 
     private var pendingRemovalBinding: Binding<Bool> {
@@ -151,6 +158,13 @@ struct DetailView: View {
                        tint: bookmarked ? theme.accent : theme.ink,
                        help: "Bookmark") {
                 appState.toggleBookmark(work.id)
+            }
+            if bookmarked {
+                iconButton("square.and.pencil",
+                           tint: theme.ink,
+                           help: "Edit bookmark — notes, tags, sync to AO3") {
+                    showBookmarkEdit = true
+                }
             }
             iconButton(downloadSymbol,
                        tint: downloaded ? theme.sage : theme.ink,

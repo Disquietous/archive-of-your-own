@@ -555,29 +555,59 @@ impl AO3Client {
         Ok((bookmarks, has_more))
     }
 
-    /// Create a bookmark on AO3 for the given work.
-    /// Returns the ao3_bookmark_id if parseable from the response.
+    /// Create a bookmark on AO3, mirroring the site's form exactly
+    /// (bookmark.html reference): pseud_id, bookmarker_notes, tag_string,
+    /// collection_names, private, rec. Posts from cached credentials with
+    /// no preparatory GET; refreshes them ONCE (work-page fetch) on a miss
+    /// or rejection. Returns the ao3_bookmark_id on success.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_ao3_bookmark(
         &self,
         work_id: u64,
         note: &str,
+        tag_string: &str,
+        collection_names: &str,
+        private: bool,
+        rec: bool,
     ) -> Result<Option<u64>, AppError> {
-        let url = format!("{BASE_URL}/works/{work_id}/bookmarks");
-        let params = vec![
-            ("bookmark[bookmarkable_id]".to_string(), work_id.to_string()),
-            ("bookmark[bookmarkable_type]".to_string(), "Work".to_string()),
-            ("bookmark[notes]".to_string(), note.to_string()),
-            ("bookmark[private]".to_string(), "1".to_string()),
-            ("bookmark[rec]".to_string(), "0".to_string()),
-            ("bookmark[tag_string]".to_string(), String::new()),
-            ("commit".to_string(), "Create".to_string()),
-        ];
-        let body = self.post_form(&url, &params).await?;
-
-        // Try to extract the bookmark ID from the response.
-        // AO3 typically redirects to /bookmarks/NNNNN or includes id="bookmark_NNNNN"
-        let ao3_bookmark_id = extract_bookmark_id_from_response(&body);
-        Ok(ao3_bookmark_id)
+        let endpoint = format!("{BASE_URL}/works/{work_id}/bookmarks");
+        let form_page = format!("{BASE_URL}/works/{work_id}?view_adult=true");
+        let mut refreshed = false;
+        loop {
+            let (token, pseud) = (self.cached_csrf_token(), self.cached_pseud_id());
+            let (Some(token), Some(pseud)) = (token, pseud) else {
+                if refreshed {
+                    return Err(AppError::ParseError(
+                        "no posting credentials — are you signed in?".to_string()));
+                }
+                self.fetch(&form_page).await?; // harvest hook fills the cache
+                refreshed = true;
+                continue;
+            };
+            let params = vec![
+                ("authenticity_token".to_string(), token),
+                ("bookmark[pseud_id]".to_string(), pseud),
+                ("bookmark[bookmarker_notes]".to_string(), note.to_string()),
+                ("bookmark[tag_string]".to_string(), tag_string.to_string()),
+                ("bookmark[collection_names]".to_string(), collection_names.to_string()),
+                ("bookmark[private]".to_string(), if private { "1" } else { "0" }.to_string()),
+                ("bookmark[rec]".to_string(), if rec { "1" } else { "0" }.to_string()),
+                ("commit".to_string(), "Create".to_string()),
+            ];
+            let body = self.post_form_raw(&endpoint, params).await?;
+            // Success redirects to the bookmark's page — the id is in the markup.
+            if let Some(id) = extract_bookmark_id_from_response(&body) {
+                return Ok(Some(id));
+            }
+            if !refreshed {
+                refreshed = true;
+                self.fetch(&form_page).await?;
+                continue;
+            }
+            log_info!("bookmark", "Rejected POST to {endpoint}: {}",
+                      body.chars().take(300).collect::<String>());
+            return Ok(None);
+        }
     }
 
     /// Delete a bookmark from AO3.
