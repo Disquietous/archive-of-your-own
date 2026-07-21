@@ -735,6 +735,18 @@ final class RustBridge {
         app?.getActiveRequests() ?? []
     }
 
+    /// Cached avatar bytes (sync, DB-only).
+    func getCachedAuthorAvatar(_ username: String) -> Data? {
+        (try? app?.getCachedAuthorAvatar(username: username)) ?? nil
+    }
+
+    /// Avatar bytes — cache-first; fetches from AO3 once and caches forever.
+    /// A URL hint (from inbox/comment data) skips the profile-page scrape.
+    func fetchAuthorAvatar(_ username: String, urlHint: String? = nil) async throws -> Data {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchAuthorAvatar(username: username, urlHint: urlHint)
+    }
+
     /// Local tag autocomplete — instant, DB-only, never touches the network.
     func searchLocalTags(tagType: String, term: String, limit: UInt32 = 12) -> [String] {
         (try? app?.searchLocalTags(tagType: tagType, term: term, limit: limit)) ?? []

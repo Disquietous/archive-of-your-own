@@ -456,10 +456,14 @@ final class AppState {
     let bookmarkSyncTask = NetworkTask()
 
     func work(byID id: String) -> Work? {
-        cachedWorks.first { $0.id == id }
+        // fetchedWorks first: it holds whatever this session most recently
+        // fetched or read, while cachedWorks is a launch-time snapshot —
+        // consulting the snapshot first showed stale data (e.g. an author's
+        // old name) even after a refresh had written the new copy.
+        fetchedWorks[id]
+        ?? cachedWorks.first { $0.id == id }
         ?? browseResults.first { $0.id == id }
         ?? searchResults.first { $0.id == id }
-        ?? fetchedWorks[id]
     }
 
     func fetchWorkMetadata(_ id: String) async {
@@ -567,6 +571,37 @@ final class AppState {
         }
         if !bookmarkSyncTask.isCancelled {
             bookmarkSyncTask.statusMessage = "Synced \(pushed) bookmarks"
+        }
+    }
+
+    // MARK: - Author avatars (DB-cached; fetched from AO3 at most once each)
+
+    /// Session cache of avatar bytes by username.
+    var authorAvatars: [String: Data] = [:]
+    @ObservationIgnored private var avatarFetchesInFlight: Set<String> = []
+    @ObservationIgnored private var avatarFailures: Set<String> = []
+
+    /// Ensure an author's avatar is available: session memory → DB cache →
+    /// (once) AO3. A URL hint from inbox/comment data avoids the
+    /// profile-page scrape. Failures are remembered for the session so a
+    /// missing avatar never causes repeated requests.
+    func loadAuthorAvatar(_ username: String, urlHint: String? = nil) {
+        guard !username.isEmpty,
+              authorAvatars[username] == nil,
+              !avatarFetchesInFlight.contains(username),
+              !avatarFailures.contains(username) else { return }
+        if let cached = bridge.getCachedAuthorAvatar(username) {
+            authorAvatars[username] = cached
+            return
+        }
+        avatarFetchesInFlight.insert(username)
+        Task { @MainActor in
+            do {
+                authorAvatars[username] = try await bridge.fetchAuthorAvatar(username, urlHint: urlHint)
+            } catch {
+                avatarFailures.insert(username)
+            }
+            avatarFetchesInFlight.remove(username)
         }
     }
 
@@ -824,10 +859,17 @@ final class AppState {
                 subscriptionCheckRemaining = Int(result.remaining)
 
                 if let error = result.error {
-                    let isRetryable = error.lowercased().contains("timeout") || error.contains("HTTP 403")
+                    let isRetryable = error.lowercased().contains("timeout")
+                        || error.contains("HTTP 403") || error.contains("HTTP 429")
                     if isRetryable && consecutiveRetries < 3 {
                         consecutiveRetries += 1
-                        let reason = error.lowercased().contains("timeout") ? "Timed out" : "Blocked"
+                        let reason = if error.lowercased().contains("timeout") {
+                            "Timed out"
+                        } else if error.contains("HTTP 429") {
+                            "Rate limited"
+                        } else {
+                            "Blocked"
+                        }
                         subscriptionCheckTask.isReconnecting = true
                         subscriptionCheckTask.statusMessage = "\(reason). Getting new circuit… (\(consecutiveRetries)/3)"
                         await rotateCircuit()
@@ -985,7 +1027,7 @@ final class AppState {
         newWorkIDs = []
     }
 
-    private func reloadCachedWorks() {
+    func reloadCachedWorks() {
         cachedWorks = bridge.getAllCachedWorks().map(Self.workFromSummary)
     }
 

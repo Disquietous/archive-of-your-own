@@ -3,6 +3,7 @@ import SwiftUI
 struct InboxView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -18,7 +19,7 @@ struct InboxView: View {
                               message: "Comment threads from your AO3 inbox appear here.")
             } else {
                 LazyVStack(spacing: 0) {
-                    ForEach(appState.inboxMessages) { item in
+                    ForEach(model.filteredInboxMessages) { item in
                         messageRow(item)
                     }
                 }
@@ -39,6 +40,11 @@ struct InboxView: View {
                             .frame(width: 8, height: 8)
                             .padding(.top, 5)
                     }
+                    AuthorAvatarView(theme: theme, appState: appState,
+                                     username: item.author,
+                                     urlHint: item.avatarUrl.isEmpty ? nil : item.avatarUrl,
+                                     size: 28,
+                                     fetchable: !item.authorUrl.isEmpty || !item.avatarUrl.isEmpty)
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .firstTextBaseline) {
                             Text(item.author)

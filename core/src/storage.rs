@@ -143,6 +143,46 @@ impl Storage {
         Ok(())
     }
 
+    /// An avatar URL already harvested for this username (from cached
+    /// comments/inbox data) — saves the profile-page request entirely.
+    pub fn get_known_avatar_url(&self, username: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT avatar_url FROM ao3_users
+             WHERE username = ?1 COLLATE NOCASE AND avatar_url != ''
+             ORDER BY updated_at DESC LIMIT 1"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![username], |row| row.get::<_, String>(0)).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(url)) => Ok(Some(url)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Image cache (avatars etc. — fetched once, then served locally)
+    // -------------------------------------------------------------------
+
+    pub fn save_cached_image(&self, key: &str, data: &[u8]) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO image_cache (key, data) VALUES (?1, ?2)",
+            params![key, data],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_cached_image(&self, key: &str) -> Result<Option<Vec<u8>>, AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT data FROM image_cache WHERE key = ?1")
+            .map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![key], |row| row.get::<_, Vec<u8>>(0)).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(data)) => Ok(Some(data)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
     // -------------------------------------------------------------------
     // Known tags (autocomplete cache — harvested from every viewed work)
     // -------------------------------------------------------------------
@@ -1579,6 +1619,11 @@ impl Storage {
                 CREATE TABLE IF NOT EXISTS kudos_given (
                     work_id INTEGER PRIMARY KEY
                 );
+                CREATE TABLE IF NOT EXISTS image_cache (
+                    key        TEXT PRIMARY KEY,
+                    data       BLOB NOT NULL,
+                    fetched_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
                 CREATE TABLE IF NOT EXISTS known_tags (
                     name      TEXT NOT NULL,
                     tag_type  TEXT NOT NULL,
@@ -1600,6 +1645,13 @@ impl Storage {
                 [],
             )
             .ok();
+
+        // One-time: purge avatars cached by the unscoped icon selector (they
+        // captured the signed-in user's chrome icon, not the profile owner's).
+        if self.get_state("avatar_cache_reset_1").ok().flatten().is_none() {
+            let _ = self.conn.execute("DELETE FROM image_cache WHERE key LIKE 'avatar:%'", []);
+            let _ = self.set_state("avatar_cache_reset_1", "1");
+        }
 
         // Migration: AO3 bookmarks are rich objects — notes, own tags,
         // collections, private/rec flags (private defaults on, per the

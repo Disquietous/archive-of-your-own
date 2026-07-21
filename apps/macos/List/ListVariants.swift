@@ -1,41 +1,10 @@
+import AppKit
 import SwiftUI
 
 // SwiftUI content for the list pane's non-table variants, hosted from the
 // AppKit ListPaneViewController. All data comes from the shared AppState.
 
 // MARK: - Tag chips (browse/search)
-
-struct ChipsBar: View {
-    @Bindable var theme: AppTheme
-    @Bindable var model: MacAppModel
-
-    var body: some View {
-        let _ = theme.uiFontScale  // track app text size so fonts refresh live
-        FlowLayout(spacing: 7) {
-            ForEach(model.availableTags, id: \.self) { tag in
-                chip(tag, on: model.activeTags.contains(tag))
-            }
-        }
-        .padding(.init(top: 12, leading: 16, bottom: 12, trailing: 16))
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
-    }
-
-    private func chip(_ tag: String, on: Bool) -> some View {
-        Button {
-            if on { model.activeTags.remove(tag) } else { model.activeTags.insert(tag) }
-        } label: {
-            Text(tag)
-                .font(Font(MacFont.ui(12, weight: .semibold)))
-                .foregroundStyle(on ? theme.onAccent : theme.ink2)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 5)
-                .background(on ? theme.accent : theme.surface2)
-                .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
 
 /// Simple leading-aligned wrapping layout (no horizontal scrolling).
 struct FlowLayout: Layout {
@@ -166,6 +135,12 @@ struct FollowedFandomsView: View {
         model.libraryFandoms.filter { !model.followedFandoms.contains($0.name) }
     }
 
+    private var filteredFandoms: [String] {
+        let needle = model.fandomsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return model.followedFandoms }
+        return model.followedFandoms.filter { $0.lowercased().contains(needle) }
+    }
+
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
@@ -189,7 +164,7 @@ struct FollowedFandomsView: View {
                     .padding(.vertical, 24)
                 } else {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {
-                        ForEach(model.followedFandoms, id: \.self) { name in
+                        ForEach(filteredFandoms, id: \.self) { name in
                             fandomCard(name)
                         }
                     }
@@ -314,16 +289,20 @@ struct AuthorsList: View {
     @State private var newAuthor = ""
 
     /// Local follows first, then AO3 subscription authors not already followed.
-    private var authors: [(name: String, source: String)] {
+    /// `username` is the canonical AO3 username (subscription display names
+    /// can differ) — used for opening works and fetching avatars.
+    private var authors: [(name: String, username: String, source: String)] {
         var seen = Set<String>()
-        var result: [(String, String)] = []
+        var result: [(String, String, String)] = []
         for name in model.followedAuthorNames where seen.insert(name).inserted {
-            result.append((name, "Followed"))
+            result.append((name, name, "Followed"))
         }
         for sub in model.followedAuthors where seen.insert(sub.name).inserted {
-            result.append((sub.name, "Subscribed on AO3"))
+            result.append((sub.name, sub.id, "Subscribed on AO3"))
         }
-        return result
+        let needle = model.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return result }
+        return result.filter { $0.0.lowercased().contains(needle) || $0.1.lowercased().contains(needle) }
     }
 
     var body: some View {
@@ -341,7 +320,7 @@ struct AuthorsList: View {
                 } else {
                     VStack(spacing: 0) {
                         ForEach(authors, id: \.name) { author in
-                            authorRow(author.name, source: author.source)
+                            authorRow(author.name, username: author.username, source: author.source)
                         }
                     }
                 }
@@ -370,19 +349,38 @@ struct AuthorsList: View {
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
     }
 
-    private func authorRow(_ name: String, source: String) -> some View {
-        Button {
-            model.openAuthor(name)
-        } label: {
-            HStack(spacing: 12) {
+    /// DB-cached AO3 avatar; the letter disc shows until (or unless) the
+    /// one-time fetch delivers.
+    private func authorAvatar(name: String, username: String) -> some View {
+        Group {
+            if let data = appState.authorAvatars[username], let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
                 Circle()
                     .fill(Fandom.spineColorForHue(abs(name.hashValue % 360)))
-                    .frame(width: 40, height: 40)
                     .overlay {
                         Text(String(name.prefix(1)).uppercased())
                             .font(Font(MacFont.serif(18, weight: .semibold)))
                             .foregroundStyle(theme.onAccent)
                     }
+            }
+        }
+        .frame(width: 40, height: 40)
+        .clipShape(Circle())
+        .onAppear { appState.loadAuthorAvatar(username) }
+    }
+
+    private func authorRow(_ name: String, username: String, source: String) -> some View {
+        // Same selection treatment as the work lists: accent-soft fill
+        // with a 3pt accent bar on the leading edge.
+        let selected = model.authorUsername == username
+        return Button {
+            model.openAuthor(username)
+        } label: {
+            HStack(spacing: 12) {
+                authorAvatar(name: name, username: username)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(name)
                         .font(Font(MacFont.ui(14.5, weight: .semibold)))
@@ -413,6 +411,10 @@ struct AuthorsList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .background(selected ? theme.accentSoft : .clear)
+        .overlay(alignment: .leading) {
+            if selected { theme.accent.frame(width: 3) }
+        }
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }
 }
