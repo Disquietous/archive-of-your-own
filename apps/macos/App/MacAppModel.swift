@@ -7,7 +7,7 @@ import Observation
 @Observable
 final class MacAppModel {
     enum Section: String, CaseIterable {
-        case browse, reading, history, subscriptions, inbox, fandoms, authors,
+        case browse, reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
              bookmarks, downloads, stats, search, authorWorks
     }
 
@@ -16,7 +16,6 @@ final class MacAppModel {
 
     /// The app opens on Currently Reading — the primary use case.
     var section: Section = .reading
-    var subscriptionSubTab: String = "new"
     var selectedWorkID: String?
     var readerOpen = false
     var readerChapter = 0
@@ -190,6 +189,7 @@ final class MacAppModel {
             Task { await search.loadFormIfNeeded(appState) }
         case .subscriptions:
             Task { await appState.loadSubscriptions() }
+        case .whatsNew:
             appState.loadNotifications()
         case .inbox:
             appState.loadCachedInbox()
@@ -230,7 +230,6 @@ final class MacAppModel {
         }
         if let i = parts.firstIndex(of: "series"), i + 1 < parts.count, UInt64(parts[i + 1]) != nil {
             goSection(.subscriptions)
-            subscriptionSubTab = "following"
             openSubscriptionAuthorWorks(subscriptionID: parts[i + 1],
                                         author: "Series \(parts[i + 1])",
                                         subType: "series")
@@ -720,7 +719,7 @@ final class MacAppModel {
                 .sorted { $0.title < $1.title }
         case .authorWorks:
             authorWorksList
-        case .subscriptions:
+        case .whatsNew:
             appState.newWorkIDs.compactMap { appState.work(byID: $0) }
         default:
             []

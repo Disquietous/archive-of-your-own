@@ -47,7 +47,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     /// width — rows measured at the fallback width keep excess bottom space.
     private var lastLayoutWidth: CGFloat = 0
     private var isShowingSubscriptionList: Bool {
-        model.section == .subscriptions && model.subscriptionSubTab == "following"
+        model.section == .subscriptions
     }
     /// Measures off-screen rows for heightOfRow.
     private lazy var sizingCell = WorkRowCellView(theme: theme)
@@ -224,9 +224,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 : nil
             showWorksContent(section: section, header: nil, overlay: empty)
 
-        case .subscriptions:
-            if model.subscriptionSubTab == "new" {
-                works = model.works(for: .subscriptions)
+        case .whatsNew:
+            do {
+                works = model.works(for: .whatsNew)
                 let checkSub: String
                 if works.isEmpty {
                     checkSub = "No updates"
@@ -247,8 +247,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                         await self.appState.checkSubscriptions()
                     }
                 })
-                buttons.append(worksFilterButton(for: .subscriptions))
-                toolbar.setLeading([subscriptionTabButtons()])
+                buttons.append(worksFilterButton(for: .whatsNew))
+                toolbar.setLeading([])
                 toolbar.setTrailing(buttons)
                 let overlay: AnyView?
                 if !appState.isCheckingSubscriptions && works.isEmpty {
@@ -260,7 +260,10 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                     overlay = nil
                 }
                 showWorksContent(section: section, header: nil, overlay: overlay)
-            } else {
+            }
+
+        case .subscriptions:
+            do {
                 displayedSubscriptions = model.filteredSubscriptions
                 works = []
                 let subtitle: String
@@ -278,7 +281,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                                                   text: Binding(get: { model.subscriptionListFilter },
                                                                 set: { model.subscriptionListFilter = $0 })))
                 }
-                toolbar.setLeading([subscriptionTabButtons()])
+                toolbar.setLeading([])
                 toolbar.setTrailing([followingFilter, ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
                     guard let self else { return }
                     guard appState.ao3Username != nil else {
@@ -374,7 +377,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         var active = false
 
         switch section {
-        case .subscriptions where model.subscriptionSubTab == "new":
+        case .whatsNew:
             if appState.subscriptionCheckTask.isReconnecting,
                let msg = appState.subscriptionCheckTask.statusMessage {
                 message = msg
@@ -386,7 +389,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             } else if let msg = appState.subscriptionCheckTask.statusMessage, !msg.isEmpty {
                 message = msg
             }
-        case .subscriptions where model.subscriptionSubTab == "following":
+        case .subscriptions:
             if appState.isLoadingSubscriptions {
                 message = "Refreshing subscriptions from AO3…"
                 active = true
@@ -510,21 +513,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
         loadMoreButton = button
         return button
-    }
-
-    private func subscriptionTabButtons() -> NSView {
-        let seg = NSSegmentedControl(labels: ["What's New", "Following"], trackingMode: .selectOne,
-                                     target: self, action: #selector(subscriptionTabChanged(_:)))
-        seg.selectedSegment = model.subscriptionSubTab == "new" ? 0 : 1
-        seg.segmentStyle = .texturedRounded
-        seg.controlSize = .small
-        (seg.cell as? NSSegmentedCell)?.trackingMode = .selectOne
-        return seg
-    }
-
-    @objc private func subscriptionTabChanged(_ sender: NSSegmentedControl) {
-        model.subscriptionSubTab = sender.selectedSegment == 0 ? "new" : "following"
-        renderedSection = nil
     }
 
     private var removeAllButton: ToolButton?
@@ -712,13 +700,17 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         if sectionChanged || ids != renderedWorkIDs {
             tableView.reloadData()
         } else {
-            // Same rows — only move the selection highlight. Reloading here
-            // replaces every cell and makes expand/collapse look like a flash.
+            // Same rows — only move the selection highlight and bookmark
+            // indicator. Reloading here replaces every cell and makes
+            // expand/collapse look like a flash. (Reading bookmarkedWorkIDs
+            // also re-renders the moment a bookmark toggles.)
+            let bookmarked = appState.bookmarkedWorkIDs
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < works.count,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
+                cell.setBookmarked(bookmarked.contains(works[row].id))
             }
         }
         renderedWorkIDs = ids
@@ -842,6 +834,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                        progress: model.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
+                       bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        summaryExpanded: expandedSummaries.contains(work.id),
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)
@@ -850,6 +843,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
         cell.onToggleTags = { [weak self] in
             self?.toggleTags(workID: work.id)
+        }
+        cell.onToggleBookmark = { [weak self] in
+            self?.appState.toggleBookmark(work.id)
         }
         return cell
     }
@@ -974,7 +970,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 tableView.rowActionsVisible = false
             }
             return [remove]
-        case .subscriptions where model.subscriptionSubTab == "new":
+        case .whatsNew:
             let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
                 self?.appState.removeNewWork(workID)
                 tableView.rowActionsVisible = false
@@ -1032,7 +1028,7 @@ extension ListPaneViewController: NSMenuDelegate {
         case .reading:
             menu.addItem(.separator())
             menu.addItem(menuItem("Remove from Currently Reading", #selector(menuRemoveFromReading(_:)), row))
-        case .subscriptions where model.subscriptionSubTab == "new":
+        case .whatsNew:
             menu.addItem(.separator())
             menu.addItem(menuItem("Remove from What’s New", #selector(menuRemoveFromNew(_:)), row))
         default:

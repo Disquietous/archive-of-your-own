@@ -229,11 +229,15 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        progress: model.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
+                       bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        summaryExpanded: true,
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: max(100, tableWidth - 45))
         cell.onToggleTags = { [weak self] in
             self?.toggleTags(workID: work.id)
+        }
+        cell.onToggleBookmark = { [weak self] in
+            self?.appState.toggleBookmark(work.id)
         }
     }
 
