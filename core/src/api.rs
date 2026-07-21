@@ -1640,7 +1640,7 @@ impl AO3App {
 
     pub async fn fetch_subscriptions(&self, username: String) -> Result<Vec<USubscription>, AO3Error> {
         let progress = self.register_progress("subscriptions");
-        let result = self.run_on_runtime(move |client, _storage| async move {
+        let result = self.run_on_runtime(move |client, storage| async move {
             let mut all_subs = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
@@ -1661,6 +1661,29 @@ impl AO3App {
                 if !has_more { break; }
                 page += 1;
             }
+
+            // Backfill ao3_users for subscribed authors we've never recorded:
+            // one profile-page request each, once ever. A fetch failure just
+            // leaves the user unrecorded for the next refresh to retry.
+            let unknown: Vec<String> = {
+                let s = storage.lock().await;
+                all_subs.iter()
+                    .filter(|u| u.sub_type == "author")
+                    .filter(|u| !s.has_ao3_user_with_username(&u.id).unwrap_or(true))
+                    .map(|u| u.id.clone())
+                    .collect()
+            };
+            for author in unknown {
+                let c = client.read().await;
+                let profile = match c.fetch_user_profile(&author).await {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                drop(c);
+                let s = storage.lock().await;
+                let _ = s.upsert_ao3_user(&profile);
+            }
+
             Ok(all_subs)
         }).await;
         self.clear_progress("subscriptions");
@@ -2294,13 +2317,25 @@ impl AO3App {
                     .or_else(|| s.get_known_avatar_url(&username).unwrap_or(None))
             };
             let c = client.read().await;
-            let bytes = if let Some(url) = known_url {
-                c.fetch_image(&url).await.map_err(AO3Error::from)?
+            let (bytes, fetched_icon_url) = if let Some(url) = known_url {
+                (c.fetch_image(&url).await.map_err(AO3Error::from)?, None)
             } else {
-                c.fetch_user_icon(&username).await.map_err(AO3Error::from)?
+                let (bytes, icon_url) = c.fetch_user_icon(&username).await.map_err(AO3Error::from)?;
+                (bytes, Some(icon_url))
             };
             drop(c);
             let s = storage.lock().await;
+            // A profile-page fetch is the authoritative source for this
+            // user's avatar URL — record it so future lookups skip the
+            // profile request.
+            if let Some(icon_url) = fetched_icon_url {
+                let _ = s.upsert_ao3_user(&AO3User {
+                    id: username.clone(),
+                    username: username.clone(),
+                    profile_url: Some(format!("{}/users/{}", crate::client::BASE_URL, username)),
+                    avatar_url: Some(icon_url),
+                });
+            }
             let _ = s.save_cached_image(&key, &bytes);
             Ok(bytes)
         }).await

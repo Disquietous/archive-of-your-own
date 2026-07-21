@@ -1341,14 +1341,28 @@ impl AO3Client {
         }
     }
 
-    /// A user's profile icon bytes: profile page → icon URL → image.
-    /// Two requests; callers cache the result so this runs once per user.
-    pub async fn fetch_user_icon(&self, username: &str) -> Result<Vec<u8>, AppError> {
+    /// A user's profile page as an AO3User record (avatar URL included when
+    /// the page has one). One request.
+    pub async fn fetch_user_profile(&self, username: &str) -> Result<crate::models::AO3User, AppError> {
         let html = self.fetch(&format!("{BASE_URL}/users/{}/profile", urlencoded(username))).await?;
-        let Some(url) = parser::extract_user_icon_url(&html) else {
+        Ok(crate::models::AO3User {
+            id: username.to_string(),
+            username: username.to_string(),
+            profile_url: Some(format!("{BASE_URL}/users/{username}")),
+            avatar_url: parser::extract_user_icon_url(&html),
+        })
+    }
+
+    /// A user's profile icon: profile page → icon URL → image. Returns the
+    /// bytes plus the resolved icon URL so callers can record it.
+    /// Two requests; callers cache the result so this runs once per user.
+    pub async fn fetch_user_icon(&self, username: &str) -> Result<(Vec<u8>, String), AppError> {
+        let profile = self.fetch_user_profile(username).await?;
+        let Some(url) = profile.avatar_url else {
             return Err(AppError::ElementNotFound(format!("profile icon for {username}")));
         };
-        self.fetch_image(&url).await
+        let bytes = self.fetch_image(&url).await?;
+        Ok((bytes, url))
     }
 
     /// AO3's JSON autocomplete for canonical tag names — fired ONLY on an
