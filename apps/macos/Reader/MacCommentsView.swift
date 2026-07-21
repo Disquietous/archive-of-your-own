@@ -35,6 +35,29 @@ struct MacCommentsView: View {
 
     private var isLoggedIn: Bool { appState.ao3Username != nil }
 
+    /// Comments shown, counting nested replies.
+    private var loadedCommentCount: Int {
+        func count(_ list: [ParsedComment]) -> Int {
+            list.reduce(0) { $0 + 1 + count($1.replies) }
+        }
+        return count(comments)
+    }
+
+    /// Append only threads not already shown — AO3's comment pages shift as
+    /// new comments arrive, so consecutive pages can overlap, and duplicate
+    /// IDs break SwiftUI's ForEach identity.
+    private func appendUnique(_ newComments: [ParsedComment]) {
+        var seen = Set<UInt64>()
+        func collect(_ list: [ParsedComment]) {
+            for c in list {
+                seen.insert(c.id)
+                collect(c.replies)
+            }
+        }
+        collect(comments)
+        comments.append(contentsOf: newComments.filter { !seen.contains($0.id) })
+    }
+
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(spacing: 0) {
@@ -63,8 +86,12 @@ struct MacCommentsView: View {
                     .lineLimit(1)
             }
             Spacer()
-            if totalPages > 1 {
-                Text("Page \(currentPage) of \(totalPages)")
+            if !comments.isEmpty {
+                // The list accumulates (Load more appends) — pages are a
+                // fetch detail, not something the user sees.
+                Text(currentPage < totalPages
+                     ? "\(loadedCommentCount) shown · more on AO3"
+                     : "\(loadedCommentCount) comment\(loadedCommentCount == 1 ? "" : "s")")
                     .font(Font(MacFont.ui(11, weight: .medium)))
                     .foregroundStyle(theme.ink3)
             }
@@ -140,7 +167,12 @@ struct MacCommentsView: View {
     private func commentView(_ comment: ParsedComment, depth: Int) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
+                HStack(alignment: .center, spacing: 8) {
+                    AuthorAvatarView(theme: theme, appState: appState,
+                                     username: comment.authorName,
+                                     urlHint: comment.authorAvatarUrl.isEmpty ? nil : comment.authorAvatarUrl,
+                                     size: 24,
+                                     fetchable: !comment.authorProfileUrl.isEmpty || !comment.authorAvatarUrl.isEmpty)
                     Text(comment.authorName)
                         .font(Font(MacFont.ui(13, weight: .bold)))
                         .foregroundStyle(comment.authorProfileUrl.isEmpty ? theme.ink : theme.accent)
@@ -419,7 +451,7 @@ struct MacCommentsView: View {
             if replace {
                 comments = newComments
             } else {
-                comments.append(contentsOf: newComments)
+                appendUnique(newComments)
             }
             currentPage = result.currentPage
             totalPages = result.totalPages
@@ -446,7 +478,7 @@ struct MacCommentsView: View {
                 let result = try await appState.retryOnTimeout(task: commentTask, using: appState.bridge) {
                     try await self.fetchPage(nextPage)
                 }
-                comments.append(contentsOf: ParsedComment.fromJSON(result.commentsJson))
+                appendUnique(ParsedComment.fromJSON(result.commentsJson))
                 currentPage = result.currentPage
                 totalPages = result.totalPages
                 nextPage += 1

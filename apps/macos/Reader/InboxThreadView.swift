@@ -66,7 +66,12 @@ struct InboxThreadView: View {
         let isTarget = comment.id == appState.selectedInboxItem?.commentId
         return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
+                HStack(alignment: .center, spacing: 8) {
+                    AuthorAvatarView(theme: theme, appState: appState,
+                                     username: comment.author,
+                                     urlHint: comment.avatarUrl.isEmpty ? nil : comment.avatarUrl,
+                                     size: 24,
+                                     fetchable: !comment.authorUrl.isEmpty || !comment.avatarUrl.isEmpty)
                     Text(comment.author)
                         .font(Font(MacFont.ui(13, weight: .bold)))
                         .foregroundStyle(isTarget ? theme.accent : theme.ink)

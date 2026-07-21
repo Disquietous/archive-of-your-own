@@ -15,7 +15,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private let scrollView = NSScrollView()
     private let tableView = KeyNavTableView()
 
-    private var chipsHost: NSHostingView<ChipsBar>?
+    private var chipsHost: NSView?
+    private var filterPopover: NSPopover?
     private var variantHost: NSView?
     private var overlayHost: NSView?
     private var eyeButton: ToolButton?
@@ -192,8 +193,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             works = model.works(for: .browse)
             toolbar.configure(title: "Browse", sub: subtitleForNetworkList(count: works.count, loading: appState.isBrowsing))
             toolbar.setLeading([])
-            toolbar.setTrailing([browseRefreshButton(), eyeToggleButton()])
-            showWorksContent(section: section, header: chipsHeader(),
+            toolbar.setTrailing([browseRefreshButton(), worksFilterButton(for: .browse), eyeToggleButton()])
+            showWorksContent(section: section, header: nil,
                              overlay: networkOverlay(loading: appState.isBrowsing,
                                                      loadingMessage: "Fetching latest works…",
                                                      emptyIcon: "safari", emptyTitle: "Nothing here yet",
@@ -213,7 +214,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let meta = sectionMeta(for: section)
             toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
             toolbar.setLeading([])
-            var trailing: [NSView] = [sortFilterMenu.makeButton(for: section)]
+            var trailing: [NSView] = [sortFilterMenu.makeButton(for: section), worksFilterButton(for: section)]
             if section == .reading && !works.isEmpty {
                 trailing.insert(removeAllReadingButton(), at: 0)
             }
@@ -246,6 +247,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                         await self.appState.checkSubscriptions()
                     }
                 })
+                buttons.append(worksFilterButton(for: .subscriptions))
                 toolbar.setLeading([subscriptionTabButtons()])
                 toolbar.setTrailing(buttons)
                 let overlay: AnyView?
@@ -259,7 +261,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 }
                 showWorksContent(section: section, header: nil, overlay: overlay)
             } else {
-                displayedSubscriptions = appState.subscriptions
+                displayedSubscriptions = model.filteredSubscriptions
                 works = []
                 let subtitle: String
                 if appState.isLoadingSubscriptions {
@@ -270,8 +272,14 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                     subtitle = "\(displayedSubscriptions.count) subscriptions"
                 }
                 toolbar.configure(title: "Following", sub: subtitle)
+                let followingFilter = filterButton(key: "following", active: !model.subscriptionListFilter.isEmpty) { [theme, model] in
+                    AnyView(SingleFieldFilterView(theme: theme, title: "Filter Following",
+                                                  placeholder: "Name",
+                                                  text: Binding(get: { model.subscriptionListFilter },
+                                                                set: { model.subscriptionListFilter = $0 })))
+                }
                 toolbar.setLeading([subscriptionTabButtons()])
-                toolbar.setTrailing([ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
+                toolbar.setTrailing([followingFilter, ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
                     guard let self else { return }
                     guard appState.ao3Username != nil else {
                         appState.subscriptionError = "Sign in to AO3 in Settings first"
@@ -321,20 +329,35 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             }
             toolbar.configure(title: "Inbox", sub: sub)
             toolbar.setLeading([])
-            toolbar.setTrailing(inboxToolbarButtons())
-            showVariant(InboxView(theme: theme, appState: appState), section: section)
+            let inboxFilter = filterButton(key: "inbox", active: !model.inboxFilterAuthor.isEmpty
+                                               || !model.inboxFilterWork.isEmpty
+                                               || !model.inboxFilterText.isEmpty) { [theme, model] in
+                AnyView(InboxFilterView(theme: theme, model: model))
+            }
+            toolbar.setTrailing([inboxFilter] + inboxToolbarButtons())
+            showVariant(InboxView(theme: theme, appState: appState, model: model), section: section)
 
         case .fandoms:
             toolbar.configure(title: "Fandoms", sub: "\(model.followedFandoms.count) followed")
             toolbar.setLeading([])
-            toolbar.setTrailing([])
+            toolbar.setTrailing([filterButton(key: "fandoms", active: !model.fandomsListFilter.isEmpty) { [theme, model] in
+                AnyView(SingleFieldFilterView(theme: theme, title: "Filter Fandoms",
+                                              placeholder: "Fandom name",
+                                              text: Binding(get: { model.fandomsListFilter },
+                                                            set: { model.fandomsListFilter = $0 })))
+            }])
             showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
 
         case .authors:
             let count = model.followedAuthorNames.count + model.followedAuthors.count
             toolbar.configure(title: "Authors", sub: "\(count) followed")
             toolbar.setLeading([])
-            toolbar.setTrailing([])
+            toolbar.setTrailing([filterButton(key: "authors", active: !model.authorsListFilter.isEmpty) { [theme, model] in
+                AnyView(SingleFieldFilterView(theme: theme, title: "Filter Authors",
+                                              placeholder: "Username",
+                                              text: Binding(get: { model.authorsListFilter },
+                                                            set: { model.authorsListFilter = $0 })))
+            }])
             showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
 
         case .stats:
@@ -599,12 +622,53 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         appState.loadCachedInbox(page: page)
     }
 
-    private func chipsHeader() -> NSView? {
-        guard !model.availableTags.isEmpty else { return nil }
-        if chipsHost == nil {
-            chipsHost = NSHostingView(rootView: ChipsBar(theme: theme, model: model))
+    // MARK: - Per-section filter popover
+
+    /// Memoized per key: render() rebuilds the toolbar constantly, and a
+    /// recreated button would yank the popover's anchor out of the view
+    /// hierarchy — dismissing the dialog the moment it opens (or on the
+    /// first keystroke, which re-renders via the filter state).
+    private var filterButtons: [String: ToolButton] = [:]
+
+    /// Toolbar button opening the section's tailored filter dialog; lit
+    /// (accent fill) while a filter is active.
+    private func filterButton(key: String, active: Bool, content: @escaping () -> AnyView) -> ToolButton {
+        if let existing = filterButtons[key] {
+            existing.isOn = active
+            return existing
         }
-        return chipsHost
+        var anchor: ToolButton!
+        let button = ToolButton(theme: theme, symbol: "line.3.horizontal.decrease.circle",
+                                tooltip: "Filter this list") { [weak self] in
+            guard let self, let anchor else { return }
+            if let popover = filterPopover, popover.isShown {
+                popover.close()
+                filterPopover = nil
+                return
+            }
+            let popover = NSPopover()
+            popover.behavior = .transient
+            let host = NSHostingController(rootView: content())
+            popover.contentViewController = host
+            // Size the popover to the SwiftUI content BEFORE showing — an
+            // unsized hosting controller makes NSPopover pick an arbitrary
+            // frame and misplace the dialog relative to its anchor.
+            host.view.layoutSubtreeIfNeeded()
+            popover.contentSize = host.view.fittingSize
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+            filterPopover = popover
+        }
+        button.isOn = active
+        anchor = button
+        filterButtons[key] = button
+        return button
+    }
+
+    private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
+        filterButton(key: "works-\(section)",
+                     active: model.workListFilter(for: section).isActive) { [theme, model] in
+            AnyView(WorkListFilterView(theme: theme, model: model, section: section))
+        }
     }
 
 
@@ -701,6 +765,20 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         let ids = displayedSubscriptions.map(\.id)
         if sectionChanged || ids != renderedSubscriptionIDs {
             tableView.reloadData()
+        } else {
+            // Same rows — move only the selection highlight. Reading the
+            // drill-in identity here also makes the observation relay
+            // re-render the moment the selection changes (previously the
+            // highlight waited for an unrelated redraw).
+            let activeID = model.subscriptionWorksSubId
+            let activeType = model.subscriptionWorksSubType
+            tableView.enumerateAvailableRowViews { [weak self] _, row in
+                guard let self, row < displayedSubscriptions.count,
+                      let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? SubscriptionRowCellView
+                else { return }
+                let sub = displayedSubscriptions[row]
+                cell.setActive(activeID == sub.id && activeType == normalizedSubType(sub))
+            }
         }
         renderedSubscriptionIDs = ids
         renderedWorkIDs = []

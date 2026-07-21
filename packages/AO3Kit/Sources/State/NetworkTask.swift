@@ -20,6 +20,14 @@ final class NetworkTask {
 }
 
 extension AppState {
+    /// Parse the Retry-After seconds the Rust layer embeds in 429 errors
+    /// ("HTTP 429 retry_after=300").
+    static func retryAfterSeconds(in description: String) -> Int? {
+        guard let range = description.range(of: "retry_after=") else { return nil }
+        let digits = description[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
+    }
+
     func retryOnTimeout<T>(task: NetworkTask, using bridge: RustBridge, _ operation: () async throws -> T) async throws -> T {
         if bridge.networkBlocked {
             let connected = await ensureTorConnected()
@@ -81,6 +89,30 @@ extension AppState {
                     }
                     task.statusMessage = "Timed out. Retrying… (\(timeoutCount)/3)"
                     continue
+                }
+                // Rate-limited (429). The budget is per exit IP, so a fresh
+                // circuit is a fresh budget — rotate rather than waiting out
+                // the Retry-After window on the burned IP. Without Tor, all
+                // we can do is surface an honest countdown.
+                if desc.contains("HTTP 429") {
+                    blockedCount += 1
+                    let waitDescription = Self.retryAfterSeconds(in: desc).map { secs in
+                        secs >= 120 ? "about \(Int((Double(secs) / 60).rounded())) minutes"
+                                    : "about \(secs) seconds"
+                    }
+                    if blockedCount >= 3 {
+                        throw Ao3Error.Network(message: "The archive is rate-limiting this connection. Try again in \(waitDescription ?? "a few minutes").")
+                    }
+                    if bridge.torStatus.isConnected {
+                        task.isReconnecting = true
+                        task.statusMessage = "Rate limited. Getting new circuit… (\(blockedCount)/3)"
+                        await rotateCircuit()
+                        if task.isCancelled { throw error }
+                        task.isReconnecting = false
+                        task.statusMessage = nil
+                        continue
+                    }
+                    throw Ao3Error.Network(message: "The archive is rate-limiting this connection. Try again in \(waitDescription ?? "a few minutes"), or connect via Tor to get a fresh route.")
                 }
                 // Cloudflare bot rejection of this circuit/session. The fix is
                 // the same as the connect flow's: a fresh circuit + a fresh

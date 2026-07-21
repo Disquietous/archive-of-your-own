@@ -22,7 +22,6 @@ final class MacAppModel {
     var readerChapter = 0
     var immersive = false
     var query = ""
-    var activeTags: Set<String> = []
     /// Reading list shown in the list pane when a collection is selected.
     var selectedReadingListID: Int64?
     /// Title override for search results driven from elsewhere (fandom cards).
@@ -132,17 +131,56 @@ final class MacAppModel {
 
     // MARK: - Intents
 
+    // MARK: - Per-section pane memory (session-scoped, never persisted)
+
+    /// What the reading pane was showing for a section — restored when the
+    /// user returns to it. Held in memory only, by design: gone on relaunch.
+    private struct PaneSnapshot {
+        var selectedWorkID: String?
+        var readerOpen = false
+        var readerChapter = 0
+        var selectedReadingListID: Int64?
+    }
+
+    private var paneSnapshots: [Section: PaneSnapshot] = [:]
+
+    private func snapshotPane(for s: Section) {
+        paneSnapshots[s] = PaneSnapshot(
+            selectedWorkID: selectedWorkID,
+            readerOpen: readerOpen,
+            readerChapter: readerChapter,
+            selectedReadingListID: selectedReadingListID)
+    }
+
+    private func restorePane(for s: Section) {
+        let snap = paneSnapshots[s] ?? PaneSnapshot()
+        immersive = false
+        selectedReadingListID = snap.selectedReadingListID
+        selectedWorkID = snap.selectedWorkID
+        readerChapter = snap.readerChapter
+        if snap.readerOpen, let id = snap.selectedWorkID {
+            // Reopening the reader lands where it was — stash the saved
+            // position exactly like openReader does.
+            if let progress = appState.progressMap[id], progress.chapter == snap.readerChapter + 1 {
+                readerResumePct = progress.pct
+            } else {
+                readerResumePct = 0
+            }
+            readerOpen = true
+        } else {
+            readerOpen = false
+        }
+    }
+
     func goSection(_ s: Section) {
-        if section == .inbox && s != .inbox {
-            appState.clearInboxSelection()
-        }
-        if section == .authors && s != .authors {
-            closeAuthorWorks()
-        }
+        guard s != section else { return }
+        // Remember what this section's pane was showing; restore the target's.
+        // Drill-in state (author/subscription works lists, inbox selection)
+        // is deliberately left alive — it only renders in its own section,
+        // and in-flight crawls keep their bookkeeping.
+        snapshotPane(for: section)
         section = s
-        selectedReadingListID = nil
-        subscriptionWorksTitle = nil
-        readerOpen = false
+        restorePane(for: s)
         switch s {
         case .browse:
             if appState.browseResults.isEmpty {
@@ -162,9 +200,12 @@ final class MacAppModel {
     }
 
     func goReadingList(_ listID: Int64) {
-        section = .bookmarks
+        if section != .bookmarks {
+            snapshotPane(for: section)
+            section = .bookmarks
+            restorePane(for: .bookmarks)
+        }
         selectedReadingListID = listID
-        readerOpen = false
     }
 
     /// Route an archiveofourown.org link to the matching screen.
@@ -307,9 +348,14 @@ final class MacAppModel {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         searchDisplayTitle = nil
-        section = .search
+        if section != .search {
+            snapshotPane(for: section)
+            section = .search
+        }
+        // A new search replaces the search pane's prior context by design.
         readerOpen = false
         selectedWorkID = nil
+        immersive = false
         Task { @MainActor in
             await search.loadFormIfNeeded(appState)
             search.setQuery(q)
@@ -321,9 +367,13 @@ final class MacAppModel {
     func searchTag(_ tag: String) {
         query = tag
         searchDisplayTitle = tag
-        section = .search
+        if section != .search {
+            snapshotPane(for: section)
+            section = .search
+        }
         readerOpen = false
         selectedWorkID = nil
+        immersive = false
         Task { @MainActor in
             search.startTagQuery(tag, appState: appState)
         }
@@ -479,6 +529,9 @@ final class MacAppModel {
                     subscriptionWorksList = all
                     let ids = all.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
                     appState.bridge.saveSubscriptionWorks(subType: subType, subId: subId, workIds: ids)
+                    // The crawl rewrote works in the DB (author renames,
+                    // updated stats) — refresh the launch-time snapshot too.
+                    appState.reloadCachedWorks()
                 }
             } catch {
                 if !task.isCancelled && !"\(error)".contains("cancelled"),
@@ -562,6 +615,7 @@ final class MacAppModel {
                     })
                 if authorUsername == username && !task.isCancelled {
                     authorWorksList = all
+                    appState.reloadCachedWorks()
                 }
             } catch {
                 if !task.isCancelled && !"\(error)".contains("cancelled"),
@@ -641,57 +695,143 @@ final class MacAppModel {
     }
 
     func works(for section: Section) -> [Work] {
-        let works: [Work]
+        sorted(applyListFilter(filtered(rawWorks(for: section)), for: section), for: section)
+    }
+
+    private func rawWorks(for section: Section) -> [Work] {
         switch section {
         case .browse:
-            works = appState.browseResults
+            appState.browseResults
         case .search:
-            works = appState.searchResults
+            appState.searchResults
         case .reading:
-            works = currentlyReading
+            currentlyReading
         case .history:
-            works = appState.history.compactMap { appState.work(byID: $0) }
+            appState.history.compactMap { appState.work(byID: $0) }
         case .bookmarks:
             if let listID = selectedReadingListID {
-                works = appState.worksInReadingList(listID)
+                appState.worksInReadingList(listID)
             } else {
-                works = appState.bookmarkedWorkIDs.compactMap { appState.work(byID: $0) }
+                appState.bookmarkedWorkIDs.compactMap { appState.work(byID: $0) }
                     .sorted { $0.title < $1.title }
             }
         case .downloads:
-            works = appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
+            appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
                 .sorted { $0.title < $1.title }
         case .authorWorks:
-            works = authorWorksList
+            authorWorksList
         case .subscriptions:
-            works = appState.newWorkIDs.compactMap { appState.work(byID: $0) }
+            appState.newWorkIDs.compactMap { appState.work(byID: $0) }
         default:
-            works = []
+            []
         }
-        return sorted(filtered(works), for: section)
     }
 
     private func filtered(_ works: [Work]) -> [Work] {
         works.filter { w in
             let passesExplicit = !hideExplicit || w.rating != .explicit
-            let matchesTags = activeTags.allSatisfy { w.tags.contains($0) }
             let passesCompletion = switch completionFilter {
             case .all: true
             case .complete: w.complete
             case .inProgress: !w.complete
             }
             let passesRating = ratingFilter == nil || w.rating == ratingFilter
-            return passesExplicit && matchesTags && passesCompletion && passesRating
+            return passesExplicit && passesCompletion && passesRating
         }
     }
 
-    /// Tag chips for browse: most common tags among current results.
-    var availableTags: [String] {
-        var counts: [String: Int] = [:]
-        for work in appState.browseResults {
-            for tag in work.tags { counts[tag, default: 0] += 1 }
+    // MARK: - 2nd-pane list filters (session-scoped, tailored per content type)
+
+    struct WorkListFilter {
+        var text = ""
+        /// Numeric filters accepting ">" / "<" prefixes (plain number = at least).
+        var kudos = ""
+        var words = ""
+        var tags: Set<String> = []
+        var isActive: Bool {
+            !text.trimmingCharacters(in: .whitespaces).isEmpty
+                || !kudos.trimmingCharacters(in: .whitespaces).isEmpty
+                || !words.trimmingCharacters(in: .whitespaces).isEmpty
+                || !tags.isEmpty
         }
-        return counts.sorted { $0.value > $1.value }.prefix(10).map(\.key)
+    }
+
+    /// Per-section work-list filter (text over title/author/summary + tag toggles).
+    var workListFilters: [Section: WorkListFilter] = [:]
+    /// Following list: subscription name.
+    var subscriptionListFilter = ""
+    /// Authors list: username.
+    var authorsListFilter = ""
+    /// Fandoms list: fandom name.
+    var fandomsListFilter = ""
+    /// Inbox: three targeted fields.
+    var inboxFilterAuthor = ""
+    var inboxFilterWork = ""
+    var inboxFilterText = ""
+
+    func workListFilter(for s: Section) -> WorkListFilter {
+        workListFilters[s] ?? WorkListFilter()
+    }
+
+    private func applyListFilter(_ works: [Work], for s: Section) -> [Work] {
+        guard let filter = workListFilters[s], filter.isActive else { return works }
+        let needle = filter.text.trimmingCharacters(in: .whitespaces).lowercased()
+        return works.filter { w in
+            let textOK = needle.isEmpty
+                || w.title.lowercased().contains(needle)
+                || w.author.lowercased().contains(needle)
+                || w.summary.lowercased().contains(needle)
+            // Tag toggles are OR: a work matches if it carries ANY selected tag.
+            let tagsOK = filter.tags.isEmpty || w.tags.contains { filter.tags.contains($0) }
+            let kudosOK = Self.matchesCount(w.kudos, expression: filter.kudos)
+            let wordsOK = Self.matchesCount(w.words, expression: filter.words)
+            return textOK && tagsOK && kudosOK && wordsOK
+        }
+    }
+
+    /// ">" / "<" prefixed comparisons; a plain number means "at least".
+    /// Unparseable input filters nothing.
+    private static func matchesCount(_ value: Int, expression: String) -> Bool {
+        let trimmed = expression.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return true }
+        if trimmed.hasPrefix(">") {
+            guard let n = Int(trimmed.dropFirst().trimmingCharacters(in: .whitespaces)) else { return true }
+            return value > n
+        }
+        if trimmed.hasPrefix("<") {
+            guard let n = Int(trimmed.dropFirst().trimmingCharacters(in: .whitespaces)) else { return true }
+            return value < n
+        }
+        guard let n = Int(trimmed) else { return true }
+        return value >= n
+    }
+
+    /// Distinct tags across a section's (pre-filter) work list,
+    /// alphabetically — the toggle set shown in the filter dialog.
+    func availableTags(for s: Section) -> [String] {
+        var tags = Set<String>()
+        for work in filtered(rawWorks(for: s)) {
+            tags.formUnion(work.tags)
+        }
+        return tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    var filteredSubscriptions: [USubscription] {
+        let needle = subscriptionListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return appState.subscriptions }
+        return appState.subscriptions.filter { $0.name.lowercased().contains(needle) }
+    }
+
+    var filteredInboxMessages: [InboxItem] {
+        let author = inboxFilterAuthor.trimmingCharacters(in: .whitespaces).lowercased()
+        let work = inboxFilterWork.trimmingCharacters(in: .whitespaces).lowercased()
+        let text = inboxFilterText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !author.isEmpty || !work.isEmpty || !text.isEmpty else { return appState.inboxMessages }
+        return appState.inboxMessages.filter { item in
+            (author.isEmpty || item.author.lowercased().contains(author))
+                && (work.isEmpty || item.workReference.lowercased().contains(work))
+                && (text.isEmpty || item.contentJson.lowercased().contains(text))
+        }
     }
 
     // MARK: - Derived library views

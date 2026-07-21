@@ -442,7 +442,7 @@ struct CommentThreadView: View {
             if replace {
                 comments = newComments
             } else {
-                comments.append(contentsOf: newComments)
+                appendUnique(newComments)
             }
             currentPage = result.currentPage
             totalPages = result.totalPages
@@ -459,6 +459,21 @@ struct CommentThreadView: View {
         await loadPage(currentPage + 1, replace: false)
     }
 
+    /// Append only threads not already shown — AO3's comment pages shift as
+    /// new comments arrive, so consecutive pages can overlap, and duplicate
+    /// IDs break SwiftUI's ForEach identity.
+    private func appendUnique(_ newComments: [ParsedComment]) {
+        var seen = Set<UInt64>()
+        func collect(_ list: [ParsedComment]) {
+            for c in list {
+                seen.insert(c.id)
+                collect(c.replies)
+            }
+        }
+        collect(comments)
+        comments.append(contentsOf: newComments.filter { !seen.contains($0.id) })
+    }
+
     private func loadAllPages() async {
         guard currentPage < totalPages else { return }
         isLoadingAll = true
@@ -470,8 +485,7 @@ struct CommentThreadView: View {
                 let result = try await state.retryOnTimeout(task: commentTask, using: state.bridge) {
                     try await self.fetchPage(nextPage)
                 }
-                let newComments = ParsedComment.fromJSON(result.commentsJson)
-                comments.append(contentsOf: newComments)
+                appendUnique(ParsedComment.fromJSON(result.commentsJson))
                 currentPage = result.currentPage
                 totalPages = result.totalPages
                 nextPage += 1

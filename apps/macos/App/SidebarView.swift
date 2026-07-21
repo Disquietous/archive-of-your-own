@@ -10,7 +10,6 @@ struct SidebarView: View {
 
     @State private var privacyShown = false
     @State private var torPulse = false
-    @FocusState private var searchFieldFocus: Bool
 
     var body: some View {
         // Track the app text-size setting: MacFont reads it via a plain static,
@@ -18,7 +17,6 @@ struct SidebarView: View {
         let _ = theme.uiFontScale
         return VStack(spacing: 0) {
             header
-            searchField
             ScrollView {
                 VStack(spacing: 6) {
                     topGroup
@@ -73,32 +71,6 @@ struct SidebarView: View {
         .frame(height: 52)
         .padding(.horizontal, 18)
         .contentShape(Rectangle())
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(theme.ink3)
-            TextField("Search the archive", text: $model.query)
-                .textFieldStyle(.plain)
-                .font(Font(MacFont.ui(13)))
-                .foregroundStyle(theme.ink)
-                .focused($searchFieldFocus)
-                .onSubmit { model.submitSearch() }
-        }
-        .padding(.horizontal, 9)
-        .frame(height: 30)
-        .background(searchFieldFocus ? theme.surface : theme.surface3)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(searchFieldFocus ? theme.accent : .clear, lineWidth: 1)
-        )
-        .padding(.leading, 12)
-        .padding(.trailing, 12)
-        .padding(.bottom, 10)
-        .padding(.top, 4)
     }
 
     private var topGroup: some View {

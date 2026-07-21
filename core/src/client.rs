@@ -877,7 +877,26 @@ impl AO3Client {
             let code = status.as_u16();
 
             // Retry on transient HTTP errors before reading body
-            if (code == 525 || code == 503 || code == 429) && retries < 5 {
+            // 429: rate-limited. The budget is per exit IP and Retry-After
+            // says how long it's burned — re-poking inside that window is
+            // useless (and can extend the penalty). Fail fast with the
+            // header value so upper layers can rotate the circuit (fresh IP
+            // = fresh budget) or surface an honest countdown.
+            if code == 429 {
+                let retry_after = response.headers().get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
+                let detail = match retry_after {
+                    Some(secs) => format!("HTTP 429 retry_after={secs}"),
+                    None => "HTTP 429".to_string(),
+                };
+                log_info!("http", " 429 rate-limited ({}) for {}",
+                          retry_after.map_or("no retry-after".to_string(), |s| format!("{s}s")), url);
+                progress!(FetchStatus::Failed, 0, None);
+                audit!(code, 0, Some(detail.clone()));
+                return Err(AppError::NetworkError(detail));
+            }
+            if (code == 525 || code == 503) && retries < 5 {
                 retries += 1;
                 progress!(FetchStatus::Connecting, 0, None);
                 let delay = std::cmp::min(retries as u64 * 2, 10);
@@ -1320,6 +1339,16 @@ impl AO3Client {
                 Ok((status, body))
             }
         }
+    }
+
+    /// A user's profile icon bytes: profile page → icon URL → image.
+    /// Two requests; callers cache the result so this runs once per user.
+    pub async fn fetch_user_icon(&self, username: &str) -> Result<Vec<u8>, AppError> {
+        let html = self.fetch(&format!("{BASE_URL}/users/{}/profile", urlencoded(username))).await?;
+        let Some(url) = parser::extract_user_icon_url(&html) else {
+            return Err(AppError::ElementNotFound(format!("profile icon for {username}")));
+        };
+        self.fetch_image(&url).await
     }
 
     /// AO3's JSON autocomplete for canonical tag names — fired ONLY on an

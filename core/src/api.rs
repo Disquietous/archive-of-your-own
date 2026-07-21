@@ -1788,7 +1788,8 @@ impl AO3App {
                     log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
                     drop(c);
 
-                    let retryable = msg.to_lowercase().contains("timeout") || msg.contains("HTTP 403");
+                    let retryable = msg.to_lowercase().contains("timeout")
+                        || msg.contains("HTTP 403") || msg.contains("HTTP 429");
                     if retryable {
                         let s = storage.lock().await;
                         if let Ok(Some(json)) = s.get_check_queue() {
@@ -1834,18 +1835,34 @@ impl AO3App {
                 _ => (String::new(), vec![]),
             };
 
-            // Diff against snapshot
             let s = storage.lock().await;
-            let old_date = s.get_subscription_snapshot(&sub_type, &sub_id)
+            // The snapshot's only job now: distinguish a first run (seed
+            // silently) from a repeat check.
+            let first_run = s.get_subscription_snapshot(&sub_type, &sub_id)
                 .unwrap_or(None)
-                .map(|d| crate::parser::normalize_ao3_date(&d));
-            let changed = if newest_date.is_empty() {
-                false
-            } else if let Some(ref old) = old_date {
-                newest_date != *old
-            } else {
-                false // first run — seed silently
-            };
+                .is_none();
+
+            // Per-work diff against the local cache, BEFORE overwriting it.
+            // date_updated is day-granular, so a chapter posted later the
+            // same day is invisible to date comparison — chapter and word
+            // counts (already in the parsed blurbs) catch it.
+            let mut updated_ids: Vec<u64> = Vec::new();
+            if !first_run {
+                for w in &parsed_works {
+                    match s.get_work(w.id) {
+                        Ok(Some(old)) => {
+                            if old.date_updated != w.date_updated
+                                || old.chapter_count != w.chapter_count
+                                || old.word_count != w.word_count {
+                                updated_ids.push(w.id);
+                            }
+                        }
+                        Ok(None) => updated_ids.push(w.id), // never seen — new work
+                        Err(_) => {}
+                    }
+                }
+            }
+            let changed = !updated_ids.is_empty();
 
             // Cache works and mark new/updated ones for the What's New feed
             for w in &parsed_works {
@@ -1858,14 +1875,7 @@ impl AO3App {
                 let _ = s.add_subscription_works(&sub_type, &sub_id, &all_ids);
             }
             if changed {
-                let old_ref = old_date.as_deref().unwrap_or("");
-                let new_ids: Vec<u64> = parsed_works.iter()
-                    .filter(|w| w.date_updated.as_str() > old_ref)
-                    .map(|w| w.id)
-                    .collect();
-                if !new_ids.is_empty() {
-                    let _ = s.add_new_work_ids(&new_ids);
-                }
+                let _ = s.add_new_work_ids(&updated_ids);
             }
 
             // Save snapshot (always, even on first run)
@@ -2258,6 +2268,42 @@ impl AO3App {
         let _ = crate::client::drain_request_records();
         let storage = self.storage.blocking_lock();
         storage.clear_request_logs().map_err(AO3Error::from)
+    }
+
+    /// Cached avatar bytes for an author, if previously fetched. Sync,
+    /// DB-only — never touches the network.
+    pub fn get_cached_author_avatar(&self, username: String) -> Result<Option<Vec<u8>>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_cached_image(&format!("avatar:{username}")).map_err(AO3Error::from)
+    }
+
+    /// An author's avatar: served from the DB cache when present. On a miss,
+    /// a known avatar URL — the caller's hint (inbox/comment data carries
+    /// one) or one recorded in ao3_users — means a single image request;
+    /// only a never-seen user costs the profile-page fetch as well. The
+    /// bytes are cached forever either way.
+    pub async fn fetch_author_avatar(&self, username: String, url_hint: Option<String>) -> Result<Vec<u8>, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let key = format!("avatar:{username}");
+            let known_url = {
+                let s = storage.lock().await;
+                if let Some(data) = s.get_cached_image(&key).map_err(AO3Error::from)? {
+                    return Ok(data);
+                }
+                url_hint.filter(|u| !u.is_empty())
+                    .or_else(|| s.get_known_avatar_url(&username).unwrap_or(None))
+            };
+            let c = client.read().await;
+            let bytes = if let Some(url) = known_url {
+                c.fetch_image(&url).await.map_err(AO3Error::from)?
+            } else {
+                c.fetch_user_icon(&username).await.map_err(AO3Error::from)?
+            };
+            drop(c);
+            let s = storage.lock().await;
+            let _ = s.save_cached_image(&key, &bytes);
+            Ok(bytes)
+        }).await
     }
 
     /// Local tag autocomplete — instant, DB-only, works offline. Suggests

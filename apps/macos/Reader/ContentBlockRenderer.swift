@@ -75,7 +75,20 @@ struct ContentBlockRenderer {
         switch block {
         case .paragraph(let inlines):
             let text = renderInlines(inlines, baseFont: bodyFont, baseColor: inkColor)
-            guard !text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Whitespace-only paragraphs are intentional blank space —
+                // <p><br><br></p> scene breaks, <p>&nbsp;</p> spacers.
+                // Render one empty line per <br> (at least one). Genuinely
+                // empty <p></p> never gets here: the parser emits no block
+                // for a paragraph with no inline content at all.
+                let blankLines = max(Self.lineBreakCount(inlines), 1)
+                let blanks = NSMutableAttributedString(
+                    string: String(repeating: "\n", count: blankLines),
+                    attributes: [.font: bodyFont, .foregroundColor: inkColor])
+                applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: blanks)
+                result.append(blanks)
+                return
+            }
             let mutable = NSMutableAttributedString(attributedString: text)
             mutable.append(NSAttributedString(string: "\n"))
             applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: mutable)
@@ -211,6 +224,21 @@ struct ContentBlockRenderer {
 
         case .lineBreak:
             return NSAttributedString(string: "\n", attributes: [.font: font, .foregroundColor: color])
+        }
+    }
+
+    /// Recursive count of explicit line breaks in an inline tree.
+    private static func lineBreakCount(_ inlines: [ParsedInlineContent]) -> Int {
+        inlines.reduce(0) { total, inline in
+            switch inline {
+            case .lineBreak:
+                total + 1
+            case .bold(let content), .italic(let content), .strikethrough(let content),
+                 .superscript(let content), .link(_, let content):
+                total + lineBreakCount(content)
+            case .text:
+                total
+            }
         }
     }
 

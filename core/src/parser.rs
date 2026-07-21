@@ -329,6 +329,46 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     })
 }
 
+/// AO3 renders comment timestamps as composite markup — separate spans for
+/// day-of-week, date, month, year, time, and timezone. Assemble them into
+/// one readable timestamp ("17 Jul 2026 03:12AM EDT"); when the pieces
+/// aren't present, fall back to the container's whitespace-normalized text.
+fn parse_composite_datetime(el: &ElementRef) -> String {
+    let piece = |selector: &str| {
+        el.select(&sel(selector)).next().map(|e| text(&e)).filter(|t| !t.is_empty())
+    };
+    if let (Some(date), Some(month), Some(year)) =
+        (piece("span.date"), piece("abbr.month"), piece("span.year")) {
+        let mut out = format!("{date} {month} {year}");
+        if let Some(time) = piece("span.time") {
+            out.push(' ');
+            out.push_str(&time);
+        }
+        if let Some(zone) = piece("abbr.timezone") {
+            out.push(' ');
+            out.push_str(&zone);
+        }
+        return out;
+    }
+    text(el).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The profile owner's icon URL from a profile page. Scoped to the page's
+/// primary header — an unscoped `img.icon` matches the signed-in user's own
+/// greeting icon in the site chrome first.
+pub fn extract_user_icon_url(html: &str) -> Option<String> {
+    let doc = Html::parse_document(html);
+    for selector in ["div.primary.header p.icon img", "#main p.icon img", "#main img.icon"] {
+        let s = sel(selector);
+        if let Some(src) = doc.select(&s).next().and_then(|el| el.value().attr("src")) {
+            if !src.is_empty() {
+                return Some(src.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Check whether the HTML page has a "next" pagination link.
 pub fn has_next_page(html: &str) -> bool {
     let doc = Html::parse_document(html);
@@ -1112,9 +1152,9 @@ pub fn parse_inbox(html: &str) -> InboxPage {
                 else { s.to_string() }
             });
 
-        // Date
+        // Date — composite spans assembled into one readable timestamp
         let posted_at = li.select(&sel("span.posted.datetime")).next()
-            .map(|d| text(&d))
+            .map(|d| parse_composite_datetime(&d))
             .unwrap_or_default();
 
         // Content
@@ -1266,10 +1306,8 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         avatar_url,
     };
 
-    let posted_at = div.select(&sel("span.posted span.date")).next()
-        .or_else(|| div.select(&sel("span.date")).next())
-        .or_else(|| div.select(&sel("span.posted")).next())
-        .map(|d| text(&d))
+    let posted_at = div.select(&sel("span.posted")).next()
+        .map(|d| parse_composite_datetime(&d))
         .unwrap_or_default();
 
     let body_sel = sel("blockquote.userstuff");
@@ -1419,6 +1457,49 @@ mod tests {
 #[cfg(test)]
 mod subscription_tests {
     use super::*;
+
+    #[test]
+    fn test_parse_composite_datetime() {
+        // AO3's real composite timestamp markup.
+        let html = r#"<html><body><span class="posted datetime">
+            <abbr class="day" title="Wednesday">Wed</abbr>
+            <span class="date">17</span>
+            <abbr class="month" title="July">Jul</abbr>
+            <span class="year">2026</span>
+            <span class="time">03:12AM</span>
+            <abbr class="timezone" title="Eastern Time (US &amp; Canada)">EDT</abbr>
+        </span></body></html>"#;
+        let doc = Html::parse_document(html);
+        let el = doc.select(&sel("span.posted")).next().unwrap();
+        assert_eq!(parse_composite_datetime(&el), "17 Jul 2026 03:12AM EDT");
+
+        // Plain-text container falls back to normalized text.
+        let plain = Html::parse_document(
+            r#"<html><body><span class="posted datetime">  2025-03-15  </span></body></html>"#);
+        let el = plain.select(&sel("span.posted")).next().unwrap();
+        assert_eq!(parse_composite_datetime(&el), "2025-03-15");
+    }
+
+    #[test]
+    fn test_extract_user_icon_url_skips_chrome_icon() {
+        // Logged-in chrome carries the signed-in user's own icon before the
+        // profile owner's — the extractor must take the primary header's.
+        let html = r#"
+        <html><body>
+        <ul class="menu"><li><a href="/users/me"><img class="icon" src="https://example.org/my-own-icon.png"/></a></li></ul>
+        <div id="main" class="profile-show dashboard region">
+          <div class="user home profile">
+            <div class="primary header module">
+              <h2 class="heading">astolat</h2>
+              <p class="icon"><a href="/users/astolat"><img alt="" class="icon" src="https://example.org/astolat-icon.png"/></a></p>
+            </div>
+          </div>
+        </div>
+        </body></html>
+        "#;
+        assert_eq!(extract_user_icon_url(html).as_deref(), Some("https://example.org/astolat-icon.png"));
+        assert_eq!(extract_user_icon_url("<html><body><p>none</p></body></html>"), None);
+    }
 
     #[test]
     fn test_total_pages() {

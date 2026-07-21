@@ -9,6 +9,9 @@ final class SubscriptionRowCellView: NSTableCellView {
     private let typeLabel = NSTextField(labelWithString: "")
     private let chevron = NSImageView()
     private let separator = NSView()
+    /// Same selection treatment as the work rows: accent-soft fill + 3px bar.
+    private let selectionBar = NSView()
+    private var isActive = false
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -29,13 +32,19 @@ final class SubscriptionRowCellView: NSTableCellView {
         chevron.contentTintColor = theme.nsInk3
 
         separator.wantsLayer = true
+        selectionBar.wantsLayer = true
 
-        for v in [iconView, nameLabel, typeLabel, chevron, separator] {
+        for v in [selectionBar, iconView, nameLabel, typeLabel, chevron, separator] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
 
         NSLayoutConstraint.activate([
+            selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            selectionBar.topAnchor.constraint(equalTo: topAnchor),
+            selectionBar.bottomAnchor.constraint(equalTo: bottomAnchor),
+            selectionBar.widthAnchor.constraint(equalToConstant: 3),
+
             iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 16),
@@ -88,7 +97,7 @@ final class SubscriptionRowCellView: NSTableCellView {
         iconView.image = NSImage(systemSymbolName: iconName,
                                  accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
-        nameLabel.textColor = isActive ? theme.nsAccent : theme.nsInk
+        setActive(isActive)
         // Works, authors, and series all drill in now.
         chevron.isHidden = false
 
@@ -96,6 +105,15 @@ final class SubscriptionRowCellView: NSTableCellView {
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         setAccessibilityLabel("\(sub.name), \(typeName) subscription")
+    }
+
+    /// Flip only the selection highlight — callable without reconfiguring,
+    /// so the highlight moves the moment the selection changes.
+    func setActive(_ active: Bool) {
+        isActive = active
+        layer?.backgroundColor = active ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
+        selectionBar.layer?.backgroundColor = active ? theme.nsAccent.cgColor : NSColor.clear.cgColor
+        nameLabel.textColor = theme.nsInk
     }
 
     func applyTheme() {
