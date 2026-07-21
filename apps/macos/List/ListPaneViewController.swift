@@ -51,6 +51,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     }
     /// Measures off-screen rows for heightOfRow.
     private lazy var sizingCell = WorkRowCellView(theme: theme)
+    private lazy var subscriptionSizingCell = SubscriptionRowCellView(theme: theme)
     private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
@@ -81,6 +82,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
+        // Click action, not just selectionDidChange: re-clicking the row the
+        // table still has selected (after the detail pane was dismissed)
+        // fires no selection change, but must still navigate.
+        tableView.target = self
+        tableView.action = #selector(rowClicked)
         // Return opens the reader for the selected work at its saved position.
         tableView.onReturn = { [weak self] in
             guard let self, !isShowingSubscriptionList,
@@ -753,23 +759,30 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             overlayHost = host
         }
 
+        // Read the drill-in identity and loading state on EVERY render path,
+        // not just the same-rows branch: the reload path's cell configuration
+        // happens lazily outside this tracked closure, so without these reads
+        // a reload render left the relay blind to selection changes — the
+        // highlight then waited for cells to scroll off-screen and re-make.
+        let activeID = model.subscriptionWorksSubId
+        let activeType = model.subscriptionWorksSubType
+        let loadingID = model.loadingSubscriptionID
+
         let sectionChanged = renderedSection != section
         let ids = displayedSubscriptions.map(\.id)
         if sectionChanged || ids != renderedSubscriptionIDs {
             tableView.reloadData()
         } else {
-            // Same rows — move only the selection highlight. Reading the
-            // drill-in identity here also makes the observation relay
-            // re-render the moment the selection changes (previously the
-            // highlight waited for an unrelated redraw).
-            let activeID = model.subscriptionWorksSubId
-            let activeType = model.subscriptionWorksSubType
+            // Same rows — reconfigure the visible cells so the selection
+            // highlight and "Fetching works…" state move immediately.
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < displayedSubscriptions.count,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? SubscriptionRowCellView
                 else { return }
                 let sub = displayedSubscriptions[row]
-                cell.setActive(activeID == sub.id && activeType == normalizedSubType(sub))
+                cell.configure(with: sub,
+                               isLoading: loadingID == sub.id,
+                               isActive: activeID == sub.id && activeType == normalizedSubType(sub))
             }
         }
         renderedSubscriptionIDs = ids
@@ -901,7 +914,14 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     /// changes on reload only upward — a collapsed summary's shorter,
     /// correctly-measured height was silently discarded, so rows never shrank.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if isShowingSubscriptionList { return 52 }
+        if isShowingSubscriptionList {
+            guard row < displayedSubscriptions.count else { return 52 }
+            // Measure so the centered text block keeps its padding at any
+            // app text size / density instead of clipping against a fixed 52.
+            subscriptionSizingCell.configure(with: displayedSubscriptions[row],
+                                             isLoading: false, isActive: false)
+            return max(44, subscriptionSizingCell.fittingSize.height)
+        }
         guard row < works.count else { return 52 }
         // Always measure via the sizing cell — querying live row views from
         // inside heightOfRow is illegal reentrancy (AppKit throws while the
@@ -941,6 +961,18 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         guard row < works.count else { return }
         let id = works[row].id
         if model.selectedWorkID != id {
+            model.selectWork(id)
+        }
+    }
+
+    @objc private func rowClicked() {
+        guard !isShowingSubscriptionList else { return }
+        let row = tableView.clickedRow
+        guard row >= 0, row < works.count else { return }
+        let id = works[row].id
+        // selectionDidChange already handled a changed selection; this covers
+        // the stale-selection re-click and refocusing the detail over a reader.
+        if model.selectedWorkID != id || model.readerOpen {
             model.selectWork(id)
         }
     }

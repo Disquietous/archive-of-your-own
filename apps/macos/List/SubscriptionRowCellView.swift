@@ -7,11 +7,24 @@ final class SubscriptionRowCellView: NSTableCellView {
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let typeLabel = NSTextField(labelWithString: "")
+    private var textStack: NSStackView!
     private let chevron = NSImageView()
     private let separator = NSView()
     /// Same selection treatment as the work rows: accent-soft fill + 3px bar.
     private let selectionBar = NSView()
     private var isActive = false
+    /// Minimum breathing room above/below the text block; the block itself is
+    /// vertically centered, so both sides get at least this much.
+    private var stackTop: NSLayoutConstraint!
+
+    /// Density-driven padding (Settings → Spacing), matching the work rows.
+    private static func verticalPad(for density: Density) -> CGFloat {
+        switch density {
+        case .compact: 8
+        case .regular: 12
+        case .comfy: 17
+        }
+    }
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -34,10 +47,20 @@ final class SubscriptionRowCellView: NSTableCellView {
         separator.wantsLayer = true
         selectionBar.wantsLayer = true
 
-        for v in [selectionBar, iconView, nameLabel, typeLabel, chevron, separator] {
+        textStack = NSStackView(views: [nameLabel, typeLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+
+        for v in [selectionBar, iconView, textStack!, chevron, separator] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+
+        // Centered text block with a required minimum inset above it; the
+        // centerY makes the inset symmetric, and fittingSize (used for row
+        // height) resolves to content + 2×inset.
+        stackTop = textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 10)
 
         NSLayoutConstraint.activate([
             selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -50,13 +73,10 @@ final class SubscriptionRowCellView: NSTableCellView {
             iconView.widthAnchor.constraint(equalToConstant: 16),
             iconView.heightAnchor.constraint(equalToConstant: 16),
 
-            nameLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
-            nameLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
-
-            typeLabel.leadingAnchor.constraint(equalTo: nameLabel.leadingAnchor),
-            typeLabel.topAnchor.constraint(equalTo: nameLabel.bottomAnchor, constant: 2),
-            typeLabel.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
+            textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
+            stackTop,
 
             chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -92,6 +112,7 @@ final class SubscriptionRowCellView: NSTableCellView {
 
         nameLabel.font = MacFont.ui(14, weight: .semibold)
         typeLabel.font = MacFont.ui(12)
+        stackTop.constant = Self.verticalPad(for: theme.density)
         nameLabel.stringValue = sub.name
         typeLabel.stringValue = isLoading ? "Fetching works…" : typeName
         iconView.image = NSImage(systemSymbolName: iconName,
