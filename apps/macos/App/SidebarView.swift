@@ -27,7 +27,8 @@ struct SidebarView: View {
                         item(.browse, "safari", "Browse")
                     }
                     group("Following") {
-                        item(.subscriptions, "bell", "Subscriptions", badge: appState.unreadNotificationCount)
+                        item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newWorkIDs.count)
+                        item(.subscriptions, "bell", "Subscriptions")
                         item(.inbox, "tray", "Inbox", badge: appState.inboxUnreadCount)
                     }
                     group("Saved") {

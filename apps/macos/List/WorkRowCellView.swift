@@ -36,6 +36,10 @@ final class WorkRowCellView: NSTableCellView {
     /// Per-row bottom hairline (the design's row border) — the table grid is
     /// off because NSTableView paints phantom lines below the last row.
     private let separator = NSView()
+    /// Quick bookmark toggle, aligned with the meta row — bookmark a work
+    /// straight from the list without opening its detail page.
+    private let bookmarkButton = NSButton()
+    private var isBookmarked = false
 
     /// Density-driven metrics (Settings → Spacing). Updated in configure().
     private var bodyStack: NSStackView!
@@ -64,6 +68,8 @@ final class WorkRowCellView: NSTableCellView {
     private var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
     var onToggleSummary: (() -> Void)?
+    /// Called when the user clicks the row's bookmark button.
+    var onToggleBookmark: (() -> Void)?
     /// Called when the user clicks the tags to expand/collapse the full list.
     var onToggleTags: (() -> Void)?
 
@@ -144,8 +150,14 @@ final class WorkRowCellView: NSTableCellView {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
 
+        bookmarkButton.isBordered = false
+        bookmarkButton.setButtonType(.momentaryPushIn)
+        bookmarkButton.target = self
+        bookmarkButton.action = #selector(bookmarkClicked)
+        bookmarkButton.toolTip = "Bookmark"
+
         separator.wantsLayer = true
-        for view in [selectionBar, spine, body, datesLabel, separator] {
+        for view in [selectionBar, spine, body, datesLabel, separator, bookmarkButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -189,6 +201,11 @@ final class WorkRowCellView: NSTableCellView {
             // long fandom truncates instead of running under the dates.
             fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: datesLabel.leadingAnchor, constant: -8),
 
+            bookmarkButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            bookmarkButton.centerYAnchor.constraint(equalTo: metaLabel.centerYAnchor),
+            bookmarkButton.widthAnchor.constraint(equalToConstant: 24),
+            bookmarkButton.heightAnchor.constraint(equalToConstant: 24),
+
             summaryClip.widthAnchor.constraint(equalTo: body.widthAnchor),
             tagsClip.widthAnchor.constraint(equalTo: body.widthAnchor),
             progressTrack.heightAnchor.constraint(equalToConstant: 3),
@@ -206,6 +223,21 @@ final class WorkRowCellView: NSTableCellView {
 
     @objc private func summaryClicked() {
         onToggleSummary?()
+    }
+
+    @objc private func bookmarkClicked() {
+        onToggleBookmark?()
+    }
+
+    /// Flip only the bookmark indicator — callable without reconfiguring so
+    /// toggles reflect instantly on every visible row.
+    func setBookmarked(_ bookmarked: Bool) {
+        isBookmarked = bookmarked
+        bookmarkButton.image = NSImage(systemSymbolName: bookmarked ? "bookmark.fill" : "bookmark",
+                                       accessibilityDescription: bookmarked ? "Remove bookmark" : "Bookmark")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        bookmarkButton.contentTintColor = bookmarked ? theme.nsAccent : theme.nsInk3
+        bookmarkButton.toolTip = bookmarked ? "Remove bookmark" : "Bookmark"
     }
 
     @objc private func tagsClicked() {
@@ -285,7 +317,9 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
+                   bookmarked: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
+        setBookmarked(bookmarked)
         isRowSelected = selected
         // NSTextField caches its intrinsic size, and changing the line clamp
         // doesn't flush it — a reused cell going expanded → collapsed kept
@@ -391,7 +425,8 @@ final class WorkRowCellView: NSTableCellView {
         // instead of a soup of unlabeled text fragments.
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
-        setAccessibilityLabel(Self.axDescription(for: work, progress: progress, downloaded: downloaded))
+        setAccessibilityLabel(Self.axDescription(for: work, progress: progress,
+                                                 downloaded: downloaded, bookmarked: bookmarked))
 
         applyTheme()
         if progress > 0 {
@@ -400,7 +435,8 @@ final class WorkRowCellView: NSTableCellView {
         }
     }
 
-    private static func axDescription(for work: Work, progress: Double, downloaded: Bool) -> String {
+    private static func axDescription(for work: Work, progress: Double,
+                                      downloaded: Bool, bookmarked: Bool) -> String {
         var parts: [String] = [work.title, "by \(work.author)"]
         if !work.fandom.isEmpty { parts.append(work.fandom) }
         parts.append("rated \(work.rating.rawValue)")
@@ -408,6 +444,7 @@ final class WorkRowCellView: NSTableCellView {
         parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")
         if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
         if downloaded { parts.append("available offline") }
+        if bookmarked { parts.append("bookmarked") }
         return parts.joined(separator: ", ")
     }
 

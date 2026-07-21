@@ -168,6 +168,18 @@ final class ReadPaneViewController: NSViewController {
     private var authorRefreshBtn: LabelToolButton?
     private var subscriptionRefreshBtn: LabelToolButton?
     private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
+    private var detailRefreshBtn: ToolButton?
+
+    /// Detail header: re-fetch the work's current details from AO3.
+    private func detailRefreshButton() -> ToolButton {
+        let button = detailRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                    tooltip: "Refresh details from AO3") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            Task { @MainActor in await self.appState.refreshWorkMetadata(id) }
+        }
+        detailRefreshBtn = button
+        return button
+    }
 
     private func subscriptionCloseButton() -> ToolButton {
         let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
@@ -289,14 +301,15 @@ final class ReadPaneViewController: NSViewController {
         let cameFromResults = model.section == .search
             || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
             || (model.section == .authors && model.authorUsername != nil)
-        toolbar.configure(title: reading ? work.title : "Details", sub: nil)
+        toolbar.configure(title: reading ? work.title : "Details",
+                          sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         toolbar.setTrailing(reading ? [settingsButton, immersiveButton, chaptersButton, commentsButton, bookmarkButton]
-                                    : [settingsButton, bookmarkButton])
+                                    : [settingsButton, detailRefreshButton(), bookmarkButton])
 
         show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))
 

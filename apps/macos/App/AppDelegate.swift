@@ -63,7 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("Fandoms", .fandoms, "4"),
         ("Authors", .authors, "5"),
         ("Browse", .browse, "6"),
-        ("Subscriptions", .subscriptions, "7"),
+        ("What\u{2019}s New", .whatsNew, "7"),
+        ("Subscriptions", .subscriptions, ""),
         ("Inbox", .inbox, "8"),
         ("Bookmarks", .bookmarks, "9"),
         ("Offline", .downloads, "0"),
@@ -234,8 +235,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             NSApp.activate(ignoringOtherApps: true)
-            model.goSection(.subscriptions)
-            model.subscriptionSubTab = "new"
+            model.goSection(.whatsNew)
         }
         completionHandler()
     }

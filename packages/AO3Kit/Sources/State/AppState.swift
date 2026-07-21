@@ -466,6 +466,27 @@ final class AppState {
         ?? searchResults.first { $0.id == id }
     }
 
+    var isRefreshingWork = false
+
+    /// Force-fetch a work's current details from AO3 and replace the local
+    /// copy (fetchWorkMetadata only fills gaps — this updates).
+    func refreshWorkMetadata(_ id: String) async {
+        guard let workId = UInt64(id), !isRefreshingWork else { return }
+        isRefreshingWork = true
+        defer { isRefreshingWork = false }
+        do {
+            let summary = try await retryOnTimeout(task: metadataTask, using: bridge) {
+                try await self.bridge.fetchWork(workId)
+            }
+            fetchedWorks[id] = Self.workFromSummary(summary)
+        } catch {
+            if !metadataTask.isCancelled && !"\(error)".contains("cancelled") {
+                bridge.writeLog(level: "ERROR", tag: "work",
+                                message: "Refresh failed for \(id): \(error.localizedDescription)")
+            }
+        }
+    }
+
     func fetchWorkMetadata(_ id: String) async {
         guard let workId = UInt64(id), fetchedWorks[id] == nil else { return }
         do {
