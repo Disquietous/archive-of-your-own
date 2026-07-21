@@ -70,6 +70,11 @@ struct TorConnectOverlayView: View {
             .padding(40)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The window's transparent titlebar (fullSizeContentView) gives the
+        // hosting view a top safe-area inset; without this the dimming layer
+        // stops short of the titlebar band and the pane toolbars' controls
+        // peek out above the overlay.
+        .ignoresSafeArea()
     }
 
     private var progressDetail: String {

@@ -66,9 +66,32 @@ final class MacSearchModel {
         if let json = appState.bridge.getSessionCache(key: Self.dbFormKey, sessionId: Self.dbSessionID),
            let fields = Self.decodeForm(json), !fields.isEmpty {
             formFields = fields
+            applyDefaultLanguageIfUnset()
             return
         }
         await scrapeForm(appState)
+    }
+
+    /// Default the language filter to the device's language. AO3's language
+    /// ids are a mix of ISO 639-1/2/3 codes plus specials like "ptBR", so try
+    /// the compacted full tag, then the alpha-2 code, then alpha-3, and leave
+    /// the field untouched ("Any") when none of them is offered.
+    private func applyDefaultLanguageIfUnset() {
+        guard let field = formFields.first(where: { $0.name.contains("[language_id]") }),
+              (fieldValues[field.name] ?? "").isEmpty else { return }
+        let preferred = Locale.preferredLanguages.first ?? "en"
+        let language = Locale.Language(identifier: preferred)
+        var candidates = [preferred.replacingOccurrences(of: "-", with: "")]
+        if let code = language.languageCode {
+            candidates.append(code.identifier)
+            if let alpha3 = code.identifier(.alpha3) {
+                candidates.append(alpha3)
+            }
+        }
+        let values = Set(field.options.map(\.value).filter { !$0.isEmpty })
+        if let match = candidates.first(where: { values.contains($0) }) {
+            fieldValues[field.name] = match
+        }
     }
 
     /// Re-scrape the criteria fields from AO3 and persist them (header button).
@@ -86,6 +109,7 @@ final class MacSearchModel {
                 try await appState.bridge.fetchSearchForm()
             }
             formFields = fields
+            applyDefaultLanguageIfUnset()
             if let json = Self.encodeForm(fields) {
                 appState.bridge.setSessionCache(key: Self.dbFormKey, data: json, sessionId: Self.dbSessionID)
             }
@@ -160,6 +184,8 @@ final class MacSearchModel {
         fieldValues = [:]
         checkboxValues = [:]
         setQuery(query)
+        // The form's default state includes the device language.
+        applyDefaultLanguageIfUnset()
     }
 
     // MARK: - Saved searches (criteria persisted in the encrypted DB)

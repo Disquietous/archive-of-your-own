@@ -121,16 +121,25 @@ struct SearchFormView: View {
             .foregroundStyle(theme.ink3)
     }
 
+    /// AO3 selects mark their no-filter option with a blank label (the
+    /// language select's is literally empty) — surface those as "Any" so the
+    /// control always shows a value.
+    private static func optionTitle(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "Any" : trimmed
+    }
+
     private func selectControl(_ field: UFormField) -> some View {
         @Bindable var search = model.search
         let current = search.fieldValues[field.name] ?? ""
-        let currentLabel = field.options.first { $0.value == current }?.label
-            ?? field.options.first?.label ?? "Any"
+        let currentLabel = Self.optionTitle(
+            field.options.first { $0.value == current }?.label
+                ?? field.options.first?.label ?? "")
         return VStack(alignment: .leading, spacing: 5) {
             fieldLabel(field)
             Menu {
                 ForEach(field.options, id: \.value) { option in
-                    Button(option.label) {
+                    Button(Self.optionTitle(option.label)) {
                         search.fieldValues[field.name] = option.value
                     }
                 }
@@ -146,6 +155,7 @@ struct SearchFormView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 30)
+                .frame(maxWidth: .infinity)
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
