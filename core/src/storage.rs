@@ -159,6 +159,15 @@ impl Storage {
         }
     }
 
+    /// Whether any ao3_users row exists for this username.
+    pub fn has_ao3_user_with_username(&self, username: &str) -> Result<bool, AppError> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM ao3_users WHERE username = ?1 COLLATE NOCASE",
+            params![username], |row| row.get(0)
+        ).map_err(map_sql)?;
+        Ok(count > 0)
+    }
+
     // -------------------------------------------------------------------
     // Image cache (avatars etc. — fetched once, then served locally)
     // -------------------------------------------------------------------
@@ -2431,6 +2440,25 @@ mod tests {
         let subs2 = vec![("series".into(), "99".into(), "Big Series".into())];
         db.save_subscriptions(&subs2).unwrap();
         assert_eq!(db.get_subscriptions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_has_ao3_user_with_username() {
+        let db = open_test_db();
+
+        assert!(!db.has_ao3_user_with_username("astolat").unwrap());
+
+        db.upsert_ao3_user(&AO3User {
+            id: "astolat".into(),
+            username: "astolat".into(),
+            profile_url: Some("https://archiveofourown.org/users/astolat".into()),
+            avatar_url: None,
+        }).unwrap();
+
+        assert!(db.has_ao3_user_with_username("astolat").unwrap());
+        // Username match is case-insensitive
+        assert!(db.has_ao3_user_with_username("Astolat").unwrap());
+        assert!(!db.has_ao3_user_with_username("someone_else").unwrap());
     }
 
     #[test]
