@@ -92,6 +92,10 @@ final class WorkRowCellView: NSTableCellView {
         fandomLabel.lineBreakMode = .byTruncatingTail
         titleLabel.font = MacFont.serif(16, weight: .semibold)
         titleLabel.maximumNumberOfLines = 2
+        // Wrapping labels are selectable by default — a selectable title
+        // consumes row clicks (blocking selection) and hands the text to the
+        // field editor, which drops the inline rating-badge attachment.
+        titleLabel.isSelectable = false
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
         summaryLabel.font = MacFont.ui(12.5)

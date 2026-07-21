@@ -62,6 +62,11 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         tableView.dataSource = self
         tableView.delegate = self
         tableView.backgroundColor = .clear
+        // Click action, not just selectionDidChange: re-clicking the row the
+        // table still has selected (after backing out of the detail view)
+        // fires no selection change, but must still navigate.
+        tableView.target = self
+        tableView.action = #selector(rowClicked)
         // Return opens the reader for the selected work at its saved position.
         tableView.onReturn = { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
@@ -191,11 +196,17 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             tableView.reloadData()
             tableView.scroll(.zero)
         } else {
+            // Same rows — only move the selection highlight and bookmark
+            // indicator, as in ListPaneViewController. (Reading
+            // bookmarkedWorkIDs also re-renders the moment a bookmark
+            // toggles.)
+            let bookmarked = appState.bookmarkedWorkIDs
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < works.count,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
+                cell.setBookmarked(bookmarked.contains(works[row].id))
             }
         }
         renderedWorkIDs = ids
@@ -273,6 +284,17 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         guard tableView.selectedRow >= 0, tableView.selectedRow < works.count else { return }
         let id = works[tableView.selectedRow].id
         if model.selectedWorkID != id {
+            model.selectWork(id)
+        }
+    }
+
+    @objc private func rowClicked() {
+        let row = tableView.clickedRow
+        guard row >= 0, row < works.count else { return }
+        let id = works[row].id
+        // selectionDidChange already handled a changed selection; this covers
+        // the stale-selection re-click and reopening the detail over a reader.
+        if model.selectedWorkID != id || model.readerOpen {
             model.selectWork(id)
         }
     }
