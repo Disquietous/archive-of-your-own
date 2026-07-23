@@ -277,6 +277,10 @@ final class MacAppModel {
             closeAuthorWorks()
             return true
         }
+        if section == .fandoms && fandomWorksTag != nil {
+            closeFandomWorks()
+            return true
+        }
         return false
     }
 
@@ -394,6 +398,56 @@ final class MacAppModel {
         didSet { UserDefaults.standard.set(followedAuthorNames, forKey: "followedAuthors") }
     }
 
+    /// Fandom drill-in: a followed fandom's works shown in the reading pane
+    /// without ever leaving the Fandoms section. Local-first — opening shows
+    /// the library's works for that fandom; AO3 is only searched on the
+    /// explicit toolbar action.
+    var fandomWorksTag: String?
+    var fandomSearchActive = false
+
+    func openFandomWorks(_ tag: String) {
+        fandomWorksTag = tag
+        fandomSearchActive = false
+        readerOpen = false
+        selectedWorkID = nil
+        immersive = false
+    }
+
+    /// The explicit — and only — network trigger for the fandom drill-in:
+    /// swap the pane to AO3's paged tag results.
+    func searchFandomOnAO3() {
+        guard let tag = fandomWorksTag else { return }
+        fandomSearchActive = true
+        selectedWorkID = nil
+        Task { @MainActor in
+            search.startTagQuery(tag, appState: appState)
+        }
+    }
+
+    /// Back from AO3 results to the library view of the open fandom.
+    func showFandomLibraryWorks() {
+        fandomSearchActive = false
+        selectedWorkID = nil
+    }
+
+    func closeFandomWorks() {
+        fandomWorksTag = nil
+        fandomSearchActive = false
+        selectedWorkID = nil
+    }
+
+    /// Library works for the open fandom — matched against every fandom tag
+    /// on the work (crossovers count), the same tally the Fandoms list rows
+    /// show.
+    var fandomLibraryWorks: [Work] {
+        applyListFilter(fandomLibraryWorksRaw, for: .fandoms)
+    }
+
+    private var fandomLibraryWorksRaw: [Work] {
+        guard let tag = fandomWorksTag else { return [] }
+        return appState.cachedWorks.filter { $0.fandoms.contains(tag) || $0.fandom == tag }
+    }
+
     func followFandom(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !followedFandoms.contains(trimmed) else { return }
@@ -470,7 +524,7 @@ final class MacAppModel {
     var subscriptionWorksFetchStatus: String?
 
     var filteredSubscriptionWorks: [Work] {
-        sorted(filtered(subscriptionWorksList), for: .subscriptions)
+        sorted(applyListFilter(filtered(subscriptionWorksList), for: .subscriptions), for: .subscriptions)
     }
 
     /// Show a subscription's locally stored works (author or series). Never
@@ -566,7 +620,7 @@ final class MacAppModel {
     var authorWorksList: [Work] = []
 
     var filteredAuthorWorks: [Work] {
-        sorted(filtered(authorWorksList), for: .authors)
+        sorted(applyListFilter(filtered(authorWorksList), for: .authors), for: .authors)
     }
     var isLoadingAuthor = false
     var authorError: String?
@@ -721,6 +775,14 @@ final class MacAppModel {
             authorWorksList
         case .whatsNew:
             appState.newWorkIDs.compactMap { appState.work(byID: $0) }
+        // Reading-pane drill-ins: the works lists shown while these
+        // sections are active (feeds availableTags + the shared filter).
+        case .subscriptions:
+            subscriptionWorksList
+        case .authors:
+            authorWorksList
+        case .fandoms:
+            fandomLibraryWorksRaw
         default:
             []
         }
@@ -747,11 +809,13 @@ final class MacAppModel {
         var kudos = ""
         var words = ""
         var tags: Set<String> = []
+        var fandoms: Set<String> = []
         var isActive: Bool {
             !text.trimmingCharacters(in: .whitespaces).isEmpty
                 || !kudos.trimmingCharacters(in: .whitespaces).isEmpty
                 || !words.trimmingCharacters(in: .whitespaces).isEmpty
                 || !tags.isEmpty
+                || !fandoms.isEmpty
         }
     }
 
@@ -780,11 +844,14 @@ final class MacAppModel {
                 || w.title.lowercased().contains(needle)
                 || w.author.lowercased().contains(needle)
                 || w.summary.lowercased().contains(needle)
-            // Tag toggles are OR: a work matches if it carries ANY selected tag.
+            // Tag/fandom selections are OR within their group: a work matches
+            // if it carries ANY selected tag / ANY selected fandom.
             let tagsOK = filter.tags.isEmpty || w.tags.contains { filter.tags.contains($0) }
+            let workFandoms = w.fandoms.isEmpty ? [w.fandom] : w.fandoms
+            let fandomsOK = filter.fandoms.isEmpty || workFandoms.contains { filter.fandoms.contains($0) }
             let kudosOK = Self.matchesCount(w.kudos, expression: filter.kudos)
             let wordsOK = Self.matchesCount(w.words, expression: filter.words)
-            return textOK && tagsOK && kudosOK && wordsOK
+            return textOK && tagsOK && fandomsOK && kudosOK && wordsOK
         }
     }
 
@@ -806,13 +873,23 @@ final class MacAppModel {
     }
 
     /// Distinct tags across a section's (pre-filter) work list,
-    /// alphabetically — the toggle set shown in the filter dialog.
+    /// alphabetically — the suggestion pool for the filter dialog.
     func availableTags(for s: Section) -> [String] {
         var tags = Set<String>()
         for work in filtered(rawWorks(for: s)) {
             tags.formUnion(work.tags)
         }
         return tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Distinct fandoms across a section's (pre-filter) work list — the
+    /// suggestion pool for the filter dialog's fandom field.
+    func availableFandoms(for s: Section) -> [String] {
+        var fandoms = Set<String>()
+        for work in filtered(rawWorks(for: s)) {
+            fandoms.formUnion(work.fandoms.isEmpty ? [work.fandom] : work.fandoms)
+        }
+        return fandoms.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     var filteredSubscriptions: [USubscription] {
@@ -840,11 +917,16 @@ final class MacAppModel {
         var id: String { name }
     }
 
-    /// Fandoms represented in the local library (cached works).
+    /// Fandoms represented in the local library (cached works). Each work
+    /// counts under every fandom it's tagged with, so crossovers appear in
+    /// both lists.
     var libraryFandoms: [FandomEntry] {
         var counts: [String: Int] = [:]
         for work in appState.cachedWorks {
-            counts[work.fandom, default: 0] += 1
+            let fandoms = work.fandoms.isEmpty ? [work.fandom] : work.fandoms
+            for fandom in fandoms {
+                counts[fandom, default: 0] += 1
+            }
         }
         return counts.sorted { $0.value > $1.value }.map { FandomEntry(name: $0.key, count: $0.value) }
     }

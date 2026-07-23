@@ -15,6 +15,24 @@ final class AppState {
         didSet { UserDefaults.standard.set(hideExplicit, forKey: "hideExplicit") }
     }
 
+    /// How reading history is handled. `persisted` keeps it in the encrypted
+    /// library; `clearOnClose` wipes it at every app quit (plus a launch-time
+    /// sweep in case the quit hook never ran); `disabled` records nothing new.
+    enum HistoryMode: String, CaseIterable {
+        case persisted, clearOnClose, disabled
+    }
+
+    var historyMode: HistoryMode = HistoryMode(
+        rawValue: UserDefaults.standard.string(forKey: "historyMode") ?? "") ?? .persisted {
+        didSet { UserDefaults.standard.set(historyMode.rawValue, forKey: "historyMode") }
+    }
+
+    func clearHistory() {
+        bridge.clearHistory()
+        history = []
+        lastReadID = nil
+    }
+
     // Live search results from Rust backend
     var searchResults: [Work] = []
     var isSearching = false
@@ -489,6 +507,13 @@ final class AppState {
 
     func fetchWorkMetadata(_ id: String) async {
         guard let workId = UInt64(id), fetchedWorks[id] == nil else { return }
+        // The encrypted DB is the first stop — a cached copy fills the
+        // session map without a request. Only a never-cached work (or an
+        // explicit refresh) touches the network.
+        if let cached = bridge.getCachedWork(workId) {
+            fetchedWorks[id] = Self.workFromSummary(cached)
+            return
+        }
         do {
             let summary = try await retryOnTimeout(task: metadataTask, using: bridge) {
                 try await self.bridge.fetchWork(workId)
@@ -683,6 +708,11 @@ final class AppState {
             progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pct: p.position)
         }
 
+        // Crash safety for clear-on-close: if the quit hook never ran (force
+        // quit, crash), sweep the leftover history at launch instead.
+        if historyMode == .clearOnClose {
+            bridge.clearHistory()
+        }
         var seen = Set<String>()
         history = bridge.getHistory().compactMap { entry in
             let id = String(entry.workId)
@@ -733,12 +763,17 @@ final class AppState {
     }
 
     func pushHistory(_ id: String) {
+        // Session continuity (resume UI) works regardless of mode; the
+        // history list and its persistence are what the setting governs.
+        lastReadID = id
+        if UInt64(id) != nil {
+            bridge.purgeStaleChapters()
+        }
+        guard historyMode != .disabled else { return }
         history.removeAll { $0 == id }
         history.insert(id, at: 0)
-        lastReadID = id
         if let workId = UInt64(id) {
             bridge.addToHistory(workId)
-            bridge.purgeStaleChapters()
         }
     }
 
@@ -1219,7 +1254,8 @@ final class AppState {
             initialProgress: 0,
             lastChapter: nil,
             downloaded: false,
-            content: nil
+            content: nil,
+            fandoms: s.fandoms
         )
     }
 

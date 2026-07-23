@@ -165,10 +165,67 @@ final class ReadPaneViewController: NSViewController {
     private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
     private var authorCloseBtn: ToolButton?
+    private var fandomCloseBtn: ToolButton?
+    private var fandomSearchBtn: ToolButton?
+    private var fandomLibraryBackBtn: ToolButton?
+    private var filterButtons: [String: ToolButton] = [:]
+    private var filterPopover: NSPopover?
+
+    /// Same filter-popover machinery as ListPaneViewController: a cached
+    /// toggle button anchoring a transient popover, sized to its SwiftUI
+    /// content before showing.
+    private func filterButton(key: String, active: Bool, content: @escaping () -> AnyView) -> ToolButton {
+        if let existing = filterButtons[key] {
+            existing.isOn = active
+            return existing
+        }
+        var anchor: ToolButton!
+        let button = ToolButton(theme: theme, symbol: "line.3.horizontal.decrease.circle",
+                                tooltip: "Filter this list") { [weak self] in
+            guard let self, let anchor else { return }
+            if let popover = filterPopover, popover.isShown {
+                popover.close()
+                filterPopover = nil
+                return
+            }
+            let popover = NSPopover()
+            popover.behavior = .transient
+            let host = NSHostingController(rootView: content())
+            popover.contentViewController = host
+            host.view.layoutSubtreeIfNeeded()
+            popover.contentSize = host.view.fittingSize
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+            filterPopover = popover
+        }
+        button.isOn = active
+        anchor = button
+        filterButtons[key] = button
+        return button
+    }
+
+    private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
+        filterButton(key: "works-\(section)",
+                     active: model.workListFilter(for: section).isActive) { [theme, model] in
+            AnyView(WorkListFilterView(theme: theme, model: model, section: section))
+        }
+    }
     private var authorRefreshBtn: LabelToolButton?
     private var subscriptionRefreshBtn: LabelToolButton?
     private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
     private var detailRefreshBtn: ToolButton?
+
+    /// The pager, hosted for the toolbar. The toolbar sits in the window's
+    /// titlebar band (fullSizeContentView), and an NSHostingView there
+    /// inherits a top safe-area inset that shoves the SwiftUI content below
+    /// the bar's midline — the same mechanism the Tor overlay hit. Clearing
+    /// safeAreaRegions makes it center like the AppKit ToolButtons.
+    private func makePagerHost() -> NSHostingView<SearchPagerView> {
+        if let pagerHost { return pagerHost }
+        let host = NSHostingView(rootView: SearchPagerView(theme: theme, appState: appState, model: model))
+        host.safeAreaRegions = []
+        pagerHost = host
+        return host
+    }
 
     /// Detail header: re-fetch the work's current details from AO3.
     private func detailRefreshButton() -> ToolButton {
@@ -194,6 +251,30 @@ final class ReadPaneViewController: NSViewController {
             self?.model.closeAuthorWorks()
         }
         authorCloseBtn = button
+        return button
+    }
+
+    private func fandomCloseButton() -> ToolButton {
+        let button = fandomCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
+            self?.model.closeFandomWorks()
+        }
+        fandomCloseBtn = button
+        return button
+    }
+
+    private func fandomSearchButton() -> ToolButton {
+        let button = fandomSearchBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass", tooltip: "Search AO3 for this fandom's works") { [weak self] in
+            self?.model.searchFandomOnAO3()
+        }
+        fandomSearchBtn = button
+        return button
+    }
+
+    private func fandomLibraryBackButton() -> ToolButton {
+        let button = fandomLibraryBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to library works") { [weak self] in
+            self?.model.showFandomLibraryWorks()
+        }
+        fandomLibraryBackBtn = button
         return button
     }
 
@@ -246,7 +327,9 @@ final class ReadPaneViewController: NSViewController {
                 : "\(model.filteredSubscriptionWorks.count) works stored"
             toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
-            toolbar.setTrailing([sortFilterMenu.makeButton(for: .subscriptions), refreshWorksButton(forAuthor: false)])
+            toolbar.setTrailing([sortFilterMenu.makeButton(for: .subscriptions),
+                                 worksFilterButton(for: .subscriptions),
+                                 refreshWorksButton(forAuthor: false)])
             show(mode: .subscriptionWorks(title))
             return
         }
@@ -258,8 +341,32 @@ final class ReadPaneViewController: NSViewController {
                 : "\(model.filteredAuthorWorks.count) works stored"
             toolbar.configure(title: author, sub: sub)
             toolbar.setLeading([authorCloseButton()])
-            toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors), refreshWorksButton(forAuthor: true)])
+            toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
+                                 worksFilterButton(for: .authors),
+                                 refreshWorksButton(forAuthor: true)])
             show(mode: .subscriptionWorks(author))
+            return
+        }
+
+        // Fandoms drill-in, without leaving the Fandoms section. Local-first:
+        // the library's works for the fandom, with an explicit Search AO3
+        // action that swaps the pane to the archive's paged tag results.
+        if model.section == .fandoms, let tag = model.fandomWorksTag, model.selectedWork == nil {
+            if model.fandomSearchActive {
+                let search = model.search
+                toolbar.configure(title: tag,
+                                  sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
+                toolbar.setLeading([fandomLibraryBackButton()])
+                toolbar.setTrailing(search.hasSearched
+                    ? [makePagerHost(), worksFilterButton(for: .search)] : [])
+            } else {
+                let count = model.fandomLibraryWorks.count
+                toolbar.configure(title: tag,
+                                  sub: count == 1 ? "1 work in library" : "\(count) works in library")
+                toolbar.setLeading([fandomCloseButton()])
+                toolbar.setTrailing([fandomSearchButton(), worksFilterButton(for: .fandoms)])
+            }
+            show(mode: .searchResults)
             return
         }
 
@@ -269,10 +376,8 @@ final class ReadPaneViewController: NSViewController {
             toolbar.configure(title: model.searchDisplayTitle ?? "Results",
                               sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
             toolbar.setLeading([])
-            if pagerHost == nil {
-                pagerHost = NSHostingView(rootView: SearchPagerView(theme: theme, appState: appState, model: model))
-            }
-            toolbar.setTrailing(search.hasSearched ? [pagerHost!] : [])
+            toolbar.setTrailing(search.hasSearched
+                ? [makePagerHost(), worksFilterButton(for: .search)] : [])
             show(mode: .searchResults)
             return
         }
@@ -301,6 +406,7 @@ final class ReadPaneViewController: NSViewController {
         let cameFromResults = model.section == .search
             || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
             || (model.section == .authors && model.authorUsername != nil)
+            || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))

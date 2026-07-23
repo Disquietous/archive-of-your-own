@@ -779,8 +779,10 @@ impl AO3App {
             c.set_active_progress(progress);
             let works = c.browse_works(page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
+            // Every listing we ever see is cached — save_work also harvests
+            // tags for autocomplete.
             let s = storage.lock().await;
-            for w in &works { let _ = s.harvest_work_tags(w); }
+            for w in &works { let _ = s.save_work(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("browse");
@@ -796,7 +798,7 @@ impl AO3App {
             let works = c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
-            for w in &works { let _ = s.harvest_work_tags(w); }
+            for w in &works { let _ = s.save_work(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("search");
@@ -812,7 +814,7 @@ impl AO3App {
             let works = c.search_works(&search_params, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
-            for w in &works { let _ = s.harvest_work_tags(w); }
+            for w in &works { let _ = s.save_work(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("search");
@@ -827,7 +829,7 @@ impl AO3App {
             let works = c.search_by_tag(&tag, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
-            for w in &works { let _ = s.harvest_work_tags(w); }
+            for w in &works { let _ = s.save_work(w); }
             Ok(works.into_iter().map(UWorkSummary::from).collect())
         }).await;
         self.clear_progress("tag_browse");

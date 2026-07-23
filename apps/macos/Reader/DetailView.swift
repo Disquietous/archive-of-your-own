@@ -15,6 +15,7 @@ struct DetailView: View {
     private var bookmarked: Bool { appState.bookmarkedWorkIDs.contains(work.id) }
     private var downloaded: Bool { appState.downloadedWorkIDs.contains(work.id) }
     private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
+    private var followingAuthor: Bool { model.followedAuthorNames.contains(work.author) }
 
     @State private var showComments = false
     @State private var showBookmarkEdit = false
@@ -32,10 +33,37 @@ struct DetailView: View {
                     .foregroundStyle(theme.ink)
                     .lineSpacing(2)
                     .padding(.bottom, 10)
-                (Text("by ").foregroundStyle(theme.ink2)
-                    + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
-                    .font(Font(MacFont.ui(16)))
-                    .padding(.bottom, 4)
+                HStack(spacing: 10) {
+                    Button {
+                        if followingAuthor {
+                            model.unfollowAuthor(work.author)
+                        } else {
+                            model.followAuthor(work.author)
+                        }
+                    } label: {
+                        (Text("by ").foregroundStyle(theme.ink2)
+                            + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
+                            .font(Font(MacFont.ui(16)))
+                    }
+                    .buttonStyle(.plain)
+                    .help(followingAuthor
+                          ? "Unfollow \(work.author)"
+                          : "Follow \(work.author) — adds them to Authors → Following")
+                    if followingAuthor {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Following")
+                                .font(Font(MacFont.ui(11, weight: .semibold)))
+                        }
+                        .foregroundStyle(theme.sage)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(theme.sage.opacity(0.14))
+                        .clipShape(Capsule())
+                    }
+                }
+                .padding(.bottom, 4)
                 if !work.relationship.isEmpty {
                     Text(work.relationship)
                         .font(Font(MacFont.ui(14)))
