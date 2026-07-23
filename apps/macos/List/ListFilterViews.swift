@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Filter popover for work lists: free text over title/author/summary plus
-/// toggles for the distinct tags present in the current list.
+/// selected-tag chips fed by a type-ahead field (same pattern as the Fandoms
+/// follow field) suggesting from the tags present in the current list.
 struct WorkListFilterView: View {
     @Bindable var theme: AppTheme
     @Bindable var model: MacAppModel
@@ -14,7 +15,6 @@ struct WorkListFilterView: View {
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
-        let tags = model.availableTags(for: section)
         VStack(alignment: .leading, spacing: 10) {
             header("Filter Works", clearEnabled: filter.wrappedValue.isActive) {
                 model.workListFilters[section] = nil
@@ -25,45 +25,117 @@ struct WorkListFilterView: View {
                 filterField("Words (e.g. <50000)", text: filter.words)
             }
 
-            if !tags.isEmpty {
-                Text("TAGS")
-                    .font(Font(MacFont.ui(10, weight: .bold)))
-                    .kerning(0.6)
-                    .foregroundStyle(theme.ink3)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(tags, id: \.self) { tag in
-                            tagRow(tag)
-                        }
-                    }
-                }
-                .frame(maxHeight: 240)
-            }
+            TokenFilterSection(theme: theme, label: "FANDOM",
+                               placeholder: "Type to add a fandom…",
+                               selected: filter.fandoms,
+                               allOptions: model.availableFandoms(for: section))
+            TokenFilterSection(theme: theme, label: "TAGS",
+                               placeholder: "Type to add a tag…",
+                               selected: filter.tags,
+                               allOptions: model.availableTags(for: section))
         }
         .padding(14)
         .frame(width: 320)
         .background(theme.surface)
     }
+}
 
-    private func tagRow(_ tag: String) -> some View {
-        let on = filter.wrappedValue.tags.contains(tag)
-        return Button {
-            var f = filter.wrappedValue
-            if on { f.tags.remove(tag) } else { f.tags.insert(tag) }
-            filter.wrappedValue = f
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: on ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(on ? theme.accent : theme.ink3)
-                Text(tag)
-                    .font(Font(MacFont.ui(12)))
-                    .foregroundStyle(theme.ink)
-                    .lineLimit(1)
-                Spacer()
+/// Chips + type-ahead selector over a fixed option pool (the values present
+/// in the current list) — the filter dialog's fandom and tag sections.
+private struct TokenFilterSection: View {
+    @Bindable var theme: AppTheme
+    let label: String
+    let placeholder: String
+    @Binding var selected: Set<String>
+    let allOptions: [String]
+
+    @State private var input = ""
+
+    private var term: String {
+        input.trimmingCharacters(in: .whitespaces)
+    }
+
+    private var suggestions: [String] {
+        guard !term.isEmpty else { return [] }
+        return allOptions
+            .filter { $0.localizedCaseInsensitiveContains(term) && !selected.contains($0) }
+            .prefix(8)
+            .map { $0 }
+    }
+
+    var body: some View {
+        Text(label)
+            .font(Font(MacFont.ui(10, weight: .bold)))
+            .kerning(0.6)
+            .foregroundStyle(theme.ink3)
+        if !selected.isEmpty {
+            FlowLayout(spacing: 5) {
+                ForEach(selected.sorted(), id: \.self) { value in
+                    chip(value)
+                }
             }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
+        }
+        TextField(placeholder, text: $input)
+            .textFieldStyle(.plain)
+            .font(Font(MacFont.ui(12.5)))
+            .foregroundStyle(theme.ink)
+            .padding(.horizontal, 9)
+            .frame(height: 30)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .onSubmit {
+                if let first = suggestions.first { add(first) }
+            }
+        if !suggestions.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(suggestions, id: \.self) { value in
+                    suggestionRow(value)
+                }
+            }
+            .padding(.vertical, 4)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func add(_ value: String) {
+        selected.insert(value)
+        input = ""
+    }
+
+    private func chip(_ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(Font(MacFont.ui(11.5, weight: .medium)))
+                .foregroundStyle(theme.ink2)
+                .lineLimit(1)
+            Button {
+                selected.remove(value)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(theme.ink3)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(theme.surface2)
+        .clipShape(Capsule())
+    }
+
+    private func suggestionRow(_ value: String) -> some View {
+        Button {
+            add(value)
+        } label: {
+            Text(value)
+                .font(Font(MacFont.ui(12)))
+                .foregroundStyle(theme.ink)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

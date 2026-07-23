@@ -259,6 +259,21 @@ struct PrivacySettingsPane: View {
                 Text("The library stays encrypted, but the key will be stored in the Keychain instead of requiring your password at launch.")
             }
 
+            SettingsGroup(theme: theme, label: "Reading History") {
+                HStack(spacing: 3) {
+                    historyModeButton("Persisted", mode: .persisted)
+                    historyModeButton("Clear on Quit", mode: .clearOnClose)
+                    historyModeButton("Disabled", mode: .disabled)
+                }
+                .padding(3)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                Text(historyModeCaption)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             SettingsGroup(theme: theme, label: "Tor") {
                 SettingsCard(theme: theme) {
                     SettingsToggleRow(theme: theme, label: "Connect via Tor on launch",
@@ -295,6 +310,30 @@ struct PrivacySettingsPane: View {
             }
         }
         .padding(16)
+    }
+
+    private var historyModeCaption: String {
+        switch appState.historyMode {
+        case .persisted: "Reading history is kept in your encrypted library until you clear it."
+        case .clearOnClose: "History is erased automatically every time the app quits."
+        case .disabled: "No new reading history is recorded. Existing entries stay until cleared."
+        }
+    }
+
+    private func historyModeButton(_ label: String, mode: AppState.HistoryMode) -> some View {
+        let on = appState.historyMode == mode
+        return Button {
+            appState.historyMode = mode
+        } label: {
+            Text(label)
+                .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                .foregroundStyle(on ? theme.ink : theme.ink3)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(on ? theme.surface : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
     }
 
     private func ghostButton(_ label: String, tint: Color, action: @escaping () -> Void) -> some View {

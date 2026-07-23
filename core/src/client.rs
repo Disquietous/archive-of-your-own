@@ -814,6 +814,9 @@ impl AO3Client {
             };
         }
         log_debug!("http", " {} header_timeout={}s body_timeout={}s", url, header_timeout.as_secs(), body_timeout.as_secs());
+        // Set after a first 429: the retry goes out with shift+refresh
+        // (no-cache) headers to punch through a cached 429 at the edge.
+        let mut hard_reload = false;
         macro_rules! progress {
             ($status:expr, $recv:expr, $total:expr) => {
                 if let Some(ref p) = progress {
@@ -846,6 +849,13 @@ impl AO3Client {
                 req = req.header("X-Requested-With", "XMLHttpRequest")
                     .header("Accept", "text/html, */*; q=0.01");
             }
+            if hard_reload {
+                // Browser shift+refresh headers: force every cache between
+                // us and the Rails origin to revalidate instead of replaying
+                // a stored response.
+                req = req.header("Cache-Control", "no-cache")
+                    .header("Pragma", "no-cache");
+            }
             let response = match tokio::time::timeout(header_timeout, req.send()).await {
                 Err(_) => {
                     log_debug!("http"," TIMEOUT send phase after {:?} total={:?} {}", send_start.elapsed(), fetch_start.elapsed(), url);
@@ -877,11 +887,20 @@ impl AO3Client {
             let code = status.as_u16();
 
             // Retry on transient HTTP errors before reading body
-            // 429: rate-limited. The budget is per exit IP and Retry-After
-            // says how long it's burned — re-poking inside that window is
-            // useless (and can extend the penalty). Fail fast with the
-            // header value so upper layers can rotate the circuit (fresh IP
-            // = fresh budget) or surface an honest countdown.
+            // 429: rate-limited. First, retry ONCE with hard-reload headers:
+            // edge caches can serve a stored 429 for the URL, in which case
+            // every client gets it regardless of exit IP (new circuits don't
+            // help) while a browser shift+refresh punches through to origin
+            // and gets a 200. Only when the no-cache retry also 429s is the
+            // limit real — then fail fast with the Retry-After value so
+            // upper layers can rotate the circuit (fresh IP = fresh budget)
+            // or surface an honest countdown.
+            if code == 429 && !hard_reload {
+                hard_reload = true;
+                log_info!("http", " 429 for {} — retrying with no-cache (shift+refresh)", url);
+                progress!(FetchStatus::Connecting, 0, None);
+                continue;
+            }
             if code == 429 {
                 let retry_after = response.headers().get("retry-after")
                     .and_then(|v| v.to_str().ok())

@@ -9,7 +9,10 @@ struct SidebarView: View {
     @Bindable var model: MacAppModel
 
     @State private var privacyShown = false
-    @State private var torPulse = false
+    @State private var requestingNewNodes = false
+    @State private var pillHover = false
+    @State private var circuitInfoShown = false
+    @State private var shieldInfoShown = false
 
     var body: some View {
         // Track the app text-size setting: MacFont reads it via a plain static,
@@ -205,68 +208,170 @@ struct SidebarView: View {
         .padding(.horizontal, 8)
     }
 
-    /// The app-state hub pill: connection on the first line, identity on the
-    /// second. Clicking opens the full hub (circuit controls, inline sign-in).
+    /// The app-state hub pill: identity on the first line, the circuit's
+    /// node country codes on the second. Clicking opens the full hub
+    /// (circuit controls, inline sign-in); the shield shows Private (sage) /
+    /// Public (red) and requests fresh relay nodes when private.
+    ///
+    /// Deliberately NOT one big Button: `.help()` tooltips do not fire on
+    /// views nested inside a Button's label on macOS, and the hop codes and
+    /// shield need working hover balloons. A tap gesture opens the hub.
     private var footer: some View {
         VStack(spacing: 8) {
-            Button {
-                privacyShown = true
-            } label: {
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3)
-                        .frame(width: 8, height: 8)
-                        .shadow(color: (torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3).opacity(0.4), radius: 3)
-                        .opacity(torConnecting ? (torPulse ? 1.0 : 0.3) : 1.0)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(torConnected ? "Private · Tor" : connectionLine)
-                            .font(Font(MacFont.ui(12.5, weight: .bold)))
-                            .foregroundStyle(theme.ink)
-                        HStack(spacing: 4) {
-                            Image(systemName: identityIcon)
-                                .font(.system(size: 8.5, weight: .semibold))
-                                .foregroundStyle(identityNeedsAttention ? theme.accent2 : theme.ink3)
-                            Text(identityLine)
-                                .font(Font(MacFont.ui(11)))
-                                .foregroundStyle(identityNeedsAttention ? theme.accent2 : theme.ink3)
-                        }
-                    }
-                    Spacer()
-                    if torConnecting {
-                        ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.7)
-                    } else {
-                        Image(systemName: torConnected ? "checkmark.shield" : "shield")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(torConnected ? theme.sage : theme.ink3)
-                    }
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: (torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3).opacity(0.4), radius: 3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(identityLine)
+                        .font(Font(MacFont.ui(12.5, weight: .bold)))
+                        .foregroundStyle(identityNeedsAttention ? theme.accent2 : theme.ink)
+                        .lineLimit(1)
+                    connectionDetailRow
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(torConnecting
-                    ? theme.accent2.opacity(0.1)
-                    : theme.sage.opacity(torConnected ? 0.12 : 0.07))
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-                .contentShape(Rectangle())
+                Spacer()
+                newNodesButton
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background((torConnecting
+                ? theme.accent2.opacity(pillHover ? 0.18 : 0.1)
+                : theme.sage.opacity(torConnected ? (pillHover ? 0.2 : 0.12) : (pillHover ? 0.14 : 0.07))))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9)
+                .stroke(theme.line.opacity(pillHover ? 1 : 0), lineWidth: 1))
+            .animation(.easeOut(duration: 0.12), value: pillHover)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                pillHover = inside
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            .onTapGesture { privacyShown = true }
             .popover(isPresented: $privacyShown, arrowEdge: .top) {
                 PrivacyPopoverView(theme: theme, appState: appState, model: model)
-            }
-            .onChange(of: torConnecting) { _, connecting in
-                if connecting {
-                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                        torPulse = true
-                    }
-                } else {
-                    withAnimation(.default) { torPulse = false }
-                }
             }
         }
         .padding(.init(top: 10, leading: 12, bottom: 10, trailing: 12))
         .overlay(alignment: .top) {
             theme.line.frame(height: 1)
+        }
+    }
+
+    /// Second row: while connecting, the progress phase; when connected, the
+    /// circuit's Guard/Relay/Exit country-code chips — hovering them raises
+    /// a balloon listing every node's role, country, and IP; otherwise the
+    /// direct-connection note. Balloons are state-driven popovers, NOT
+    /// .help() tooltips — those never fire reliably in this nested hierarchy.
+    @ViewBuilder
+    private var connectionDetailRow: some View {
+        if torConnecting {
+            Text(connectionLine)
+                .font(Font(MacFont.ui(11)))
+                .foregroundStyle(theme.ink3)
+        } else if torConnected {
+            let hops = appState.bridge.circuitHops
+            if hops.isEmpty {
+                Text("Circuit established")
+                    .font(Font(MacFont.ui(11)))
+                    .foregroundStyle(theme.ink3)
+            } else {
+                HStack(spacing: 4) {
+                    ForEach(Array(hops.enumerated()), id: \.offset) { _, hop in
+                        Text(hop.country.uppercased())
+                            .font(Font(MacFont.ui(10, weight: .bold)))
+                            .kerning(0.3)
+                            .foregroundStyle(theme.ink2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(theme.ink.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+                .onHover { circuitInfoShown = $0 }
+                .popover(isPresented: $circuitInfoShown, arrowEdge: .top) {
+                    circuitBalloon
+                }
+            }
+        } else {
+            Text("Direct connection")
+                .font(Font(MacFont.ui(11)))
+                .foregroundStyle(theme.ink3)
+        }
+    }
+
+    /// Hover balloon: the full circuit, one row per node.
+    private var circuitBalloon: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("RELAY CIRCUIT")
+                .font(Font(MacFont.ui(10, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+            ForEach(Array(appState.bridge.circuitHops.enumerated()), id: \.offset) { _, hop in
+                HStack(spacing: 8) {
+                    Text(hop.role)
+                        .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                        .frame(width: 42, alignment: .leading)
+                    Text(hop.country.uppercased())
+                        .font(Font(MacFont.ui(10, weight: .bold)))
+                        .foregroundStyle(theme.ink2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(theme.surface2)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text(hop.address)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.ink2)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+        .padding(12)
+    }
+
+    /// The shield stands for the connection mode: sage = Private (routed
+    /// through relays), red = Public (direct). When private, clicking
+    /// requests a fresh set of relay nodes; when public, it opens the hub
+    /// to connect. Hovering raises an explanatory balloon.
+    @ViewBuilder
+    private var newNodesButton: some View {
+        if torConnecting || requestingNewNodes {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.7)
+        } else {
+            Button {
+                if torConnected {
+                    requestingNewNodes = true
+                    Task { @MainActor in
+                        _ = await appState.bridge.newCircuit()
+                        requestingNewNodes = false
+                    }
+                } else {
+                    privacyShown = true
+                }
+            } label: {
+                Image(systemName: torConnected ? "checkmark.shield" : "xmark.shield")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(torConnected ? theme.sage : Color(hex: "CE514D"))
+                    .frame(width: 26, height: 26)
+                    .background((torConnected ? theme.sage : Color(hex: "CE514D"))
+                        .opacity(shieldInfoShown ? 0.15 : 0))
+                    .clipShape(Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .onHover { shieldInfoShown = $0 }
+            .popover(isPresented: $shieldInfoShown, arrowEdge: .top) {
+                Text(torConnected
+                     ? "Private connection — click to request new relay nodes"
+                     : "Public connection — traffic is not routed through relays. Click to connect.")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink)
+                    .padding(10)
+                    .frame(maxWidth: 230)
+            }
         }
     }
 
@@ -278,13 +383,9 @@ struct SidebarView: View {
     }
 
     private var identityLine: String {
-        if appState.needsReauth { return "Session expired — sign back in" }
+        if appState.needsReauth { return "session expired" }
         if let account = appState.ao3Username { return account }
-        return "Not signed in"
-    }
-
-    private var identityIcon: String {
-        appState.needsReauth ? "person.badge.clock" : "person"
+        return "not signed in"
     }
 
     private var identityNeedsAttention: Bool {

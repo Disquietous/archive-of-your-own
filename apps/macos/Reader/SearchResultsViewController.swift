@@ -6,7 +6,7 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks, authorWorks
+        case search, subscriptionWorks, authorWorks, fandomWorks
     }
 
     /// What this listing shows. Derived from observable model state inside
@@ -17,6 +17,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         switch model.section {
         case .authors, .authorWorks: return .authorWorks
         case .subscriptions: return .subscriptionWorks
+        case .fandoms: return model.fandomSearchActive ? .search : .fandomWorks
         default: return .search
         }
     }
@@ -117,6 +118,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .search: works = model.works(for: .search)
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
         case .authorWorks: works = model.filteredAuthorWorks
+        case .fandomWorks: works = model.fandomLibraryWorks
         }
 
         overlayHost?.removeFromSuperview()
@@ -175,6 +177,15 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
                                                 title: "No works stored",
                                                 message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
+            } else {
+                overlay = nil
+            }
+        case .fandomWorks:
+            if works.isEmpty {
+                let tag = model.fandomWorksTag ?? "this fandom"
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "flame",
+                                                title: "Nothing in your library yet",
+                                                message: "Works from \(tag) you’ve opened or downloaded appear here. Press Search AO3 above to find works on the archive."))
             } else {
                 overlay = nil
             }

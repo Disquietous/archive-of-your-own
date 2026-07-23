@@ -65,6 +65,8 @@ struct SearchFormView: View {
                                 selectControl(field)
                             case "checkboxes":
                                 checkboxControl(field)
+                            case "radio":
+                                radioControl(field)
                             default:
                                 textControl(field)
                             }
@@ -161,6 +163,37 @@ struct SearchFormView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
             }
             .menuStyle(.borderlessButton)
+        }
+    }
+
+    /// AO3 radio groups (Completion status, Crossovers): exactly one choice
+    /// active at a time, rendered as wrapping chips. The scraped `selected`
+    /// flag supplies the default (AO3 pre-checks the no-filter option), so
+    /// the control always shows a state even before the user touches it.
+    private func radioControl(_ field: UFormField) -> some View {
+        @Bindable var search = model.search
+        let defaultValue = field.options.first { $0.selected }?.value
+            ?? field.options.first?.value ?? ""
+        let current = search.fieldValues[field.name] ?? defaultValue
+        return VStack(alignment: .leading, spacing: 5) {
+            fieldLabel(field)
+            FlowLayout(spacing: 6) {
+                ForEach(field.options, id: \.value) { option in
+                    let on = current == option.value
+                    Button {
+                        search.fieldValues[field.name] = option.value
+                    } label: {
+                        Text(Self.optionTitle(option.label))
+                            .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                            .foregroundStyle(on ? theme.onAccent : theme.ink2)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(on ? theme.accent : theme.surface2)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 

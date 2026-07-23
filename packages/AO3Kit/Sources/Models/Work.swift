@@ -25,6 +25,9 @@ struct Work: Identifiable, Hashable {
     let lastChapter: Int?
     let downloaded: Bool
     let content: [ChapterContent]?
+    /// All fandom tags (`fandom` is just the first). Defaulted so the many
+    /// mock/sample initializers don't need to supply it.
+    var fandoms: [String] = []
 
     var spineColor: Color {
         Fandom.spineColor(for: fandom)

@@ -224,6 +224,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             if section == .reading && !works.isEmpty {
                 trailing.insert(removeAllReadingButton(), at: 0)
             }
+            if section == .history && !works.isEmpty {
+                trailing.insert(clearHistoryButton(), at: 0)
+            }
             toolbar.setTrailing(trailing)
             let empty = works.isEmpty
                 ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
@@ -522,6 +525,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     private var removeAllButton: ToolButton?
+    private var clearHistoryBtn: ToolButton?
 
     private func removeAllReadingButton() -> ToolButton {
         let button = removeAllButton ?? ToolButton(theme: theme, symbol: "trash", tooltip: "Remove all") { [weak self] in
@@ -529,6 +533,29 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         }
         removeAllButton = button
         return button
+    }
+
+    private func clearHistoryButton() -> ToolButton {
+        let button = clearHistoryBtn ?? ToolButton(theme: theme, symbol: "trash", tooltip: "Clear history") { [weak self] in
+            self?.confirmClearHistory()
+        }
+        clearHistoryBtn = button
+        return button
+    }
+
+    private func confirmClearHistory() {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Clear Reading History?"
+        alert.informativeText = "This removes every entry from your reading history. Reading positions, bookmarks, and downloads are not affected."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear History")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            appState.clearHistory()
+        }
     }
 
     private func confirmRemoveAllReading() {

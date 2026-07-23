@@ -39,6 +39,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        if appState.historyMode == .clearOnClose {
+            appState.clearHistory()
+        }
+    }
+
     @objc private func openSettings() {
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(theme: theme, appState: appState, model: model)

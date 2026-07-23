@@ -123,6 +123,19 @@ final class MacSearchModel {
 
     // MARK: - Searching & pagination (page fetches replace results)
 
+    /// Starting a brand-new query drops the previous query's results before
+    /// anything renders: the results pane must show search progress, never a
+    /// stale list from the last search. (Pagination within a query keeps the
+    /// current page visible instead — only new queries clear.)
+    @MainActor
+    private func beginNewQuery(_ appState: AppState) {
+        appState.searchResults = []
+        appState.searchError = nil
+        appState.isSearching = true
+        currentPage = 1
+        lastPageCount = 0
+    }
+
     @MainActor
     func performSearch(_ appState: AppState) {
         var keys: [String] = []
@@ -138,12 +151,14 @@ final class MacSearchModel {
             }
         }
         activeQuery = .form(keys: keys, values: values)
+        beginNewQuery(appState)
         Task { await fetch(page: 1, appState: appState) }
     }
 
     @MainActor
     func startTagQuery(_ tag: String, appState: AppState) {
         activeQuery = .tag(tag)
+        beginNewQuery(appState)
         Task { await fetch(page: 1, appState: appState) }
     }
 
@@ -171,6 +186,9 @@ final class MacSearchModel {
             appState.searchResults = summaries.map(AppState.workFromSummary)
             currentPage = page
             lastPageCount = summaries.count
+            // Results are persisted by the Rust layer as they're fetched —
+            // refresh the library snapshot so they join local lists at once.
+            appState.reloadCachedWorks()
         } catch {
             if !appState.searchTask.isCancelled && !"\(error)".contains("cancelled") {
                 appState.searchError = error.localizedDescription
