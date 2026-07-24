@@ -33,6 +33,16 @@ final class AppState {
         lastReadID = nil
     }
 
+    /// Idle minutes before the library auto-locks; 0 disables. Only applies
+    /// when a library password is set (an auto-key DB reopens itself).
+    var autoLockMinutes: Int = UserDefaults.standard.object(forKey: "autoLockMinutes") as? Int ?? 5 {
+        didSet { UserDefaults.standard.set(autoLockMinutes, forKey: "autoLockMinutes") }
+    }
+
+    func lockNow() {
+        bridge.lock()
+    }
+
     // Live search results from Rust backend
     var searchResults: [Work] = []
     var isSearching = false
@@ -562,6 +572,28 @@ final class AppState {
         pendingBookmarkRemoval = nil
     }
 
+    // MARK: - Work subscriptions
+
+    /// Work IDs with a subscription toggle in flight (disables the button).
+    var subscriptionTogglingWorkIDs: Set<String> = []
+
+    func isSubscribedToWork(_ id: String) -> Bool {
+        subscriptions.contains { $0.id == id && $0.subType.lowercased().contains("work") }
+    }
+
+    func toggleWorkSubscription(_ id: String) {
+        guard let workId = UInt64(id), !subscriptionTogglingWorkIDs.contains(id) else { return }
+        subscriptionTogglingWorkIDs.insert(id)
+        Task { @MainActor in
+            if (try? await bridge.toggleWorkSubscription(workId: workId, username: ao3Username)) != nil {
+                // The Rust side already updated the subscriptions table —
+                // refresh the in-memory list from it.
+                subscriptions = bridge.getPersistedSubscriptions()
+            }
+            subscriptionTogglingWorkIDs.remove(id)
+        }
+    }
+
     func importAO3Bookmarks() async {
         guard let username = ao3Username else { return }
         bookmarkSyncTask.reset()
@@ -844,7 +876,11 @@ final class AppState {
     }
 
     private func encodeSubscriptions(_ subs: [USubscription]) -> String? {
-        let arr: [[String: String]] = subs.map { ["subType": $0.subType, "id": $0.id, "name": $0.name] }
+        let arr: [[String: String]] = subs.map { sub in
+            var dict = ["subType": sub.subType, "id": sub.id, "name": sub.name]
+            if let ao3Id = sub.ao3Id { dict["ao3Id"] = ao3Id }
+            return dict
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: arr) else { return nil }
         return String(data: data, encoding: .utf8)
     }
@@ -854,7 +890,7 @@ final class AppState {
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else { return nil }
         return arr.compactMap { dict -> USubscription? in
             guard let subType = dict["subType"], let id = dict["id"], let name = dict["name"] else { return nil }
-            return USubscription(subType: subType, id: id, name: name)
+            return USubscription(subType: subType, id: id, name: name, ao3Id: dict["ao3Id"])
         }
     }
 

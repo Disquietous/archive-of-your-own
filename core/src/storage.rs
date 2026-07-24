@@ -929,9 +929,9 @@ impl Storage {
     // Subscriptions (persisted list)
     // -------------------------------------------------------------------
 
-    pub fn save_subscriptions(&self, subs: &[(String, String, String)]) -> Result<(), AppError> {
+    pub fn save_subscriptions(&self, subs: &[(String, String, String, Option<String>)]) -> Result<(), AppError> {
         let mut seen = std::collections::HashSet::new();
-        for (sub_type, sub_id, name) in subs {
+        for (sub_type, sub_id, name, _) in subs {
             if !seen.insert((sub_type.as_str(), sub_id.as_str())) {
                 crate::dlog("WARN", "storage",
                     &format!("Duplicate subscription: type={sub_type} id={sub_id} name={name}"));
@@ -940,23 +940,62 @@ impl Storage {
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
         tx.execute("DELETE FROM subscriptions", []).map_err(map_sql)?;
         let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name) VALUES (?1, ?2, ?3)"
+            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4)"
         ).map_err(map_sql)?;
-        for (sub_type, sub_id, name) in subs {
-            stmt.execute(params![sub_type, sub_id, name]).map_err(map_sql)?;
+        for (sub_type, sub_id, name, ao3_id) in subs {
+            stmt.execute(params![sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
         }
         drop(stmt);
         tx.commit().map_err(map_sql)
     }
 
-    pub fn get_subscriptions(&self) -> Result<Vec<(String, String, String)>, AppError> {
+    pub fn add_subscription(&self, sub_type: &str, sub_id: &str, name: &str,
+                            ao3_id: Option<&str>) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4)",
+            params![sub_type, sub_id, name, ao3_id],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn remove_subscription(&self, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
+        self.conn.execute(
+            "DELETE FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_subscriptions(&self) -> Result<Vec<(String, String, String, Option<String>)>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT sub_type, sub_id, name FROM subscriptions"
+            "SELECT sub_type, sub_id, name, ao3_id FROM subscriptions"
         ).map_err(map_sql)?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    /// AO3's subscription record id for a local subscription, when known.
+    pub fn get_subscription_ao3_id(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ao3_id FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![sub_type, sub_id],
+                                      |row| row.get::<_, Option<String>>(0)).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(id)) => Ok(id),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn has_subscription(&self, sub_type: &str, sub_id: &str) -> Result<bool, AppError> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id], |row| row.get(0)
+        ).map_err(map_sql)?;
+        Ok(count > 0)
     }
 
     // -------------------------------------------------------------------
@@ -1675,6 +1714,10 @@ impl Storage {
 
         // Migration: add date_published column to works (idempotent)
         self.conn.execute("ALTER TABLE works ADD COLUMN date_published TEXT NOT NULL DEFAULT ''", []).ok();
+
+        // Migration: AO3's own subscription record id (from unsubscribe form
+        // actions) — lets unsubscribe POST directly without a page fetch.
+        self.conn.execute("ALTER TABLE subscriptions ADD COLUMN ao3_id TEXT", []).ok();
 
         // Migration: rename old per-work subscription_snapshots to _old.
         // The new table (created above) stores one row per subscription.
@@ -2429,15 +2472,25 @@ mod tests {
         assert!(db.get_subscriptions().unwrap().is_empty());
 
         let subs = vec![
-            ("author".into(), "coolwriter".into(), "CoolWriter".into()),
-            ("work".into(), "12345".into(), "My Fic".into()),
+            ("author".into(), "coolwriter".into(), "CoolWriter".into(), Some("111".into())),
+            ("work".into(), "12345".into(), "My Fic".into(), None),
         ];
         db.save_subscriptions(&subs).unwrap();
         let loaded = db.get_subscriptions().unwrap();
         assert_eq!(loaded.len(), 2);
+        assert_eq!(db.get_subscription_ao3_id("author", "coolwriter").unwrap().as_deref(), Some("111"));
+        assert_eq!(db.get_subscription_ao3_id("work", "12345").unwrap(), None);
+        assert!(db.has_subscription("work", "12345").unwrap());
+        assert!(!db.has_subscription("work", "99999").unwrap());
+
+        // Single add/remove (work subscribe toggle path)
+        db.add_subscription("work", "555", "Another Fic", Some("222")).unwrap();
+        assert_eq!(db.get_subscription_ao3_id("work", "555").unwrap().as_deref(), Some("222"));
+        db.remove_subscription("work", "555").unwrap();
+        assert!(!db.has_subscription("work", "555").unwrap());
 
         // Replacing clears the old set
-        let subs2 = vec![("series".into(), "99".into(), "Big Series".into())];
+        let subs2 = vec![("series".into(), "99".into(), "Big Series".into(), None)];
         db.save_subscriptions(&subs2).unwrap();
         assert_eq!(db.get_subscriptions().unwrap().len(), 1);
     }

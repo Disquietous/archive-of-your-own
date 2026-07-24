@@ -259,6 +259,31 @@ struct PrivacySettingsPane: View {
                 Text("The library stays encrypted, but the key will be stored in the Keychain instead of requiring your password at launch.")
             }
 
+            SettingsGroup(theme: theme, label: "Auto-Lock") {
+                HStack(spacing: 8) {
+                    Text("Lock when idle for")
+                        .font(Font(MacFont.ui(13, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                    TextField("5", text: autoLockBinding)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .font(Font(MacFont.ui(13, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                        .frame(width: 52, height: 28)
+                        .background(theme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+                    Text("minutes")
+                        .font(Font(MacFont.ui(13, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                    Spacer()
+                }
+                Text(autoLockCaption)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             SettingsGroup(theme: theme, label: "Reading History") {
                 HStack(spacing: 3) {
                     historyModeButton("Persisted", mode: .persisted)
@@ -310,6 +335,21 @@ struct PrivacySettingsPane: View {
             }
         }
         .padding(16)
+    }
+
+    private var autoLockBinding: Binding<String> {
+        Binding(get: { String(appState.autoLockMinutes) },
+                set: { appState.autoLockMinutes = min(9999, max(0, Int($0.filter(\.isNumber)) ?? 0)) })
+    }
+
+    private var autoLockCaption: String {
+        if !appState.bridge.hasDbPassword {
+            return "Auto-lock requires a library password — set one above to enable it."
+        }
+        if appState.autoLockMinutes == 0 {
+            return "Auto-lock is disabled. Enter a number of minutes to lock the library after inactivity."
+        }
+        return "After \(appState.autoLockMinutes) idle minute\(appState.autoLockMinutes == 1 ? "" : "s"), the library locks and the app returns to the unlock screen. Any activity in the app resets the timer. 0 disables."
     }
 
     private var historyModeCaption: String {

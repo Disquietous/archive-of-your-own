@@ -330,6 +330,9 @@ pub struct USubscription {
     pub sub_type: String,
     pub id: String,
     pub name: String,
+    /// AO3's subscription record id (from unsubscribe form actions) —
+    /// stored so unsubscribing can POST directly without a page fetch.
+    pub ao3_id: Option<String>,
 }
 
 impl From<crate::models::Subscription> for USubscription {
@@ -338,6 +341,7 @@ impl From<crate::models::Subscription> for USubscription {
             sub_type: s.sub_type,
             id: s.id,
             name: s.name,
+            ao3_id: s.ao3_id,
         }
     }
 }
@@ -1692,13 +1696,63 @@ impl AO3App {
         result
     }
 
+    /// Toggle the AO3 subscription for a work and mirror the result into
+    /// the local subscriptions table. Prefers the direct one-POST paths
+    /// (cached CSRF token; stored record id for unsubscribe) and falls back
+    /// to the intent-aware page-fetch path when those can't run or fail.
+    /// Returns the new state: true = now subscribed.
+    pub async fn toggle_work_subscription(&self, work_id: u64, username: Option<String>)
+        -> Result<bool, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let id = work_id.to_string();
+            let (locally_subscribed, stored_ao3_id) = {
+                let s = storage.lock().await;
+                (s.has_subscription("work", &id).unwrap_or(false),
+                 s.get_subscription_ao3_id("work", &id).unwrap_or(None))
+            };
+            let want = !locally_subscribed;
+
+            let c = client.read().await;
+            let mut outcome: Option<(bool, Option<String>)> = None;
+            if let Some(user) = username.as_deref().filter(|u| !u.is_empty()) {
+                if want {
+                    if let Ok(Some(new_id)) = c.subscribe_work_direct(user, work_id).await {
+                        outcome = Some((true, Some(new_id)));
+                    }
+                } else if let Some(ref ao3_id) = stored_ao3_id {
+                    if let Ok(true) = c.unsubscribe_work_direct(user, ao3_id).await {
+                        outcome = Some((false, None));
+                    }
+                }
+            }
+            // Ambiguous or impossible direct path: the page-fetch path reads
+            // live state and only submits when it differs from `want`.
+            let (subscribed, ao3_id) = match outcome {
+                Some(o) => o,
+                None => c.set_work_subscription(work_id, want).await.map_err(AO3Error::from)?,
+            };
+            drop(c);
+
+            let s = storage.lock().await;
+            if subscribed {
+                let name = s.get_work(work_id).ok().flatten()
+                    .map(|w| w.title)
+                    .unwrap_or_else(|| format!("Work {work_id}"));
+                let _ = s.add_subscription("work", &id, &name, ao3_id.as_deref());
+            } else {
+                let _ = s.remove_subscription("work", &id);
+            }
+            Ok(subscribed)
+        }).await
+    }
+
     // -- Subscription persistence (user-triggered refresh) --
 
     pub fn persist_subscriptions(&self, subscriptions: Vec<USubscription>) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
-        let tuples: Vec<(String, String, String)> = subscriptions
+        let tuples: Vec<(String, String, String, Option<String>)> = subscriptions
             .into_iter()
-            .map(|u| (u.sub_type, u.id, u.name))
+            .map(|u| (u.sub_type, u.id, u.name, u.ao3_id))
             .collect();
         s.save_subscriptions(&tuples).map_err(AO3Error::from)
     }
@@ -1706,7 +1760,9 @@ impl AO3App {
     pub fn get_persisted_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
         let s = self.storage.blocking_lock();
         let rows = s.get_subscriptions().map_err(AO3Error::from)?;
-        Ok(rows.into_iter().map(|(t, id, name)| USubscription { sub_type: t, id, name }).collect())
+        Ok(rows.into_iter()
+            .map(|(t, id, name, ao3_id)| USubscription { sub_type: t, id, name, ao3_id })
+            .collect())
     }
 
     pub fn save_subscription_works(&self, sub_type: String, sub_id: String, work_ids: Vec<u64>) -> Result<(), AO3Error> {
@@ -1739,7 +1795,7 @@ impl AO3App {
         }
         // Build a fresh queue from persisted subscriptions
         let subs = s.get_subscriptions().map_err(AO3Error::from)?;
-        let arr: Vec<serde_json::Value> = subs.iter().map(|(t, id, name)| {
+        let arr: Vec<serde_json::Value> = subs.iter().map(|(t, id, name, _)| {
             serde_json::json!({"sub_type": t, "sub_id": id, "name": name})
         }).collect();
         let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());

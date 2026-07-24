@@ -84,6 +84,23 @@ final class RustBridge {
         }
     }
 
+    /// Lock the library: persist session cookies, then drop the runtime —
+    /// the SQLCipher key material goes with it and launchState returns to
+    /// .locked, which sends the window back to the unlock gate. Only
+    /// meaningful for password-protected libraries (an auto-key DB would
+    /// simply reopen itself).
+    func lock() {
+        guard hasDbPassword, isInitialized else { return }
+        saveSessionCookies()
+        app = nil
+        torOnlyApp = nil
+        isInitialized = false
+        torStatus = .disconnected
+        torHasConnectedOnce = false
+        cloudflareReady = false
+        circuitHops = []
+    }
+
     /// Create a new database with a user-chosen password.
     func createWithPassword(_ password: String) -> Bool {
         let dbPath = Self.databasePath()
@@ -590,6 +607,15 @@ final class RustBridge {
     func deleteAo3Bookmark(workId: UInt64) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.deleteAo3Bookmark(workId: workId)
+    }
+
+    /// Toggle the AO3 subscription for a work; returns the new state
+    /// (true = now subscribed). The Rust side prefers direct POSTs (cached
+    /// token + stored record id) and mirrors the result into the local
+    /// subscriptions table.
+    func toggleWorkSubscription(workId: UInt64, username: String?) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.toggleWorkSubscription(workId: workId, username: username)
     }
 
     func getSyncedBookmarkIds() -> [UInt64] {

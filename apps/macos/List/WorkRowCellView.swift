@@ -91,7 +91,7 @@ final class WorkRowCellView: NSTableCellView {
         fandomLabel.font = MacFont.ui(11, weight: .bold)
         fandomLabel.lineBreakMode = .byTruncatingTail
         titleLabel.font = MacFont.serif(16, weight: .semibold)
-        titleLabel.maximumNumberOfLines = 2
+        titleLabel.maximumNumberOfLines = 0
         // Wrapping labels are selectable by default — a selectable title
         // consumes row clicks (blocking selection) and hands the text to the
         // field editor, which drops the inline rating-badge attachment.
@@ -364,8 +364,10 @@ final class WorkRowCellView: NSTableCellView {
         }
         datesLabel.stringValue = dateLines.joined(separator: "\n")
         datesLabel.isHidden = dateLines.isEmpty
-        // The title shares the dates' vertical band — wrap it short of them.
-        let datesReserve = dateLines.isEmpty ? 0 : datesLabel.intrinsicContentSize.width + 8
+        // Full body width, same as the summary — the title wraps freely and
+        // shows every line (no clamp). Only a two-line date block can reach
+        // down into the title's first line; reserve width just for that case.
+        let datesReserve = dateLines.count > 1 ? datesLabel.intrinsicContentSize.width + 8 : 0
         titleLabel.preferredMaxLayoutWidth = max(60, availableTextWidth - datesReserve)
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor

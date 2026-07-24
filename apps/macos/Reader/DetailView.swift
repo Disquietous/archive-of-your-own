@@ -16,6 +16,7 @@ struct DetailView: View {
     private var downloaded: Bool { appState.downloadedWorkIDs.contains(work.id) }
     private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
     private var followingAuthor: Bool { model.followedAuthorNames.contains(work.author) }
+    private var workSubscribed: Bool { appState.isSubscribedToWork(work.id) }
 
     @State private var showComments = false
     @State private var showBookmarkEdit = false
@@ -199,6 +200,17 @@ struct DetailView: View {
                        help: downloaded ? "Downloaded" : "Download for offline") {
                 appState.toggleDownload(work.id)
             }
+
+            iconButton(workSubscribed ? "bell.fill" : "bell",
+                       tint: workSubscribed ? theme.accent : theme.ink,
+                       help: appState.ao3Username == nil
+                           ? "Sign in to subscribe to this work"
+                           : (workSubscribed ? "Unsubscribe from this work on AO3"
+                                             : "Subscribe to this work on AO3")) {
+                appState.toggleWorkSubscription(work.id)
+            }
+            .disabled(appState.ao3Username == nil
+                      || appState.subscriptionTogglingWorkIDs.contains(work.id))
 
             Button {
                 appState.giveKudos(work.id)
