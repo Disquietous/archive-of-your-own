@@ -825,6 +825,37 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
 /// - `/users/{name}/pseuds` or `/users/{name}` => author subscription
 /// - `/works/{id}` => work subscription
 /// - `/series/{id}` => series subscription
+/// The work page's subscribe form (form#new_subscription): where to POST,
+/// whether the user is currently subscribed (the form flips into a delete
+/// with the subscription id in its action), and the CSRF token to submit.
+/// None when logged out — AO3 renders no subscription form for guests.
+pub struct SubscriptionForm {
+    pub action: String,
+    pub subscribed: bool,
+    pub token: String,
+    pub subscribable_id: String,
+    pub subscribable_type: String,
+}
+
+pub fn parse_work_subscription_form(html: &str) -> Option<SubscriptionForm> {
+    let doc = Html::parse_document(html);
+    let form = doc.select(&sel("form#new_subscription")).next()?;
+    let action = form.value().attr("action")?.to_string();
+    let token = form.select(&sel("input[name='authenticity_token']")).next()
+        .and_then(|i| i.value().attr("value"))
+        .map(str::to_string)
+        .or_else(|| doc.select(&sel("meta[name='csrf-token']")).next()
+            .and_then(|m| m.value().attr("content"))
+            .map(str::to_string))?;
+    let subscribed = form.select(&sel("input[name='_method']")).next()
+        .and_then(|i| i.value().attr("value")) == Some("delete");
+    let subscribable_id = form.select(&sel("input[name='subscription[subscribable_id]']")).next()
+        .and_then(|i| i.value().attr("value")).unwrap_or("").to_string();
+    let subscribable_type = form.select(&sel("input[name='subscription[subscribable_type]']")).next()
+        .and_then(|i| i.value().attr("value")).unwrap_or("Work").to_string();
+    Some(SubscriptionForm { action, subscribed, token, subscribable_id, subscribable_type })
+}
+
 pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppError> {
     let doc = Html::parse_document(html);
     let mut subs = Vec::new();
@@ -861,10 +892,23 @@ pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppErro
         if let Some((sub_type, id, name)) = entry {
             let key = (sub_type.to_string(), id.clone());
             if seen.insert(key) {
+                // AO3's subscription record id lives in the paired <dd>'s
+                // unsubscribe form action (/users/X/subscriptions/{id}) —
+                // harvest it so unsubscribing can POST directly later.
+                let form_sel = sel("form[action]");
+                let ao3_id = dt.next_siblings()
+                    .filter_map(ElementRef::wrap)
+                    .find(|el| el.value().name() == "dd")
+                    .and_then(|dd| dd.select(&form_sel).next())
+                    .and_then(|f| f.value().attr("action"))
+                    .and_then(|a| a.rsplit('/').next())
+                    .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                    .map(str::to_string);
                 subs.push(Subscription {
                     sub_type: sub_type.to_string(),
                     id,
                     name,
+                    ao3_id,
                 });
             }
         }
@@ -1520,12 +1564,50 @@ mod subscription_tests {
     }
 
     #[test]
+    fn test_parse_work_subscription_form() {
+        // Subscribed state — real markup from a work page: delete method,
+        // subscription id in the action.
+        let subscribed = r#"
+        <html><body>
+        <form class="ajax-create-destroy" id="new_subscription" data-create-value="Subscribe" data-destroy-value="Unsubscribe" action="/users/RestlessIntimacy/subscriptions/1551470436" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="TOKEN123" autocomplete="off">
+          <input autocomplete="off" type="hidden" value="88969876" name="subscription[subscribable_id]" id="subscription_subscribable_id">
+          <input autocomplete="off" type="hidden" value="Work" name="subscription[subscribable_type]" id="subscription_subscribable_type">
+          <input type="submit" name="commit" value="Unsubscribe">
+        <input name="_method" type="hidden" value="delete"></form>
+        </body></html>
+        "#;
+        let form = parse_work_subscription_form(subscribed).expect("form parses");
+        assert!(form.subscribed);
+        assert_eq!(form.action, "/users/RestlessIntimacy/subscriptions/1551470436");
+        assert_eq!(form.token, "TOKEN123");
+        assert_eq!(form.subscribable_id, "88969876");
+        assert_eq!(form.subscribable_type, "Work");
+
+        // Unsubscribed state: create action, no _method input.
+        let unsubscribed = r#"
+        <html><body>
+        <form class="ajax-create-destroy" id="new_subscription" action="/users/RestlessIntimacy/subscriptions" method="post"><input type="hidden" name="authenticity_token" value="TOKEN456">
+          <input type="hidden" value="88969876" name="subscription[subscribable_id]">
+          <input type="hidden" value="Work" name="subscription[subscribable_type]">
+          <input type="submit" name="commit" value="Subscribe">
+        </form>
+        </body></html>
+        "#;
+        let form = parse_work_subscription_form(unsubscribed).expect("form parses");
+        assert!(!form.subscribed);
+        assert_eq!(form.action, "/users/RestlessIntimacy/subscriptions");
+
+        // Logged out: no form at all.
+        assert!(parse_work_subscription_form("<html><body><p>none</p></body></html>").is_none());
+    }
+
+    #[test]
     fn test_parse_subscriptions_page_authors() {
         let html = r#"
         <html><body>
         <dl class="subscription index group">
             <dt><a href="/users/coolwriter">coolwriter</a></dt>
-            <dd><form><input type="submit" value="Unsubscribe" /></form></dd>
+            <dd><form action="/users/me/subscriptions/98765"><input type="submit" value="Unsubscribe" /></form></dd>
             <dt><a href="/users/another_author">another_author</a></dt>
             <dd><form><input type="submit" value="Unsubscribe" /></form></dd>
         </dl>
@@ -1533,6 +1615,8 @@ mod subscription_tests {
         "#;
         let subs = parse_subscriptions_page(html).unwrap();
         assert_eq!(subs.len(), 2);
+        assert_eq!(subs[0].ao3_id.as_deref(), Some("98765"));
+        assert_eq!(subs[1].ao3_id, None);
         assert_eq!(subs[0].sub_type, "author");
         assert_eq!(subs[0].id, "coolwriter");
         assert_eq!(subs[0].name, "coolwriter");

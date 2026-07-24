@@ -627,6 +627,85 @@ impl AO3Client {
 
     // -- Subscription operations -----------------------------------------------
 
+    /// Set the signed-in user's subscription state for a work, page-fetch
+    /// path: reads the work page's live form (create vs destroy) and submits
+    /// it only when the state actually differs — intent-aware, so a retry
+    /// after an ambiguous direct POST can never double-toggle. Returns the
+    /// resulting state and AO3's subscription record id when subscribed.
+    pub async fn set_work_subscription(&self, work_id: u64, subscribe: bool)
+        -> Result<(bool, Option<String>), AppError> {
+        let page_url = format!("{BASE_URL}/works/{work_id}?view_adult=true");
+        let html = self.fetch(&page_url).await?;
+        let form = parser::parse_work_subscription_form(&html)
+            .ok_or_else(|| AppError::ElementNotFound(
+                "subscription form — are you signed in?".to_string()))?;
+        if form.subscribed == subscribe {
+            // Already in the desired state — just harvest the record id.
+            return Ok((form.subscribed, sub_id_from_action(&form.action)));
+        }
+        let action = if form.action.starts_with('/') {
+            format!("{BASE_URL}{}", form.action)
+        } else {
+            form.action.clone()
+        };
+        let mut params = vec![("authenticity_token".to_string(), form.token.clone())];
+        if form.subscribed {
+            params.push(("_method".to_string(), "delete".to_string()));
+            params.push(("commit".to_string(), "Unsubscribe".to_string()));
+        } else {
+            params.push(("subscription[subscribable_id]".to_string(), form.subscribable_id.clone()));
+            params.push(("subscription[subscribable_type]".to_string(), form.subscribable_type.clone()));
+            params.push(("commit".to_string(), "Subscribe".to_string()));
+        }
+        let body = self.post_form_raw(&action, params).await?;
+        // The POST redirects to a page carrying the form again — read the
+        // resulting state (and new record id) from it when possible.
+        match parser::parse_work_subscription_form(&body) {
+            Some(f) => {
+                let id = sub_id_from_action(&f.action);
+                Ok((f.subscribed, id))
+            }
+            None => Ok((subscribe, None)),
+        }
+    }
+
+    /// Direct subscribe using the cached CSRF token — one POST, no page
+    /// fetch. Ok(Some(id)) is definite success; Ok(None) means no cached
+    /// token (caller should use the page-fetch path).
+    pub async fn subscribe_work_direct(&self, username: &str, work_id: u64)
+        -> Result<Option<String>, AppError> {
+        let Some(token) = self.cached_csrf_token() else { return Ok(None) };
+        let url = format!("{BASE_URL}/users/{}/subscriptions", urlencoded(username));
+        let params = vec![
+            ("authenticity_token".to_string(), token),
+            ("subscription[subscribable_id]".to_string(), work_id.to_string()),
+            ("subscription[subscribable_type]".to_string(), "Work".to_string()),
+            ("commit".to_string(), "Subscribe".to_string()),
+        ];
+        let body = self.post_form_raw(&url, params).await?;
+        // Success redirects to the work page, whose form is now the destroy
+        // variant carrying the fresh record id.
+        Ok(parser::parse_work_subscription_form(&body)
+            .filter(|f| f.subscribed)
+            .and_then(|f| sub_id_from_action(&f.action)))
+    }
+
+    /// Direct unsubscribe using a stored record id + cached CSRF token —
+    /// one POST, no page fetch. Ok(true) on apparent success; Ok(false)
+    /// when there's no token or the archive rejected it (stale id).
+    pub async fn unsubscribe_work_direct(&self, username: &str, ao3_sub_id: &str)
+        -> Result<bool, AppError> {
+        let Some(token) = self.cached_csrf_token() else { return Ok(false) };
+        let url = format!("{BASE_URL}/users/{}/subscriptions/{}", urlencoded(username), ao3_sub_id);
+        let params = vec![
+            ("authenticity_token".to_string(), token),
+            ("_method".to_string(), "delete".to_string()),
+            ("commit".to_string(), "Unsubscribe".to_string()),
+        ];
+        let body = self.post_form_raw(&url, params).await?;
+        Ok(!body.contains("Error 404") && !body.contains("Sorry, you don't have permission"))
+    }
+
     /// Fetch a page of user subscriptions.
     /// Returns (subscriptions, has_more_pages).
     pub async fn fetch_subscriptions(
@@ -1625,6 +1704,14 @@ impl AO3Client {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The numeric AO3 subscription record id from a form action like
+/// "/users/name/subscriptions/1551470436" — None for the create action.
+fn sub_id_from_action(action: &str) -> Option<String> {
+    action.rsplit('/').next()
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+}
 
 /// Build a `reqwest::Client` with our standard headers and an optional SOCKS
 /// proxy.

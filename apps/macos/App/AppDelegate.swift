@@ -10,6 +10,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: SettingsWindowController?
     private var requestLogWindowController: RequestLogWindowController?
 
+    // Auto-lock: every in-app event stamps lastActivity; a coarse timer
+    // compares the idle span against the user's setting.
+    private var activityMonitor: Any?
+    private var idleCheckTimer: Timer?
+    private var lastActivity = Date()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         MacFont.scale = CGFloat(theme.uiFontScale)
         buildMainMenu()
@@ -33,6 +39,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = MainWindowController(theme: theme, appState: appState, model: model)
         controller.showWindow(nil)
         mainWindowController = controller
+
+        setupAutoLock()
+    }
+
+    // MARK: - Auto-lock on idle
+
+    private func setupAutoLock() {
+        // Any user event inside the app counts as activity. mouseMoved is
+        // included deliberately — reading without clicking is activity.
+        let events: NSEvent.EventTypeMask = [
+            .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+            .scrollWheel, .mouseMoved, .leftMouseDragged, .magnify,
+        ]
+        activityMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+            self?.lastActivity = Date()
+            return event
+        }
+        // Coarse check: worst case adds ~15 s past the configured span,
+        // which is fine for minute-granular timeouts.
+        idleCheckTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.lockIfIdle()
+        }
+    }
+
+    private func lockIfIdle() {
+        let minutes = appState.autoLockMinutes
+        guard minutes > 0,
+              appState.bridge.isInitialized,
+              appState.bridge.hasDbPassword,
+              Date().timeIntervalSince(lastActivity) >= Double(minutes) * 60 else { return }
+        appState.lockNow()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

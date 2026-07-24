@@ -53,6 +53,9 @@ final class MainWindowController: NSWindowController {
         showingGate = gate
         let frame = window.frame
         if gate {
+            // Auto-lock drops the whole runtime (Tor included) — re-arm the
+            // auto-connect so unlocking brings the circuit back up.
+            torAutoStarted = false
             window.contentViewController = NSHostingController(
                 rootView: LaunchGateView(theme: theme, appState: appState))
         } else {

@@ -20,12 +20,12 @@ enum ScreenshotState {
         state.ao3Username = "stardust_reader"
 
         state.subscriptions = [
-            USubscription(subType: "author", id: "marblestaircase", name: "marblestaircase"),
-            USubscription(subType: "author", id: "quietfeathers", name: "quietfeathers"),
-            USubscription(subType: "work", id: "baker", name: "The Long Way Round to Baker Street"),
-            USubscription(subType: "work", id: "olive", name: "What the Olive Branch Knew"),
-            USubscription(subType: "work", id: "wireframe", name: "Wireframe Hearts"),
-            USubscription(subType: "series", id: "1001", name: "The Seasons Cycle"),
+            USubscription(subType: "author", id: "marblestaircase", name: "marblestaircase", ao3Id: nil),
+            USubscription(subType: "author", id: "quietfeathers", name: "quietfeathers", ao3Id: nil),
+            USubscription(subType: "work", id: "baker", name: "The Long Way Round to Baker Street", ao3Id: nil),
+            USubscription(subType: "work", id: "olive", name: "What the Olive Branch Knew", ao3Id: nil),
+            USubscription(subType: "work", id: "wireframe", name: "Wireframe Hearts", ao3Id: nil),
+            USubscription(subType: "series", id: "1001", name: "The Seasons Cycle", ao3Id: nil),
         ]
 
         state.fetchedChapters = [

@@ -161,6 +161,9 @@ pub struct Subscription {
     pub sub_type: String,  // "author", "work", "series"
     pub id: String,        // username, work_id, or series_id
     pub name: String,      // display name
+    /// AO3's subscription record id (from the unsubscribe form action) —
+    /// lets unsubscribe POST directly without a page fetch.
+    pub ao3_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
