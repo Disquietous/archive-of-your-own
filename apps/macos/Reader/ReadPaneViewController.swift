@@ -227,6 +227,19 @@ final class ReadPaneViewController: NSViewController {
         return host
     }
 
+    private var readerRefreshBtn: ToolButton?
+
+    /// Reader header: refetch the chapters from AO3, bypassing the caches —
+    /// picks up chapter text that changed or arrived after the original fetch.
+    private func readerRefreshButton() -> ToolButton {
+        let button = readerRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                    tooltip: "Refresh chapter from AO3") { [weak self] in
+            self?.readerController.refreshChaptersFromAO3()
+        }
+        readerRefreshBtn = button
+        return button
+    }
+
     /// Detail header: re-fetch the work's current details from AO3.
     private func detailRefreshButton() -> ToolButton {
         let button = detailRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
@@ -414,7 +427,8 @@ final class ReadPaneViewController: NSViewController {
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
-        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, chaptersButton, commentsButton, bookmarkButton]
+        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, chaptersButton,
+                                       readerRefreshButton(), commentsButton, bookmarkButton]
                                     : [settingsButton, detailRefreshButton(), bookmarkButton])
 
         show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))

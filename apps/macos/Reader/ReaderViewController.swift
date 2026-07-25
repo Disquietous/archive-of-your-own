@@ -190,7 +190,7 @@ final class ReaderViewController: NSViewController {
 
     // MARK: - Chapter acquisition (cache-first, then Tor)
 
-    private func loadChapters() async {
+    private func loadChapters(force: Bool = false) async {
         guard let work else { return }
 
         // Mock/preview works carry their content inline.
@@ -206,20 +206,22 @@ final class ReaderViewController: NSViewController {
         }
         guard let workId = UInt64(work.id) else { return }
 
-        // Already fetched this session?
-        if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty {
-            chapters = fetched
-            renderChapter()
-            return
-        }
+        if !force {
+            // Already fetched this session?
+            if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty {
+                chapters = fetched
+                renderChapter()
+                return
+            }
 
-        // Local database cache (downloaded / recently read works).
-        let cached = appState.bridge.getCachedChapters(workId)
-        if !cached.isEmpty {
-            appState.fetchedChapters[work.id] = cached
-            chapters = cached
-            renderChapter()
-            return
+            // Local database cache (downloaded / recently read works).
+            let cached = appState.bridge.getCachedChapters(workId)
+            if !cached.isEmpty {
+                appState.fetchedChapters[work.id] = cached
+                chapters = cached
+                renderChapter()
+                return
+            }
         }
 
         // Fetch over the network (Tor-gated inside retryOnTimeout).
@@ -244,6 +246,18 @@ final class ReaderViewController: NSViewController {
     private func retryLoad() {
         loadError = nil
         Task { await loadChapters() }
+    }
+
+    /// Toolbar refresh: refetch the work's chapters from AO3, bypassing the
+    /// session and database caches — the fetch rewrites the cached rows, so
+    /// chapters whose text changed (or arrived) since the original fetch
+    /// show their current content.
+    func refreshChaptersFromAO3() {
+        guard let work, UInt64(work.id) != nil, !isLoading else { return }
+        appState.fetchedChapters[work.id] = nil
+        chapters = nil
+        loadError = nil
+        Task { await loadChapters(force: true) }
     }
 
     private func cancelLoad() {

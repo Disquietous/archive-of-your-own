@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindowController: MainWindowController?
     private var settingsWindowController: SettingsWindowController?
     private var requestLogWindowController: RequestLogWindowController?
+    private var debugLogWindowController: DebugLogWindowController?
 
     // Auto-lock: every in-app event stamps lastActivity; a coarse timer
     // compares the idle span against the user's setting.
@@ -94,6 +95,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requestLogWindowController = RequestLogWindowController(theme: theme, appState: appState)
         }
         requestLogWindowController?.show()
+    }
+
+    @objc private func openDebugLog() {
+        if debugLogWindowController == nil {
+            debugLogWindowController = DebugLogWindowController(theme: theme, appState: appState)
+        }
+        debugLogWindowController?.show()
     }
 
     // MARK: - Go menu
@@ -254,6 +262,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestLog.keyEquivalentModifierMask = [.command, .option]
         requestLog.target = self
         viewMenu.addItem(requestLog)
+        let debugLog = NSMenuItem(title: "Debug Log", action: #selector(openDebugLog), keyEquivalent: "d")
+        debugLog.keyEquivalentModifierMask = [.command, .option]
+        debugLog.target = self
+        viewMenu.addItem(debugLog)
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
