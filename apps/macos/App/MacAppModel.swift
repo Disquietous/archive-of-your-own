@@ -531,8 +531,13 @@ final class MacAppModel {
     /// fetches — a complete, current list comes from Refresh Works.
     /// `subscriptionID` is the parsed AO3 username (author) or series ID;
     /// `author` is only the display name and may differ from it.
+    /// Whether the reading pane shows the drilled-in author's profile
+    /// instead of their works list. Toggled by the header's person button.
+    var showingAuthorProfile = false
+
     func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
         authorTask.cancel()
+        showingAuthorProfile = false
         subscriptionWorksTitle = author
         subscriptionWorksError = nil
         subscriptionWorksFetchStatus = nil
@@ -606,6 +611,7 @@ final class MacAppModel {
 
     func closeSubscriptionWorks() {
         authorTask.cancel()
+        showingAuthorProfile = false
         subscriptionWorksTitle = nil
         subscriptionWorksList = []
         subscriptionWorksError = nil
@@ -634,6 +640,7 @@ final class MacAppModel {
     /// current list comes from the user pressing Refresh Works.
     func openAuthor(_ username: String) {
         authorTask.cancel()
+        showingAuthorProfile = false
         authorUsername = username
         authorError = nil
         authorFetchStatus = nil
@@ -689,6 +696,7 @@ final class MacAppModel {
 
     func closeAuthorWorks() {
         authorTask.cancel()
+        showingAuthorProfile = false
         authorUsername = nil
         authorWorksList = []
         authorError = nil

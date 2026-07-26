@@ -8,7 +8,7 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppError;
 use crate::models::{
-    AO3User, Chapter, Comment, ContentBlock, Rating, Warning, WorkSummary,
+    AO3User, Chapter, Comment, ContentBlock, Rating, UserProfile, Warning, WorkSummary,
 };
 
 /// Encrypted local storage backed by SQLCipher.
@@ -1750,6 +1750,31 @@ impl Storage {
             );"
         ).ok();
 
+        // Migration: full user profiles + block/mute state on ao3_users.
+        // pseuds and bio are JSON (bio is a serialized ContentBlock tree,
+        // same encoding comments use). The *_ao3_id columns hold AO3's
+        // record ids so undo can POST directly without a confirm-page fetch.
+        for ddl in [
+            "ALTER TABLE ao3_users ADD COLUMN numeric_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN joined TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN location TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN birthday TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN pseuds_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE ao3_users ADD COLUMN bio_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE ao3_users ADD COLUMN works_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN series_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN bookmarks_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN collections_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN gifts_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN block_ao3_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN is_muted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ao3_users ADD COLUMN mute_ao3_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE ao3_users ADD COLUMN profile_fetched_at TEXT NOT NULL DEFAULT ''",
+        ] {
+            self.conn.execute(ddl, []).ok();
+        }
+
         Ok(())
     }
 
@@ -2063,6 +2088,128 @@ impl Storage {
             Some(Ok(u)) => Ok(Some(u)),
             _ => Ok(None),
         }
+    }
+
+    /// Persist a fetched profile onto the user's ao3_users row (keyed by
+    /// username, matching how author rows are recorded elsewhere).
+    /// Creates the row when the user has never been seen.
+    pub fn upsert_user_profile(&self, p: &UserProfile) -> Result<(), AppError> {
+        self.upsert_ao3_user(&AO3User {
+            id: p.username.clone(),
+            username: p.username.clone(),
+            profile_url: Some(format!("{}/users/{}", crate::client::BASE_URL, p.username)),
+            avatar_url: p.avatar_url.clone(),
+        })?;
+        let pseuds_json = serde_json::to_string(&p.pseuds).map_err(map_json)?;
+        let bio_json = serde_json::to_string(&p.bio).map_err(map_json)?;
+        self.conn.execute(
+            "UPDATE ao3_users SET
+                numeric_id = CASE WHEN ?2 = '' THEN numeric_id ELSE ?2 END,
+                joined = ?3, location = ?4, birthday = ?5,
+                pseuds_json = ?6, bio_json = ?7,
+                works_count = ?8, series_count = ?9, bookmarks_count = ?10,
+                collections_count = ?11, gifts_count = ?12,
+                is_blocked = ?13, block_ao3_id = ?14,
+                is_muted = ?15, mute_ao3_id = ?16,
+                profile_fetched_at = datetime('now'),
+                updated_at = datetime('now')
+             WHERE username = ?1 COLLATE NOCASE",
+            params![
+                p.username,
+                p.numeric_id.as_deref().unwrap_or(""),
+                p.joined, p.location, p.birthday,
+                pseuds_json, bio_json,
+                p.works_count, p.series_count, p.bookmarks_count,
+                p.collections_count, p.gifts_count,
+                p.blocked as i64, p.block_ao3_id.as_deref().unwrap_or(""),
+                p.muted as i64, p.mute_ao3_id.as_deref().unwrap_or(""),
+            ],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// The cached profile for a username, with live subscription state
+    /// joined in from the local subscriptions table. None when the user
+    /// has never had a profile fetch recorded.
+    pub fn get_user_profile(&self, username: &str) -> Result<Option<UserProfile>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT username, numeric_id, avatar_url, pseuds_json, joined, location, birthday,
+                    bio_json, works_count, series_count, bookmarks_count, collections_count,
+                    gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id, profile_fetched_at
+             FROM ao3_users
+             WHERE username = ?1 COLLATE NOCASE AND profile_fetched_at != ''
+             ORDER BY updated_at DESC LIMIT 1"
+        ).map_err(map_sql)?;
+        let row = stmt.query_map(params![username], |row| {
+            let opt = |s: String| if s.is_empty() { None } else { Some(s) };
+            Ok(UserProfile {
+                username: row.get::<_, String>(0)?,
+                numeric_id: opt(row.get(1)?),
+                avatar_url: opt(row.get(2)?),
+                pseuds: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+                joined: row.get(4)?,
+                location: row.get(5)?,
+                birthday: row.get(6)?,
+                bio: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+                works_count: row.get(8)?,
+                series_count: row.get(9)?,
+                bookmarks_count: row.get(10)?,
+                collections_count: row.get(11)?,
+                gifts_count: row.get(12)?,
+                blocked: row.get::<_, i64>(13)? != 0,
+                block_ao3_id: opt(row.get(14)?),
+                muted: row.get::<_, i64>(15)? != 0,
+                mute_ao3_id: opt(row.get(16)?),
+                viewer_signed_in: false,
+                subscribed: false,
+                subscription_ao3_id: None,
+                fetched_at: row.get(17)?,
+            })
+        }).map_err(map_sql)?.next();
+        let Some(Ok(mut profile)) = row else { return Ok(None) };
+        profile.subscribed = self.has_subscription("author", &profile.username)?;
+        profile.subscription_ao3_id =
+            self.get_subscription_ao3_id("author", &profile.username)?;
+        Ok(Some(profile))
+    }
+
+    /// Record block state locally (mirrors an AO3-side change). Creates a
+    /// minimal user row when needed so state is never dropped.
+    pub fn set_user_block_state(&self, username: &str, blocked: bool,
+                                ao3_id: Option<&str>) -> Result<(), AppError> {
+        self.ensure_ao3_user_row(username)?;
+        self.conn.execute(
+            "UPDATE ao3_users SET is_blocked = ?2, block_ao3_id = ?3,
+                updated_at = datetime('now')
+             WHERE username = ?1 COLLATE NOCASE",
+            params![username, blocked as i64, ao3_id.unwrap_or("")],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Record mute state locally (mirrors an AO3-side change).
+    pub fn set_user_mute_state(&self, username: &str, muted: bool,
+                               ao3_id: Option<&str>) -> Result<(), AppError> {
+        self.ensure_ao3_user_row(username)?;
+        self.conn.execute(
+            "UPDATE ao3_users SET is_muted = ?2, mute_ao3_id = ?3,
+                updated_at = datetime('now')
+             WHERE username = ?1 COLLATE NOCASE",
+            params![username, muted as i64, ao3_id.unwrap_or("")],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    fn ensure_ao3_user_row(&self, username: &str) -> Result<(), AppError> {
+        if !self.has_ao3_user_with_username(username)? {
+            self.upsert_ao3_user(&AO3User {
+                id: username.to_string(),
+                username: username.to_string(),
+                profile_url: Some(format!("{}/users/{username}", crate::client::BASE_URL)),
+                avatar_url: None,
+            })?;
+        }
+        Ok(())
     }
 
     fn save_comment_recursive(&self, work_id: u64, chapter_id: u64, parent_id: u64, comment: &Comment) -> Result<(), AppError> {
@@ -2512,6 +2659,77 @@ mod tests {
         // Username match is case-insensitive
         assert!(db.has_ao3_user_with_username("Astolat").unwrap());
         assert!(!db.has_ao3_user_with_username("someone_else").unwrap());
+    }
+
+    #[test]
+    fn test_user_profile_round_trip() {
+        let db = open_test_db();
+
+        assert!(db.get_user_profile("writer").unwrap().is_none());
+
+        let profile = UserProfile {
+            username: "Writer".into(),
+            numeric_id: Some("424242".into()),
+            avatar_url: Some("https://example.org/icon.png".into()),
+            pseuds: vec!["Writer".into(), "AltPseud".into()],
+            joined: "2015-01-02".into(),
+            location: "The Library".into(),
+            birthday: String::new(),
+            bio: vec![ContentBlock::Paragraph {
+                text: vec![InlineContent::Text { value: "Hello.".into() }],
+            }],
+            works_count: 12,
+            series_count: 3,
+            bookmarks_count: 40,
+            collections_count: 1,
+            gifts_count: 2,
+            viewer_signed_in: true,
+            subscribed: true, // network-side state; not persisted here
+            subscription_ao3_id: Some("999".into()),
+            blocked: false,
+            block_ao3_id: None,
+            muted: true,
+            mute_ao3_id: Some("88".into()),
+            fetched_at: String::new(),
+        };
+        db.upsert_user_profile(&profile).unwrap();
+
+        // Case-insensitive lookup; subscription state joins from the
+        // subscriptions table, not the profile columns.
+        let got = db.get_user_profile("writer").unwrap().expect("cached profile");
+        assert_eq!(got.username, "Writer");
+        assert_eq!(got.numeric_id.as_deref(), Some("424242"));
+        assert_eq!(got.pseuds, vec!["Writer".to_string(), "AltPseud".to_string()]);
+        assert_eq!(got.joined, "2015-01-02");
+        assert_eq!(got.location, "The Library");
+        assert_eq!(got.bio.len(), 1);
+        assert_eq!(got.works_count, 12);
+        assert_eq!(got.gifts_count, 2);
+        assert!(!got.subscribed);
+        assert!(got.muted);
+        assert_eq!(got.mute_ao3_id.as_deref(), Some("88"));
+        assert!(!got.fetched_at.is_empty());
+
+        db.add_subscription("author", "Writer", "Writer", Some("777")).unwrap();
+        let got = db.get_user_profile("Writer").unwrap().unwrap();
+        assert!(got.subscribed);
+        assert_eq!(got.subscription_ao3_id.as_deref(), Some("777"));
+
+        // Block/mute state updates stick, and clear cleanly.
+        db.set_user_block_state("Writer", true, Some("55")).unwrap();
+        let got = db.get_user_profile("Writer").unwrap().unwrap();
+        assert!(got.blocked);
+        assert_eq!(got.block_ao3_id.as_deref(), Some("55"));
+        db.set_user_mute_state("Writer", false, None).unwrap();
+        let got = db.get_user_profile("Writer").unwrap().unwrap();
+        assert!(!got.muted);
+        assert!(got.mute_ao3_id.is_none());
+
+        // Block state for a never-seen user creates the row, but no
+        // profile fetch is faked — get_user_profile stays None.
+        db.set_user_block_state("stranger", true, None).unwrap();
+        assert!(db.get_user_profile("stranger").unwrap().is_none());
+        assert!(db.has_ao3_user_with_username("stranger").unwrap());
     }
 
     #[test]

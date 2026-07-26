@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<!--
+  Fully synthetic AO3 work-search form page for parser tests. Mirrors the
+  /works/search markup (form#new_work_search with dt/dd field pairs) with
+  a representative subset of fields. No real data — do not replace with
+  saved pages.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Search Works | Archive of Our Own</title>
+  </head>
+  <body>
+    <div id="main" class="works-search region" role="main">
+      <h2 class="heading">Work Search</h2>
+
+      <form id="new_work_search" class="new_work_search" action="/works/search" accept-charset="UTF-8" method="get">
+        <dl>
+          <dt><label for="work_search_query">Any Field</label></dt>
+          <dd>
+            <input type="text" name="work_search[query]" id="work_search_query" />
+          </dd>
+
+          <dt><label for="work_search_title">Title</label></dt>
+          <dd>
+            <input type="text" name="work_search[title]" id="work_search_title" />
+          </dd>
+
+          <dt><label for="work_search_creators">Author/Artist</label></dt>
+          <dd>
+            <input type="text" name="work_search[creators]" id="work_search_creators" />
+          </dd>
+
+          <dt>Completion status</dt>
+          <dd>
+            <select name="work_search[complete]" id="work_search_complete">
+              <option value="" selected="selected">All works</option>
+              <option value="T">Complete works only</option>
+              <option value="F">Works in progress only</option>
+            </select>
+          </dd>
+
+          <dt>Crossovers</dt>
+          <dd>
+            <input type="radio" value="" checked="checked" name="work_search[crossover]" id="work_search_crossover_" />
+            <label for="work_search_crossover_">Include crossovers</label>
+            <input type="radio" value="F" name="work_search[crossover]" id="work_search_crossover_f" />
+            <label for="work_search_crossover_f">Exclude crossovers</label>
+            <input type="radio" value="T" name="work_search[crossover]" id="work_search_crossover_t" />
+            <label for="work_search_crossover_t">Show only crossovers</label>
+          </dd>
+
+          <dt>Single Chapter</dt>
+          <dd>
+            <input type="checkbox" value="1" name="work_search[single_chapter]" id="work_search_single_chapter" />
+            <label for="work_search_single_chapter">Single Chapter</label>
+          </dd>
+
+          <dt>Language</dt>
+          <dd>
+            <select name="work_search[language_id]" id="work_search_language_id">
+              <option value="" selected="selected">Any</option>
+              <option value="en">English</option>
+              <option value="es">Español</option>
+              <option value="zh">中文-普通话 國語</option>
+            </select>
+          </dd>
+
+          <dt>Ratings</dt>
+          <dd>
+            <input type="checkbox" value="10" name="work_search[rating_ids][]" id="work_search_rating_ids_10" />
+            <label for="work_search_rating_ids_10">General Audiences</label>
+            <input type="checkbox" value="11" name="work_search[rating_ids][]" id="work_search_rating_ids_11" />
+            <label for="work_search_rating_ids_11">Teen And Up Audiences</label>
+            <input type="checkbox" value="12" name="work_search[rating_ids][]" id="work_search_rating_ids_12" />
+            <label for="work_search_rating_ids_12">Mature</label>
+            <input type="checkbox" value="13" name="work_search[rating_ids][]" id="work_search_rating_ids_13" />
+            <label for="work_search_rating_ids_13">Explicit</label>
+          </dd>
+
+          <dt>Sort by</dt>
+          <dd>
+            <select name="work_search[sort_column]" id="work_search_sort_column">
+              <option value="_score" selected="selected">Best Match</option>
+              <option value="authors_to_sort_on">Creator</option>
+              <option value="title_to_sort_on">Title</option>
+              <option value="created_at">Date Posted</option>
+              <option value="revised_at">Date Updated</option>
+              <option value="word_count">Word Count</option>
+              <option value="hits">Hits</option>
+              <option value="kudos_count">Kudos</option>
+            </select>
+          </dd>
+        </dl>
+
+        <p class="submit actions"><input type="submit" name="commit" value="Search" /></p>
+      </form>
+    </div>
+  </body>
+</html>

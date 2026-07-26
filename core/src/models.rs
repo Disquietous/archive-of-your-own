@@ -174,6 +174,41 @@ pub struct AO3User {
     pub avatar_url: Option<String>,
 }
 
+/// A user's full profile page (/users/{username}/profile): identity and
+/// bio, sidebar counts, and — when the viewer is signed in — the live
+/// subscribe/block/mute state with AO3's record ids for direct undo POSTs.
+#[derive(Debug, Clone)]
+pub struct UserProfile {
+    pub username: String,
+    /// AO3's numeric user id — the subscribe form's subscribable_id, or the
+    /// "My user ID is" meta row when no form renders (logged out).
+    pub numeric_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub pseuds: Vec<String>,
+    pub joined: String,
+    pub location: String,
+    pub birthday: String,
+    pub bio: Vec<ContentBlock>,
+    pub works_count: u32,
+    pub series_count: u32,
+    pub bookmarks_count: u32,
+    pub collections_count: u32,
+    pub gifts_count: u32,
+    /// Whether the page rendered a subscribe form — i.e. the viewer was
+    /// signed in. When false the subscribe/block/mute fields carry no
+    /// signal and must not overwrite locally known state.
+    pub viewer_signed_in: bool,
+    pub subscribed: bool,
+    pub subscription_ao3_id: Option<String>,
+    pub blocked: bool,
+    pub block_ao3_id: Option<String>,
+    pub muted: bool,
+    pub mute_ao3_id: Option<String>,
+    /// When this profile was last fetched from AO3 (set by storage on
+    /// cached reads; empty on a fresh network parse).
+    pub fetched_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Comment {
     pub id: u64,

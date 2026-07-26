@@ -362,9 +362,9 @@ final class RustBridge {
         return try await app.fetchSearchForm()
     }
 
-    func fetchAuthorWorks(username: String, page: UInt32 = 1) async throws -> UPagedWorks {
+    func fetchAuthorWorks(username: String, pseud: String? = nil, page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchAuthorWorks(username: username, page: page)
+        return try await app.fetchAuthorWorks(username: username, pseud: pseud, page: page)
     }
 
     func fetchSeriesWorksPaged(seriesId: UInt64, page: UInt32 = 1) async throws -> UPagedWorks {
@@ -618,6 +618,39 @@ final class RustBridge {
         return try await app.toggleWorkSubscription(workId: workId, username: username)
     }
 
+    // MARK: - User profiles (subscribe / block / mute)
+
+    /// The locally cached profile for a user — instant, DB-only.
+    func getCachedUserProfile(username: String) -> UUserProfile? {
+        guard let app else { return nil }
+        return (try? app.getCachedUserProfile(username: username)) ?? nil
+    }
+
+    /// Fetch a user's profile from AO3 and cache it. Also mirrors live
+    /// subscription state into the local subscriptions table.
+    func fetchUserProfile(username: String) async throws -> UUserProfile {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchUserProfile(username: username)
+    }
+
+    /// Toggle the AO3 subscription for a user; returns the new state.
+    func toggleUserSubscription(target: String, username: String?) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.toggleUserSubscription(target: target, username: username)
+    }
+
+    /// Toggle blocking a user on AO3; returns the new state.
+    func toggleUserBlock(target: String, username: String) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.toggleUserBlock(target: target, username: username)
+    }
+
+    /// Toggle muting a user on AO3; returns the new state.
+    func toggleUserMute(target: String, username: String) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.toggleUserMute(target: target, username: username)
+    }
+
     func getSyncedBookmarkIds() -> [UInt64] {
         (try? app?.getSyncedBookmarkIds()) ?? []
     }
@@ -822,9 +855,9 @@ final class RustBridge {
         (try? app?.getWorksByAuthor(username: username)) ?? []
     }
 
-    func startSubscriptionCheck() throws -> UInt32 {
+    func startSubscriptionCheck(extraAuthors: [String] = []) throws -> UInt32 {
         guard let app else { throw BridgeError.notInitialized }
-        return try app.startSubscriptionCheck()
+        return try app.startSubscriptionCheck(extraAuthors: extraAuthors)
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

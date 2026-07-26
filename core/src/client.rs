@@ -706,6 +706,165 @@ impl AO3Client {
         Ok(!body.contains("Error 404") && !body.contains("Sorry, you don't have permission"))
     }
 
+    /// A user's full profile page — identity, pseuds, counts, bio, and
+    /// (when signed in) live subscribe/block/mute state. One request; the
+    /// page fetch also refreshes the cached CSRF token, so a follow-up
+    /// direct POST from the profile screen never needs a second fetch.
+    pub async fn fetch_user_profile_full(&self, username: &str)
+        -> Result<crate::models::UserProfile, AppError> {
+        let html = self.fetch(&format!("{BASE_URL}/users/{}/profile", urlencoded(username))).await?;
+        parser::parse_user_profile(&html)
+    }
+
+    /// Set the signed-in user's subscription state for another user,
+    /// page-fetch path: reads the profile page's live form and submits it
+    /// only when the state actually differs — intent-aware, mirroring
+    /// set_work_subscription. Returns (state, AO3 record id when subscribed).
+    pub async fn set_user_subscription(&self, target: &str, subscribe: bool)
+        -> Result<(bool, Option<String>), AppError> {
+        let page_url = format!("{BASE_URL}/users/{}/profile", urlencoded(target));
+        let html = self.fetch(&page_url).await?;
+        let form = parser::parse_work_subscription_form(&html)
+            .ok_or_else(|| AppError::ElementNotFound(
+                "subscription form — are you signed in?".to_string()))?;
+        if form.subscribed == subscribe {
+            return Ok((form.subscribed, sub_id_from_action(&form.action)));
+        }
+        let action = if form.action.starts_with('/') {
+            format!("{BASE_URL}{}", form.action)
+        } else {
+            form.action.clone()
+        };
+        let mut params = vec![("authenticity_token".to_string(), form.token.clone())];
+        if form.subscribed {
+            params.push(("_method".to_string(), "delete".to_string()));
+            params.push(("commit".to_string(), "Unsubscribe".to_string()));
+        } else {
+            params.push(("subscription[subscribable_id]".to_string(), form.subscribable_id.clone()));
+            params.push(("subscription[subscribable_type]".to_string(),
+                         if form.subscribable_type.is_empty() { "User".to_string() }
+                         else { form.subscribable_type.clone() }));
+            params.push(("commit".to_string(), "Subscribe".to_string()));
+        }
+        let body = self.post_form_raw(&action, params).await?;
+        match parser::parse_work_subscription_form(&body) {
+            Some(f) => Ok((f.subscribed, sub_id_from_action(&f.action))),
+            None => Ok((subscribe, None)),
+        }
+    }
+
+    /// Direct user-subscribe using the cached CSRF token + the target's
+    /// numeric id — one POST, no page fetch. Ok(Some(id)) is definite
+    /// success; Ok(None) means no cached token (use the page-fetch path).
+    pub async fn subscribe_user_direct(&self, me: &str, target_numeric_id: &str)
+        -> Result<Option<String>, AppError> {
+        let Some(token) = self.cached_csrf_token() else { return Ok(None) };
+        let url = format!("{BASE_URL}/users/{}/subscriptions", urlencoded(me));
+        let params = vec![
+            ("authenticity_token".to_string(), token),
+            ("subscription[subscribable_id]".to_string(), target_numeric_id.to_string()),
+            ("subscription[subscribable_type]".to_string(), "User".to_string()),
+            ("commit".to_string(), "Subscribe".to_string()),
+        ];
+        let body = self.post_form_raw(&url, params).await?;
+        // Success redirects to the target's profile, whose form is now the
+        // destroy variant carrying the fresh record id.
+        Ok(parser::parse_work_subscription_form(&body)
+            .filter(|f| f.subscribed)
+            .and_then(|f| sub_id_from_action(&f.action)))
+    }
+
+    /// Set block or mute state for another user. `kind` is "blocked" or
+    /// "muted". Prefers a direct POST with the cached CSRF token; falls
+    /// back to a profile fetch when the token or (for undo) the record id
+    /// is missing — that fetch also short-circuits when AO3 already has
+    /// the desired state. Returns (state, AO3 record id when on).
+    pub async fn set_user_moderation(&self, me: &str, target: &str, kind: &str,
+                                     on: bool, record_id: Option<&str>)
+        -> Result<(bool, Option<String>), AppError> {
+        let (param, confirm_tail) = match kind {
+            "blocked" => ("blocked_id", "confirm_unblock"),
+            "muted" => ("muted_id", "confirm_unmute"),
+            other => return Err(AppError::ParseError(format!("unknown moderation kind {other}"))),
+        };
+
+        let mut token = self.cached_csrf_token();
+        let mut known_record = record_id.map(str::to_string);
+        let mut verified_state: Option<(bool, Option<String>)> = None;
+        if token.is_none() || (!on && known_record.is_none()) {
+            let profile = self.fetch_user_profile_full(target).await?;
+            token = self.cached_csrf_token();
+            let (state, rid) = if kind == "blocked" {
+                (profile.blocked, profile.block_ao3_id)
+            } else {
+                (profile.muted, profile.mute_ao3_id)
+            };
+            if state == on {
+                return Ok((state, rid));
+            }
+            if known_record.is_none() { known_record = rid.clone(); }
+            verified_state = Some((state, rid));
+        }
+        let Some(token) = token else {
+            return Err(AppError::ElementNotFound(
+                "CSRF token — are you signed in?".to_string()));
+        };
+
+        let me_enc = urlencoded(me);
+        let (url, params) = if on {
+            (format!("{BASE_URL}/users/{me_enc}/{kind}/users"),
+             vec![
+                 ("authenticity_token".to_string(), token),
+                 (param.to_string(), target.to_string()),
+             ])
+        } else {
+            let Some(rid) = known_record.clone() else {
+                return Err(AppError::ElementNotFound(
+                    format!("{kind} record id for {target}")));
+            };
+            (format!("{BASE_URL}/users/{me_enc}/{kind}/users/{rid}"),
+             vec![
+                 ("authenticity_token".to_string(), token),
+                 ("_method".to_string(), "delete".to_string()),
+             ])
+        };
+
+        let body = self.post_form_raw(&url, params).await?;
+        if body.contains("The change you wanted was rejected")
+            || body.contains("Sorry, you don't have permission") {
+            return Err(AppError::NetworkError(format!("{kind} POST rejected")));
+        }
+
+        // The POST redirects to the blocked/muted index — read the result
+        // straight off it. An absent entry after an undo is success; an
+        // absent entry after a create is ambiguous, so verify via the
+        // profile unless this call already fetched it.
+        let list = parser::parse_moderation_list(&body, confirm_tail);
+        let entry = list.iter().find(|(n, _)| n.eq_ignore_ascii_case(target));
+        match (on, entry) {
+            (true, Some((_, rid))) => Ok((true, rid.clone())),
+            (false, None) => Ok((false, None)),
+            (false, Some(_)) => Err(AppError::NetworkError(
+                format!("{target} still present after un-{kind} POST"))),
+            (true, None) => {
+                if verified_state.is_some() {
+                    // Profile said "not yet" moments ago and the POST wasn't
+                    // rejected — treat the redirect as success without a
+                    // record id (the next profile fetch will backfill it).
+                    return Ok((true, None));
+                }
+                let profile = self.fetch_user_profile_full(target).await?;
+                let (state, rid) = if kind == "blocked" {
+                    (profile.blocked, profile.block_ao3_id)
+                } else {
+                    (profile.muted, profile.mute_ao3_id)
+                };
+                if state == on { Ok((state, rid)) }
+                else { Err(AppError::NetworkError(format!("{kind} did not stick for {target}"))) }
+            }
+        }
+    }
+
     /// Fetch a page of user subscriptions.
     /// Returns (subscriptions, has_more_pages).
     pub async fn fetch_subscriptions(
@@ -722,12 +881,22 @@ impl AO3Client {
 
     /// Fetch one page of an author's works.
     /// Returns (works, has_next_page, total_pages).
+    /// One page of an author's works. With a pseud, fetches the
+    /// pseud-scoped list (/users/{user}/pseuds/{pseud}/works) — bylines
+    /// like "saltedriceball (tealvneu)" are pseud saltedriceball of user
+    /// tealvneu, and the works shown should match the byline clicked.
     pub async fn fetch_author_works(
         &self,
         username: &str,
+        pseud: Option<&str>,
         page: u32,
     ) -> Result<(Vec<WorkSummary>, bool, u32), AppError> {
-        let url = format!("{BASE_URL}/users/{username}/works?page={page}");
+        let base = match pseud.filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case(username)) {
+            Some(p) => format!("{BASE_URL}/users/{}/pseuds/{}/works",
+                               urlencoded(username), urlencoded(p)),
+            None => format!("{BASE_URL}/users/{}/works", urlencoded(username)),
+        };
+        let url = format!("{base}?page={page}");
         log_info!("http"," Starting: {url}");
         let start = std::time::Instant::now();
         match self.fetch(&url).await {

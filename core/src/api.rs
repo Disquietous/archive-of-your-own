@@ -347,6 +347,56 @@ impl From<crate::models::Subscription> for USubscription {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct UUserProfile {
+    pub username: String,
+    /// AO3's numeric user id — needed for the direct subscribe POST.
+    pub numeric_id: Option<String>,
+    pub avatar_url: Option<String>,
+    pub pseuds: Vec<String>,
+    pub joined: String,
+    pub location: String,
+    pub birthday: String,
+    /// Bio as a serialized ContentBlock tree (same JSON encoding as
+    /// comment content) — "[]" when the profile has none.
+    pub bio_json: String,
+    pub works_count: u32,
+    pub series_count: u32,
+    pub bookmarks_count: u32,
+    pub collections_count: u32,
+    pub gifts_count: u32,
+    pub subscribed: bool,
+    pub blocked: bool,
+    pub muted: bool,
+    /// When this profile was last fetched from AO3; empty for a profile
+    /// that just arrived off the network.
+    pub fetched_at: String,
+}
+
+impl From<crate::models::UserProfile> for UUserProfile {
+    fn from(p: crate::models::UserProfile) -> Self {
+        UUserProfile {
+            username: p.username,
+            numeric_id: p.numeric_id,
+            avatar_url: p.avatar_url,
+            pseuds: p.pseuds,
+            joined: p.joined,
+            location: p.location,
+            birthday: p.birthday,
+            bio_json: serde_json::to_string(&p.bio).unwrap_or_else(|_| "[]".to_string()),
+            works_count: p.works_count,
+            series_count: p.series_count,
+            bookmarks_count: p.bookmarks_count,
+            collections_count: p.collections_count,
+            gifts_count: p.gifts_count,
+            subscribed: p.subscribed,
+            blocked: p.blocked,
+            muted: p.muted,
+            fetched_at: p.fetched_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct USubscriptionCheckResult {
     pub sub_type: String,
     pub sub_id: String,
@@ -394,6 +444,37 @@ pub struct AO3App {
 }
 
 impl AO3App {
+    /// Shared block/mute toggle: flips the state AO3-side (kind is
+    /// "blocked" or "muted") and mirrors the result onto the user's row.
+    async fn toggle_user_moderation(&self, target: String, me: String, kind: &'static str)
+        -> Result<bool, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let (target, _) = split_author_byline(&target);
+            let (current, record_id) = {
+                let s = storage.lock().await;
+                s.get_user_profile(&target).ok().flatten()
+                    .map(|p| if kind == "blocked" { (p.blocked, p.block_ao3_id) }
+                             else { (p.muted, p.mute_ao3_id) })
+                    .unwrap_or((false, None))
+            };
+            let want = !current;
+
+            let c = client.read().await;
+            let (state, new_record) = c
+                .set_user_moderation(&me, &target, kind, want, record_id.as_deref())
+                .await.map_err(AO3Error::from)?;
+            drop(c);
+
+            let s = storage.lock().await;
+            if kind == "blocked" {
+                let _ = s.set_user_block_state(&target, state, new_record.as_deref());
+            } else {
+                let _ = s.set_user_mute_state(&target, state, new_record.as_deref());
+            }
+            Ok(state)
+        }).await
+    }
+
     fn register_progress(&self, key: &str) -> ProgressHandle {
         let handle = new_progress_handle();
         self.progress_handles.lock().unwrap().insert(key.to_string(), handle.clone());
@@ -738,12 +819,17 @@ impl AO3App {
         }).await
     }
 
-    pub async fn fetch_author_works(&self, username: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+    /// One page of an author's works. `username` may be a raw byline
+    /// ("Pseud (Username)") — it's split here so URLs always carry the
+    /// real account name; an explicit `pseud` wins over the byline's.
+    pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
         let progress = self.register_progress("author_works");
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let (works, has_next, total) = c.fetch_author_works(&username, page).await.map_err(AO3Error::from)?;
+            let (user, byline_pseud) = split_author_byline(&username);
+            let pseud = pseud.filter(|p| !p.is_empty()).or(byline_pseud);
+            let (works, has_next, total) = c.fetch_author_works(&user, pseud.as_deref(), page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             for w in &works { let _ = s.save_work(w); }
@@ -1746,6 +1832,106 @@ impl AO3App {
         }).await
     }
 
+    // -- User profiles (subscribe / block / mute) --
+
+    /// The locally cached profile for a user — instant, DB-only. None when
+    /// no profile fetch has ever been recorded for them.
+    pub fn get_cached_user_profile(&self, username: String) -> Result<Option<UUserProfile>, AO3Error> {
+        let (username, _) = split_author_byline(&username);
+        let s = self.storage.blocking_lock();
+        Ok(s.get_user_profile(&username).map_err(AO3Error::from)?.map(UUserProfile::from))
+    }
+
+    /// Fetch a user's profile from AO3, cache it, and mirror the live
+    /// subscription state into the local subscriptions table (only when
+    /// the session was signed in — a logged-out page carries no signal).
+    pub async fn fetch_user_profile(&self, username: String) -> Result<UUserProfile, AO3Error> {
+        let _progress = self.register_progress("user_profile");
+        let result = self.run_on_runtime(move |client, storage| async move {
+            let (username, _) = split_author_byline(&username);
+            let c = client.read().await;
+            let profile = c.fetch_user_profile_full(&username).await.map_err(AO3Error::from)?;
+            drop(c);
+            let s = storage.lock().await;
+            let _ = s.upsert_user_profile(&profile);
+            if profile.viewer_signed_in {
+                if profile.subscribed {
+                    let _ = s.add_subscription("author", &profile.username, &profile.username,
+                                               profile.subscription_ao3_id.as_deref());
+                } else {
+                    let _ = s.remove_subscription("author", &profile.username);
+                }
+            }
+            Ok(UUserProfile::from(profile))
+        }).await;
+        self.clear_progress("user_profile");
+        result
+    }
+
+    /// Toggle the AO3 subscription for a user and mirror the result into
+    /// the local subscriptions table (sub_type "author", so it shows under
+    /// Subscriptions → Following immediately). Prefers the direct one-POST
+    /// paths and falls back to the intent-aware profile-page path.
+    /// Returns the new state: true = now subscribed.
+    pub async fn toggle_user_subscription(&self, target: String, username: Option<String>)
+        -> Result<bool, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let (target, _) = split_author_byline(&target);
+            let (locally_subscribed, stored_ao3_id, numeric_id) = {
+                let s = storage.lock().await;
+                (s.has_subscription("author", &target).unwrap_or(false),
+                 s.get_subscription_ao3_id("author", &target).unwrap_or(None),
+                 s.get_user_profile(&target).ok().flatten().and_then(|p| p.numeric_id))
+            };
+            let want = !locally_subscribed;
+
+            let c = client.read().await;
+            let mut outcome: Option<(bool, Option<String>)> = None;
+            if let Some(user) = username.as_deref().filter(|u| !u.is_empty()) {
+                if want {
+                    if let Some(ref nid) = numeric_id {
+                        if let Ok(Some(new_id)) = c.subscribe_user_direct(user, nid).await {
+                            outcome = Some((true, Some(new_id)));
+                        }
+                    }
+                } else if let Some(ref ao3_id) = stored_ao3_id {
+                    // The unsubscribe endpoint is type-agnostic — same
+                    // record-id POST works for user subscriptions.
+                    if let Ok(true) = c.unsubscribe_work_direct(user, ao3_id).await {
+                        outcome = Some((false, None));
+                    }
+                }
+            }
+            let (subscribed, ao3_id) = match outcome {
+                Some(o) => o,
+                None => c.set_user_subscription(&target, want).await.map_err(AO3Error::from)?,
+            };
+            drop(c);
+
+            let s = storage.lock().await;
+            if subscribed {
+                let _ = s.add_subscription("author", &target, &target, ao3_id.as_deref());
+            } else {
+                let _ = s.remove_subscription("author", &target);
+            }
+            Ok(subscribed)
+        }).await
+    }
+
+    /// Toggle blocking a user on AO3 and mirror the result locally.
+    /// Returns the new state: true = now blocked.
+    pub async fn toggle_user_block(&self, target: String, username: String)
+        -> Result<bool, AO3Error> {
+        self.toggle_user_moderation(target, username, "blocked").await
+    }
+
+    /// Toggle muting a user on AO3 and mirror the result locally.
+    /// Returns the new state: true = now muted.
+    pub async fn toggle_user_mute(&self, target: String, username: String)
+        -> Result<bool, AO3Error> {
+        self.toggle_user_moderation(target, username, "muted").await
+    }
+
     // -- Subscription persistence (user-triggered refresh) --
 
     pub fn persist_subscriptions(&self, subscriptions: Vec<USubscription>) -> Result<(), AO3Error> {
@@ -1784,7 +1970,12 @@ impl AO3App {
 
     // -- Sequential subscription check queue --
 
-    pub fn start_subscription_check(&self) -> Result<u32, AO3Error> {
+    /// Build (or resume) the What's-New check queue. `extra_authors` are
+    /// device-local follows — they join the queue as author checks,
+    /// deduplicated against real author subscriptions. The combined queue
+    /// is sorted alphabetically by display name so the user can predict
+    /// where a given check lands in the request order.
+    pub fn start_subscription_check(&self, extra_authors: Vec<String>) -> Result<u32, AO3Error> {
         let s = self.storage.blocking_lock();
         // Resume if a queue already exists
         if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
@@ -1793,9 +1984,25 @@ impl AO3App {
                 return Ok(arr.len() as u32);
             }
         }
-        // Build a fresh queue from persisted subscriptions
+        // Fresh queue: persisted subscriptions plus followed authors.
         let subs = s.get_subscriptions().map_err(AO3Error::from)?;
-        let arr: Vec<serde_json::Value> = subs.iter().map(|(t, id, name, _)| {
+        let mut entries: Vec<(String, String, String)> = subs.into_iter()
+            .map(|(t, id, name, _)| (t, id, name))
+            .collect();
+        for follow in &extra_authors {
+            let display = follow.trim();
+            let (user, _) = split_author_byline(display);
+            if user.is_empty() {
+                continue;
+            }
+            let duplicate = entries.iter().any(|(t, id, _)|
+                t == "author" && id.eq_ignore_ascii_case(&user));
+            if !duplicate {
+                entries.push(("author".to_string(), user, display.to_string()));
+            }
+        }
+        entries.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
+        let arr: Vec<serde_json::Value> = entries.iter().map(|(t, id, name)| {
             serde_json::json!({"sub_type": t, "sub_id": id, "name": name})
         }).collect();
         let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
@@ -1932,16 +2139,46 @@ impl AO3App {
                 for w in &parsed_works {
                     match s.get_work(w.id) {
                         Ok(Some(old)) => {
-                            if old.date_updated != w.date_updated
-                                || old.chapter_count != w.chapter_count
-                                || old.word_count != w.word_count {
+                            // Each differing metric is a qualification on its
+                            // own; log every one that fired so the What's New
+                            // decision is auditable after the fact.
+                            let mut reasons: Vec<String> = Vec::new();
+                            if old.date_updated != w.date_updated {
+                                reasons.push(format!(
+                                    "date_updated '{}' → '{}' (rule: a changed update date means content was posted since we cached it)",
+                                    old.date_updated, w.date_updated));
+                            }
+                            if old.chapter_count != w.chapter_count {
+                                reasons.push(format!(
+                                    "chapter_count {} → {} (rule: AO3 dates are day-granular, so a same-day chapter shows up here, not in the date)",
+                                    old.chapter_count, w.chapter_count));
+                            }
+                            if old.word_count != w.word_count {
+                                reasons.push(format!(
+                                    "word_count {} → {} (rule: edits that add/remove text without a new chapter still count as an update)",
+                                    old.word_count, w.word_count));
+                            }
+                            if !reasons.is_empty() {
+                                log_info!("whats_new",
+                                    "Flagged work {} '{}' from {} subscription '{}': {}",
+                                    w.id, w.title, sub_type, sub_name, reasons.join("; "));
                                 updated_ids.push(w.id);
                             }
                         }
-                        Ok(None) => updated_ids.push(w.id), // never seen — new work
+                        Ok(None) => {
+                            // never seen — new work
+                            log_info!("whats_new",
+                                "Flagged work {} '{}' from {} subscription '{}': not in the local works cache (rule: a work we've never cached from any source is new to us)",
+                                w.id, w.title, sub_type, sub_name);
+                            updated_ids.push(w.id);
+                        }
                         Err(_) => {}
                     }
                 }
+            } else {
+                log_info!("whats_new",
+                    "First check for {} subscription '{}' — seeded {} works silently (rule: no baseline yet, nothing can qualify)",
+                    sub_type, sub_name, parsed_works.len());
             }
             let changed = !updated_ids.is_empty();
 
@@ -2479,6 +2716,25 @@ fn chrono_now() -> String {
     }
 }
 
+/// AO3 bylines render as "Pseud (Username)" (also without the space) when
+/// the pseud differs from the account name. Returns (username, pseud) —
+/// plain names pass through as (name, None). Real usernames never contain
+/// spaces or parens, so URLs must always use the split-out account name.
+fn split_author_byline(author: &str) -> (String, Option<String>) {
+    let t = author.trim();
+    if let Some(open) = t.rfind('(') {
+        if t.ends_with(')') {
+            let user = t[open + 1..t.len() - 1].trim();
+            let pseud = t[..open].trim();
+            if !user.is_empty() {
+                return (user.to_string(),
+                        Some(pseud.to_string()).filter(|p| !p.is_empty()));
+            }
+        }
+    }
+    (t.to_string(), None)
+}
+
 fn sub_id_to_work_id(sub_type: &str, sub_id: &str) -> u64 {
     let key = format!("{sub_type}:{sub_id}");
     let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
@@ -2490,3 +2746,21 @@ fn sub_id_to_work_id(sub_type: &str, sub_id: &str) -> u64 {
 }
 
 // scaffolding is in lib.rs
+
+#[cfg(test)]
+mod byline_tests {
+    use super::split_author_byline;
+
+    #[test]
+    fn test_split_author_byline() {
+        assert_eq!(split_author_byline("tealvneu"), ("tealvneu".to_string(), None));
+        assert_eq!(split_author_byline("saltedriceball (tealvneu)"),
+                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
+        assert_eq!(split_author_byline("saltedriceball(tealvneu)"),
+                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
+        assert_eq!(split_author_byline("  plain_name  "), ("plain_name".to_string(), None));
+        // Same pseud as username still splits to the clean account name.
+        assert_eq!(split_author_byline("astolat (astolat)"),
+                   ("astolat".to_string(), Some("astolat".to_string())));
+    }
+}

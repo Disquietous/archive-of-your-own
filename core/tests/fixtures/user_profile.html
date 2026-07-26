@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<!--
+  Fully synthetic AO3 user-profile page for parser tests. Mirrors the
+  markup structure of /users/{name}/profile as rendered by otwarchive
+  (logged-in view), with entirely fabricated users, ids, and tokens.
+  No real account data — do not replace with saved pages.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>MockAuthor - Profile | Archive of Our Own</title>
+    <meta name="csrf-param" content="authenticity_token" />
+    <meta name="csrf-token" content="MOCK-CSRF-TOKEN-000000000000000000000000" />
+  </head>
+
+  <body class="logged-in">
+    <div id="outer" class="wrapper">
+      <ul id="skiplinks"><li><a href="#main">Main Content</a></li></ul>
+
+      <header id="header" class="region">
+        <h1 class="heading">
+          <a href="/"><span>Archive of Our Own</span><img alt="Archive of Our Own" class="logo" src="/images/ao3_logos/logo_42.png" /></a>
+        </h1>
+        <nav id="greeting" aria-label="User">
+          <ul class="user navigation actions">
+            <li class="dropdown">
+              <a href="/users/MockViewer">Hi, MockViewer!</a>
+              <ul class="menu">
+                <li><a href="/users/MockViewer">My Dashboard</a></li>
+                <li><a href="/users/MockViewer/subscriptions">My Subscriptions</a></li>
+              </ul>
+            </li>
+            <li><a rel="nofollow" data-method="delete" href="/users/logout">Log Out</a></li>
+          </ul>
+          <p class="icon"><a href="/users/MockViewer"><img alt="" class="icon" src="/images/skins/iconsets/default/icon_user.png" /></a></p>
+        </nav>
+      </header>
+
+      <div id="inner" class="wrapper">
+        <!-- BEGIN sidebar -->
+        <div id="dashboard" class="region" role="navigation region">
+          <h4 class="landmark heading">Choices</h4>
+          <ul class="navigation actions">
+            <li><a href="/users/MockAuthor">Dashboard</a></li>
+            <li><span class="current">Profile</span></li>
+          </ul>
+          <h4 class="landmark heading">Pitch</h4>
+          <ul class="navigation actions">
+            <li><a href="/users/MockAuthor/works">Works (2)</a></li>
+            <li><a href="/users/MockAuthor/series">Series (1)</a></li>
+            <li><a href="/users/MockAuthor/bookmarks">Bookmarks (0)</a></li>
+            <li><a href="/users/MockAuthor/collections">Collections (0)</a></li>
+          </ul>
+          <h4 class="landmark heading">Switch</h4>
+          <ul class="navigation actions">
+            <li><a href="/users/MockAuthor/gifts">Gifts (0)</a></li>
+          </ul>
+        </div>
+        <!-- END sidebar -->
+
+        <!-- BEGIN main -->
+        <div id="main" class="profile-show dashboard region" role="main">
+          <div class="flash"></div>
+          <div class="user home profile">
+            <div class="primary header module">
+              <h2 class="heading">
+                MockAuthor
+              </h2>
+              <p class="icon"><a href="/users/MockAuthor"><img alt="" class="icon" src="/images/skins/iconsets/default/icon_user.png" /></a></p>
+
+              <ul class="navigation actions" role="navigation">
+                <li>
+                  <form class="ajax-create-destroy" id="new_subscription" data-create-value="Subscribe" data-destroy-value="Unsubscribe" action="/users/MockViewer/subscriptions" accept-charset="UTF-8" method="post">
+                    <input type="hidden" name="authenticity_token" value="MOCK-FORM-TOKEN-00000000000000000000000" autocomplete="off" />
+                    <input autocomplete="off" type="hidden" value="12345678" name="subscription[subscribable_id]" id="subscription_subscribable_id" />
+                    <input autocomplete="off" type="hidden" value="User" name="subscription[subscribable_type]" id="subscription_subscribable_type" />
+                    <input type="submit" name="commit" value="Subscribe" />
+                  </form>
+                </li>
+                <li><a href="/users/MockViewer/blocked/users/confirm_block?blocked_id=MockAuthor">Block</a></li>
+                <li><a href="/users/MockViewer/muted/users/confirm_mute?muted_id=MockAuthor">Mute</a></li>
+              </ul>
+            </div>
+
+            <div class="wrapper">
+              <dl class="meta">
+                <dt class="pseuds">My pseuds:</dt>
+                <dd class="pseuds"><a href="/users/MockAuthor/pseuds/MockAuthor">MockAuthor</a></dd>
+                <dt>I joined on:</dt>
+                <dd>2020-01-15</dd>
+                <dt>My user ID is:</dt>
+                <dd>12345678</dd>
+              </dl>
+            </div>
+          </div>
+
+          <div class="clear"><!--presentational--></div>
+        </div>
+        <!-- END main -->
+      </div>
+    </div>
+  </body>
+</html>

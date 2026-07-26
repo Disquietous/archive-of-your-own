@@ -42,6 +42,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindowController = controller
 
         setupAutoLock()
+        setupScrollShortcuts()
+    }
+
+    // MARK: - ⌘↑ / ⌘↓ jump-to-top / jump-to-bottom
+
+    private var scrollShortcutMonitor: Any?
+    private weak var lastClickedScrollView: NSScrollView?
+
+    /// One app-wide handler instead of per-component overrides: ⌘↑ and ⌘↓
+    /// scroll a component to its top or bottom. Covers AppKit tables, the
+    /// TextKit reader, and SwiftUI-hosted ScrollViews alike, since all of
+    /// them sit in an NSScrollView. Targeting follows the system's
+    /// scroll-under-pointer convention — SwiftUI content never becomes
+    /// first responder, so keyboard focus alone would leave the list pane
+    /// permanently capturing the shortcut.
+    private func setupScrollShortcuts() {
+        scrollShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak self] event in
+            guard let self else { return event }
+            if event.type == .leftMouseDown {
+                // Remember which scrolling component was last clicked —
+                // the fallback target when the pointer has since moved
+                // somewhere without one.
+                if let window = event.window, let content = window.contentView {
+                    let point = content.convert(event.locationInWindow, from: nil)
+                    if let hit = content.hitTest(point),
+                       let scrollView = enclosingScrollView(of: hit) {
+                        lastClickedScrollView = scrollView
+                    }
+                }
+                return event
+            }
+            guard event.keyCode == 126 || event.keyCode == 125 else { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                .subtracting([.numericPad, .function])
+            guard mods == .command else { return event }
+            // Leave editable fields alone — ⌘↑/⌘↓ move the insertion point
+            // there, and hijacking that would scroll the pane behind them.
+            if let editor = event.window?.firstResponder as? NSTextView, editor.isFieldEditor {
+                return event
+            }
+            guard let scrollView = targetScrollView(for: event) else { return event }
+            scroll(scrollView, toTop: event.keyCode == 126)
+            return nil
+        }
+    }
+
+    /// The scroll view the shortcut should act on, in priority order:
+    /// under the pointer (matches how scroll wheels target), then the last
+    /// one clicked, then the one enclosing the focused view.
+    private func targetScrollView(for event: NSEvent) -> NSScrollView? {
+        guard let window = event.window ?? NSApp.keyWindow else { return nil }
+        if let content = window.contentView {
+            let point = content.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if let hit = content.hitTest(point),
+               let scrollView = enclosingScrollView(of: hit) {
+                return scrollView
+            }
+        }
+        if let clicked = lastClickedScrollView, clicked.window === window {
+            return clicked
+        }
+        if let responder = window.firstResponder as? NSView,
+           let scrollView = enclosingScrollView(of: responder) {
+            return scrollView
+        }
+        return nil
+    }
+
+    private func enclosingScrollView(of view: NSView) -> NSScrollView? {
+        var current: NSView? = view
+        while let v = current {
+            if let scrollView = v as? NSScrollView { return scrollView }
+            current = v.superview
+        }
+        return nil
+    }
+
+    private func scroll(_ scrollView: NSScrollView, toTop: Bool) {
+        guard let document = scrollView.documentView else { return }
+        let clip = scrollView.contentView
+        let maxY = max(0, document.frame.height - clip.bounds.height)
+        let topIsZero = document.isFlipped
+        let y = toTop == topIsZero ? 0 : maxY
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.allowsImplicitAnimation = true
+            clip.animator().setBoundsOrigin(NSPoint(x: clip.bounds.origin.x, y: y))
+            scrollView.reflectScrolledClipView(clip)
+        }
     }
 
     // MARK: - Auto-lock on idle

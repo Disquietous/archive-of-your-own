@@ -68,7 +68,8 @@ struct SidebarView: View {
         HStack {
             // Leading space clears the system traffic lights.
             Spacer().frame(width: 62)
-            (Text("AoYO").foregroundStyle(theme.ink) + Text(".").foregroundStyle(theme.accent))
+            Text("AoYO")
+                .foregroundStyle(theme.ink)
                 .font(Font(MacFont.serif(21, weight: .semibold)))
             Spacer()
         }
@@ -150,10 +151,10 @@ struct SidebarView: View {
                 if badge > 0 {
                     Text("\(badge)")
                         .font(Font(MacFont.ui(10.5, weight: .bold)))
-                        .foregroundStyle(theme.onAccent)
+                        .foregroundStyle(selected ? theme.onAccent : theme.ink3)
                         .padding(.horizontal, 5)
                         .frame(minWidth: 18, minHeight: 18)
-                        .background(selected ? Color.white.opacity(0.3) : theme.accent)
+                        .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
                         .clipShape(Capsule())
                 } else if let count, count > 0 {
                     Text("\(count)")

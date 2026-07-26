@@ -24,6 +24,7 @@ final class ReadPaneViewController: NSViewController {
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
+    private var profileController: AuthorProfileViewController?
     private var pagerHost: NSHostingView<SearchPagerView>?
     private var resultsBackButton: ToolButton!
     private var detailHost: NSHostingView<AnyView>?
@@ -31,7 +32,8 @@ final class ReadPaneViewController: NSViewController {
     private var settingsPopover: NSPopover?
 
     private enum Mode: Equatable {
-        case empty, searchResults, subscriptionWorks(String), detail(String), reading(String, Int), inboxThread(UInt64)
+        case empty, searchResults, subscriptionWorks(String), authorProfile(String),
+             detail(String), reading(String, Int), inboxThread(UInt64)
     }
 
     private var renderedMode: Mode?
@@ -267,6 +269,57 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    private var authorProfileBtn: ToolButton?
+    private var authorSubscribeBtn: ToolButton?
+    /// The author the drill-in toolbar buttons act on — set on every render
+    /// pass so the cached buttons' closures always target the current author.
+    private var drillInAuthorUsername: String?
+
+    /// Bell button for the author drill-ins: subscribe/unsubscribe on AO3.
+    /// Symbol and tooltip track the live subscription state each render.
+    private func authorSubscribeButton(username: String) -> ToolButton {
+        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "bell",
+                                                      tooltip: "Subscribe") { [weak self] in
+            guard let self, let user = drillInAuthorUsername else { return }
+            appState.toggleAuthorSubscription(user)
+        }
+        authorSubscribeBtn = button
+        let subscribed = appState.isSubscribedToAuthor(username)
+        button.setSymbol(subscribed ? "bell.fill" : "bell")
+        button.tintOverride = subscribed ? theme.nsAccent : nil
+        button.toolTip = subscribed
+            ? "Unsubscribe from \(username) on AO3"
+            : "Subscribe to \(username) on AO3"
+        button.isEnabled = !appState.isUserActionBusy("sub", username)
+        return button
+    }
+
+    /// Person button for the author drill-ins: swaps the reading pane
+    /// between the author's works list (default) and their profile.
+    private func authorProfileButton() -> ToolButton {
+        let button = authorProfileBtn ?? ToolButton(theme: theme, symbol: "person.crop.circle",
+                                                    tooltip: "Show author profile") { [weak self] in
+            self?.model.showingAuthorProfile.toggle()
+        }
+        authorProfileBtn = button
+        button.isOn = model.showingAuthorProfile
+        button.toolTip = model.showingAuthorProfile ? "Show works list" : "Show author profile"
+        return button
+    }
+
+    /// The subscribe/profile buttons for an author drill-in header, in
+    /// trailing-order. Subscribe needs a signed-in AO3 session; the profile
+    /// card is public data and always available.
+    private func authorHeaderButtons(username: String) -> [NSView] {
+        drillInAuthorUsername = username
+        var buttons: [NSView] = []
+        if appState.ao3Username != nil {
+            buttons.append(authorSubscribeButton(username: username))
+        }
+        buttons.append(authorProfileButton())
+        return buttons
+    }
+
     private func fandomCloseButton() -> ToolButton {
         let button = fandomCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
             self?.model.closeFandomWorks()
@@ -335,29 +388,42 @@ final class ReadPaneViewController: NSViewController {
         // Subscriptions drill-in: an author subscription's works, without
         // ever leaving the Subscriptions section.
         if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
-            let sub = model.isLoadingSubscriptionWorks
-                ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
-                : "\(model.filteredSubscriptionWorks.count) works stored"
+            let isAuthor = model.subscriptionWorksSubType == "author"
+            let author = model.subscriptionWorksSubId ?? title
+            let showProfile = isAuthor && model.showingAuthorProfile
+            let sub = showProfile ? "Author profile"
+                : model.isLoadingSubscriptionWorks
+                    ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
+                    : "\(model.filteredSubscriptionWorks.count) works stored"
             toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
-            toolbar.setTrailing([sortFilterMenu.makeButton(for: .subscriptions),
-                                 worksFilterButton(for: .subscriptions),
-                                 refreshWorksButton(forAuthor: false)])
-            show(mode: .subscriptionWorks(title))
+            var trailing: [NSView] = showProfile ? []
+                : [sortFilterMenu.makeButton(for: .subscriptions),
+                   worksFilterButton(for: .subscriptions),
+                   refreshWorksButton(forAuthor: false)]
+            if isAuthor {
+                trailing = authorHeaderButtons(username: author) + trailing
+            }
+            toolbar.setTrailing(trailing)
+            show(mode: showProfile ? .authorProfile(author) : .subscriptionWorks(title))
             return
         }
 
         // Authors drill-in: an author's works shown in the reading pane.
         if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
-            let sub = model.isLoadingAuthor
-                ? (model.authorFetchStatus ?? "Fetching works from AO3…")
-                : "\(model.filteredAuthorWorks.count) works stored"
+            let showProfile = model.showingAuthorProfile
+            let sub = showProfile ? "Author profile"
+                : model.isLoadingAuthor
+                    ? (model.authorFetchStatus ?? "Fetching works from AO3…")
+                    : "\(model.filteredAuthorWorks.count) works stored"
             toolbar.configure(title: author, sub: sub)
             toolbar.setLeading([authorCloseButton()])
-            toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
-                                 worksFilterButton(for: .authors),
-                                 refreshWorksButton(forAuthor: true)])
-            show(mode: .subscriptionWorks(author))
+            toolbar.setTrailing(authorHeaderButtons(username: author)
+                                + (showProfile ? []
+                                   : [sortFilterMenu.makeButton(for: .authors),
+                                      worksFilterButton(for: .authors),
+                                      refreshWorksButton(forAuthor: true)]))
+            show(mode: showProfile ? .authorProfile(author) : .subscriptionWorks(author))
             return
         }
 
@@ -448,6 +514,7 @@ final class ReadPaneViewController: NSViewController {
             detailHost?.removeFromSuperview()
             detailHost = nil
             emptyHost?.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
             if resultsController == nil {
                 let controller = SearchResultsViewController(theme: theme, appState: appState, model: model)
                 addChild(controller)
@@ -455,9 +522,24 @@ final class ReadPaneViewController: NSViewController {
             }
             pin(resultsController!.view)
 
+        case .authorProfile(let username):
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            detailHost?.removeFromSuperview()
+            detailHost = nil
+            emptyHost?.removeFromSuperview()
+            if profileController == nil {
+                let controller = AuthorProfileViewController(theme: theme, appState: appState)
+                addChild(controller)
+                profileController = controller
+            }
+            pin(profileController!.view)
+            profileController!.configure(username: username)
+
         case .empty:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
             detailHost?.removeFromSuperview()
             detailHost = nil
             if emptyHost == nil {
@@ -472,6 +554,7 @@ final class ReadPaneViewController: NSViewController {
         case .detail(let workID):
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
@@ -484,6 +567,7 @@ final class ReadPaneViewController: NSViewController {
             detailHost?.removeFromSuperview()
             detailHost = nil
             resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 pin(readerController.view)
@@ -493,6 +577,7 @@ final class ReadPaneViewController: NSViewController {
         case .inboxThread:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))
