@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// The Search section's middle pane: criteria only. Fields are AO3's own
-/// search form (scraped and stored in the database); results render in the
-/// reading pane with full pagination.
+/// The Search section's full-width criteria form (the list pane is
+/// collapsed while searching). Fields are AO3's own search form (scraped
+/// and stored in the database), laid out to use the width: compact scalar
+/// fields flow into an adaptive multi-column grid, and the chip groups
+/// (ratings, warnings, categories, …) sit side by side beneath them.
 struct SearchFormView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
@@ -52,29 +54,65 @@ struct SearchFormView: View {
                                 .foregroundStyle(theme.ink3)
                         }
                     }
-                    ForEach(search.filterFields, id: \.name) { field in
-                        if let tagType = Self.tagType(for: field.name) {
-                            TagTokenField(theme: theme, appState: appState,
-                                          label: field.label, tagType: tagType,
-                                          value: Binding(
-                                              get: { search.fieldValues[field.name] ?? "" },
-                                              set: { search.fieldValues[field.name] = $0 }))
-                        } else {
-                            switch field.fieldType {
-                            case "select":
-                                selectControl(field)
-                            case "checkboxes":
-                                checkboxControl(field)
-                            case "radio":
-                                radioControl(field)
-                            default:
-                                textControl(field)
+                    let scalarFields = search.filterFields.filter { !Self.isChipGroup($0) }
+                    let chipGroups = search.filterFields.filter { Self.isChipGroup($0) }
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 250, maximum: 420),
+                                           spacing: 18, alignment: .topLeading)],
+                        alignment: .leading, spacing: 14
+                    ) {
+                        ForEach(scalarFields, id: \.name) { field in
+                            fieldControl(field)
+                        }
+                    }
+
+                    if !chipGroups.isEmpty {
+                        Divider().padding(.vertical, 4)
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 280, maximum: 520),
+                                               spacing: 18, alignment: .topLeading)],
+                            alignment: .leading, spacing: 20
+                        ) {
+                            ForEach(chipGroups, id: \.name) { field in
+                                fieldControl(field)
                             }
                         }
                     }
                 }
             }
-            .padding(16)
+            .padding(20)
+        }
+    }
+
+    /// Chip-cloud groups get their own grid — they're tall and variable,
+    /// and mixing them with 30-pt scalar controls leaves ragged holes.
+    /// Radio groups (Completion status, Crossovers) render as dropdowns,
+    /// so they live with the scalars.
+    private static func isChipGroup(_ field: UFormField) -> Bool {
+        field.fieldType == "checkboxes"
+    }
+
+    @ViewBuilder
+    private func fieldControl(_ field: UFormField) -> some View {
+        @Bindable var search = model.search
+        if let tagType = Self.tagType(for: field.name) {
+            TagTokenField(theme: theme, appState: appState,
+                          label: field.label, tagType: tagType,
+                          value: Binding(
+                              get: { search.fieldValues[field.name] ?? "" },
+                              set: { search.fieldValues[field.name] = $0 }))
+        } else {
+            switch field.fieldType {
+            case "select":
+                selectControl(field)
+            case "checkboxes":
+                checkboxControl(field)
+            case "radio":
+                radioControl(field)
+            default:
+                textControl(field)
+            }
         }
     }
 
@@ -134,42 +172,35 @@ struct SearchFormView: View {
     private func selectControl(_ field: UFormField) -> some View {
         @Bindable var search = model.search
         let current = search.fieldValues[field.name] ?? ""
-        let currentLabel = Self.optionTitle(
-            field.options.first { $0.value == current }?.label
-                ?? field.options.first?.label ?? "")
         return VStack(alignment: .leading, spacing: 5) {
             fieldLabel(field)
-            Menu {
-                ForEach(field.options, id: \.value) { option in
-                    Button(Self.optionTitle(option.label)) {
-                        search.fieldValues[field.name] = option.value
-                    }
-                }
-            } label: {
-                HStack {
-                    Text(currentLabel)
-                        .font(Font(MacFont.ui(12.5, weight: .medium)))
-                        .foregroundStyle(theme.ink)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(theme.ink3)
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 30)
-                .frame(maxWidth: .infinity)
-                .background(theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+            dropdownMenu(field, current: current) {
+                search.fieldValues[field.name] = $0
             }
-            .menuStyle(.borderlessButton)
         }
     }
 
+    /// A themed control with NSPopUpButton's visual grammar: the value on
+    /// a bordered field, chevrons on an accent thumb tab at the right edge.
+    /// Clicking anywhere on the control pops a real NSMenu (native
+    /// checkmarks, keyboard navigation, scrolling for long lists).
+    private func dropdownMenu(_ field: UFormField, current: String,
+                              onPick: @escaping (String) -> Void) -> some View {
+        DropdownControl(
+            theme: theme,
+            title: Self.optionTitle(
+                field.options.first { $0.value == current }?.label
+                    ?? field.options.first?.label ?? ""),
+            options: field.options.map {
+                (label: Self.optionTitle($0.label), value: $0.value, checked: $0.value == current)
+            },
+            onPick: onPick)
+    }
+
     /// AO3 radio groups (Completion status, Crossovers): exactly one choice
-    /// active at a time, rendered as wrapping chips. The scraped `selected`
-    /// flag supplies the default (AO3 pre-checks the no-filter option), so
-    /// the control always shows a state even before the user touches it.
+    /// active at a time, rendered as a dropdown like the selects. The
+    /// scraped `selected` flag supplies the default (AO3 pre-checks the
+    /// no-filter option), so the control always shows a value.
     private func radioControl(_ field: UFormField) -> some View {
         @Bindable var search = model.search
         let defaultValue = field.options.first { $0.selected }?.value
@@ -177,22 +208,8 @@ struct SearchFormView: View {
         let current = search.fieldValues[field.name] ?? defaultValue
         return VStack(alignment: .leading, spacing: 5) {
             fieldLabel(field)
-            FlowLayout(spacing: 6) {
-                ForEach(field.options, id: \.value) { option in
-                    let on = current == option.value
-                    Button {
-                        search.fieldValues[field.name] = option.value
-                    } label: {
-                        Text(Self.optionTitle(option.label))
-                            .font(Font(MacFont.ui(11.5, weight: .semibold)))
-                            .foregroundStyle(on ? theme.onAccent : theme.ink2)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 4)
-                            .background(on ? theme.accent : theme.surface2)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
+            dropdownMenu(field, current: current) {
+                search.fieldValues[field.name] = $0
             }
         }
     }
@@ -243,4 +260,89 @@ struct SearchFormView: View {
                 .onSubmit { search.performSearch(appState) }
         }
     }
+}
+
+/// Themed dropdown: a plain SwiftUI Button (whole control is clickable,
+/// custom chrome survives) that pops a native NSMenu anchored to itself.
+private struct DropdownControl: View {
+    @Bindable var theme: AppTheme
+    let title: String
+    let options: [(label: String, value: String, checked: Bool)]
+    let onPick: (String) -> Void
+
+    @State private var anchorView: NSView?
+    @State private var picker = MenuPicker()
+
+    var body: some View {
+        Button {
+            presentMenu()
+        } label: {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(Font(MacFont.ui(12.5, weight: .medium)))
+                    .foregroundStyle(theme.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(theme.accent)
+                    .frame(width: 20, height: 20)
+                    .overlay(
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(theme.onAccent)
+                    )
+            }
+            .padding(.leading, 10)
+            .padding(.trailing, 5)
+            .frame(height: 30)
+            .frame(maxWidth: .infinity)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .background(AnchorCapture(view: $anchorView))
+    }
+
+    private func presentMenu() {
+        guard let anchor = anchorView else { return }
+        picker.onPick = onPick
+        let menu = NSMenu()
+        var selectedItem: NSMenuItem?
+        for option in options {
+            let item = NSMenuItem(title: option.label,
+                                  action: #selector(MenuPicker.pick(_:)),
+                                  keyEquivalent: "")
+            item.target = picker
+            item.representedObject = option.value
+            item.state = option.checked ? .on : .off
+            if option.checked { selectedItem = item }
+            menu.addItem(item)
+        }
+        menu.minimumWidth = anchor.bounds.width
+        // NSPopUpButton behavior: open with the current selection over the control.
+        menu.popUp(positioning: selectedItem ?? menu.items.first,
+                   at: NSPoint(x: 0, y: anchor.bounds.maxY),
+                   in: anchor)
+    }
+}
+
+/// Retained menu target — NSMenuItem targets are weak.
+private final class MenuPicker: NSObject {
+    var onPick: ((String) -> Void)?
+    @objc func pick(_ sender: NSMenuItem) {
+        onPick?(sender.representedObject as? String ?? "")
+    }
+}
+
+/// Grabs the backing NSView so the menu can anchor to the control's frame.
+private struct AnchorCapture: NSViewRepresentable {
+    @Binding var view: NSView?
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { view = v }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

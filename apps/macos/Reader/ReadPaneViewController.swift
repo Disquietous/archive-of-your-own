@@ -32,7 +32,7 @@ final class ReadPaneViewController: NSViewController {
     private var settingsPopover: NSPopover?
 
     private enum Mode: Equatable {
-        case empty, searchResults, subscriptionWorks(String), authorProfile(String),
+        case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
              detail(String), reading(String, Int), inboxThread(UInt64)
     }
 
@@ -320,6 +320,75 @@ final class ReadPaneViewController: NSViewController {
         return buttons
     }
 
+    // MARK: - Search pane buttons (the list pane is collapsed in Search,
+    // so the form's actions live in this pane's header)
+
+    private var searchBackBtn: ToolButton?
+    private var searchGoBtn: ToolButton?
+    private var reloadCriteriaBtn: ToolButton?
+    private var searchEyeBtn: ToolButton?
+
+    private func searchFormBackButton() -> ToolButton {
+        let button = searchBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left",
+                                                 tooltip: "Back to search criteria") { [weak self] in
+            self?.model.search.showingResults = false
+        }
+        searchBackBtn = button
+        return button
+    }
+
+    private func searchGoButton() -> ToolButton {
+        let button = searchGoBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass",
+                                               tooltip: "Search") { [weak self] in
+            guard let self else { return }
+            model.search.performSearch(appState)
+        }
+        searchGoBtn = button
+        button.isOn = true
+        return button
+    }
+
+    private func saveSearchToolButton() -> ToolButton {
+        ToolButton(theme: theme, symbol: "star", tooltip: "Save this search") { [weak self] in
+            guard let self else { return }
+            let alert = NSAlert()
+            alert.messageText = "Save Search"
+            alert.informativeText = "The current criteria will appear under Saved Searches in the sidebar."
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+            field.placeholderString = "Name"
+            field.stringValue = model.search.queryText
+            alert.accessoryView = field
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.initialFirstResponder = field
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            model.search.saveCurrentSearch(named: name, appState: appState)
+        }
+    }
+
+    private func reloadCriteriaButton() -> ToolButton {
+        let button = reloadCriteriaBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                     tooltip: "Reload search criteria from AO3") { [weak self] in
+            guard let self else { return }
+            Task { await self.model.search.scrapeForm(self.appState) }
+        }
+        reloadCriteriaBtn = button
+        return button
+    }
+
+    private func searchEyeButton() -> ToolButton {
+        let eye = searchEyeBtn ?? ToolButton(theme: theme, symbol: "eye",
+                                             tooltip: "Hide explicit") { [weak self] in
+            self?.model.hideExplicit.toggle()
+        }
+        searchEyeBtn = eye
+        eye.isOn = model.hideExplicit
+        eye.setSymbol(model.hideExplicit ? "eye.slash" : "eye")
+        return eye
+    }
+
     private func fandomCloseButton() -> ToolButton {
         let button = fandomCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
             self?.model.closeFandomWorks()
@@ -449,15 +518,26 @@ final class ReadPaneViewController: NSViewController {
             return
         }
 
-        // Search section with no selection: the pane shows paged results.
+        // Search section with no selection: the list pane is collapsed, so
+        // this pane holds the whole flow — the full-width criteria form,
+        // flipping to paged results once a query runs (back button returns).
         if model.section == .search, model.selectedWork == nil {
             let search = model.search
-            toolbar.configure(title: model.searchDisplayTitle ?? "Results",
-                              sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
-            toolbar.setLeading([])
-            toolbar.setTrailing(search.hasSearched
-                ? [makePagerHost(), worksFilterButton(for: .search)] : [])
-            show(mode: .searchResults)
+            if search.showingResults {
+                toolbar.configure(title: model.searchDisplayTitle ?? "Results",
+                                  sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
+                toolbar.setLeading([searchFormBackButton()])
+                toolbar.setTrailing(search.hasSearched
+                    ? [makePagerHost(), worksFilterButton(for: .search)] : [])
+                show(mode: .searchResults)
+            } else {
+                toolbar.configure(title: "Search",
+                                  sub: search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
+                toolbar.setLeading([])
+                toolbar.setTrailing([searchGoButton(), saveSearchToolButton(),
+                                     reloadCriteriaButton(), searchEyeButton()])
+                show(mode: .searchForm)
+            }
             return
         }
 
@@ -521,6 +601,16 @@ final class ReadPaneViewController: NSViewController {
                 resultsController = controller
             }
             pin(resultsController!.view)
+
+        case .searchForm:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(SearchFormView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
 
         case .authorProfile(let username):
             readerController.view.removeFromSuperview()

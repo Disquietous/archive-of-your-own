@@ -128,12 +128,19 @@ final class MacSearchModel {
     /// stale list from the last search. (Pagination within a query keeps the
     /// current page visible instead — only new queries clear.)
     @MainActor
+    /// Search-section pane state: false shows the full-width criteria form
+    /// in the reading pane, true shows the results list. Executing any
+    /// query flips to results; the header's back button returns to the form.
+    var showingResults = false
+
+    @MainActor
     private func beginNewQuery(_ appState: AppState) {
         appState.searchResults = []
         appState.searchError = nil
         appState.isSearching = true
         currentPage = 1
         lastPageCount = 0
+        showingResults = true
     }
 
     @MainActor

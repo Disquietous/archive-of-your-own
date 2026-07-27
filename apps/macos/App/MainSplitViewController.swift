@@ -8,7 +8,8 @@ final class MainSplitViewController: NSSplitViewController {
 
     private var sidebarItem: NSSplitViewItem!
     private var listItem: NSSplitViewItem!
-    private var immersiveApplied = false
+    private var sidebarCollapsedApplied = false
+    private var listCollapsedApplied = false
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -52,18 +53,24 @@ final class MainSplitViewController: NSSplitViewController {
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             let immersive = self.model.immersive
-            DispatchQueue.main.async { self.applyImmersive(immersive) }
+            // Search spans the reading pane full-width: the middle pane's
+            // form moved there, so the list pane has nothing to show.
+            let hideList = immersive || self.model.section == .search
+            DispatchQueue.main.async {
+                self.applyCollapse(sidebar: immersive, list: hideList)
+            }
         }
     }
 
-    private func applyImmersive(_ immersive: Bool) {
-        guard immersive != immersiveApplied else { return }
-        immersiveApplied = immersive
+    private func applyCollapse(sidebar: Bool, list: Bool) {
+        guard sidebar != sidebarCollapsedApplied || list != listCollapsedApplied else { return }
+        sidebarCollapsedApplied = sidebar
+        listCollapsedApplied = list
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.32
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.2, 1)
-            sidebarItem.animator().isCollapsed = immersive
-            listItem.animator().isCollapsed = immersive
+            sidebarItem.animator().isCollapsed = sidebar
+            listItem.animator().isCollapsed = list
         }
     }
 

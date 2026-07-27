@@ -129,7 +129,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             if !model.search.hasSearched {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
                                                 title: "Search the archive",
-                                                message: "Set your criteria in the middle pane and press Search."))
+                                                message: "Set your criteria and press Search."))
             } else if appState.isSearching && works.isEmpty {
                 overlay = AnyView(LoadingStateMac(theme: theme, message: "Searching the archive…",
                                                   detail: "Requests are rate-limited to be kind to the archive.",
