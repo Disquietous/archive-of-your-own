@@ -173,6 +173,16 @@ final class AppState {
         }
     }
 
+    /// User-initiated circuit rotation. The user only reaches for this when
+    /// the current circuit is presumed dead, so abort the in-flight request
+    /// first — otherwise the rotation queues behind the Rust client lock
+    /// until that request finishes or times out. Automatic rotation paths
+    /// (retry-on-timeout) keep their settle-and-wait behavior.
+    func newCircuitNow() async -> Bool {
+        bridge.cancelRequest()
+        return await bridge.newCircuit()
+    }
+
     func rotateCircuit() async {
         // Coalesce: if a rotation is already running (another request hit the
         // same dead circuit), wait for it instead of rotating again — the
@@ -1144,6 +1154,16 @@ final class AppState {
                     if result.changed {
                         loadNewWorks()
                         reloadCachedWorks()
+                        // work(byID:) consults fetchedWorks before the
+                        // cachedWorks snapshot — a copy viewed earlier this
+                        // session would shadow the freshly saved row, so
+                        // replace any flagged entries from the DB.
+                        for id in newWorkIDs where fetchedWorks[id] != nil {
+                            if let workId = UInt64(id),
+                               let fresh = bridge.getCachedWork(workId) {
+                                fetchedWorks[id] = Self.workFromSummary(fresh)
+                            }
+                        }
                     }
                 }
             }
@@ -1477,6 +1497,7 @@ final class AppState {
     static func encodeWorks(_ works: [Work]) -> String? {
         let arr: [[String: Any]] = works.map { w in
             ["id": w.id, "title": w.title, "author": w.author, "fandom": w.fandom,
+             "fandoms": w.fandoms,
              "rating": w.rating.rawValue, "warnings": w.warnings, "tags": w.tags,
              "words": w.words, "chapterCount": w.chapterCount, "totalChapters": w.totalChapters,
              "complete": w.complete, "kudos": w.kudos, "hits": w.hits, "bookmarks": w.bookmarks,
@@ -1513,7 +1534,8 @@ final class AppState {
                 published: dict["published"] as? String ?? "",
                 updated: dict["updated"] as? String ?? "",
                 summary: dict["summary"] as? String ?? "",
-                initialProgress: 0, lastChapter: nil, downloaded: false, content: nil
+                initialProgress: 0, lastChapter: nil, downloaded: false, content: nil,
+                fandoms: dict["fandoms"] as? [String] ?? []
             )
         }
         return works.isEmpty ? nil : works

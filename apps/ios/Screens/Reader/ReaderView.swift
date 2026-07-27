@@ -253,7 +253,7 @@ struct ReaderView: View {
                 chapterDivider
             }
 
-            Text("\(work.fandom) · Ch \(index + 1) of \(work.totalChapters)")
+            Text("Ch \(index + 1) of \(work.totalChapters)")
                 .font(Typography.uiCaption())
                 .foregroundStyle(theme.ink3)
                 .textCase(.uppercase)
@@ -349,7 +349,7 @@ struct ReaderView: View {
                         Spacer()
                             .frame(height: chromeVisible ? 80 : 50)
 
-                        Text("\(work.fandom) · Ch \(chapterIndex + 1) of \(work.totalChapters)")
+                        Text("Ch \(chapterIndex + 1) of \(work.totalChapters)")
                             .font(Typography.uiCaption())
                             .foregroundStyle(theme.ink3)
                             .textCase(.uppercase)

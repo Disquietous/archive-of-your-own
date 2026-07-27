@@ -202,7 +202,9 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             overlayHost = host
         }
 
-        let ids = works.map(\.id)
+        // Content-aware signature — data refreshes must repaint rows even
+        // when the id set is unchanged (see ListPaneViewController).
+        let ids = works.map { "\($0.id)|\($0.updated)|\($0.chapterCount)|\($0.words)" }
         if ids != renderedWorkIDs {
             tableView.reloadData()
             tableView.scroll(.zero)

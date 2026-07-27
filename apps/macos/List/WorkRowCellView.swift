@@ -11,7 +11,7 @@ final class WorkRowCellView: NSTableCellView {
     private let theme: AppTheme
     private let selectionBar = NSView()
     private let spine = NSView()
-    private let fandomLabel = NSTextField(labelWithString: "")
+    private let fandomLabel = NSTextField(wrappingLabelWithString: "")
     private let titleLabel = NSTextField(wrappingLabelWithString: "")
     private let authorLabel = NSTextField(labelWithString: "")
     private let summaryLabel = NSTextField(wrappingLabelWithString: "")
@@ -89,7 +89,8 @@ final class WorkRowCellView: NSTableCellView {
         spine.layer?.cornerRadius = 1.5
 
         fandomLabel.font = MacFont.ui(11, weight: .bold)
-        fandomLabel.lineBreakMode = .byTruncatingTail
+        fandomLabel.maximumNumberOfLines = 0
+        fandomLabel.isSelectable = false
         titleLabel.font = MacFont.serif(16, weight: .semibold)
         titleLabel.maximumNumberOfLines = 0
         // Wrapping labels are selectable by default — a selectable title
@@ -136,13 +137,13 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
 
-        let body = NSStackView(views: [fandomLabel, titleLabel, authorLabel, summaryClip, tagsClip, metaLabel, progressTrack])
+        let body = NSStackView(views: [titleLabel, authorLabel, fandomLabel, summaryClip, tagsClip, metaLabel, progressTrack])
         bodyStack = body
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
-        body.setCustomSpacing(2, after: fandomLabel)
-        body.setCustomSpacing(6, after: authorLabel)
+        body.setCustomSpacing(2, after: authorLabel)
+        body.setCustomSpacing(6, after: fandomLabel)
         body.setCustomSpacing(7, after: summaryClip)
         body.setCustomSpacing(7, after: tagsClip)
         body.setCustomSpacing(7, after: metaLabel)
@@ -201,9 +202,7 @@ final class WorkRowCellView: NSTableCellView {
 
             datesTop,
             datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            // The fandom line shares the dates' vertical band — cap it so a
-            // long fandom truncates instead of running under the dates.
-            fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: datesLabel.leadingAnchor, constant: -8),
+            fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
 
             bookmarkButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             bookmarkButton.centerYAnchor.constraint(equalTo: metaLabel.centerYAnchor),
@@ -371,7 +370,9 @@ final class WorkRowCellView: NSTableCellView {
         titleLabel.preferredMaxLayoutWidth = max(60, availableTextWidth - datesReserve)
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
-        fandomLabel.stringValue = work.fandom
+        // One fandom per line, matching the work-details header.
+        fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
+        fandomLabel.stringValue = work.fandomList.joined(separator: "\n")
 
         // Serif title with the rating badge inline after the last word — a
         // non-breaking space keeps the badge from wrapping onto its own line.
@@ -444,7 +445,7 @@ final class WorkRowCellView: NSTableCellView {
     private static func axDescription(for work: Work, progress: Double,
                                       downloaded: Bool, bookmarked: Bool) -> String {
         var parts: [String] = [work.title, "by \(work.author)"]
-        if !work.fandom.isEmpty { parts.append(work.fandom) }
+        if !work.fandomDisplay.isEmpty { parts.append(work.fandomDisplay) }
         parts.append("rated \(work.rating.rawValue)")
         parts.append("\(Fmt.k(work.words)) words")
         parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")

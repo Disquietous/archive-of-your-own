@@ -25,10 +25,6 @@ struct DetailView: View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Text(work.fandom)
-                    .font(Font(MacFont.ui(13, weight: .bold)))
-                    .foregroundStyle(theme.accent)
-                    .padding(.bottom, 10)
                 Text(work.title)
                     .font(Font(MacFont.serif(38, weight: .bold)))
                     .foregroundStyle(theme.ink)
@@ -64,7 +60,15 @@ struct DetailView: View {
                         .clipShape(Capsule())
                     }
                 }
-                .padding(.bottom, 4)
+                .padding(.bottom, 10)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(work.fandomList, id: \.self) { fandom in
+                        Text(fandom)
+                            .font(Font(MacFont.ui(13, weight: .bold)))
+                            .foregroundStyle(theme.accent)
+                    }
+                }
+                .padding(.bottom, 6)
                 if !work.relationship.isEmpty {
                     Text(work.relationship)
                         .font(Font(MacFont.ui(14)))

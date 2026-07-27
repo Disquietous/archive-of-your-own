@@ -295,7 +295,7 @@ final class ReaderViewController: NSViewController {
 
         let totalLabel = work.complete ? String(work.totalChapters) : "?"
         metaLabel.attributedStringValue = NSAttributedString(
-            string: "\(work.fandom) · Chapter \(chapterIndex + 1) of \(totalLabel)".uppercased(),
+            string: "Chapter \(chapterIndex + 1) of \(totalLabel)".uppercased(),
             attributes: [.font: MacFont.ui(12, weight: .semibold), .kern: 0.8, .foregroundColor: theme.nsInk3])
         titleRule.layer?.backgroundColor = theme.nsLine.cgColor
         titleLabel.textColor = theme.nsInk

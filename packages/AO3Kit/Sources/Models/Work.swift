@@ -29,6 +29,18 @@ struct Work: Identifiable, Hashable {
     /// mock/sample initializers don't need to supply it.
     var fandoms: [String] = []
 
+    /// Every fandom on the work — falls back to the single `fandom` for
+    /// works cached before the full list was carried through.
+    var fandomList: [String] {
+        if !fandoms.isEmpty { return fandoms }
+        return fandom.isEmpty ? [] : [fandom]
+    }
+
+    /// All fandoms as one display string ("A · B · C").
+    var fandomDisplay: String {
+        fandomList.joined(separator: " · ")
+    }
+
     var spineColor: Color {
         Fandom.spineColor(for: fandom)
     }

@@ -344,6 +344,10 @@ struct PrivacySheetView: View {
 
             case .connected:
                 Button {
+                    // The current circuit is presumed dead — abort the
+                    // in-flight request so the reconnect isn't stuck
+                    // queued behind it.
+                    state.bridge.cancelRequest()
                     circuitTask = Task { await state.connectTor() }
                 } label: {
                     HStack(spacing: 8) {

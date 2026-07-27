@@ -168,12 +168,6 @@ struct WorkDetailView: View {
 
     private func heroSection(_ work: Work) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(work.fandom)
-                .font(Typography.uiCaption())
-                .foregroundStyle(theme.ink3)
-                .textCase(.uppercase)
-                .tracking(0.5)
-
             Text(work.title)
                 .font(Typography.detailTitle())
                 .foregroundStyle(theme.ink)
@@ -181,6 +175,16 @@ struct WorkDetailView: View {
             Text("by \(work.author)")
                 .font(Typography.uiBody())
                 .foregroundStyle(theme.accent)
+
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(work.fandomList, id: \.self) { fandom in
+                    Text(fandom)
+                        .font(Typography.uiCaption())
+                        .foregroundStyle(theme.ink3)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
+            }
 
             if !work.relationship.isEmpty {
                 Text(work.relationship)
@@ -272,20 +276,22 @@ struct WorkDetailView: View {
 
     private func tagFlow(_ work: Work) -> some View {
         FlowLayout(spacing: 8) {
-            // Fandom tag
-            Button { nav.openTag(work.fandom) } label: {
-                Text(work.fandom)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.accent)
-                    .lineLimit(1)
-                    .padding(.horizontal, 12)
-                    .frame(height: 30)
-                    .background(
-                        RoundedRectangle(cornerRadius: Radius.chip)
-                            .fill(theme.accentSoft)
-                    )
+            // Fandom tags — one chip per fandom, each opening its own tag
+            ForEach(work.fandomList, id: \.self) { fandom in
+                Button { nav.openTag(fandom) } label: {
+                    Text(fandom)
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.accent)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .frame(height: 30)
+                        .background(
+                            RoundedRectangle(cornerRadius: Radius.chip)
+                                .fill(theme.accentSoft)
+                        )
+                }
+                .buttonStyle(ChipPressStyle())
             }
-            .buttonStyle(ChipPressStyle())
 
             ForEach(work.tags, id: \.self) { tag in
                 Button { nav.openTag(tag) } label: {

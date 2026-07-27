@@ -74,7 +74,7 @@ struct WorkCardView: View {
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .leading, spacing: 6) {
                 // Fandom label
-                Text(work.fandom)
+                Text(work.fandomDisplay)
                     .font(.custom("HankenGrotesk", size: 11.5).weight(.semibold))
                     .foregroundStyle(theme.ink3)
                     .textCase(.uppercase)

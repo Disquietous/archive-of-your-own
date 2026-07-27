@@ -729,7 +729,10 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             overlayHost = host
         }
         let sectionChanged = renderedSection != section
-        let ids = works.map(\.id)
+        // Content-aware row signature: a What's-New check or forced refresh
+        // can change a work's dates/counts without changing which rows are
+        // shown — those edits must repaint, not just selection state.
+        let ids = works.map { "\($0.id)|\($0.updated)|\($0.chapterCount)|\($0.words)" }
         if sectionChanged || ids != renderedWorkIDs {
             tableView.reloadData()
         } else {

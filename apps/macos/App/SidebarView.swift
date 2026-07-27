@@ -346,7 +346,7 @@ struct SidebarView: View {
                 if torConnected {
                     requestingNewNodes = true
                     Task { @MainActor in
-                        _ = await appState.bridge.newCircuit()
+                        _ = await appState.newCircuitNow()
                         requestingNewNodes = false
                     }
                 } else {
