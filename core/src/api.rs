@@ -2139,30 +2139,42 @@ impl AO3App {
                 for w in &parsed_works {
                     match s.get_work(w.id) {
                         Ok(Some(old)) => {
-                            // Each differing metric is a qualification on its
-                            // own; log every one that fired so the What's New
+                            // Log every metric that differs so the What's New
                             // decision is auditable after the fact.
+                            let date_changed = old.date_updated != w.date_updated;
+                            let chapters_changed = old.chapter_count != w.chapter_count;
+                            let words_changed = old.word_count != w.word_count;
                             let mut reasons: Vec<String> = Vec::new();
-                            if old.date_updated != w.date_updated {
+                            if date_changed {
                                 reasons.push(format!(
                                     "date_updated '{}' → '{}' (rule: a changed update date means content was posted since we cached it)",
                                     old.date_updated, w.date_updated));
                             }
-                            if old.chapter_count != w.chapter_count {
+                            if chapters_changed {
                                 reasons.push(format!(
                                     "chapter_count {} → {} (rule: AO3 dates are day-granular, so a same-day chapter shows up here, not in the date)",
                                     old.chapter_count, w.chapter_count));
                             }
-                            if old.word_count != w.word_count {
+                            if words_changed {
                                 reasons.push(format!(
                                     "word_count {} → {} (rule: edits that add/remove text without a new chapter still count as an update)",
                                     old.word_count, w.word_count));
                             }
-                            if !reasons.is_empty() {
+                            // A date change alone is NOT sufficient: AO3 has
+                            // been seen shifting update dates without any
+                            // content change (timezone drift on the site's
+                            // side). It must be corroborated by at least one
+                            // content metric; chapter/word changes remain
+                            // sufficient on their own.
+                            if chapters_changed || words_changed {
                                 log_info!("whats_new",
                                     "Flagged work {} '{}' from {} subscription '{}': {}",
                                     w.id, w.title, sub_type, sub_name, reasons.join("; "));
                                 updated_ids.push(w.id);
+                            } else if date_changed {
+                                log_info!("whats_new",
+                                    "Suppressed work {} '{}' from {} subscription '{}': {} — no chapter/word change corroborates it (rule: an uncorroborated date change is site-side date drift, not an update; the fresh date is cached so it won't re-trigger)",
+                                    w.id, w.title, sub_type, sub_name, reasons.join("; "));
                             }
                         }
                         Ok(None) => {
