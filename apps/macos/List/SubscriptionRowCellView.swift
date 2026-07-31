@@ -144,3 +144,120 @@ final class SubscriptionRowCellView: NSTableCellView {
         separator.layer?.backgroundColor = theme.nsLine.cgColor
     }
 }
+
+/// One reading list in the Reading Lists section — same visual grammar as the
+/// subscription rows: icon, name over a works-count line, chevron, accent-soft
+/// selection with the 3px bar.
+final class ReadingListRowCellView: NSTableCellView {
+    static let reuseID = NSUserInterfaceItemIdentifier("ReadingListRowCell")
+
+    private let theme: AppTheme
+    private let iconView = NSImageView()
+    private let nameLabel = NSTextField(labelWithString: "")
+    private let countLabel = NSTextField(labelWithString: "")
+    private var textStack: NSStackView!
+    private let chevron = NSImageView()
+    private let separator = NSView()
+    private let selectionBar = NSView()
+    private var stackTop: NSLayoutConstraint!
+
+    private static func verticalPad(for density: Density) -> CGFloat {
+        switch density {
+        case .compact: 8
+        case .regular: 12
+        case .comfy: 17
+        }
+    }
+
+    init(theme: AppTheme) {
+        self.theme = theme
+        super.init(frame: .zero)
+        wantsLayer = true
+
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.image = NSImage(systemSymbolName: "books.vertical",
+                                 accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.maximumNumberOfLines = 1
+        countLabel.lineBreakMode = .byTruncatingTail
+
+        chevron.image = NSImage(systemSymbolName: "chevron.right",
+                                accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+
+        separator.wantsLayer = true
+        selectionBar.wantsLayer = true
+
+        textStack = NSStackView(views: [nameLabel, countLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+
+        for v in [selectionBar, iconView, textStack!, chevron, separator] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+
+        stackTop = textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 10)
+
+        NSLayoutConstraint.activate([
+            selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            selectionBar.topAnchor.constraint(equalTo: topAnchor),
+            selectionBar.bottomAnchor.constraint(equalTo: bottomAnchor),
+            selectionBar.widthAnchor.constraint(equalToConstant: 3),
+
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+
+            textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
+            stackTop,
+
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 10),
+
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+        ])
+
+        applyTheme()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func configure(name: String, workCount: Int, isActive: Bool) {
+        nameLabel.font = MacFont.ui(14, weight: .semibold)
+        countLabel.font = MacFont.ui(12)
+        stackTop.constant = Self.verticalPad(for: theme.density)
+        nameLabel.stringValue = name
+        countLabel.stringValue = workCount == 1 ? "1 work" : "\(workCount) works"
+        setActive(isActive)
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel("\(name), reading list, \(workCount) works")
+    }
+
+    func setActive(_ active: Bool) {
+        layer?.backgroundColor = active ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
+        selectionBar.layer?.backgroundColor = active ? theme.nsAccent.cgColor : NSColor.clear.cgColor
+        nameLabel.textColor = theme.nsInk
+    }
+
+    func applyTheme() {
+        countLabel.textColor = theme.nsInk3
+        iconView.contentTintColor = theme.nsAccent
+        chevron.contentTintColor = theme.nsInk3
+        separator.layer?.backgroundColor = theme.nsLine.cgColor
+    }
+}

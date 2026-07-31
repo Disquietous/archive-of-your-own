@@ -369,6 +369,57 @@ pub fn extract_user_icon_url(html: &str) -> Option<String> {
     None
 }
 
+/// Total number of works a listing page claims to contain, independent of
+/// pagination. Author works listings carry it in the page heading
+/// ("1 - 20 of 123 Works by X", or "5 Works by X" when unpaginated);
+/// series pages carry it in the stats block ("Works: 12"). None when no
+/// count is present — callers must treat that as "unknown", never zero.
+pub fn parse_listing_works_total(html: &str) -> Option<u32> {
+    let doc = Html::parse_document(html);
+    let heading = sel("h2.heading");
+    for el in doc.select(&heading) {
+        if let Some(n) = works_total_from_heading(&text(&el)) {
+            return Some(n);
+        }
+    }
+    let series_stat = sel("dd.works");
+    for el in doc.select(&series_stat) {
+        let t = text(&el).trim().replace(',', "");
+        if let Ok(n) = t.parse::<u32>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// "1 - 20 of 123 Works by X" → 123; "5 Works by X" → 5. The token right
+/// before "Works" is the total in both shapes.
+fn works_total_from_heading(heading: &str) -> Option<u32> {
+    let t = heading.replace(',', "").replace('\u{a0}', " ");
+    let idx = t.find(" Works")?;
+    t[..idx].split_whitespace().last()?.parse::<u32>().ok()
+}
+
+/// Total result count of a search/tag results page. Search results carry
+/// "834 Found" in an h3 heading; tag works listings carry the
+/// "1 - 20 of 834 Works in …" h2 shape. None when neither is present.
+pub fn parse_results_total(html: &str) -> Option<u32> {
+    let doc = Html::parse_document(html);
+    let h3 = sel("h3.heading");
+    for el in doc.select(&h3) {
+        let t = text(&el).replace(',', "");
+        let mut tokens = t.split_whitespace();
+        if let (Some(n), Some(word)) = (tokens.next(), tokens.next()) {
+            if word.eq_ignore_ascii_case("found") {
+                if let Ok(count) = n.parse::<u32>() {
+                    return Some(count);
+                }
+            }
+        }
+    }
+    parse_listing_works_total(html)
+}
+
 /// Check whether the HTML page has a "next" pagination link.
 pub fn has_next_page(html: &str) -> bool {
     let doc = Html::parse_document(html);
@@ -1586,6 +1637,37 @@ fn parse_comment_pagination(doc: &Html, pagination_sel: &Selector) -> (u32, u32)
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_parse_listing_works_total() {
+        // Paginated author listing heading.
+        let ranged = r#"<div id="main"><h2 class="heading">1 - 20 of 1,234 Works by someauthor</h2></div>"#;
+        assert_eq!(parse_listing_works_total(ranged), Some(1234));
+        // Unpaginated author listing heading.
+        let single = r#"<div id="main"><h2 class="heading">5 Works by someauthor</h2></div>"#;
+        assert_eq!(parse_listing_works_total(single), Some(5));
+        // Series stats block.
+        let series = r#"<dl class="series meta group"><dt>Works:</dt><dd class="works">12</dd></dl>"#;
+        assert_eq!(parse_listing_works_total(series), Some(12));
+        // No count anywhere — unknown, never zero.
+        let none = r#"<div id="main"><h2 class="heading">Works</h2></div>"#;
+        assert_eq!(parse_listing_works_total(none), None);
+    }
+
+    #[test]
+    fn test_parse_results_total() {
+        // Search results heading.
+        let search = r#"<div id="main"><h3 class="heading">1,234 Found</h3></div>"#;
+        assert_eq!(parse_results_total(search), Some(1234));
+        // Real fixture carries "3 Found".
+        let html = fs::read_to_string("tests/fixtures/search_results.html").unwrap();
+        assert_eq!(parse_results_total(&html), Some(3));
+        // Tag listing shape falls through to the works-heading parser.
+        let tag = r#"<div id="main"><h2 class="heading">1 - 20 of 567 Works in Some Tag</h2></div>"#;
+        assert_eq!(parse_results_total(tag), Some(567));
+        // Nothing recognizable → unknown, never zero.
+        assert_eq!(parse_results_total("<p>hi</p>"), None);
+    }
 
     #[test]
     fn test_parse_search_results() {

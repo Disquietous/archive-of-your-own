@@ -9,8 +9,6 @@ final class MacSearchModel {
     /// Stable session key so the form survives launches in the DB cache table.
     private static let dbSessionID = "persistent"
     private static let dbFormKey = "searchFormFields"
-    /// AO3's search page size — a short page means we're on the last one.
-    private static let pageSize = 20
 
     var formFields: [UFormField] = []
     var fieldValues: [String: String] = [:]
@@ -28,8 +26,24 @@ final class MacSearchModel {
 
     var activeQuery: ActiveQuery?
     var currentPage: UInt32 = 1
-    var lastPageCount = 0
-    var hasNextPage: Bool { lastPageCount >= Self.pageSize }
+    /// From the results page's own pagination — a page-size heuristic showed
+    /// a false next arrow whenever a final page held exactly 20 works.
+    var hasNextPage = false
+    /// Total pages per the results pagination bar (1 when unpaginated).
+    var totalPages: UInt32 = 1
+    /// The results page's own count ("834 Found"); nil when absent.
+    var totalWorks: UInt32?
+
+    /// Toolbar subtitle for a results page: "Page 3 of 42 · 834 works",
+    /// degrading gracefully when parts are unknown.
+    var resultsSubtitle: String? {
+        guard hasSearched else { return nil }
+        var line = totalPages > 1 ? "Page \(currentPage) of \(totalPages)" : "Page \(currentPage)"
+        if let total = totalWorks {
+            line += total == 1 ? " · 1 work" : " · \(total) works"
+        }
+        return line
+    }
 
     var primaryField: UFormField? {
         formFields.first { $0.fieldType == "text" && $0.name.contains("[query]") }
@@ -52,8 +66,20 @@ final class MacSearchModel {
         queryText = text
     }
 
+    /// The auto-applied device-language default (field name → value). Not a
+    /// user choice, so it must not count as an "active filter" — counting it
+    /// made the badge read "1 filters active" on a pristine form, and Clear
+    /// (which re-applies the default) could never bring it to zero.
+    private var defaultLanguage: (field: String, value: String)?
+
     var activeFilterCount: Int {
-        let fields = fieldValues.filter { $0.key != primaryField?.name && !$0.value.isEmpty }.count
+        let fields = fieldValues.filter { key, value in
+            guard key != primaryField?.name, !value.isEmpty else { return false }
+            if let defaultLanguage, key == defaultLanguage.field, value == defaultLanguage.value {
+                return false
+            }
+            return true
+        }.count
         let checkboxes = checkboxValues.reduce(0) { $0 + $1.value.count }
         return fields + checkboxes
     }
@@ -91,6 +117,7 @@ final class MacSearchModel {
         let values = Set(field.options.map(\.value).filter { !$0.isEmpty })
         if let match = candidates.first(where: { values.contains($0) }) {
             fieldValues[field.name] = match
+            defaultLanguage = (field.name, match)
         }
     }
 
@@ -139,7 +166,9 @@ final class MacSearchModel {
         appState.searchError = nil
         appState.isSearching = true
         currentPage = 1
-        lastPageCount = 0
+        hasNextPage = false
+        totalPages = 1
+        totalWorks = nil
         showingResults = true
     }
 
@@ -182,17 +211,19 @@ final class MacSearchModel {
         appState.isSearching = true
         appState.searchError = nil
         do {
-            let summaries = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+            let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
                 switch query {
                 case .form(let keys, let values):
-                    return try await appState.bridge.searchWorksRaw(keys: keys, values: values, page: page)
+                    return try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page)
                 case .tag(let tag):
-                    return try await appState.bridge.searchByTag(tag, page: page)
+                    return try await appState.bridge.searchByTagPaged(tag, page: page)
                 }
             }
-            appState.searchResults = summaries.map(AppState.workFromSummary)
+            appState.searchResults = result.works.map(AppState.workFromSummary)
             currentPage = page
-            lastPageCount = summaries.count
+            hasNextPage = result.hasNextPage
+            totalPages = max(result.totalPages, page)
+            totalWorks = result.totalWorks
             // Results are persisted by the Rust layer as they're fetched —
             // refresh the library snapshot so they join local lists at once.
             appState.reloadCachedWorks()
@@ -247,6 +278,25 @@ final class MacSearchModel {
     func deleteSavedSearch(_ id: Int64, appState: AppState) {
         appState.bridge.deleteSavedSearch(id)
         loadSavedSearches(appState)
+    }
+
+    /// One-line criteria summary for a saved-search row: the query text plus
+    /// how many other criteria are set — so same-named searches are tellable
+    /// apart without running them.
+    static func summary(of saved: USavedSearch) -> String? {
+        guard let data = saved.paramsJson.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let fields = payload["fieldValues"] as? [String: String] ?? [:]
+        let boxes = payload["checkboxValues"] as? [String: [String]] ?? [:]
+        let query = fields.first { $0.key.hasSuffix("[query]") && !$0.value.isEmpty }?.value
+        let filterCount = fields.filter { !$0.key.hasSuffix("[query]") && !$0.value.isEmpty }.count
+            + boxes.reduce(0) { $0 + $1.value.count }
+        var parts: [String] = []
+        if let query { parts.append("“\(query)”") }
+        if filterCount > 0 {
+            parts.append(filterCount == 1 ? "1 filter" : "\(filterCount) filters")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: - Form JSON (same shape the iOS cache uses)

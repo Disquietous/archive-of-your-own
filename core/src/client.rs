@@ -331,7 +331,9 @@ impl AO3Client {
     }
 
     /// Search works with raw query string parameters.
-    pub async fn search_works_raw(&self, query_pairs: &[(String, String)], page: u32) -> Result<Vec<WorkSummary>, AppError> {
+    /// Returns (works, has_next_page, total_pages, total_works) — pagination
+    /// read from the results page itself, not inferred from the page size.
+    pub async fn search_works_raw(&self, query_pairs: &[(String, String)], page: u32) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
         let mut parts: Vec<String> = vec![format!("page={page}"), "commit=Search".to_string()];
         for (key, value) in query_pairs {
             if !value.is_empty() {
@@ -341,7 +343,9 @@ impl AO3Client {
         }
         let url = format!("{BASE_URL}/works/search?{}", parts.join("&"));
         let html = self.fetch(&url).await?;
-        parser::parse_work_listings(&html)
+        let works = parser::parse_work_listings(&html)?;
+        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
+            parser::parse_results_total(&html)))
     }
 
     /// Search works using AO3's search engine (/works/search).
@@ -415,11 +419,15 @@ impl AO3Client {
     }
 
     /// Browse works by tag (returns one page from /tags/{tag}/works).
-    pub async fn search_by_tag(&self, tag: &str, page: u32) -> Result<Vec<WorkSummary>, AppError> {
+    /// Returns (works, has_next_page, total_pages, total_works), as
+    /// search_works_raw.
+    pub async fn search_by_tag(&self, tag: &str, page: u32) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
         let encoded_tag = ao3_tag_encode(tag);
         let url = format!("{BASE_URL}/tags/{encoded_tag}/works?page={page}");
         let html = self.fetch(&url).await?;
-        parser::parse_work_listings(&html)
+        let works = parser::parse_work_listings(&html)?;
+        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
+            parser::parse_results_total(&html)))
     }
 
     /// Fetch a single work's metadata and all its chapters.

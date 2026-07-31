@@ -49,9 +49,15 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     private var isShowingSubscriptionList: Bool {
         model.section == .subscriptions
     }
+    private var isShowingReadingLists: Bool {
+        model.section == .readingLists
+    }
+    private var displayedReadingLists: [UReadingList] = []
+    private var renderedReadingListIDs: [Int64] = []
     /// Measures off-screen rows for heightOfRow.
     private lazy var sizingCell = WorkRowCellView(theme: theme)
     private lazy var subscriptionSizingCell = SubscriptionRowCellView(theme: theme)
+    private lazy var readingListSizingCell = ReadingListRowCellView(theme: theme)
     private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
@@ -199,7 +205,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             works = model.works(for: .browse)
             toolbar.configure(title: "Browse", sub: subtitleForNetworkList(count: works.count, loading: appState.isBrowsing))
             toolbar.setLeading([])
-            toolbar.setTrailing([browseRefreshButton(), worksFilterButton(for: .browse), eyeToggleButton()])
+            toolbar.setTrailing([browseRefreshButton(), sortFilterMenu.makeButton(for: .browse),
+                                 worksFilterButton(for: .browse), eyeToggleButton()])
             showWorksContent(section: section, header: nil,
                              overlay: networkOverlay(loading: appState.isBrowsing,
                                                      loadingMessage: "Fetching latest works…",
@@ -256,6 +263,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                         await self.appState.checkSubscriptions()
                     }
                 })
+                buttons.append(sortFilterMenu.makeButton(for: .whatsNew))
                 buttons.append(worksFilterButton(for: .whatsNew))
                 toolbar.setLeading([])
                 toolbar.setTrailing(buttons)
@@ -329,6 +337,23 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                 }
                 showSubscriptionsContent(section: section, overlay: overlay)
             }
+
+        case .readingLists:
+            displayedReadingLists = appState.readingLists
+            works = []
+            let count = displayedReadingLists.count
+            toolbar.configure(title: "Reading Lists",
+                              sub: count == 1 ? "1 list" : "\(count) lists")
+            toolbar.setLeading([])
+            toolbar.setTrailing([ToolButton(theme: theme, symbol: "plus", tooltip: "New reading list") { [weak self] in
+                self?.createReadingList()
+            }])
+            let overlay: AnyView? = displayedReadingLists.isEmpty
+                ? AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
+                                        title: "No reading lists",
+                                        message: "Create a list here, or right-click any work and choose Add to Reading List."))
+                : nil
+            showReadingListsContent(section: section, overlay: overlay)
 
         case .inbox:
             let sub: String
@@ -443,10 +468,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     private func sectionMeta(for section: MacAppModel.Section) -> (title: String, sub: String, empty: (String, String, String)) {
-        if section == .bookmarks, let listID = model.selectedReadingListID,
-           let list = appState.readingLists.first(where: { $0.id == listID }) {
-            return (list.name, "Reading list", ("bookmark", "Empty list", "Add works to this list from a work's details."))
-        }
         switch section {
         case .reading: return ("Currently Reading", "In progress", ("book", "Nothing in progress", "Open a work to begin reading."))
         case .history: return ("History", "Recently read", ("clock", "No history yet", "Works you read appear here."))
@@ -823,6 +844,81 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         tableView.deselectAll(nil)
     }
 
+    /// Reading-list rows in the shared table — the same shape as
+    /// showSubscriptionsContent: reload when the row set changes, otherwise
+    /// reconfigure visible cells in place so the active highlight moves.
+    private func showReadingListsContent(section: MacAppModel.Section, overlay: AnyView?) {
+        variantHost?.removeFromSuperview()
+        variantHost = nil
+        chipsHost?.removeFromSuperview()
+
+        if scrollView.superview == nil {
+            contentStack.addArrangedSubview(scrollView)
+            scrollView.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+        }
+
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
+        if let overlay {
+            let host = NSHostingView(rootView: overlay)
+            host.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+                host.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+                host.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor),
+            ])
+            overlayHost = host
+        }
+
+        // Read on every render path so the relay tracks selection changes
+        // (see showSubscriptionsContent).
+        let activeID = model.selectedReadingListID
+
+        let sectionChanged = renderedSection != section
+        let ids = displayedReadingLists.map(\.id)
+        if sectionChanged || ids != renderedReadingListIDs {
+            tableView.reloadData()
+        } else {
+            tableView.enumerateAvailableRowViews { [weak self] _, row in
+                guard let self, row < displayedReadingLists.count,
+                      let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? ReadingListRowCellView
+                else { return }
+                let list = displayedReadingLists[row]
+                cell.configure(name: list.name,
+                               workCount: appState.worksInReadingList(list.id).count,
+                               isActive: activeID == list.id)
+            }
+        }
+        renderedReadingListIDs = ids
+        renderedWorkIDs = []
+        renderedSubscriptionIDs = []
+        if sectionChanged {
+            tableView.scroll(.zero)
+        }
+        tableView.deselectAll(nil)
+    }
+
+    /// "+" toolbar action: name a new list, then open it.
+    private func createReadingList() {
+        let alert = NSAlert()
+        alert.messageText = "New Reading List"
+        alert.informativeText = "Add works to it from any work's right-click menu."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let listId = appState.createReadingList(name)
+        if listId >= 0 {
+            model.goReadingList(listId)
+        }
+    }
+
     private func showVariant(_ content: some View, section: MacAppModel.Section) {
         chipsHost?.removeFromSuperview()
         scrollView.removeFromSuperview()
@@ -843,10 +939,27 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: - Table
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        isShowingSubscriptionList ? displayedSubscriptions.count : works.count
+        if isShowingSubscriptionList { return displayedSubscriptions.count }
+        if isShowingReadingLists { return displayedReadingLists.count }
+        return works.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if isShowingReadingLists {
+            guard row < displayedReadingLists.count else { return nil }
+            let cell: ReadingListRowCellView
+            if let reused = tableView.makeView(withIdentifier: ReadingListRowCellView.reuseID, owner: self) as? ReadingListRowCellView {
+                cell = reused
+            } else {
+                cell = ReadingListRowCellView(theme: theme)
+                cell.identifier = ReadingListRowCellView.reuseID
+            }
+            let list = displayedReadingLists[row]
+            cell.configure(name: list.name,
+                           workCount: appState.worksInReadingList(list.id).count,
+                           isActive: model.selectedReadingListID == list.id)
+            return cell
+        }
         if isShowingSubscriptionList {
             guard row < displayedSubscriptions.count else { return nil }
             let cell: SubscriptionRowCellView
@@ -952,6 +1065,12 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
                                              isLoading: false, isActive: false)
             return max(44, subscriptionSizingCell.fittingSize.height)
         }
+        if isShowingReadingLists {
+            guard row < displayedReadingLists.count else { return 52 }
+            let list = displayedReadingLists[row]
+            readingListSizingCell.configure(name: list.name, workCount: 0, isActive: false)
+            return max(44, readingListSizingCell.fittingSize.height)
+        }
         guard row < works.count else { return 52 }
         // Always measure via the sizing cell — querying live row views from
         // inside heightOfRow is illegal reentrancy (AppKit throws while the
@@ -988,6 +1107,13 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             return
         }
 
+        if isShowingReadingLists {
+            guard row < displayedReadingLists.count else { return }
+            model.goReadingList(displayedReadingLists[row].id)
+            tableView.deselectAll(nil)
+            return
+        }
+
         guard row < works.count else { return }
         let id = works[row].id
         if model.selectedWorkID != id {
@@ -998,6 +1124,13 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     @objc private func rowClicked() {
         guard !isShowingSubscriptionList else { return }
         let row = tableView.clickedRow
+        if isShowingReadingLists {
+            // Re-click on the already-open list (no selection change) must
+            // still restore the drill-in over a detail/reader view.
+            guard row >= 0, row < displayedReadingLists.count else { return }
+            model.goReadingList(displayedReadingLists[row].id)
+            return
+        }
         guard row >= 0, row < works.count else { return }
         let id = works[row].id
         // selectionDidChange already handled a changed selection; this covers
@@ -1063,6 +1196,15 @@ extension ListPaneViewController: NSMenuDelegate {
             return
         }
 
+        if isShowingReadingLists {
+            guard row < displayedReadingLists.count else { return }
+            menu.addItem(menuItem("Show Works", #selector(menuShowReadingList(_:)), row))
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Rename…", #selector(menuRenameReadingList(_:)), row))
+            menu.addItem(menuItem("Delete Reading List", #selector(menuDeleteReadingList(_:)), row))
+            return
+        }
+
         guard row < works.count else { return }
         let work = works[row]
         let started = (appState.progressMap[work.id]?.chapter ?? 0) > 0
@@ -1084,6 +1226,9 @@ extension ListPaneViewController: NSMenuDelegate {
         if appState.downloadedWorkIDs.contains(work.id) {
             menu.addItem(menuItem("Export as EPUB…", #selector(menuExportEpub(_:)), row))
         }
+        if UInt64(work.id) != nil {
+            menu.addItem(readingListMenuItem(for: work, row: row))
+        }
 
         // Section-specific destructive action (the swipe action's menu twin).
         switch model.section {
@@ -1096,6 +1241,27 @@ extension ListPaneViewController: NSMenuDelegate {
         default:
             break
         }
+    }
+
+    /// "Add to Reading List" ▸ every list with a membership checkmark
+    /// (clicking toggles), plus "New Reading List…".
+    private func readingListMenuItem(for work: Work, row: Int) -> NSMenuItem {
+        let parent = NSMenuItem(title: "Add to Reading List", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let workId = UInt64(work.id)
+        for list in appState.readingLists {
+            let member = workId.map { appState.bridge.getReadingListItems(list.id).contains($0) } ?? false
+            let item = menuItem(list.name, #selector(menuToggleReadingList(_:)), row)
+            item.representedObject = NSNumber(value: list.id)
+            item.state = member ? .on : .off
+            submenu.addItem(item)
+        }
+        if !appState.readingLists.isEmpty {
+            submenu.addItem(.separator())
+        }
+        submenu.addItem(menuItem("New Reading List…", #selector(menuAddToNewReadingList(_:)), row))
+        parent.submenu = submenu
+        return parent
     }
 
     private func menuItem(_ title: String, _ action: Selector, _ row: Int) -> NSMenuItem {
@@ -1162,6 +1328,74 @@ extension ListPaneViewController: NSMenuDelegate {
     @objc private func menuRemoveFromNew(_ sender: NSMenuItem) {
         guard let work = clickedWork(sender) else { return }
         appState.removeNewWork(work.id)
+    }
+
+    @objc private func menuToggleReadingList(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender),
+              let listId = (sender.representedObject as? NSNumber)?.int64Value else { return }
+        if sender.state == .on {
+            appState.removeFromReadingList(listId, workId: work.id)
+        } else {
+            appState.addToReadingList(listId, workId: work.id)
+        }
+    }
+
+    @objc private func menuAddToNewReadingList(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        let alert = NSAlert()
+        alert.messageText = "New Reading List"
+        alert.informativeText = "“\(work.title)” will be added to the new list."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let listId = appState.createReadingList(name)
+        if listId >= 0 {
+            appState.addToReadingList(listId, workId: work.id)
+        }
+    }
+
+    @objc private func menuShowReadingList(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < displayedReadingLists.count else { return }
+        model.goReadingList(displayedReadingLists[sender.tag].id)
+    }
+
+    @objc private func menuRenameReadingList(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < displayedReadingLists.count else { return }
+        let list = displayedReadingLists[sender.tag]
+        let alert = NSAlert()
+        alert.messageText = "Rename Reading List"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = list.name
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        appState.renameReadingList(list.id, name: name)
+    }
+
+    @objc private func menuDeleteReadingList(_ sender: NSMenuItem) {
+        guard sender.tag >= 0, sender.tag < displayedReadingLists.count else { return }
+        let list = displayedReadingLists[sender.tag]
+        let alert = NSAlert()
+        alert.messageText = "Delete “\(list.name)”?"
+        alert.informativeText = "The list is removed. The works themselves stay in your library."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if model.selectedReadingListID == list.id {
+            model.closeReadingList()
+        }
+        appState.deleteReadingList(list.id)
     }
 
     @objc private func menuShowSubscriptionWorks(_ sender: NSMenuItem) {

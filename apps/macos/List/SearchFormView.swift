@@ -44,7 +44,9 @@ struct SearchFormView: View {
                 } else {
                     if search.activeFilterCount > 0 {
                         HStack {
-                            Text("\(search.activeFilterCount) filters active")
+                            Text(search.activeFilterCount == 1
+                                 ? "1 filter active"
+                                 : "\(search.activeFilterCount) filters active")
                                 .font(Font(MacFont.ui(11.5, weight: .semibold)))
                                 .foregroundStyle(theme.accent)
                             Spacer()
@@ -244,8 +246,7 @@ struct SearchFormView: View {
         @Bindable var search = model.search
         return VStack(alignment: .leading, spacing: 5) {
             fieldLabel(field)
-            TextField(field.placeholder.isEmpty ? field.label : field.placeholder,
-                      text: Binding(
+            TextField(Self.placeholderHint(for: field), text: Binding(
                         get: { search.fieldValues[field.name] ?? "" },
                         set: { search.fieldValues[field.name] = $0 }
                       ))
@@ -258,7 +259,35 @@ struct SearchFormView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
                 .onSubmit { search.performSearch(appState) }
+                .help(Self.rangeHelp(for: field) ?? field.label)
         }
+    }
+
+    /// AO3's stat fields silently accept range syntax; the scraped form
+    /// carries no placeholders, so surface the syntax here.
+    private static let rangeFieldSuffixes = [
+        "[word_count]", "[hits]", "[kudos_count]", "[comments_count]", "[bookmarks_count]",
+    ]
+
+    private static func placeholderHint(for field: UFormField) -> String {
+        if !field.placeholder.isEmpty { return field.placeholder }
+        if rangeFieldSuffixes.contains(where: { field.name.hasSuffix($0) }) {
+            return ">1000 · <500 · 100-5000"
+        }
+        if field.name.hasSuffix("[revised_at]") {
+            return "e.g. 2024, or < 2 weeks ago"
+        }
+        return field.label
+    }
+
+    private static func rangeHelp(for field: UFormField) -> String? {
+        if rangeFieldSuffixes.contains(where: { field.name.hasSuffix($0) }) {
+            return "Exact number, or a range: >1000 (more than), <500 (fewer than), 100-5000 (between)"
+        }
+        if field.name.hasSuffix("[revised_at]") {
+            return "A date (2024-01), or relative: < 2 weeks ago, > 3 months ago"
+        }
+        return nil
     }
 }
 

@@ -1,8 +1,8 @@
 import AppKit
 
 /// Builds and presents the sort & filter menu shared by every work list —
-/// the middle-pane sections and the reading-pane drill-ins. Sort choice is
-/// per-section; the completion/rating filters are global.
+/// the middle-pane sections and the reading-pane drill-ins. Sort, completion,
+/// and rating choices are all per-section and persisted.
 final class SortFilterMenuController: NSObject {
     private let theme: AppTheme
     private let model: MacAppModel
@@ -47,7 +47,7 @@ final class SortFilterMenuController: NSObject {
             let item = NSMenuItem(title: filter.label, action: #selector(completionChosen(_:)), keyEquivalent: "")
             item.target = self
             item.isEnabled = true
-            item.state = filter == model.completionFilter ? .on : .off
+            item.state = filter == model.completionFilter(for: section) ? .on : .off
             item.representedObject = filter.rawValue
             menu.addItem(item)
         }
@@ -57,13 +57,13 @@ final class SortFilterMenuController: NSObject {
         let anyRating = NSMenuItem(title: "All Ratings", action: #selector(ratingChosen(_:)), keyEquivalent: "")
         anyRating.target = self
         anyRating.isEnabled = true
-        anyRating.state = model.ratingFilter == nil ? .on : .off
+        anyRating.state = model.ratingFilter(for: section) == nil ? .on : .off
         menu.addItem(anyRating)
         for rating in Rating.allCases {
             let item = NSMenuItem(title: rating.rawValue, action: #selector(ratingChosen(_:)), keyEquivalent: "")
             item.target = self
             item.isEnabled = true
-            item.state = model.ratingFilter == rating ? .on : .off
+            item.state = model.ratingFilter(for: section) == rating ? .on : .off
             item.representedObject = rating.rawValue
             menu.addItem(item)
         }
@@ -86,10 +86,10 @@ final class SortFilterMenuController: NSObject {
     @objc private func completionChosen(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let filter = MacAppModel.CompletionFilter(rawValue: raw) else { return }
-        model.completionFilter = filter
+        model.setCompletionFilter(filter, for: section)
     }
 
     @objc private func ratingChosen(_ sender: NSMenuItem) {
-        model.ratingFilter = (sender.representedObject as? String).flatMap(Rating.init(rawValue:))
+        model.setRatingFilter((sender.representedObject as? String).flatMap(Rating.init(rawValue:)), for: section)
     }
 }

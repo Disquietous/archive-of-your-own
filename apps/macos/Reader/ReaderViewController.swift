@@ -163,6 +163,12 @@ final class ReaderViewController: NSViewController {
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
                                                name: NSView.boundsDidChangeNotification,
                                                object: scrollView.contentView)
+        NotificationCenter.default.addObserver(self, selector: #selector(liveScrollBegan),
+                                               name: NSScrollView.willStartLiveScrollNotification,
+                                               object: scrollView)
+        NotificationCenter.default.addObserver(self, selector: #selector(liveScrollEnded),
+                                               name: NSScrollView.didEndLiveScrollNotification,
+                                               object: scrollView)
 
         ObservationRelay.track { [weak self] in
             guard let self else { return }
@@ -176,11 +182,58 @@ final class ReaderViewController: NSViewController {
     /// Saved scroll fraction to restore once the chapter content renders.
     private var pendingRestorePct: Double?
 
+    /// Character offset (from the document start) of the first body-text line
+    /// visible at the top of the viewport. Unlike the scroll fraction, this
+    /// survives reflows — immersive toggles, window/pane resizes, font and
+    /// measure changes — so the reader stays on the same words.
+    private var anchorOffset: Int?
+    /// True while a reflow or programmatic restore is rewriting scroll
+    /// geometry; scroll notifications in that window are echoes of layout,
+    /// not reader movement, and must not retrack the anchor or persist.
+    private var suppressTracking = false
+    /// Viewport width the current text layout was produced for; a change
+    /// means the text reflowed and the anchor must be re-applied.
+    private var lastLayoutWidth: CGFloat = 0
+    /// Document height the anchor was last placed against. TextKit 2 keeps
+    /// refining estimated heights after a reflow; when the document grows or
+    /// shrinks without the user scrolling, the text has shifted under the
+    /// viewport and the anchor must be re-applied.
+    private var lastDocumentHeight: CGFloat = 0
+    /// True while the user is gesture-scrolling — their movement is always
+    /// authoritative, so geometry shifts never trigger restores mid-gesture.
+    private var isLiveScrolling = false
+    /// Line-start offset that should be at the viewport top after the last
+    /// restore or user movement. When the top line diverges from this while
+    /// the scroll offset is (nearly) unmoved, the text shifted underneath the
+    /// viewport — re-pin instead of adopting the shifted position.
+    private var expectedTopLine: Int?
+    private var lastScrollY: CGFloat = 0
+    /// Invalidates in-flight verification passes (new restore, new chapter).
+    private var verifyGeneration = 0
+
+    /// Diagnostic trail readable outside Xcode. Mirrors the [ReaderPos] NSLogs.
+    private func posLog(_ message: String) {
+        NSLog("[ReaderPos] %@", message)
+        let line = "\(Date()) \(message)\n"
+        if let data = line.data(using: .utf8),
+           let handle = FileHandle(forWritingAtPath: "/tmp/aoyo-readerpos.log") {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        } else {
+            try? (line as NSString).write(toFile: "/tmp/aoyo-readerpos.log",
+                                          atomically: false, encoding: String.Encoding.utf8.rawValue)
+        }
+    }
+
     func show(work: Work, chapterIndex: Int) {
         self.work = work
         self.chapterIndex = chapterIndex
         self.chapters = nil
         self.loadError = nil
+        anchorOffset = nil
+        expectedTopLine = nil
+        verifyGeneration += 1
         pendingRestorePct = model.readerResumePct > 0.02 ? model.readerResumePct : nil
         model.readerResumePct = 0
         renderChapter()
@@ -288,6 +341,12 @@ final class ReaderViewController: NSViewController {
 
     private func renderChapter() {
         guard let work else { return }
+        // Re-render of content the reader is already inside (immersive, font,
+        // measure, theme changes): freeze the text anchor now and re-apply it
+        // once the new layout exists.
+        let restoreAfterRender = anchorOffset != nil && pendingRestorePct == nil
+        if restoreAfterRender { scheduleAnchorRestore() }
+        posLog("render immersive=\(model.immersive) anchor=\(anchorOffset ?? -1) restoreAfter=\(restoreAfterRender)")
         let bodySize = CGFloat(theme.fontSize)
         columnCap.isActive = !model.immersive
         columnCap.constant = CGFloat(theme.measure)
@@ -310,6 +369,8 @@ final class ReaderViewController: NSViewController {
             [endRule, ornamentLabel, nextChapterButton, endNoteBig, endNoteSub].forEach { $0.isHidden = true }
             footer.applyTheme()
             updateProgress()
+            // A scheduled restore bails on the now-empty document and lifts
+            // the tracking suppression itself.
             return
         }
 
@@ -351,6 +412,8 @@ final class ReaderViewController: NSViewController {
                 self?.restoreScroll(to: pct)
             }
         }
+        // restoreAfterRender: the restore scheduled at the top of this pass
+        // runs on the next turn, once this render's layout settles.
     }
 
     private func restoreScroll(to pct: Double) {
@@ -360,6 +423,206 @@ final class ReaderViewController: NSViewController {
         guard maxOffset > 0 else { return }
         scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxOffset * pct))
         scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
+    // MARK: - Text-anchored position
+
+    /// Any viewport width change (window or pane resize, immersive collapse
+    /// animation frames) reflows the column; snap the scroll offset back to
+    /// the anchored text rather than letting the raw point offset drift.
+    @objc private func liveScrollBegan() {
+        isLiveScrolling = true
+    }
+
+    @objc private func liveScrollEnded() {
+        isLiveScrolling = false
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = scrollView.contentView.bounds.width
+        let height = scrollView.documentView?.bounds.height ?? 0
+        guard width != lastLayoutWidth || abs(height - lastDocumentHeight) > 0.5 else { return }
+        lastLayoutWidth = width
+        lastDocumentHeight = height
+        if anchorOffset != nil, pendingRestorePct == nil, !isLiveScrolling {
+            scheduleAnchorRestore()
+        }
+    }
+
+    /// Coalesces restore requests onto the next runloop turn: restoring from
+    /// inside viewDidLayout reads half-updated frames (layoutSubtreeIfNeeded
+    /// is a reentrant no-op there), and a burst of animation frames needs one
+    /// restore after each turn's layout settles, not one per frame. Tracking
+    /// is suppressed immediately so the layout churn in between can't be
+    /// mistaken for the reader moving.
+    private var restorePending = false
+
+    private func scheduleAnchorRestore() {
+        suppressTracking = true
+        guard !restorePending else { return }
+        restorePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.restorePending = false
+            self.restoreAnchor()
+        }
+    }
+
+    /// Character offset of the first body-text line at the top of the
+    /// viewport, or nil while the header above the body is showing (there the
+    /// raw offset is stable enough and there is no line to anchor to).
+    private func captureAnchor() -> Int? {
+        guard let layoutManager = textView.textLayoutManager,
+              let contentManager = layoutManager.textContentManager,
+              let document = scrollView.documentView else { return nil }
+        let top = textView.convert(NSPoint(x: 0, y: scrollView.contentView.bounds.minY), from: document)
+        guard top.y > 0 else { return nil }
+        guard let fragment = layoutManager.textLayoutFragment(for: NSPoint(x: 0, y: top.y)) else { return nil }
+        var location = fragment.rangeInElement.location
+        let yInFragment = top.y - fragment.layoutFragmentFrame.minY
+        for line in fragment.textLineFragments where line.typographicBounds.maxY > yInFragment {
+            location = contentManager.location(fragment.rangeInElement.location,
+                                               offsetBy: line.characterRange.location) ?? location
+            break
+        }
+        return contentManager.offset(from: contentManager.documentRange.location, to: location)
+    }
+
+    /// Scrolls so the line holding `anchorOffset` sits back at the top of the
+    /// viewport, then republishes progress from the new geometry.
+    private func restoreAnchor() {
+        guard let offset = anchorOffset else { return }
+        suppressTracking = true
+        defer {
+            suppressTracking = false
+            refreshProgress(persist: true)
+        }
+        guard let layoutManager = textView.textLayoutManager,
+              let contentManager = layoutManager.textContentManager,
+              let document = scrollView.documentView else { return }
+        view.layoutSubtreeIfNeeded()
+        let start = contentManager.documentRange.location
+        let length = contentManager.offset(from: start, to: contentManager.documentRange.endLocation)
+        guard length > 0 else {
+            posLog("restore anchor=\(offset) bailed: empty doc")
+            return
+        }
+        let clamped = min(offset, length - 1)
+
+        // TextKit 2 gives two answers that can disagree: fragment enumeration
+        // reports positions built on estimated heights for content it hasn't
+        // materialized, while the viewport hit-test reflects what's actually
+        // drawn. So converge on VISUAL truth: compare the line at the top of
+        // the screen against the anchor's line, and when they differ, move by
+        // the *difference* of their enumerated positions — the shared
+        // estimation error above them cancels. Never accept "the scroll
+        // offset stopped moving" as done; only "the anchor's line is what's
+        // at the top".
+        var passes = 0
+        while passes < 10 {
+            passes += 1
+            view.layoutSubtreeIfNeeded()
+            guard let target = linePosition(of: clamped) else {
+                posLog("restore anchor=\(offset) bailed: no target line")
+                break
+            }
+            let currentY = scrollView.contentView.bounds.minY
+            let viewportTop = textView.convert(NSPoint(x: 0, y: currentY), from: document).y
+            let currentTop = captureAnchor()
+
+            let delta: CGFloat
+            if let currentTop, currentTop == target.start {
+                // Right line is on top — pin its top edge exactly, using
+                // now-local (real) geometry.
+                delta = target.y - viewportTop
+                if abs(delta) < 1 { break }
+            } else if let currentTop, let current = linePosition(of: currentTop) {
+                // Wrong line — relative jump between the two lines' positions
+                // within the same coordinate answer.
+                delta = target.y - current.y
+            } else {
+                // Header above the body is showing; aim absolutely.
+                delta = target.y - viewportTop
+            }
+
+            let maxOffset = document.bounds.height - scrollView.contentView.bounds.height
+            guard maxOffset > 0 else { break }
+            let newY = min(Swift.max(0, currentY + delta), maxOffset)
+            // Clamped into place and can't improve further.
+            if abs(newY - currentY) < 0.5 { break }
+            // Instant jump: an implicitly animated scroll (inside the
+            // immersive split-collapse animation) would keep emitting bounds
+            // changes after suppression lifts, corrupting the anchor.
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            NSAnimationContext.current.allowsImplicitAnimation = false
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: newY))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            NSAnimationContext.endGrouping()
+            // Materialize real layout at the new position before re-checking.
+            layoutManager.textViewportLayoutController.layoutViewport()
+        }
+        lastLayoutWidth = scrollView.contentView.bounds.width
+        lastDocumentHeight = document.bounds.height
+        lastScrollY = scrollView.contentView.bounds.minY
+        expectedTopLine = captureAnchor()
+        posLog("restore anchor=\(offset) passes=\(passes) landed \(Int(lastScrollY)) top=\(expectedTopLine ?? -1)")
+        scheduleAnchorVerify()
+    }
+
+    private struct LinePosition {
+        let start: Int
+        let y: CGFloat
+    }
+
+    /// Start offset and y (text-view coordinates) of the line containing the
+    /// given character offset, per fragment enumeration. The y inherits
+    /// whatever estimation error the layout above still carries — callers
+    /// difference two of these so the shared error cancels.
+    private func linePosition(of offset: Int) -> LinePosition? {
+        guard let layoutManager = textView.textLayoutManager,
+              let contentManager = layoutManager.textContentManager else { return nil }
+        let start = contentManager.documentRange.location
+        guard let target = contentManager.location(start, offsetBy: offset) else { return nil }
+        var fragment: NSTextLayoutFragment?
+        layoutManager.enumerateTextLayoutFragments(from: target, options: [.ensuresLayout]) { found in
+            fragment = found
+            return false
+        }
+        guard let fragment else { return nil }
+        let fragmentStart = contentManager.offset(from: start, to: fragment.rangeInElement.location)
+        let within = offset - fragmentStart
+        for line in fragment.textLineFragments where NSLocationInRange(within, line.characterRange) {
+            return LinePosition(start: fragmentStart + line.characterRange.location,
+                                y: fragment.layoutFragmentFrame.minY + line.typographicBounds.minY)
+        }
+        return LinePosition(start: fragmentStart, y: fragment.layoutFragmentFrame.minY)
+    }
+
+    /// The restores above run before the exit/enter transition ever paints;
+    /// the first real draw then materializes true layout for the new column
+    /// width, silently shifting fragment origins inside an unchanged frame —
+    /// no layout pass, no bounds change, nothing to observe. So verify after
+    /// display: staggered checks that re-pin if the top line drifted off the
+    /// anchor while the viewport sat still.
+    private func scheduleAnchorVerify() {
+        verifyGeneration += 1
+        let generation = verifyGeneration
+        for delay in [0.05, 0.3, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.verifyGeneration == generation else { return }
+                self.verifyAnchor()
+            }
+        }
+    }
+
+    private func verifyAnchor() {
+        guard anchorOffset != nil, !suppressTracking, !restorePending, !isLiveScrolling,
+              currentChapterContent != nil, let expected = expectedTopLine else { return }
+        guard let current = captureAnchor(), current != expected else { return }
+        posLog("verify drift: top \(current) expected \(expected) — repin")
+        scheduleAnchorRestore()
     }
 
     private func updateOverlay() {
@@ -438,6 +701,9 @@ final class ReaderViewController: NSViewController {
         guard target >= 0, target < postedChapterCount else { return }
         chapterIndex = target
         chapterPct = 0
+        anchorOffset = nil
+        expectedTopLine = nil
+        verifyGeneration += 1
         model.readerChapter = target
         appState.pushHistory(work.id)
         // Reaching a chapter records it even if the reader never scrolls.
@@ -452,12 +718,44 @@ final class ReaderViewController: NSViewController {
     }
 
     @objc private func scrolled() {
+        // Layout churn (reflow in flight, or a width the current layout wasn't
+        // produced for) is not reader movement: viewDidLayout / restoreAnchor
+        // will republish once the geometry settles.
+        guard !suppressTracking, scrollView.contentView.bounds.width == lastLayoutWidth else { return }
+        refreshProgress(persist: true)
+        guard currentChapterContent != nil else { return }
+        let y = scrollView.contentView.bounds.minY
+        let captured = captureAnchor()
+        // Top text changed while the viewport barely moved: the ground moved
+        // (TextKit materializing real layout at paint time), not the reader.
+        // Re-pin to the anchor rather than adopting the shifted position.
+        if !isLiveScrolling, abs(y - lastScrollY) < 3,
+           let captured, let expected = expectedTopLine, captured != expected {
+            posLog("shift under viewport: top \(captured) expected \(expected) at y \(Int(y))")
+            scheduleAnchorRestore()
+            return
+        }
+        // A document-height change without a user gesture also means shifted
+        // geometry — hold the anchor; viewDidLayout schedules the re-pin.
+        let height = scrollView.documentView?.bounds.height ?? 0
+        if isLiveScrolling || abs(height - lastDocumentHeight) <= 0.5 {
+            if let old = anchorOffset, let new = captured, abs(new - old) > 400 {
+                posLog("track jump \(old) -> \(new) at y \(Int(y))")
+            }
+            anchorOffset = captured
+            expectedTopLine = captured
+            lastScrollY = y
+            lastDocumentHeight = height
+        }
+    }
+
+    private func refreshProgress(persist: Bool) {
         guard let documentHeight = scrollView.documentView?.bounds.height else { return }
         let visible = scrollView.contentView.bounds
         let max = documentHeight - visible.height
         chapterPct = max > 0 ? min(1, Swift.max(0, visible.origin.y / max)) : 0
         updateProgress()
-        if let work, currentChapterContent != nil {
+        if persist, let work, currentChapterContent != nil {
             // 1-based chapter; AppState keeps progress monotonic.
             appState.setProgress(work.id, chapter: chapterIndex + 1, pct: chapterPct)
         }

@@ -24,6 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // What's New: notify when a background check finds updates, and keep
         // the dock badge on the unviewed count.
         UNUserNotificationCenter.current().delegate = self
+        // Ask for notification permission now, at a predictable moment —
+        // requesting inside notifyNewWorks made the system prompt appear at
+        // whatever arbitrary time the first background check found updates.
+        // Alert-only: the dock badge is drawn manually from newWorkIDs below,
+        // so the UN badge would be a second, competing badge mechanism.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
         appState.onNewWorksFound = { [weak self] count in
             self?.notifyNewWorks(count)
         }
@@ -207,6 +213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("Subscriptions", .subscriptions, ""),
         ("Inbox", .inbox, "8"),
         ("Bookmarks", .bookmarks, "9"),
+        ("Reading Lists", .readingLists, ""),
         ("Offline", .downloads, "0"),
     ]
 
@@ -257,8 +264,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The user is looking at the app — the What's New badge is enough.
         guard !NSApp.isActive else { return }
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .badge]) { granted, _ in
-            guard granted else { return }
+        // Authorization was requested at launch; just check it here.
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else { return }
             let content = UNMutableNotificationContent()
             content.title = count == 1 ? "1 work updated" : "\(count) works updated"
             content.body = "Works you follow have new chapters waiting."
@@ -266,6 +274,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 content: content, trigger: nil)
             center.add(request)
         }
+    }
+
+    // Secure state restoration is supported (macOS 14 logs a warning and
+    // falls back to insecure restoration when this is absent).
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
     }
 
     // MARK: - Menu

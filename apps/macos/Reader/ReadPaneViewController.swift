@@ -166,6 +166,7 @@ final class ReadPaneViewController: NSViewController {
     private var keyMonitor: Any?
     private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
+    private var readingListCloseBtn: ToolButton?
     private var authorCloseBtn: ToolButton?
     private var fandomCloseBtn: ToolButton?
     private var fandomSearchBtn: ToolButton?
@@ -206,10 +207,85 @@ final class ReadPaneViewController: NSViewController {
     }
 
     private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
-        filterButton(key: "works-\(section)",
-                     active: model.workListFilter(for: section).isActive) { [theme, model] in
+        let button = filterButton(key: "works-\(section)",
+                                  active: model.workListFilter(for: section).isActive) { [theme, model] in
             AnyView(WorkListFilterView(theme: theme, model: model, section: section))
         }
+        if section == .search {
+            // This is a client-side sieve over the fetched rows — make sure
+            // it can't be mistaken for a server-side search refinement.
+            button.toolTip = "Filter the fetched results (this page only)"
+        }
+        return button
+    }
+
+    /// The scraped AO3 sort-column field, when the form has one.
+    private func searchSortField() -> UFormField? {
+        model.search.formFields.first { $0.name.hasSuffix("[sort_column]") }
+    }
+
+    /// Server-side sort menu for search results: options come from the
+    /// scraped form's sort fields; picking one rewrites the criteria and
+    /// re-runs the query, so re-sorting no longer means a round-trip back
+    /// to the form.
+    private func searchSortButton() -> ToolButton {
+        var anchor: ToolButton!
+        let button = ToolButton(theme: theme, symbol: "arrow.up.arrow.down",
+                                tooltip: "Sort results (re-runs the search)") { [weak self] in
+            guard let self, let anchor else { return }
+            showSearchSortMenu(from: anchor)
+        }
+        anchor = button
+        return button
+    }
+
+    private func showSearchSortMenu(from anchor: NSView) {
+        guard let sortField = searchSortField() else { return }
+        let search = model.search
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let sortHeader = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
+        sortHeader.isEnabled = false
+        menu.addItem(sortHeader)
+        // AO3 pre-selects a default when the field is unset locally.
+        let currentSort = search.fieldValues[sortField.name]
+            ?? sortField.options.first { $0.selected }?.value ?? ""
+        for option in sortField.options {
+            let title = option.label.trimmingCharacters(in: .whitespaces)
+            guard !title.isEmpty else { continue }
+            let item = NSMenuItem(title: title, action: #selector(searchSortChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = option.value == currentSort ? .on : .off
+            item.representedObject = [sortField.name, option.value]
+            menu.addItem(item)
+        }
+
+        if let directionField = model.search.formFields.first(where: { $0.name.hasSuffix("[sort_direction]") }) {
+            menu.addItem(.separator())
+            let directionHeader = NSMenuItem(title: "Direction", action: nil, keyEquivalent: "")
+            directionHeader.isEnabled = false
+            menu.addItem(directionHeader)
+            let currentDirection = search.fieldValues[directionField.name]
+                ?? directionField.options.first { $0.selected }?.value ?? ""
+            for option in directionField.options {
+                let title = option.label.trimmingCharacters(in: .whitespaces)
+                guard !title.isEmpty else { continue }
+                let item = NSMenuItem(title: title, action: #selector(searchSortChosen(_:)), keyEquivalent: "")
+                item.target = self
+                item.state = option.value == currentDirection ? .on : .off
+                item.representedObject = [directionField.name, option.value]
+                menu.addItem(item)
+            }
+        }
+
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+    }
+
+    @objc private func searchSortChosen(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
+        model.search.fieldValues[pair[0]] = pair[1]
+        model.search.performSearch(appState)
     }
     private var authorRefreshBtn: LabelToolButton?
     private var subscriptionRefreshBtn: LabelToolButton?
@@ -258,6 +334,14 @@ final class ReadPaneViewController: NSViewController {
             self?.model.closeSubscriptionWorks()
         }
         subscriptionCloseBtn = button
+        return button
+    }
+
+    private func readingListCloseButton() -> ToolButton {
+        let button = readingListCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close list") { [weak self] in
+            self?.model.closeReadingList()
+        }
+        readingListCloseBtn = button
         return button
     }
 
@@ -413,6 +497,14 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    /// Drill-in staleness line: "N works stored · refreshed 3d ago" when a
+    /// full crawl has ever completed, plain count otherwise.
+    private func storedWorksSubtitle(count: Int, crawledAt: String?) -> String {
+        let stored = "\(count) works stored"
+        guard let crawledAt, !crawledAt.isEmpty else { return stored }
+        return "\(stored) · refreshed \(Fmt.relativeTime(crawledAt))"
+    }
+
     /// The drill-in header button: "Refresh Works" idle, "Cancel" while a
     /// crawl runs. render() re-invokes this every pass, so the label always
     /// tracks the current state.
@@ -463,7 +555,8 @@ final class ReadPaneViewController: NSViewController {
             let sub = showProfile ? "Author profile"
                 : model.isLoadingSubscriptionWorks
                     ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
-                    : "\(model.filteredSubscriptionWorks.count) works stored"
+                    : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
+                                          crawledAt: model.subscriptionWorksCrawledAt)
             toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
             var trailing: [NSView] = showProfile ? []
@@ -484,7 +577,8 @@ final class ReadPaneViewController: NSViewController {
             let sub = showProfile ? "Author profile"
                 : model.isLoadingAuthor
                     ? (model.authorFetchStatus ?? "Fetching works from AO3…")
-                    : "\(model.filteredAuthorWorks.count) works stored"
+                    : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
+                                          crawledAt: model.authorWorksCrawledAt)
             toolbar.configure(title: author, sub: sub)
             toolbar.setLeading([authorCloseButton()])
             toolbar.setTrailing(authorHeaderButtons(username: author)
@@ -502,8 +596,7 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .fandoms, let tag = model.fandomWorksTag, model.selectedWork == nil {
             if model.fandomSearchActive {
                 let search = model.search
-                toolbar.configure(title: tag,
-                                  sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
+                toolbar.configure(title: tag, sub: search.resultsSubtitle)
                 toolbar.setLeading([fandomLibraryBackButton()])
                 toolbar.setTrailing(search.hasSearched
                     ? [makePagerHost(), worksFilterButton(for: .search)] : [])
@@ -518,6 +611,23 @@ final class ReadPaneViewController: NSViewController {
             return
         }
 
+        // Reading Lists drill-in: the selected list's works, mirroring the
+        // Subscriptions → works flow.
+        if model.section == .readingLists, let listID = model.selectedReadingListID,
+           model.selectedWork == nil {
+            let name = appState.readingLists.first { $0.id == listID }?.name ?? "Reading List"
+            let summary = appState.readingListSummary(listID)
+            let sub = summary.totalCount == 0
+                ? "Reading list"
+                : "\(Fmt.k(summary.totalWords)) words · \(summary.readCount) of \(summary.totalCount) read"
+            toolbar.configure(title: name, sub: sub)
+            toolbar.setLeading([readingListCloseButton()])
+            toolbar.setTrailing([sortFilterMenu.makeButton(for: .readingLists),
+                                 worksFilterButton(for: .readingLists)])
+            show(mode: .searchResults)
+            return
+        }
+
         // Search section with no selection: the list pane is collapsed, so
         // this pane holds the whole flow — the full-width criteria form,
         // flipping to paged results once a query runs (back button returns).
@@ -525,10 +635,16 @@ final class ReadPaneViewController: NSViewController {
             let search = model.search
             if search.showingResults {
                 toolbar.configure(title: model.searchDisplayTitle ?? "Results",
-                                  sub: search.hasSearched ? "Page \(search.currentPage)" : nil)
+                                  sub: search.resultsSubtitle)
                 toolbar.setLeading([searchFormBackButton()])
-                toolbar.setTrailing(search.hasSearched
-                    ? [makePagerHost(), worksFilterButton(for: .search)] : [])
+                var trailing: [NSView] = search.hasSearched
+                    ? [makePagerHost(), worksFilterButton(for: .search)] : []
+                // Server-side sort — only form queries carry AO3 sort params.
+                if search.hasSearched, case .form = search.activeQuery,
+                   searchSortField() != nil {
+                    trailing.insert(searchSortButton(), at: 0)
+                }
+                toolbar.setTrailing(trailing)
                 show(mode: .searchResults)
             } else {
                 toolbar.configure(title: "Search",

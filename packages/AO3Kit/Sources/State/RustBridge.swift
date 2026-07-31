@@ -382,14 +382,24 @@ final class RustBridge {
         return try await app.searchWorks(params: params, page: page)
     }
 
-    func searchWorksRaw(keys: [String], values: [String], page: UInt32 = 1) async throws -> [UWorkSummary] {
+    /// Paged variant: real has-next/total-pages read from the results HTML.
+    func searchWorksRawPaged(keys: [String], values: [String], page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.searchWorksRaw(keys: keys, values: values, page: page)
     }
 
-    func searchByTag(_ tag: String, page: UInt32 = 1) async throws -> [UWorkSummary] {
+    /// Paged variant of searchByTag.
+    func searchByTagPaged(_ tag: String, page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.searchByTag(tag: tag, page: page)
+    }
+
+    func searchWorksRaw(keys: [String], values: [String], page: UInt32 = 1) async throws -> [UWorkSummary] {
+        try await searchWorksRawPaged(keys: keys, values: values, page: page).works
+    }
+
+    func searchByTag(_ tag: String, page: UInt32 = 1) async throws -> [UWorkSummary] {
+        try await searchByTagPaged(tag, page: page).works
     }
 
     func fetchWorkFull(_ workId: UInt64) async throws -> UWorkSummary {
@@ -871,6 +881,22 @@ final class RustBridge {
 
     func getNewWorkIds() -> [UInt64] {
         (try? app?.getNewWorkIds()) ?? []
+    }
+
+    /// Works a census confirmed are no longer listed on AO3 (cached copies
+    /// are retained; this is display metadata).
+    func getGoneWorkIds() -> [UInt64] {
+        (try? app?.getGoneWorkIds()) ?? []
+    }
+
+    /// Stamp "a full works crawl for this author/series completed now".
+    func setWorksCrawledNow(subType: String, subId: String) {
+        try? app?.setWorksCrawledNow(subType: subType, subId: subId)
+    }
+
+    /// Unix-seconds string of the last completed works crawl, or nil.
+    func getWorksCrawledAt(subType: String, subId: String) -> String? {
+        (try? app?.getWorksCrawledAt(subType: subType, subId: subId)) ?? nil
     }
 
     func removeNewWork(_ workId: UInt64) {

@@ -6,7 +6,7 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks, authorWorks, fandomWorks
+        case search, subscriptionWorks, authorWorks, fandomWorks, readingListWorks
     }
 
     /// What this listing shows. Derived from observable model state inside
@@ -18,6 +18,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .authors, .authorWorks: return .authorWorks
         case .subscriptions: return .subscriptionWorks
         case .fandoms: return model.fandomSearchActive ? .search : .fandomWorks
+        case .readingLists: return .readingListWorks
         default: return .search
         }
     }
@@ -119,6 +120,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
         case .authorWorks: works = model.filteredAuthorWorks
         case .fandomWorks: works = model.fandomLibraryWorks
+        case .readingListWorks: works = model.filteredReadingListWorks
         }
 
         overlayHost?.removeFromSuperview()
@@ -186,6 +188,14 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "flame",
                                                 title: "Nothing in your library yet",
                                                 message: "Works from \(tag) you’ve opened or downloaded appear here. Press Search AO3 above to find works on the archive."))
+            } else {
+                overlay = nil
+            }
+        case .readingListWorks:
+            if works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
+                                                title: "Empty list",
+                                                message: "Right-click any work and choose Add to Reading List."))
             } else {
                 overlay = nil
             }
@@ -315,6 +325,20 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     func tableView(_ tableView: NSTableView, shouldShowCellExpansionFor tableColumn: NSTableColumn?, row: Int) -> Bool {
         false
     }
+
+    // Swipe right → Remove, inside a reading list only (matching the other
+    // removable lists).
+    func tableView(_ tableView: NSTableView, rowActionsForRow row: Int,
+                   edge: NSTableView.RowActionEdge) -> [NSTableViewRowAction] {
+        guard edge == .leading, context == .readingListWorks,
+              row < works.count, let listID = model.selectedReadingListID else { return [] }
+        let workID = works[row].id
+        let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
+            self?.appState.removeFromReadingList(listID, workId: workID)
+            tableView.rowActionsVisible = false
+        }
+        return [remove]
+    }
 }
 
 // MARK: - Row context menu
@@ -340,7 +364,35 @@ extension SearchResultsViewController: NSMenuDelegate {
                               #selector(menuToggleDownload(_:)), row))
         if UInt64(work.id) != nil {
             menu.addItem(menuItem("Copy AO3 Link", #selector(menuCopyWorkLink(_:)), row))
+            menu.addItem(readingListMenuItem(for: work, row: row))
         }
+        if context == .readingListWorks,
+           let listID = model.selectedReadingListID,
+           let list = appState.readingLists.first(where: { $0.id == listID }) {
+            menu.addItem(.separator())
+            menu.addItem(menuItem("Remove from “\(list.name)”", #selector(menuRemoveFromReadingList(_:)), row))
+        }
+    }
+
+    /// "Add to Reading List" ▸ every list with a membership checkmark
+    /// (clicking toggles), plus "New Reading List…" — same as the list pane.
+    private func readingListMenuItem(for work: Work, row: Int) -> NSMenuItem {
+        let parent = NSMenuItem(title: "Add to Reading List", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        let workId = UInt64(work.id)
+        for list in appState.readingLists {
+            let member = workId.map { appState.bridge.getReadingListItems(list.id).contains($0) } ?? false
+            let item = menuItem(list.name, #selector(menuToggleReadingList(_:)), row)
+            item.representedObject = NSNumber(value: list.id)
+            item.state = member ? .on : .off
+            submenu.addItem(item)
+        }
+        if !appState.readingLists.isEmpty {
+            submenu.addItem(.separator())
+        }
+        submenu.addItem(menuItem("New Reading List…", #selector(menuAddToNewReadingList(_:)), row))
+        parent.submenu = submenu
+        return parent
     }
 
     private func menuItem(_ title: String, _ action: Selector, _ row: Int) -> NSMenuItem {
@@ -393,20 +445,60 @@ extension SearchResultsViewController: NSMenuDelegate {
         }
         presentAsSheet(hosting)
     }
+
+    @objc private func menuRemoveFromReadingList(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender),
+              let listID = model.selectedReadingListID else { return }
+        appState.removeFromReadingList(listID, workId: work.id)
+    }
+
+    @objc private func menuToggleReadingList(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender),
+              let listId = (sender.representedObject as? NSNumber)?.int64Value else { return }
+        if sender.state == .on {
+            appState.removeFromReadingList(listId, workId: work.id)
+        } else {
+            appState.addToReadingList(listId, workId: work.id)
+        }
+    }
+
+    @objc private func menuAddToNewReadingList(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        let alert = NSAlert()
+        alert.messageText = "New Reading List"
+        alert.informativeText = "“\(work.title)” will be added to the new list."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let listId = appState.createReadingList(name)
+        if listId >= 0 {
+            appState.addToReadingList(listId, workId: work.id)
+        }
+    }
 }
 
-/// Numbered pagination + prev/next for the results pane toolbar.
+/// Numbered pagination + prev/next for the results pane toolbar, with a
+/// jump-to-page field when the listing spans more pages than the ±2 window.
 struct SearchPagerView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
+    @State private var jumpText = ""
+
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         let search = model.search
         let current = Int(search.currentPage)
+        let total = Int(search.totalPages)
         let lower = max(1, current - 2)
-        let upper = search.hasNextPage ? current + 2 : current
+        let upper = search.hasNextPage ? min(current + 2, max(total, current + 2)) : current
         HStack(spacing: 3) {
             pagerButton(symbol: "chevron.left", enabled: current > 1) {
                 search.goToPage(UInt32(current - 1), appState: appState)
@@ -428,6 +520,33 @@ struct SearchPagerView: View {
             }
             pagerButton(symbol: "chevron.right", enabled: search.hasNextPage) {
                 search.goToPage(UInt32(current + 1), appState: appState)
+            }
+            // Jump-to-page, once the real total says the window can't reach
+            // everything: "· ⟨field⟩ of 42".
+            if total > upper {
+                Text("·")
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(theme.ink3)
+                TextField("\(current)", text: $jumpText)
+                    .textFieldStyle(.plain)
+                    .multilineTextAlignment(.center)
+                    .font(Font(MacFont.ui(12, weight: .semibold)))
+                    .foregroundStyle(theme.ink)
+                    .frame(width: 38, height: 22)
+                    .background(theme.surface2)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .onSubmit {
+                        if let page = Int(jumpText.trimmingCharacters(in: .whitespaces)),
+                           page >= 1 {
+                            search.goToPage(UInt32(min(page, total)), appState: appState)
+                        }
+                        jumpText = ""
+                    }
+                    .disabled(appState.isSearching)
+                    .help("Jump to page")
+                Text("of \(total)")
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(theme.ink3)
             }
         }
     }

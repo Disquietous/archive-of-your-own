@@ -97,9 +97,11 @@ impl Storage {
 
     /// Insert or replace a `WorkSummary`.
     pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
+        // Upsert, NOT INSERT OR REPLACE: replace re-creates the row, wiping
+        // columns the blurb doesn't carry (gone_from_ao3).
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO works (
+                "INSERT INTO works (
                     id, title, authors_json, fandoms_json, rating,
                     warnings_json, categories_json, relationships_json,
                     characters_json, tags_json, summary, word_count,
@@ -111,7 +113,14 @@ impl Storage {
                     ?9, ?10, ?11, ?12,
                     ?13, ?14, ?15, ?16,
                     ?17, ?18, ?19, ?20, ?21, ?22
-                )",
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    title = ?2, authors_json = ?3, fandoms_json = ?4, rating = ?5,
+                    warnings_json = ?6, categories_json = ?7, relationships_json = ?8,
+                    characters_json = ?9, tags_json = ?10, summary = ?11, word_count = ?12,
+                    chapter_count = ?13, total_chapters = ?14, kudos = ?15, hits = ?16,
+                    bookmarks = ?17, comments = ?18, date_published = ?19, date_updated = ?20,
+                    language = ?21, complete = ?22",
                 params![
                     work.id as i64,
                     work.title,
@@ -1008,13 +1017,121 @@ impl Storage {
         sub_id: &str,
         date_updated: &str,
     ) -> Result<(), AppError> {
+        // Upsert, NOT INSERT OR REPLACE: replace would null out the census
+        // columns (total_works, last_census_at, census_state) on every check.
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO subscription_snapshots (sub_type, sub_id, date_updated)
-                 VALUES (?1, ?2, ?3)",
+                "INSERT INTO subscription_snapshots (sub_type, sub_id, date_updated)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(sub_type, sub_id) DO UPDATE SET date_updated = ?3",
                 params![sub_type, sub_id, date_updated],
             )
             .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Census metadata for one subscription: (total_works, last_census_at,
+    /// census_state). All None when the row doesn't exist yet.
+    pub fn get_snapshot_census_meta(
+        &self,
+        sub_type: &str,
+        sub_id: &str,
+    ) -> Result<(Option<u32>, Option<String>, Option<String>), AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT total_works, last_census_at, census_state
+             FROM subscription_snapshots WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+            Ok((
+                row.get::<_, Option<u32>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(t)) => Ok(t),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok((None, None, None)),
+        }
+    }
+
+    pub fn set_snapshot_total_works(
+        &self,
+        sub_type: &str,
+        sub_id: &str,
+        total: u32,
+    ) -> Result<(), AppError> {
+        self.ensure_snapshot_row(sub_type, sub_id)?;
+        self.conn.execute(
+            "UPDATE subscription_snapshots SET total_works = ?3
+             WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id, total],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Persist (or clear, with None) the in-progress census JSON.
+    pub fn set_snapshot_census_state(
+        &self,
+        sub_type: &str,
+        sub_id: &str,
+        state: Option<&str>,
+    ) -> Result<(), AppError> {
+        self.ensure_snapshot_row(sub_type, sub_id)?;
+        self.conn.execute(
+            "UPDATE subscription_snapshots SET census_state = ?3
+             WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id, state],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn set_snapshot_last_census(
+        &self,
+        sub_type: &str,
+        sub_id: &str,
+        at: &str,
+    ) -> Result<(), AppError> {
+        self.ensure_snapshot_row(sub_type, sub_id)?;
+        self.conn.execute(
+            "UPDATE subscription_snapshots SET last_census_at = ?3
+             WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id, at],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn set_works_crawled_at(&self, sub_type: &str, sub_id: &str, at: &str) -> Result<(), AppError> {
+        self.ensure_snapshot_row(sub_type, sub_id)?;
+        self.conn.execute(
+            "UPDATE subscription_snapshots SET works_crawled_at = ?3
+             WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id, at],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_works_crawled_at(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT works_crawled_at FROM subscription_snapshots
+             WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+            row.get::<_, Option<String>>(0)
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    fn ensure_snapshot_row(&self, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO subscription_snapshots (sub_type, sub_id, date_updated)
+             VALUES (?1, ?2, '')",
+            params![sub_type, sub_id],
+        ).map_err(map_sql)?;
         Ok(())
     }
 
@@ -1058,6 +1175,41 @@ impl Storage {
     }
 
     /// Add works to a subscription's cached set without dropping existing
+    /// Just the associated work ids — the cheap set-membership view the
+    /// census reconciles against.
+    pub fn get_subscription_work_ids(&self, sub_type: &str, sub_id: &str) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT work_id FROM subscription_works WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, u64>(0))
+            .map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Mark (or clear) works as no longer listed on AO3. The cached rows are
+    /// never deleted — this flag is the only record of the disappearance.
+    pub fn set_works_gone(&self, work_ids: &[u64], gone: bool) -> Result<(), AppError> {
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE works SET gone_from_ao3 = ?2 WHERE id = ?1"
+            ).map_err(map_sql)?;
+            for id in work_ids {
+                stmt.execute(params![id, gone as i64]).map_err(map_sql)?;
+            }
+        }
+        tx.commit().map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_gone_work_ids(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM works WHERE gone_from_ao3 = 1"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| row.get::<_, u64>(0)).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// associations (unlike save_subscription_works, which replaces the set).
     pub fn add_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
@@ -1749,6 +1901,23 @@ impl Storage {
                 PRIMARY KEY (sub_type, sub_id, work_id)
             );"
         ).ok();
+
+        // Migration: census metadata on subscription snapshots. total_works
+        // is the listing's claimed count from the last check (NULL =
+        // unknown); last_census_at is a unix-seconds string (NULL = never);
+        // census_state is in-progress census JSON (NULL = none running).
+        self.conn.execute("ALTER TABLE subscription_snapshots ADD COLUMN total_works INTEGER", []).ok();
+        self.conn.execute("ALTER TABLE subscription_snapshots ADD COLUMN last_census_at TEXT", []).ok();
+        self.conn.execute("ALTER TABLE subscription_snapshots ADD COLUMN census_state TEXT", []).ok();
+        // Migration: when a full works crawl (Refresh Works) last completed
+        // for this author/series — unix-seconds string, NULL = never. Drives
+        // the drill-in staleness line ("refreshed 3d ago").
+        self.conn.execute("ALTER TABLE subscription_snapshots ADD COLUMN works_crawled_at TEXT", []).ok();
+
+        // Migration: works that a census confirmed are no longer listed on
+        // AO3 (deleted, restricted, or moved to Anonymous). The cached copy
+        // is retained everywhere; this only records the fact.
+        self.conn.execute("ALTER TABLE works ADD COLUMN gone_from_ao3 INTEGER NOT NULL DEFAULT 0", []).ok();
 
         // Migration: full user profiles + block/mute state on ao3_users.
         // pseuds and bio are JSON (bio is a serialized ContentBlock tree,
@@ -2755,6 +2924,65 @@ mod tests {
 
         // Different sub is separate
         assert!(db.get_subscription_snapshot("work", "100").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_snapshot_census_meta() {
+        let db = open_test_db();
+
+        // Unknown sub: all None.
+        assert_eq!(db.get_snapshot_census_meta("author", "u").unwrap(), (None, None, None));
+
+        // Census fields survive a snapshot date update (upsert, not replace).
+        db.set_snapshot_total_works("author", "u", 42).unwrap();
+        db.set_snapshot_last_census("author", "u", "1700000000").unwrap();
+        db.set_snapshot_census_state("author", "u", Some("{\"next_page\":3}")).unwrap();
+        db.save_subscription_snapshot("author", "u", "2025-06-01").unwrap();
+        let (total, last, state) = db.get_snapshot_census_meta("author", "u").unwrap();
+        assert_eq!(total, Some(42));
+        assert_eq!(last.as_deref(), Some("1700000000"));
+        assert_eq!(state.as_deref(), Some("{\"next_page\":3}"));
+        assert_eq!(db.get_subscription_snapshot("author", "u").unwrap().as_deref(), Some("2025-06-01"));
+
+        // Clearing the census state leaves the rest.
+        db.set_snapshot_census_state("author", "u", None).unwrap();
+        let (total, last, state) = db.get_snapshot_census_meta("author", "u").unwrap();
+        assert_eq!(total, Some(42));
+        assert!(last.is_some());
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn test_gone_from_ao3_flag() {
+        let db = open_test_db();
+        let mut w = sample_work(7001);
+        db.save_work(&w).unwrap();
+        w.id = 7002;
+        db.save_work(&w).unwrap();
+
+        assert!(db.get_gone_work_ids().unwrap().is_empty());
+
+        db.set_works_gone(&[7001], true).unwrap();
+        assert_eq!(db.get_gone_work_ids().unwrap(), vec![7001]);
+
+        // save_work on a gone work must not resurrect it implicitly…
+        w.id = 7001;
+        db.save_work(&w).unwrap();
+        assert_eq!(db.get_gone_work_ids().unwrap(), vec![7001]);
+
+        // …only an explicit clear (census reappearance) does.
+        db.set_works_gone(&[7001, 7002], false).unwrap();
+        assert!(db.get_gone_work_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_subscription_work_ids() {
+        let db = open_test_db();
+        db.add_subscription_works("author", "u", &[1, 2, 3]).unwrap();
+        db.add_subscription_works("author", "u", &[3, 4]).unwrap();
+        let mut ids = db.get_subscription_work_ids("author", "u").unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
     }
 
     #[test]

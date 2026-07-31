@@ -11,8 +11,14 @@ struct SidebarView: View {
     @State private var privacyShown = false
     @State private var requestingNewNodes = false
     @State private var pillHover = false
+    @State private var shieldHover = false
     @State private var circuitInfoShown = false
-    @State private var shieldInfoShown = false
+
+    /// Hub-pill hover, minus the shield: hovering the shield triggers the
+    /// shield's own action, so only it should light up — not the whole pill.
+    private var hubHover: Bool {
+        pillHover && !shieldHover
+    }
 
     var body: some View {
         // Track the app text-size setting: MacFont reads it via a plain static,
@@ -36,15 +42,9 @@ struct SidebarView: View {
                     }
                     group("Saved") {
                         item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
+                        item(.readingLists, "books.vertical", "Reading Lists", count: appState.readingLists.count)
                         item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
                         item(.stats, "chart.bar", "Reading Stats")
-                    }
-                    if !appState.readingLists.isEmpty {
-                        group("Collections") {
-                            ForEach(appState.readingLists, id: \.id) { list in
-                                collectionRow(list)
-                            }
-                        }
                     }
                     if !model.search.savedSearches.isEmpty {
                         group("Saved Searches") {
@@ -97,10 +97,18 @@ struct SidebarView: View {
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 17)
                     .foregroundStyle(theme.ink3)
-                Text(saved.name)
-                    .font(Font(MacFont.ui(13.5, weight: .medium)))
-                    .foregroundStyle(theme.ink2)
-                    .lineLimit(1)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(saved.name)
+                        .font(Font(MacFont.ui(13.5, weight: .medium)))
+                        .foregroundStyle(theme.ink2)
+                        .lineLimit(1)
+                    if let summary = MacSearchModel.summary(of: saved) {
+                        Text(summary)
+                            .font(Font(MacFont.ui(11)))
+                            .foregroundStyle(theme.ink3)
+                            .lineLimit(1)
+                    }
+                }
                 Spacer(minLength: 4)
             }
             .padding(.horizontal, 10)
@@ -134,7 +142,7 @@ struct SidebarView: View {
                       count: Int? = nil, badge: Int = 0) -> some View {
         // Author-works browsing keeps Authors highlighted.
         let effectiveSection = model.section == .authorWorks ? MacAppModel.Section.authors : model.section
-        let selected = effectiveSection == section && model.selectedReadingListID == nil
+        let selected = effectiveSection == section
         return Button {
             model.goSection(section)
         } label: {
@@ -176,38 +184,6 @@ struct SidebarView: View {
         .padding(.horizontal, 8)
     }
 
-    private func collectionRow(_ list: UReadingList) -> some View {
-        let selected = model.selectedReadingListID == list.id
-        let count = appState.worksInReadingList(list.id).count
-        return Button {
-            model.goReadingList(list.id)
-        } label: {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(selected ? theme.onAccent : theme.accent2)
-                    .frame(width: 9, height: 9)
-                Text(list.name)
-                    .font(Font(MacFont.ui(13.5, weight: .medium)))
-                    .foregroundStyle(selected ? theme.onAccent : theme.ink2)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Text("\(count)")
-                    .font(Font(MacFont.ui(11, weight: .bold)))
-                    .foregroundStyle(selected ? theme.onAccent : theme.ink3)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 1)
-                    .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
-                    .clipShape(Capsule())
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(selected ? theme.accent : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
-        .padding(.horizontal, 8)
-    }
 
     /// The app-state hub pill: identity on the first line, the circuit's
     /// node country codes on the second. Clicking opens the full hub
@@ -237,16 +213,15 @@ struct SidebarView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .background((torConnecting
-                ? theme.accent2.opacity(pillHover ? 0.18 : 0.1)
-                : theme.sage.opacity(torConnected ? (pillHover ? 0.2 : 0.12) : (pillHover ? 0.14 : 0.07))))
+                ? theme.accent2.opacity(hubHover ? 0.18 : 0.1)
+                : theme.sage.opacity(torConnected ? (hubHover ? 0.2 : 0.12) : (hubHover ? 0.14 : 0.07))))
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9)
-                .stroke(theme.line.opacity(pillHover ? 1 : 0), lineWidth: 1))
-            .animation(.easeOut(duration: 0.12), value: pillHover)
+                .stroke(theme.line.opacity(hubHover ? 1 : 0), lineWidth: 1))
+            .animation(.easeOut(duration: 0.12), value: hubHover)
             .contentShape(Rectangle())
             .onHover { inside in
                 pillHover = inside
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
             .onTapGesture { privacyShown = true }
             .popover(isPresented: $privacyShown, arrowEdge: .top) {
@@ -343,6 +318,7 @@ struct SidebarView: View {
                 .scaleEffect(0.7)
         } else {
             Button {
+                shieldHover = false
                 if torConnected {
                     requestingNewNodes = true
                     Task { @MainActor in
@@ -358,22 +334,39 @@ struct SidebarView: View {
                     .foregroundStyle(torConnected ? theme.sage : Color(hex: "CE514D"))
                     .frame(width: 26, height: 26)
                     .background((torConnected ? theme.sage : Color(hex: "CE514D"))
-                        .opacity(shieldInfoShown ? 0.15 : 0))
+                        .opacity(shieldHover ? 0.15 : 0))
                     .clipShape(Circle())
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .onHover { shieldInfoShown = $0 }
-            .popover(isPresented: $shieldInfoShown, arrowEdge: .top) {
-                Text(torConnected
-                     ? "Private connection — click to request new relay nodes"
-                     : "Public connection — traffic is not routed through relays. Click to connect.")
-                    .font(Font(MacFont.ui(11.5)))
-                    .foregroundStyle(theme.ink)
-                    .padding(10)
-                    .frame(maxWidth: 230)
+            .onHover { shieldHover = $0 }
+            .overlay(alignment: .topTrailing) {
+                if shieldHover {
+                    shieldBalloon
+                }
             }
         }
+    }
+
+    /// The shield's hover balloon, drawn in-window rather than as a popover:
+    /// a transient popover window swallows the click that dismisses it, which
+    /// ate the first click on the shield — the circuit only rotated on the
+    /// second try.
+    private var shieldBalloon: some View {
+        Text(torConnected
+             ? "Private connection — click to request new relay nodes"
+             : "Public connection — traffic is not routed through relays. Click to connect.")
+            .font(Font(MacFont.ui(11.5)))
+            .foregroundStyle(theme.ink)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(10)
+            .frame(width: 200, alignment: .leading)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+            .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+            .alignmentGuide(.top) { $0[.bottom] + 8 }
+            .allowsHitTesting(false)
     }
 
     private var connectionLine: String {

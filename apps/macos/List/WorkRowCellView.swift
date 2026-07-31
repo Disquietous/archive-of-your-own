@@ -282,6 +282,57 @@ final class WorkRowCellView: NSTableCellView {
         return image
     }
 
+    /// Wraps the title so lines that share the vertical band of the top-right
+    /// dates block stop short of it while every later line spans the full
+    /// width. NSTextField can't vary width per line, so the wrap is computed
+    /// with an exclusion-path layout and baked in as hard line breaks.
+    private static func wrappedAroundDates(_ title: NSAttributedString, width: CGFloat,
+                                           datesSize: NSSize) -> NSAttributedString {
+        // Keep at least 60pt of title width no matter how wide the dates run.
+        let exclusionWidth = min(datesSize.width, width - 60)
+        guard exclusionWidth > 0, datesSize.height > 0 else { return title }
+
+        let storage = NSTextStorage(attributedString: title)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        container.exclusionPaths = [NSBezierPath(rect: NSRect(x: width - exclusionWidth, y: 0,
+                                                              width: exclusionWidth,
+                                                              height: datesSize.height))]
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+
+        // Collect the character index ending each laid-out line.
+        var breaks: [Int] = []
+        var glyphIndex = 0
+        while glyphIndex < layoutManager.numberOfGlyphs {
+            var lineGlyphs = NSRange()
+            layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineGlyphs)
+            let lineEnd = layoutManager.characterRange(forGlyphRange: lineGlyphs,
+                                                       actualGlyphRange: nil).upperBound
+            if lineEnd < storage.length { breaks.append(lineEnd) }
+            glyphIndex = NSMaxRange(lineGlyphs)
+        }
+        guard !breaks.isEmpty else { return title }
+
+        let wrapped = NSMutableAttributedString(attributedString: title)
+        let text = title.string as NSString
+        for lineEnd in breaks.reversed() {
+            let before = text.character(at: lineEnd - 1)
+            if before == 0x0A { continue }  // already a hard break
+            let attributes = wrapped.attributes(at: lineEnd - 1, effectiveRange: nil)
+            if before == 0x20 {
+                // Soft wraps eat the boundary space; mirror that exactly.
+                wrapped.replaceCharacters(in: NSRange(location: lineEnd - 1, length: 1),
+                                          with: NSAttributedString(string: "\n", attributes: attributes))
+            } else {
+                wrapped.insert(NSAttributedString(string: "\n", attributes: attributes), at: lineEnd)
+            }
+        }
+        return wrapped
+    }
+
     /// Measure the summary's collapsed (2-line) and full heights at a width.
     private static func summaryHeights(text: String, width: CGFloat) -> (collapsed: CGFloat, full: CGFloat) {
         let label = measureLabel
@@ -363,11 +414,7 @@ final class WorkRowCellView: NSTableCellView {
         }
         datesLabel.stringValue = dateLines.joined(separator: "\n")
         datesLabel.isHidden = dateLines.isEmpty
-        // Full body width, same as the summary — the title wraps freely and
-        // shows every line (no clamp). Only a two-line date block can reach
-        // down into the title's first line; reserve width just for that case.
-        let datesReserve = dateLines.count > 1 ? datesLabel.intrinsicContentSize.width + 8 : 0
-        titleLabel.preferredMaxLayoutWidth = max(60, availableTextWidth - datesReserve)
+        titleLabel.preferredMaxLayoutWidth = availableTextWidth
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
         // One fandom per line, matching the work-details header.
@@ -385,7 +432,15 @@ final class WorkRowCellView: NSTableCellView {
         badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - Self.badgeSize) / 2,
                               width: Self.badgeSize, height: Self.badgeSize)
         title.append(NSAttributedString(attachment: badge))
-        titleLabel.attributedStringValue = title
+        // The dates block occupies the row's top-right corner. The opening
+        // title line(s) wrap short of it; every line below runs full width.
+        var datesSize = NSSize.zero
+        if !dateLines.isEmpty {
+            let size = datesLabel.intrinsicContentSize
+            datesSize = NSSize(width: size.width + 10, height: size.height)
+        }
+        titleLabel.attributedStringValue = Self.wrappedAroundDates(
+            title, width: availableTextWidth, datesSize: datesSize)
 
         let author = NSMutableAttributedString(
             string: "by ", attributes: [.font: MacFont.ui(12), .foregroundColor: theme.nsInk3])

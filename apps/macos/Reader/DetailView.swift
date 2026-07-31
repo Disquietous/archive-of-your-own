@@ -20,6 +20,12 @@ struct DetailView: View {
 
     @State private var showComments = false
     @State private var showBookmarkEdit = false
+    @State private var showReadingLists = false
+
+    private var inAnyReadingList: Bool {
+        guard let id = UInt64(work.id) else { return false }
+        return appState.readingLists.contains { appState.bridge.getReadingListItems($0.id).contains(id) }
+    }
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -149,6 +155,10 @@ struct DetailView: View {
             if !work.updated.isEmpty {
                 pill("Updated \(work.updated)", bg: theme.surface2, fg: theme.ink3)
             }
+            if appState.goneWorkIDs.contains(work.id) {
+                pill("No longer on AO3", icon: "archivebox",
+                     bg: theme.accent2.opacity(0.13), fg: theme.accent2)
+            }
         }
     }
 
@@ -203,6 +213,17 @@ struct DetailView: View {
                        tint: downloaded ? theme.sage : theme.ink,
                        help: downloaded ? "Downloaded" : "Download for offline") {
                 appState.toggleDownload(work.id)
+            }
+
+            if UInt64(work.id) != nil {
+                iconButton(inAnyReadingList ? "books.vertical.fill" : "books.vertical",
+                           tint: inAnyReadingList ? theme.accent : theme.ink,
+                           help: "Add to reading list") {
+                    showReadingLists = true
+                }
+                .popover(isPresented: $showReadingLists, arrowEdge: .bottom) {
+                    ReadingListPopover(theme: theme, appState: appState, work: work)
+                }
             }
 
             iconButton(workSubscribed ? "bell.fill" : "bell",
@@ -403,5 +424,150 @@ struct DetailView: View {
         .disabled(unposted)
         .opacity(unposted ? 0.4 : 1)
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+    }
+}
+
+/// Find-or-create reading list popover: type to filter the lists, click to
+/// toggle membership, and when the typed name matches nothing, a Create row
+/// makes the list with this work already in it.
+private struct ReadingListPopover: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    let work: Work
+
+    @State private var term = ""
+    @FocusState private var searchFocused: Bool
+
+    private var workId: UInt64? { UInt64(work.id) }
+
+    private var filteredLists: [UReadingList] {
+        let needle = term.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return appState.readingLists }
+        return appState.readingLists.filter {
+            $0.name.localizedCaseInsensitiveContains(needle)
+        }
+    }
+
+    private var canCreateTyped: Bool {
+        let needle = term.trimmingCharacters(in: .whitespaces)
+        guard !needle.isEmpty else { return false }
+        return !appState.readingLists.contains {
+            $0.name.caseInsensitiveCompare(needle) == .orderedSame
+        }
+    }
+
+    private func isMember(_ list: UReadingList) -> Bool {
+        guard let workId else { return false }
+        return appState.bridge.getReadingListItems(list.id).contains(workId)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("READING LISTS")
+                .font(Font(MacFont.ui(10.5, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+                .padding(.init(top: 12, leading: 14, bottom: 8, trailing: 14))
+
+            TextField("Find or create a list…", text: $term)
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(13)))
+                .foregroundStyle(theme.ink)
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 12)
+                .focused($searchFocused)
+                .onSubmit { createTypedIfPossible() }
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(filteredLists, id: \.id) { list in
+                        listRow(list)
+                    }
+                    if canCreateTyped {
+                        createRow
+                    } else if filteredLists.isEmpty {
+                        Text("No lists yet — type a name to create one.")
+                            .font(Font(MacFont.ui(12)))
+                            .foregroundStyle(theme.ink3)
+                            .padding(14)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
+        }
+        .frame(width: 280)
+        .background(theme.surface)
+        .onAppear { searchFocused = true }
+    }
+
+    private func listRow(_ list: UReadingList) -> some View {
+        let member = isMember(list)
+        return Button {
+            guard workId != nil else { return }
+            if member {
+                appState.removeFromReadingList(list.id, workId: work.id)
+            } else {
+                appState.addToReadingList(list.id, workId: work.id)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "books.vertical")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 16)
+                    .foregroundStyle(theme.ink3)
+                Text(list.name)
+                    .font(Font(MacFont.ui(13, weight: .medium)))
+                    .foregroundStyle(theme.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if member {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(theme.accent)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
+        .help(member ? "Remove from “\(list.name)”" : "Add to “\(list.name)”")
+    }
+
+    private var createRow: some View {
+        Button {
+            createTypedIfPossible()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 16)
+                    .foregroundStyle(theme.accent)
+                Text("Create “\(term.trimmingCharacters(in: .whitespaces))”")
+                    .font(Font(MacFont.ui(13, weight: .semibold)))
+                    .foregroundStyle(theme.accent)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
+    }
+
+    private func createTypedIfPossible() {
+        guard canCreateTyped else { return }
+        let name = term.trimmingCharacters(in: .whitespaces)
+        let listId = appState.createReadingList(name)
+        if listId >= 0 {
+            appState.addToReadingList(listId, workId: work.id)
+        }
+        term = ""
     }
 }

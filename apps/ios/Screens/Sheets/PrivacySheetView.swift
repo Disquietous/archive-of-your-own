@@ -292,7 +292,7 @@ struct PrivacySheetView: View {
             switch state.bridge.torStatus {
             case .disconnected, .error:
                 Button {
-                    Task { await state.connectTor() }
+                    Task { await state.connectTorNow() }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "shield.checkmark")
@@ -344,11 +344,7 @@ struct PrivacySheetView: View {
 
             case .connected:
                 Button {
-                    // The current circuit is presumed dead — abort the
-                    // in-flight request so the reconnect isn't stuck
-                    // queued behind it.
-                    state.bridge.cancelRequest()
-                    circuitTask = Task { await state.connectTor() }
+                    circuitTask = Task { await state.connectTorNow() }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.triangle.2.circlepath")

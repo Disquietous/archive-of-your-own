@@ -82,6 +82,9 @@ final class AppState {
     var unreadNotificationCount: Int = 0
     var notifications: [UNotification] = []
     var newWorkIDs: [String] = []
+    /// Works a census confirmed are no longer listed on AO3 — cached copies
+    /// are retained everywhere; views may badge them.
+    var goneWorkIDs: Set<String> = []
     var isCheckingSubscriptions = false
     let subscriptionCheckTask = NetworkTask()
     var subscriptionCheckTotal: Int = 0
@@ -181,6 +184,15 @@ final class AppState {
     func newCircuitNow() async -> Bool {
         bridge.cancelRequest()
         return await bridge.newCircuit()
+    }
+
+    /// User-initiated full reconnect (the hub's "New circuit" / "Connect"
+    /// button). Same contract as newCircuitNow(): the user reaches for this
+    /// when the current circuit is presumed dead, so abort the in-flight
+    /// request instead of queueing the transport swap behind it.
+    func connectTorNow() async {
+        bridge.cancelRequest()
+        await connectTor()
     }
 
     func rotateCircuit() async {
@@ -393,9 +405,11 @@ final class AppState {
         readingLists = bridge.getReadingLists()
     }
 
-    func createReadingList(_ name: String) {
-        _ = bridge.createReadingList(name)
+    @discardableResult
+    func createReadingList(_ name: String) -> Int64 {
+        let id = bridge.createReadingList(name)
         refreshReadingLists()
+        return id
     }
 
     func renameReadingList(_ listId: Int64, name: String) {
@@ -1292,6 +1306,7 @@ final class AppState {
 
     func loadNewWorks() {
         newWorkIDs = bridge.getNewWorkIds().map { String($0) }
+        goneWorkIDs = Set(bridge.getGoneWorkIds().map { String($0) })
     }
 
     func removeNewWork(_ id: String) {

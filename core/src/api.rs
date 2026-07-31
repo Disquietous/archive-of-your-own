@@ -139,6 +139,9 @@ pub struct UPagedWorks {
     pub has_next_page: bool,
     /// Highest page number shown in the listing's pagination bar (1 = no pagination).
     pub total_pages: u32,
+    /// The listing's own total result count ("834 Found" / "… of 834 Works"),
+    /// when the page carries one. None = unknown, never zero.
+    pub total_works: Option<u32>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -441,6 +444,10 @@ pub struct AO3App {
     active_task: Arc<std::sync::Mutex<Option<tokio::task::AbortHandle>>>,
     _runtime: Arc<tokio::runtime::Runtime>,
     progress_handles: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::client::ProgressHandle>>>,
+    /// One age-based works census per check cycle: keeps a fresh install (or
+    /// a long-idle app) from crawling every subscription's full listing in a
+    /// single cycle. Evidence-based censuses (count mismatches) ignore this.
+    census_cycle_used: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AO3App {
@@ -573,6 +580,7 @@ impl AO3App {
             active_task: Arc::new(std::sync::Mutex::new(None)),
             _runtime: Arc::new(runtime),
             progress_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            census_cycle_used: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -837,6 +845,7 @@ impl AO3App {
                 works: works.into_iter().map(UWorkSummary::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
+                total_works: None,
             })
         }).await;
         self.clear_progress("author_works");
@@ -856,6 +865,7 @@ impl AO3App {
                 works: works.into_iter().map(UWorkSummary::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
+                total_works: None,
             })
         }).await;
         self.clear_progress("series_works");
@@ -879,17 +889,22 @@ impl AO3App {
         result
     }
 
-    pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
+    pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
         let progress = self.register_progress("search");
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let works = c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)?;
+            let (works, has_next, total, found) = c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             for w in &works { let _ = s.save_work(w); }
-            Ok(works.into_iter().map(UWorkSummary::from).collect())
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_works: found,
+            })
         }).await;
         self.clear_progress("search");
         result
@@ -911,16 +926,21 @@ impl AO3App {
         result
     }
 
-    pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
+    pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<UPagedWorks, AO3Error> {
         let progress = self.register_progress("tag_browse");
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let works = c.search_by_tag(&tag, page).await.map_err(AO3Error::from)?;
+            let (works, has_next, total, found) = c.search_by_tag(&tag, page).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             for w in &works { let _ = s.save_work(w); }
-            Ok(works.into_iter().map(UWorkSummary::from).collect())
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_works: found,
+            })
         }).await;
         self.clear_progress("tag_browse");
         result
@@ -1976,6 +1996,7 @@ impl AO3App {
     /// is sorted alphabetically by display name so the user can predict
     /// where a given check lands in the request order.
     pub fn start_subscription_check(&self, extra_authors: Vec<String>) -> Result<u32, AO3Error> {
+        self.census_cycle_used.store(false, std::sync::atomic::Ordering::Relaxed);
         let s = self.storage.blocking_lock();
         // Resume if a queue already exists
         if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
@@ -2022,6 +2043,25 @@ impl AO3App {
         s.get_new_work_ids().map_err(AO3Error::from)
     }
 
+    /// Works a census confirmed are no longer listed on AO3 (cached copies
+    /// are retained; this is display metadata).
+    pub fn get_gone_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_gone_work_ids().map_err(AO3Error::from)
+    }
+
+    /// Stamp "a full works crawl for this author/series completed now".
+    pub fn set_works_crawled_now(&self, sub_type: String, sub_id: String) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.set_works_crawled_at(&sub_type, &sub_id, &chrono_now()).map_err(AO3Error::from)
+    }
+
+    /// Unix-seconds string of the last completed works crawl, or None.
+    pub fn get_works_crawled_at(&self, sub_type: String, sub_id: String) -> Result<Option<String>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_works_crawled_at(&sub_type, &sub_id).map_err(AO3Error::from)
+    }
+
     pub fn remove_new_work(&self, work_id: u64) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
         s.remove_new_work_id(work_id).map_err(AO3Error::from)
@@ -2033,6 +2073,7 @@ impl AO3App {
     }
 
     pub async fn check_next_subscription(&self) -> Result<Option<USubscriptionCheckResult>, AO3Error> {
+        let census_cycle_used = self.census_cycle_used.clone();
         self.run_on_runtime(move |client, storage| async move {
             let s = storage.lock().await;
             // Pop the first item from the queue
@@ -2047,20 +2088,42 @@ impl AO3App {
             let sub_type = item["sub_type"].as_str().unwrap_or("").to_string();
             let sub_id = item["sub_id"].as_str().unwrap_or("").to_string();
             let sub_name = item["name"].as_str().unwrap_or("").to_string();
+            let is_census = item["census"].as_bool().unwrap_or(false);
 
             // Persist updated queue before the fetch (so a crash mid-fetch
             // skips this item rather than retrying it forever).
-            let remaining = queue.len() as u32;
+            let mut remaining = queue.len() as u32;
             let updated_json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
             let _ = s.set_check_queue(&updated_json);
+
+            // Census continuations read their page cursor from the persisted
+            // state, not the queue marker — cancel/crash resumes cleanly.
+            let census_state: Option<CensusState> = if is_census {
+                s.get_snapshot_census_meta(&sub_type, &sub_id)
+                    .ok()
+                    .and_then(|(_, _, state)| state)
+                    .and_then(|json| serde_json::from_str(&json).ok())
+            } else {
+                None
+            };
             drop(s);
+
+            if is_census && census_state.is_none() {
+                // Orphaned marker — its state was cleared elsewhere.
+                return Ok(Some(USubscriptionCheckResult {
+                    sub_type, sub_id, name: sub_name, changed: false, remaining, error: None,
+                }));
+            }
 
             // Build URL
             let base = crate::client::BASE_URL;
-            let url = match sub_type.as_str() {
-                "author" => format!("{base}/users/{sub_id}/works"),
-                "work" => format!("{base}/works/{sub_id}?view_adult=true"),
-                "series" => format!("{base}/series/{sub_id}"),
+            let census_page = census_state.as_ref().map(|c| c.next_page);
+            let url = match (sub_type.as_str(), census_page) {
+                ("author", None) => format!("{base}/users/{sub_id}/works"),
+                ("author", Some(p)) => format!("{base}/users/{sub_id}/works?page={p}"),
+                ("series", None) => format!("{base}/series/{sub_id}"),
+                ("series", Some(p)) => format!("{base}/series/{sub_id}?page={p}"),
+                ("work", _) => format!("{base}/works/{sub_id}?view_adult=true"),
                 _ => return Ok(Some(USubscriptionCheckResult {
                     sub_type, sub_id, name: sub_name, changed: false, remaining,
                     error: Some(format!("Unknown subscription type")),
@@ -2082,11 +2145,9 @@ impl AO3App {
                         let s = storage.lock().await;
                         if let Ok(Some(json)) = s.get_check_queue() {
                             if let Ok(mut q) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                                q.insert(0, serde_json::json!({
-                                    "sub_type": &sub_type,
-                                    "sub_id": &sub_id,
-                                    "name": &sub_name,
-                                }));
+                                // Re-insert the item wholesale so census
+                                // markers survive the retry.
+                                q.insert(0, item);
                                 let _ = s.set_check_queue(&serde_json::to_string(&q).unwrap_or_default());
                             }
                         }
@@ -2124,74 +2185,63 @@ impl AO3App {
             };
 
             let s = storage.lock().await;
-            // The snapshot's only job now: distinguish a first run (seed
-            // silently) from a repeat check.
-            let first_run = s.get_subscription_snapshot(&sub_type, &sub_id)
-                .unwrap_or(None)
-                .is_none();
 
-            // Per-work diff against the local cache, BEFORE overwriting it.
-            // date_updated is day-granular, so a chapter posted later the
-            // same day is invisible to date comparison — chapter and word
-            // counts (already in the parsed blurbs) catch it.
-            let mut updated_ids: Vec<u64> = Vec::new();
-            if !first_run {
+            // ---- Census continuation: one deeper listing page per call ----
+            if let Some(mut state) = census_state {
+                let (flagged, _) = diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, state.seed);
                 for w in &parsed_works {
-                    match s.get_work(w.id) {
-                        Ok(Some(old)) => {
-                            // Log every metric that differs so the What's New
-                            // decision is auditable after the fact.
-                            let date_changed = old.date_updated != w.date_updated;
-                            let chapters_changed = old.chapter_count != w.chapter_count;
-                            let words_changed = old.word_count != w.word_count;
-                            let mut reasons: Vec<String> = Vec::new();
-                            if date_changed {
-                                reasons.push(format!(
-                                    "date_updated '{}' → '{}' (rule: a changed update date means content was posted since we cached it)",
-                                    old.date_updated, w.date_updated));
-                            }
-                            if chapters_changed {
-                                reasons.push(format!(
-                                    "chapter_count {} → {} (rule: AO3 dates are day-granular, so a same-day chapter shows up here, not in the date)",
-                                    old.chapter_count, w.chapter_count));
-                            }
-                            if words_changed {
-                                reasons.push(format!(
-                                    "word_count {} → {} (rule: edits that add/remove text without a new chapter still count as an update)",
-                                    old.word_count, w.word_count));
-                            }
-                            // A date change alone is NOT sufficient: AO3 has
-                            // been seen shifting update dates without any
-                            // content change (timezone drift on the site's
-                            // side). It must be corroborated by at least one
-                            // content metric; chapter/word changes remain
-                            // sufficient on their own.
-                            if chapters_changed || words_changed {
-                                log_info!("whats_new",
-                                    "Flagged work {} '{}' from {} subscription '{}': {}",
-                                    w.id, w.title, sub_type, sub_name, reasons.join("; "));
-                                updated_ids.push(w.id);
-                            } else if date_changed {
-                                log_info!("whats_new",
-                                    "Suppressed work {} '{}' from {} subscription '{}': {} — no chapter/word change corroborates it (rule: an uncorroborated date change is site-side date drift, not an update; the fresh date is cached so it won't re-trigger)",
-                                    w.id, w.title, sub_type, sub_name, reasons.join("; "));
-                            }
-                        }
-                        Ok(None) => {
-                            // never seen — new work
-                            log_info!("whats_new",
-                                "Flagged work {} '{}' from {} subscription '{}': not in the local works cache (rule: a work we've never cached from any source is new to us)",
-                                w.id, w.title, sub_type, sub_name);
-                            updated_ids.push(w.id);
-                        }
-                        Err(_) => {}
+                    let _ = s.save_work(w);
+                }
+                let page_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+                if !page_ids.is_empty() {
+                    let _ = s.add_subscription_works(&sub_type, &sub_id, &page_ids);
+                }
+                for id in page_ids {
+                    if !state.seen_ids.contains(&id) {
+                        state.seen_ids.push(id);
                     }
                 }
-            } else {
+                let changed = !flagged.is_empty();
+                if changed {
+                    let _ = s.add_new_work_ids(&flagged);
+                }
+
+                let done = !crate::parser::has_next_page(&html)
+                    || state.next_page >= CENSUS_MAX_PAGES
+                    || parsed_works.is_empty();
+                if done {
+                    finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
+                } else {
+                    state.next_page += 1;
+                    let _ = s.set_snapshot_census_state(&sub_type, &sub_id,
+                        serde_json::to_string(&state).ok().as_deref());
+                    remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
+                }
+                if remaining == 0 {
+                    let _ = s.set_last_check_time(&chrono_now());
+                }
+                return Ok(Some(USubscriptionCheckResult {
+                    sub_type, sub_id, name: sub_name, changed, remaining, error: None,
+                }));
+            }
+
+            // ---- Level 0: page 1 (or the single work) ----
+            // The snapshot's job here: distinguish a first run (seed
+            // silently) from a repeat check. An empty date also counts as
+            // first run — census bookkeeping may create the row early.
+            let first_run = s.get_subscription_snapshot(&sub_type, &sub_id)
+                .unwrap_or(None)
+                .map(|d| d.is_empty())
+                .unwrap_or(true);
+
+            let (updated_ids, unseen) = if first_run {
                 log_info!("whats_new",
                     "First check for {} subscription '{}' — seeded {} works silently (rule: no baseline yet, nothing can qualify)",
                     sub_type, sub_name, parsed_works.len());
-            }
+                (Vec::new(), 0)
+            } else {
+                diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, false)
+            };
             let changed = !updated_ids.is_empty();
 
             // Cache works and mark new/updated ones for the What's New feed
@@ -2211,6 +2261,92 @@ impl AO3App {
             // Save snapshot (always, even on first run)
             if !newest_date.is_empty() {
                 let _ = s.save_subscription_snapshot(&sub_type, &sub_id, &newest_date);
+            }
+
+            // ---- Census escalation (listings only) ----
+            // Page 1 sorted by update date is blind to backdated posts and
+            // removals; the listing's total works count is not. When the
+            // count doesn't reconcile with what page 1 shows, walk the whole
+            // listing. A periodic census also runs to catch the one case the
+            // count can't see (an addition paired with a removal between
+            // checks) and to reconcile the gone-from-AO3 flags.
+            if sub_type == "author" || sub_type == "series" {
+                let header_total = crate::parser::parse_listing_works_total(&html);
+                let (prev_total, last_census_at, existing_state) =
+                    s.get_snapshot_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
+
+                let mut census_reason: Option<String> = None;
+                if existing_state.is_some() {
+                    census_reason = Some("resuming interrupted census".to_string());
+                } else if !first_run {
+                    if let (Some(t), Some(p)) = (header_total, prev_total) {
+                        let delta = t as i64 - p as i64;
+                        if delta < 0 {
+                            census_reason = Some(format!(
+                                "listing count fell {p} → {t} (rule: something was removed; confirm what)"));
+                        } else if delta > unseen as i64 {
+                            census_reason = Some(format!(
+                                "listing count rose {p} → {t} but page 1 shows only {unseen} unknown work(s) (rule: a new work missing from the top of the date sort is a backdated post)"));
+                        } else if delta == 0 && unseen > 0 {
+                            census_reason = Some(format!(
+                                "unknown work on page 1 with unchanged count {t} (rule: an addition paired with a removal keeps the count flat)"));
+                        }
+                    }
+                }
+                // Age-based census — capped at one per check cycle so
+                // baselines build gradually instead of all at once.
+                let seed = last_census_at.is_none();
+                if census_reason.is_none() {
+                    let due = match &last_census_at {
+                        None => true,
+                        Some(at) => {
+                            let then = at.parse::<u64>().unwrap_or(0);
+                            let now = chrono_now().parse::<u64>().unwrap_or(0);
+                            now.saturating_sub(then) > CENSUS_INTERVAL_SECS
+                        }
+                    };
+                    if due && !census_cycle_used.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        census_reason = Some(if seed {
+                            "baseline census (first full listing pass)".to_string()
+                        } else {
+                            "periodic census".to_string()
+                        });
+                    }
+                }
+
+                if let Some(reason) = census_reason {
+                    let resumed = existing_state
+                        .and_then(|json| serde_json::from_str::<CensusState>(&json).ok());
+                    let fresh = resumed.is_none();
+                    let mut state = resumed.unwrap_or_else(|| CensusState {
+                        next_page: 2,
+                        total_pages: crate::parser::total_pages(&html),
+                        seen_ids: Vec::new(),
+                        started_at: chrono_now(),
+                        reason: reason.clone(),
+                        seed,
+                    });
+                    for id in &all_ids {
+                        if !state.seen_ids.contains(id) {
+                            state.seen_ids.push(*id);
+                        }
+                    }
+                    log_info!("whats_new",
+                        "Census for {} subscription '{}': {} (from page {}, ~{} pages)",
+                        sub_type, sub_name, reason, state.next_page, state.total_pages);
+                    if fresh && !crate::parser::has_next_page(&html) {
+                        // Single-page listing: page 1 was the whole census.
+                        finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
+                    } else {
+                        let _ = s.set_snapshot_census_state(&sub_type, &sub_id,
+                            serde_json::to_string(&state).ok().as_deref());
+                        remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
+                    }
+                } else if let Some(t) = header_total {
+                    // Counts reconcile — adopt the fresh total as the next
+                    // check's baseline.
+                    let _ = s.set_snapshot_total_works(&sub_type, &sub_id, t);
+                }
             }
 
             // If queue is now empty, mark the check as complete
@@ -2715,6 +2851,142 @@ fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage:
 
 /// Generate a timestamp string without pulling in the chrono crate.
 /// Uses a simple approach based on SystemTime.
+/// How often an age-based full-listing census runs per subscription.
+const CENSUS_INTERVAL_SECS: u64 = 7 * 24 * 3600;
+/// Hard page cap per census — safety valve against pagination anomalies.
+const CENSUS_MAX_PAGES: u32 = 200;
+
+/// In-progress census bookkeeping, persisted in the snapshot row so a
+/// cancelled or crashed check resumes where it left off.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CensusState {
+    next_page: u32,
+    total_pages: u32,
+    seen_ids: Vec<u64>,
+    started_at: String,
+    reason: String,
+    /// Baseline-building pass: cache and associate everything, flag nothing —
+    /// on the first full listing walk, "unknown" means "unseen by us", not
+    /// "new on AO3".
+    seed: bool,
+}
+
+/// The What's-New qualification rules applied to one page of parsed blurbs.
+/// Returns (work ids to flag, how many were never in the cache).
+fn diff_and_flag_works(
+    s: &Storage,
+    parsed_works: &[WorkSummary],
+    sub_type: &str,
+    sub_name: &str,
+    seed: bool,
+) -> (Vec<u64>, usize) {
+    // Per-work diff against the local cache, BEFORE overwriting it.
+    // date_updated is day-granular, so a chapter posted later the
+    // same day is invisible to date comparison — chapter and word
+    // counts (already in the parsed blurbs) catch it.
+    let mut updated_ids: Vec<u64> = Vec::new();
+    let mut unseen = 0usize;
+    for w in parsed_works {
+        match s.get_work(w.id) {
+            Ok(Some(old)) => {
+                if seed {
+                    continue;
+                }
+                // Log every metric that differs so the What's New
+                // decision is auditable after the fact.
+                let date_changed = old.date_updated != w.date_updated;
+                let chapters_changed = old.chapter_count != w.chapter_count;
+                let words_changed = old.word_count != w.word_count;
+                let mut reasons: Vec<String> = Vec::new();
+                if date_changed {
+                    reasons.push(format!(
+                        "date_updated '{}' → '{}' (rule: a changed update date means content was posted since we cached it)",
+                        old.date_updated, w.date_updated));
+                }
+                if chapters_changed {
+                    reasons.push(format!(
+                        "chapter_count {} → {} (rule: AO3 dates are day-granular, so a same-day chapter shows up here, not in the date)",
+                        old.chapter_count, w.chapter_count));
+                }
+                if words_changed {
+                    reasons.push(format!(
+                        "word_count {} → {} (rule: edits that add/remove text without a new chapter still count as an update)",
+                        old.word_count, w.word_count));
+                }
+                // A date change alone is NOT sufficient: AO3 has
+                // been seen shifting update dates without any
+                // content change (timezone drift on the site's
+                // side). It must be corroborated by at least one
+                // content metric; chapter/word changes remain
+                // sufficient on their own.
+                if chapters_changed || words_changed {
+                    log_info!("whats_new",
+                        "Flagged work {} '{}' from {} subscription '{}': {}",
+                        w.id, w.title, sub_type, sub_name, reasons.join("; "));
+                    updated_ids.push(w.id);
+                } else if date_changed {
+                    log_info!("whats_new",
+                        "Suppressed work {} '{}' from {} subscription '{}': {} — no chapter/word change corroborates it (rule: an uncorroborated date change is site-side date drift, not an update; the fresh date is cached so it won't re-trigger)",
+                        w.id, w.title, sub_type, sub_name, reasons.join("; "));
+                }
+            }
+            Ok(None) => {
+                // never seen — new work
+                unseen += 1;
+                if seed {
+                    continue;
+                }
+                log_info!("whats_new",
+                    "Flagged work {} '{}' from {} subscription '{}': not in the local works cache (rule: a work we've never cached from any source is new to us)",
+                    w.id, w.title, sub_type, sub_name);
+                updated_ids.push(w.id);
+            }
+            Err(_) => {}
+        }
+    }
+    (updated_ids, unseen)
+}
+
+/// Census complete: `seen_ids` is everything AO3 still lists. Reconcile the
+/// gone-from-AO3 flags, adopt the authoritative total, stamp the census
+/// time, and clear the in-progress state.
+fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_name: &str, state: &CensusState) {
+    let known = s.get_subscription_work_ids(sub_type, sub_id).unwrap_or_default();
+    let seen: std::collections::HashSet<u64> = state.seen_ids.iter().copied().collect();
+    let gone: Vec<u64> = known.into_iter().filter(|id| !seen.contains(id)).collect();
+    if !gone.is_empty() {
+        let _ = s.set_works_gone(&gone, true);
+        log_info!("whats_new",
+            "Census: {} work(s) from {} subscription '{}' no longer listed on AO3 — flagged gone, cached copies retained: {:?}",
+            gone.len(), sub_type, sub_name, gone);
+    }
+    // A reappearance (undeleted, un-anonymized, unrestricted) clears the flag.
+    let _ = s.set_works_gone(&state.seen_ids, false);
+    let _ = s.set_snapshot_total_works(sub_type, sub_id, seen.len() as u32);
+    let _ = s.set_snapshot_last_census(sub_type, sub_id, &chrono_now());
+    let _ = s.set_snapshot_census_state(sub_type, sub_id, None);
+    log_info!("whats_new",
+        "Census complete for {} subscription '{}' ({}): {} works listed{}",
+        sub_type, sub_name, state.reason, seen.len(),
+        if state.seed { " — baseline established" } else { "" });
+}
+
+/// Append this subscription's census-continuation marker to the check queue
+/// (at the tail, so other subscriptions get their turn first). Returns the
+/// new queue length.
+fn requeue_census_marker(s: &Storage, sub_type: &str, sub_id: &str, name: &str) -> u32 {
+    let queue_json = s.get_check_queue().ok().flatten().unwrap_or_else(|| "[]".to_string());
+    let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json).unwrap_or_default();
+    queue.push(serde_json::json!({
+        "sub_type": sub_type,
+        "sub_id": sub_id,
+        "name": name,
+        "census": true,
+    }));
+    let _ = s.set_check_queue(&serde_json::to_string(&queue).unwrap_or_default());
+    queue.len() as u32
+}
+
 fn chrono_now() -> String {
     use std::time::SystemTime;
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {

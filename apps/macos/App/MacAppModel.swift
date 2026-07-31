@@ -8,7 +8,7 @@ import Observation
 final class MacAppModel {
     enum Section: String, CaseIterable {
         case browse, reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
-             bookmarks, downloads, stats, search, authorWorks
+             bookmarks, downloads, stats, search, authorWorks, readingLists
     }
 
     let appState: AppState
@@ -106,14 +106,45 @@ final class MacAppModel {
         workSorts[String(describing: section)] = sort.rawValue
     }
 
-    var completionFilter: CompletionFilter =
-        CompletionFilter(rawValue: UserDefaults.standard.string(forKey: "completionFilter") ?? "") ?? .all {
-        didSet { UserDefaults.standard.set(completionFilter.rawValue, forKey: "completionFilter") }
+    /// Per-section completion/rating filters (persisted), matching the sort
+    /// scoping — a rating filter chosen for Bookmarks no longer silently
+    /// constrains History. The old global keys seed every section once so
+    /// existing choices carry over.
+    private var completionFilters: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "completionFilters") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(completionFilters, forKey: "completionFilters") }
     }
 
-    var ratingFilter: Rating? =
-        UserDefaults.standard.string(forKey: "ratingFilter").flatMap(Rating.init(rawValue:)) {
-        didSet { UserDefaults.standard.set(ratingFilter?.rawValue, forKey: "ratingFilter") }
+    private var ratingFilters: [String: String] =
+        UserDefaults.standard.dictionary(forKey: "ratingFilters") as? [String: String] ?? [:] {
+        didSet { UserDefaults.standard.set(ratingFilters, forKey: "ratingFilters") }
+    }
+
+    /// Legacy global values, used as the default where no per-section choice
+    /// has been made yet.
+    private let legacyCompletionFilter =
+        CompletionFilter(rawValue: UserDefaults.standard.string(forKey: "completionFilter") ?? "") ?? .all
+    private let legacyRatingFilter =
+        UserDefaults.standard.string(forKey: "ratingFilter").flatMap(Rating.init(rawValue:))
+
+    func completionFilter(for section: Section) -> CompletionFilter {
+        guard let raw = completionFilters[String(describing: section)] else { return legacyCompletionFilter }
+        return CompletionFilter(rawValue: raw) ?? .all
+    }
+
+    func setCompletionFilter(_ filter: CompletionFilter, for section: Section) {
+        completionFilters[String(describing: section)] = filter.rawValue
+    }
+
+    func ratingFilter(for section: Section) -> Rating? {
+        guard let raw = ratingFilters[String(describing: section)] else { return legacyRatingFilter }
+        return Rating(rawValue: raw)
+    }
+
+    func setRatingFilter(_ rating: Rating?, for section: Section) {
+        // "" = an explicit All choice — distinct from "never chosen", which
+        // falls back to the legacy global value.
+        ratingFilters[String(describing: section)] = rating?.rawValue ?? ""
     }
 
     /// Sort a filtered list by the section's persisted choice. Dates are
@@ -199,13 +230,24 @@ final class MacAppModel {
         }
     }
 
+    /// Open a reading list's works in the reading pane (the Reading Lists
+    /// section's drill-in, mirroring the Subscriptions → works flow).
     func goReadingList(_ listID: Int64) {
-        if section != .bookmarks {
-            snapshotPane(for: section)
-            section = .bookmarks
-            restorePane(for: .bookmarks)
-        }
+        goSection(.readingLists)
         selectedReadingListID = listID
+        selectedWorkID = nil
+        readerOpen = false
+    }
+
+    /// Close the drill-in: back to "select a list".
+    func closeReadingList() {
+        selectedReadingListID = nil
+        selectedWorkID = nil
+        readerOpen = false
+    }
+
+    var filteredReadingListWorks: [Work] {
+        works(for: .readingLists)
     }
 
     /// Route an archiveofourown.org link to the matching screen.
@@ -522,9 +564,12 @@ final class MacAppModel {
     var subscriptionWorksSubId: String?
     /// Progress line while a full works crawl is running ("Page 3 of 12 · 47 works…").
     var subscriptionWorksFetchStatus: String?
+    /// When this drill-in's works were last fully crawled (epoch-seconds
+    /// string from the DB) — drives the "refreshed 3d ago" staleness line.
+    var subscriptionWorksCrawledAt: String?
 
     var filteredSubscriptionWorks: [Work] {
-        sorted(applyListFilter(filtered(subscriptionWorksList), for: .subscriptions), for: .subscriptions)
+        sorted(applyListFilter(filtered(subscriptionWorksList, for: .subscriptions), for: .subscriptions), for: .subscriptions)
     }
 
     /// Show a subscription's locally stored works (author or series). Never
@@ -547,6 +592,7 @@ final class MacAppModel {
         readerOpen = false
         subscriptionWorksSubType = subType
         subscriptionWorksSubId = subscriptionID
+        subscriptionWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subscriptionID)
 
         let cached = appState.bridge.getSubscriptionWorks(subType: subType, subId: subscriptionID)
         let works = cached.map(AppState.workFromSummary)
@@ -587,6 +633,8 @@ final class MacAppModel {
                     subscriptionWorksList = all
                     let ids = all.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
                     appState.bridge.saveSubscriptionWorks(subType: subType, subId: subId, workIds: ids)
+                    appState.bridge.setWorksCrawledNow(subType: subType, subId: subId)
+                    subscriptionWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subId)
                     // The crawl rewrote works in the DB (author renames,
                     // updated stats) — refresh the launch-time snapshot too.
                     appState.reloadCachedWorks()
@@ -624,9 +672,11 @@ final class MacAppModel {
 
     var authorUsername: String?
     var authorWorksList: [Work] = []
+    /// Last completed full crawl for this author (epoch-seconds string).
+    var authorWorksCrawledAt: String?
 
     var filteredAuthorWorks: [Work] {
-        sorted(applyListFilter(filtered(authorWorksList), for: .authors), for: .authors)
+        sorted(applyListFilter(filtered(authorWorksList, for: .authors), for: .authors), for: .authors)
     }
     var isLoadingAuthor = false
     var authorError: String?
@@ -648,6 +698,7 @@ final class MacAppModel {
         selectedWorkID = nil
         readerOpen = false
 
+        authorWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
         let cached = appState.bridge.getWorksByAuthor(username: username)
         let works = cached.map(AppState.workFromSummary)
         for work in works { appState.fetchedWorks[work.id] = work }
@@ -674,8 +725,15 @@ final class MacAppModel {
                         authorWorksList = works
                     })
                 if authorUsername == username && !task.isCancelled {
-                    authorWorksList = all
+                    appState.bridge.setWorksCrawledNow(subType: "author", subId: username)
+                    authorWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
                     appState.reloadCachedWorks()
+                    // Show the cache union, not just the crawl result: works
+                    // that disappeared from AO3 stay on the author's list.
+                    let cached = appState.bridge.getWorksByAuthor(username: username)
+                    let works = cached.map(AppState.workFromSummary)
+                    for work in works { appState.fetchedWorks[work.id] = work }
+                    authorWorksList = works.isEmpty ? all : works
                 }
             } catch {
                 if !task.isCancelled && !"\(error)".contains("cancelled"),
@@ -756,7 +814,7 @@ final class MacAppModel {
     }
 
     func works(for section: Section) -> [Work] {
-        sorted(applyListFilter(filtered(rawWorks(for: section)), for: section), for: section)
+        sorted(applyListFilter(filtered(rawWorks(for: section), for: section), for: section), for: section)
     }
 
     private func rawWorks(for section: Section) -> [Work] {
@@ -770,12 +828,10 @@ final class MacAppModel {
         case .history:
             appState.history.compactMap { appState.work(byID: $0) }
         case .bookmarks:
-            if let listID = selectedReadingListID {
-                appState.worksInReadingList(listID)
-            } else {
-                appState.bookmarkedWorkIDs.compactMap { appState.work(byID: $0) }
-                    .sorted { $0.title < $1.title }
-            }
+            appState.bookmarkedWorkIDs.compactMap { appState.work(byID: $0) }
+                .sorted { $0.title < $1.title }
+        case .readingLists:
+            selectedReadingListID.map { appState.worksInReadingList($0) } ?? []
         case .downloads:
             appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
                 .sorted { $0.title < $1.title }
@@ -796,15 +852,17 @@ final class MacAppModel {
         }
     }
 
-    private func filtered(_ works: [Work]) -> [Work] {
-        works.filter { w in
+    private func filtered(_ works: [Work], for section: Section) -> [Work] {
+        let completion = completionFilter(for: section)
+        let rating = ratingFilter(for: section)
+        return works.filter { w in
             let passesExplicit = !hideExplicit || w.rating != .explicit
-            let passesCompletion = switch completionFilter {
+            let passesCompletion = switch completion {
             case .all: true
             case .complete: w.complete
             case .inProgress: !w.complete
             }
-            let passesRating = ratingFilter == nil || w.rating == ratingFilter
+            let passesRating = rating == nil || w.rating == rating
             return passesExplicit && passesCompletion && passesRating
         }
     }
@@ -884,7 +942,7 @@ final class MacAppModel {
     /// alphabetically — the suggestion pool for the filter dialog.
     func availableTags(for s: Section) -> [String] {
         var tags = Set<String>()
-        for work in filtered(rawWorks(for: s)) {
+        for work in filtered(rawWorks(for: s), for: s) {
             tags.formUnion(work.tags)
         }
         return tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
@@ -894,7 +952,7 @@ final class MacAppModel {
     /// suggestion pool for the filter dialog's fandom field.
     func availableFandoms(for s: Section) -> [String] {
         var fandoms = Set<String>()
-        for work in filtered(rawWorks(for: s)) {
+        for work in filtered(rawWorks(for: s), for: s) {
             fandoms.formUnion(work.fandoms.isEmpty ? [work.fandom] : work.fandoms)
         }
         return fandoms.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }

@@ -95,7 +95,7 @@ struct PrivacyPopoverView: View {
             }
 
             Button {
-                Task { await appState.connectTor() }
+                Task { await appState.connectTorNow() }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise")
