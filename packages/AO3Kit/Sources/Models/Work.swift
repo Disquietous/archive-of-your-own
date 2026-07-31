@@ -28,6 +28,15 @@ struct Work: Identifiable, Hashable {
     /// All fandom tags (`fandom` is just the first). Defaulted so the many
     /// mock/sample initializers don't need to supply it.
     var fandoms: [String] = []
+    /// Series this work belongs to. Only populated by full work-page
+    /// fetches; listing rows and older caches leave it empty.
+    var series: [SeriesInfo] = []
+
+    /// The membership to follow at end-of-work — first series that has a
+    /// next work.
+    var nextInSeries: SeriesInfo? {
+        series.first { $0.nextWorkID != nil }
+    }
 
     /// Every fandom on the work — falls back to the single `fandom` for
     /// works cached before the full list was carried through.
@@ -44,6 +53,15 @@ struct Work: Identifiable, Hashable {
     var spineColor: Color {
         Fandom.spineColor(for: fandom)
     }
+}
+
+struct SeriesInfo: Hashable {
+    let seriesID: String
+    let name: String
+    /// 1-based "Part N" position; 0 = unknown.
+    let part: Int
+    let prevWorkID: String?
+    let nextWorkID: String?
 }
 
 struct ChapterContent: Hashable {

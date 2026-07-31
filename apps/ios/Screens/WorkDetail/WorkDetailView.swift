@@ -191,6 +191,16 @@ struct WorkDetailView: View {
                     .font(Typography.uiBody())
                     .foregroundStyle(theme.ink2)
             }
+
+            if !work.series.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(work.series, id: \.self) { s in
+                        Text(s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)")
+                            .font(Typography.uiCaption())
+                            .foregroundStyle(theme.ink2)
+                    }
+                }
+            }
         }
         .padding(.top, 8)
     }

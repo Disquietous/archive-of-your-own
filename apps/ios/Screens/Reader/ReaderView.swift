@@ -331,7 +331,30 @@ struct ReaderView: View {
                         .foregroundStyle(theme.ink3)
                 }
             }
+
+            if let next = work.nextInSeries?.nextWorkID {
+                nextWorkInSeriesButton(next)
+            }
         }
+    }
+
+    /// End-of-work jump to the next installment — lands on its detail page
+    /// (which fetches metadata itself for never-opened works).
+    private func nextWorkInSeriesButton(_ nextID: String) -> some View {
+        Button {
+            nav.openWork(nextID)
+        } label: {
+            Text("Next work in series")
+                .font(Typography.buttonLabel())
+                .foregroundStyle(theme.onAccent)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.button)
+                        .fill(theme.accent)
+                )
+        }
+        .buttonStyle(ButtonPressStyle())
     }
 
     // MARK: - Reader Content (single chapter)
@@ -587,6 +610,9 @@ struct ReaderView: View {
                             .font(Typography.uiBody())
                             .foregroundStyle(theme.ink3)
                     }
+                }
+                if let next = work?.nextInSeries?.nextWorkID {
+                    nextWorkInSeriesButton(next)
                 }
             } else {
                 Button {

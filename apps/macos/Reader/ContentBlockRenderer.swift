@@ -13,6 +13,33 @@ struct ContentBlockRenderer {
 
     let theme: AppTheme
     var paragraphStyle: ParagraphMode = .indented
+    /// Chapter-embedded images already fetched (src → image). Anything not
+    /// here renders as a tap-to-load placeholder.
+    var loadedImages: [String: NSImage] = [:]
+    /// Per-image status overrides for the placeholder ("Loading…", errors).
+    var imageStatus: [String: String] = [:]
+    /// Display cap for image width; tall images scale proportionally.
+    var imageDisplayWidth: CGFloat = 560
+
+    /// Custom scheme carried in the placeholder's .link attribute; the
+    /// reader's delegate intercepts it to trigger the fetch.
+    static let imageLinkScheme = "aoyo-image"
+
+    static func imageLinkURL(for src: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = imageLinkScheme
+        components.host = "load"
+        components.queryItems = [URLQueryItem(name: "src", value: src)]
+        return components.url
+    }
+
+    static func imageSrc(from link: Any) -> String? {
+        let url: URL?
+        if let u = link as? URL { url = u } else if let s = link as? String { url = URL(string: s) } else { url = nil }
+        guard let url, url.scheme == imageLinkScheme,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        return components.queryItems?.first { $0.name == "src" }?.value
+    }
 
     private var bodySize: CGFloat { CGFloat(theme.fontSize) }
     private var bodyFont: NSFont { Self.readingFont(named: theme.readingFont.fontName, size: bodySize) }
@@ -173,6 +200,71 @@ struct ContentBlockRenderer {
                     .font: NSFont.monospacedSystemFont(ofSize: bodySize * 0.85, weight: .regular),
                     .foregroundColor: ink2Color,
                     .paragraphStyle: style,
+                ]
+            ))
+
+        case .image(let src, let alt):
+            appendImage(src: src, alt: alt, to: result)
+        }
+    }
+
+    /// A loaded image as a centered attachment (scaled to the column) with an
+    /// alt-text caption; otherwise a tap-to-load placeholder line whose .link
+    /// carries the source URL for the reader's delegate.
+    private func appendImage(src: String, alt: String, to result: NSMutableAttributedString) {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.paragraphSpacingBefore = 12
+        style.paragraphSpacing = 4
+
+        if let image = loadedImages[src] {
+            let attachment = NSTextAttachment()
+            attachment.image = image
+            let size = image.size
+            let scale = size.width > imageDisplayWidth && size.width > 0
+                ? imageDisplayWidth / size.width : 1
+            attachment.bounds = CGRect(x: 0, y: 0,
+                                       width: size.width * scale, height: size.height * scale)
+            let line = NSMutableAttributedString(attachment: attachment)
+            line.append(NSAttributedString(string: "\n"))
+            line.addAttributes([.paragraphStyle: style],
+                               range: NSRange(location: 0, length: line.length))
+            result.append(line)
+        } else {
+            let label: String
+            if let status = imageStatus[src] {
+                label = status
+            } else if alt.isEmpty {
+                label = "Tap to load image"
+            } else {
+                label = "Tap to load image — \(alt)"
+            }
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: bodySize * 0.8, weight: .medium),
+                .foregroundColor: accentColor,
+                .paragraphStyle: style,
+            ]
+            if let link = Self.imageLinkURL(for: src) {
+                attributes[.link] = link
+                // Suppress the default link underline/color pair fighting the
+                // accent styling.
+                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
+            result.append(NSAttributedString(string: "🖼 \(label)\n", attributes: attributes))
+        }
+
+        // Caption under a loaded image only — the placeholder already
+        // carries the alt text.
+        if loadedImages[src] != nil, !alt.isEmpty {
+            let captionStyle = NSMutableParagraphStyle()
+            captionStyle.alignment = .center
+            captionStyle.paragraphSpacing = 12
+            result.append(NSAttributedString(
+                string: alt + "\n",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: bodySize * 0.72),
+                    .foregroundColor: ink3Color,
+                    .paragraphStyle: captionStyle,
                 ]
             ))
         }

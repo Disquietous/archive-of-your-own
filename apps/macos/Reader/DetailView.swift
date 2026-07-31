@@ -79,9 +79,19 @@ struct DetailView: View {
                     Text(work.relationship)
                         .font(Font(MacFont.ui(14)))
                         .foregroundStyle(theme.ink3)
-                        .padding(.bottom, 20)
-                } else {
+                        .padding(.bottom, work.series.isEmpty ? 20 : 8)
+                } else if work.series.isEmpty {
                     Spacer().frame(height: 20)
+                }
+                if !work.series.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(work.series, id: \.self) { s in
+                            Text(s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)")
+                                .font(Font(MacFont.ui(13, weight: .semibold)))
+                                .foregroundStyle(theme.ink3)
+                        }
+                    }
+                    .padding(.bottom, 20)
                 }
 
                 pills.padding(.bottom, 22)

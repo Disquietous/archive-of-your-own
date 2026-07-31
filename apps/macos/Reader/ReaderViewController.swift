@@ -22,6 +22,7 @@ final class ReaderViewController: NSViewController {
     private let nextChapterButton = NSButton(title: "Next chapter", target: nil, action: nil)
     private let endNoteBig = NSTextField(labelWithString: "")
     private let endNoteSub = NSTextField(labelWithString: "")
+    private let nextWorkButton = NSButton(title: "Next work in series", target: nil, action: nil)
     private let footer: ReadFooterView
     private var overlayHost: NSHostingView<AnyView>?
 
@@ -34,6 +35,11 @@ final class ReaderViewController: NSViewController {
     private var isLoading = false
     private var loadError: String?
     private let chapterTask = NetworkTask()
+    /// Chapter-embedded images fetched this work (src → image), the fetches
+    /// in flight, and per-image failure messages for the placeholder.
+    private var loadedChapterImages: [String: NSImage] = [:]
+    private var chapterImageStatus: [String: String] = [:]
+    private var loadingChapterImages: Set<String> = []
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -60,6 +66,7 @@ final class ReaderViewController: NSViewController {
 
         textView.isEditable = false
         textView.isSelectable = true
+        textView.delegate = self
         textView.drawsBackground = false
         textView.textContainerInset = .zero
         textView.textContainer?.widthTracksTextView = true
@@ -95,6 +102,14 @@ final class ReaderViewController: NSViewController {
         endNoteBig.alignment = .center
         endNoteSub.font = MacFont.ui(14)
         endNoteSub.alignment = .center
+        nextWorkButton.isBordered = false
+        nextWorkButton.wantsLayer = true
+        nextWorkButton.layer?.cornerRadius = 11
+        nextWorkButton.target = self
+        nextWorkButton.action = #selector(openNextWorkInSeries)
+        nextWorkButton.translatesAutoresizingMaskIntoConstraints = false
+        nextWorkButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
+        nextWorkButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
 
         column.orientation = .vertical
         column.alignment = .leading
@@ -102,7 +117,8 @@ final class ReaderViewController: NSViewController {
         column.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         column.edgeInsets = NSEdgeInsets(top: 46, left: 0, bottom: 120, right: 0)
         [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel,
-         nextChapterButton, endNoteBig, endNoteSub].forEach { column.addArrangedSubview($0) }
+         nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { column.addArrangedSubview($0) }
+        column.setCustomSpacing(18, after: endNoteSub)
         column.setCustomSpacing(10, after: metaLabel)
         column.setCustomSpacing(22, after: titleLabel)
         column.setCustomSpacing(28, after: titleRule)
@@ -227,6 +243,12 @@ final class ReaderViewController: NSViewController {
     }
 
     func show(work: Work, chapterIndex: Int) {
+        // Bound memory: decoded images don't outlive their work.
+        if work.id != self.work?.id {
+            loadedChapterImages = [:]
+            chapterImageStatus = [:]
+            loadingChapterImages = []
+        }
         self.work = work
         self.chapterIndex = chapterIndex
         self.chapters = nil
@@ -366,7 +388,7 @@ final class ReaderViewController: NSViewController {
             titleLabel.stringValue = isLoading || loadError != nil ? "" : "Chapter \(chapterIndex + 1)"
             textView.textStorage?.setAttributedString(NSAttributedString())
             dropCapLabel.isHidden = true
-            [endRule, ornamentLabel, nextChapterButton, endNoteBig, endNoteSub].forEach { $0.isHidden = true }
+            [endRule, ornamentLabel, nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { $0.isHidden = true }
             footer.applyTheme()
             updateProgress()
             // A scheduled restore bails on the now-empty document and lifts
@@ -375,7 +397,11 @@ final class ReaderViewController: NSViewController {
         }
 
         titleLabel.stringValue = content.title
-        let renderer = ContentBlockRenderer(theme: theme, paragraphStyle: .macReading)
+        primeAndLoadImages(in: content.blocks)
+        var renderer = ContentBlockRenderer(theme: theme, paragraphStyle: .macReading)
+        renderer.loadedImages = loadedChapterImages
+        renderer.imageStatus = chapterImageStatus
+        renderer.imageDisplayWidth = max(240, CGFloat(theme.measure) - 60)
         let body = NSMutableAttributedString(attributedString: renderer.render(blocks: content.blocks))
         applyDropCap(to: body, bodySize: bodySize)
         textView.textStorage?.setAttributedString(body)
@@ -390,11 +416,18 @@ final class ReaderViewController: NSViewController {
         nextChapterButton.isHidden = isLastChapter
         endNoteBig.isHidden = !isLastChapter
         endNoteSub.isHidden = !isLastChapter
+        nextWorkButton.isHidden = !(isLastChapter && work.nextInSeries?.nextWorkID != nil)
         if isLastChapter {
             endNoteBig.stringValue = work.complete ? "The end" : "You’re all caught up"
             endNoteBig.textColor = theme.nsInk2
             endNoteSub.stringValue = work.complete ? "Thanks for reading." : "Updated \(work.updated)"
             endNoteSub.textColor = theme.nsInk3
+            if !nextWorkButton.isHidden {
+                nextWorkButton.layer?.backgroundColor = theme.nsAccent.cgColor
+                nextWorkButton.attributedTitle = NSAttributedString(
+                    string: "Next work in series  ›",
+                    attributes: [.font: MacFont.ui(14.5, weight: .bold), .foregroundColor: theme.nsOnAccent])
+            }
         } else {
             nextChapterButton.layer?.backgroundColor = theme.nsAccent.cgColor
             nextChapterButton.attributedTitle = NSAttributedString(
@@ -690,6 +723,11 @@ final class ReaderViewController: NSViewController {
         goChapter(1)
     }
 
+    @objc private func openNextWorkInSeries() {
+        guard let next = work?.nextInSeries?.nextWorkID else { return }
+        model.openNextWorkInSeries(next)
+    }
+
     /// Keyboard navigation entry point (← / → in the reading pane).
     func goToAdjacentChapter(_ delta: Int) {
         goChapter(delta)
@@ -768,6 +806,84 @@ final class ReaderViewController: NSViewController {
         footer.update(chapterPct: chapterPct, bookPct: bookPct,
                       canGoBack: chapterIndex > 0,
                       canGoForward: chapterIndex < postedChapterCount - 1)
+    }
+
+    // MARK: - Chapter-embedded images
+
+    private static func imageSrcs(in blocks: [ParsedContentBlock]) -> [String] {
+        var srcs: [String] = []
+        func walk(_ blocks: [ParsedContentBlock]) {
+            for block in blocks {
+                switch block {
+                case .image(let src, _):
+                    if !srcs.contains(src) { srcs.append(src) }
+                case .blockquote(let inner):
+                    walk(inner)
+                case .list(_, let items):
+                    items.forEach(walk)
+                default:
+                    break
+                }
+            }
+        }
+        walk(blocks)
+        return srcs
+    }
+
+    /// Synchronously adopt already-cached images (downloaded works, earlier
+    /// taps this session), and start fetches for the rest when auto-load is
+    /// on. Tap-to-load is the default: uncached images stay placeholders.
+    private func primeAndLoadImages(in blocks: [ParsedContentBlock]) {
+        for src in Self.imageSrcs(in: blocks) where loadedChapterImages[src] == nil {
+            if let data = appState.bridge.cachedChapterImage(url: src),
+               let image = NSImage(data: data) {
+                loadedChapterImages[src] = image
+            } else if theme.imageAutoLoad {
+                loadChapterImage(src)
+            }
+        }
+    }
+
+    private func loadChapterImage(_ src: String) {
+        guard !loadingChapterImages.contains(src), loadedChapterImages[src] == nil else { return }
+        loadingChapterImages.insert(src)
+        chapterImageStatus[src] = "Loading image…"
+        renderChapter()
+        Task { @MainActor in
+            do {
+                let data = try await appState.bridge.fetchChapterImage(url: src, maxBytes: theme.imageMaxBytes)
+                if let image = NSImage(data: data) {
+                    loadedChapterImages[src] = image
+                    chapterImageStatus[src] = nil
+                    appState.bridge.writeLog(level: "INFO", tag: "image",
+                        message: "Decoded \(data.count) bytes into \(Int(image.size.width))×\(Int(image.size.height)) for \(src)")
+                } else {
+                    let head = data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                    appState.bridge.writeLog(level: "ERROR", tag: "image",
+                        message: "NSImage decode failed for \(src): \(data.count) bytes, head [\(head)]")
+                    chapterImageStatus[src] = "Couldn’t decode image — tap to retry"
+                }
+            } catch {
+                appState.bridge.writeLog(level: "ERROR", tag: "image",
+                    message: "Fetch failed for \(src): \(error.localizedDescription)")
+                chapterImageStatus[src] = "\(error.localizedDescription) — tap to retry"
+            }
+            loadingChapterImages.remove(src)
+            renderChapter()
+        }
+    }
+}
+
+// MARK: - Link handling (tap-to-load images)
+
+extension ReaderViewController: NSTextViewDelegate {
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let src = ContentBlockRenderer.imageSrc(from: link) else {
+            return false  // regular hyperlink — default handling
+        }
+        chapterImageStatus[src] = nil  // clear a stale error before retrying
+        loadChapterImage(src)
+        return true
     }
 }
 

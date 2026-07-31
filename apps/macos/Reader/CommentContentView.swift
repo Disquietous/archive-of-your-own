@@ -59,6 +59,11 @@ struct CommentContentView: View {
                 .padding(8)
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+        case .image(_, let alt):
+            // Comments stay text-only; note the image rather than fetch it.
+            Text(alt.isEmpty ? "[image]" : "[image: \(alt)]")
+                .font(Font(MacFont.ui(12)).italic())
+                .foregroundStyle(theme.ink3)
         }
     }
 

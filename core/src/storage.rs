@@ -8,7 +8,8 @@ use rusqlite::{params, Connection};
 
 use crate::error::AppError;
 use crate::models::{
-    AO3User, Chapter, Comment, ContentBlock, Rating, UserProfile, Warning, WorkSummary,
+    AO3User, Chapter, Comment, ContentBlock, Rating, SeriesMembership, UserProfile, Warning,
+    WorkSummary,
 };
 
 /// Encrypted local storage backed by SQLCipher.
@@ -152,6 +153,23 @@ impl Storage {
         Ok(())
     }
 
+    /// Persist series memberships for a work. Separate from `save_work`
+    /// because listing blurbs never carry series data and their upserts
+    /// must not clobber it; only full work-page fetches call this. Always
+    /// writes — the work page is authoritative, so an empty slice clears.
+    pub fn set_work_series(&self, work_id: u64, series: &[SeriesMembership]) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "UPDATE works SET series_json = ?2 WHERE id = ?1",
+                params![
+                    work_id as i64,
+                    serde_json::to_string(series).map_err(map_json)?
+                ],
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
     /// An avatar URL already harvested for this username (from cached
     /// comments/inbox data) — saves the profile-page request entirely.
     pub fn get_known_avatar_url(&self, username: &str) -> Result<Option<String>, AppError> {
@@ -186,6 +204,12 @@ impl Storage {
             "INSERT OR REPLACE INTO image_cache (key, data) VALUES (?1, ?2)",
             params![key, data],
         ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn delete_cached_image(&self, key: &str) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM image_cache WHERE key = ?1", params![key])
+            .map_err(map_sql)?;
         Ok(())
     }
 
@@ -305,7 +329,8 @@ impl Storage {
                         warnings_json, categories_json, relationships_json,
                         characters_json, tags_json, summary, word_count,
                         chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_published, date_updated, language, complete
+                        bookmarks, comments, date_published, date_updated, language, complete,
+                        series_json
                  FROM works WHERE id = ?1",
             )
             .map_err(map_sql)?;
@@ -332,7 +357,8 @@ impl Storage {
                         warnings_json, categories_json, relationships_json,
                         characters_json, tags_json, summary, word_count,
                         chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_published, date_updated, language, complete
+                        bookmarks, comments, date_published, date_updated, language, complete,
+                        series_json
                  FROM works",
             )
             .map_err(map_sql)?;
@@ -357,7 +383,8 @@ impl Storage {
                         w.warnings_json, w.categories_json, w.relationships_json,
                         w.characters_json, w.tags_json, w.summary, w.word_count,
                         w.chapter_count, w.total_chapters, w.kudos, w.hits,
-                        w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete
+                        w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete,
+                        w.series_json
                  FROM works w, json_each(w.authors_json) j
                  WHERE j.value = ?1
                  ORDER BY w.date_updated DESC",
@@ -1233,7 +1260,8 @@ impl Storage {
                     w.warnings_json, w.categories_json, w.relationships_json,
                     w.characters_json, w.tags_json, w.summary, w.word_count,
                     w.chapter_count, w.total_chapters, w.kudos, w.hits,
-                    w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete
+                    w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete,
+                    w.series_json
              FROM subscription_works sw
              JOIN works w ON w.id = sw.work_id
              WHERE sw.sub_type = ?1 AND sw.sub_id = ?2
@@ -1628,7 +1656,8 @@ impl Storage {
                     date_published  TEXT NOT NULL DEFAULT '',
                     date_updated    TEXT NOT NULL,
                     language        TEXT NOT NULL,
-                    complete        INTEGER NOT NULL
+                    complete        INTEGER NOT NULL,
+                    series_json     TEXT NOT NULL DEFAULT '[]'
                 );
 
                 CREATE TABLE IF NOT EXISTS chapters (
@@ -1919,6 +1948,12 @@ impl Storage {
         // is retained everywhere; this only records the fact.
         self.conn.execute("ALTER TABLE works ADD COLUMN gone_from_ao3 INTEGER NOT NULL DEFAULT 0", []).ok();
 
+        // Migration: series memberships parsed from the work page ('[]'
+        // until the work is next fully fetched). Kept out of save_work —
+        // listing blurbs don't carry series and would wipe it (same
+        // rationale as gone_from_ao3 above); set_work_series writes it.
+        self.conn.execute("ALTER TABLE works ADD COLUMN series_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+
         // Migration: full user profiles + block/mute state on ao3_users.
         // pseuds and bio are JSON (bio is a serialized ContentBlock tree,
         // same encoding comments use). The *_ao3_id columns hold AO3's
@@ -1990,6 +2025,7 @@ impl Storage {
         let date_updated: String = row.get(19)?;
         let language: String = row.get(20)?;
         let complete: i32 = row.get(21)?;
+        let series_json: String = row.get(22)?;
 
         // Deserialize JSON columns — use unwrap_or_default so a corrupted
         // row doesn't crash the whole query; the caller can still surface the
@@ -2008,6 +2044,8 @@ impl Storage {
             serde_json::from_str(&characters_json).unwrap_or_default();
         let tags: Vec<String> =
             serde_json::from_str(&tags_json).unwrap_or_default();
+        let series: Vec<SeriesMembership> =
+            serde_json::from_str(&series_json).unwrap_or_default();
 
         Ok(WorkSummary {
             id: id as u64,
@@ -2032,6 +2070,7 @@ impl Storage {
             date_updated,
             language,
             complete: complete != 0,
+            series,
         })
     }
 
@@ -2569,6 +2608,7 @@ mod tests {
             date_updated: "2025-01-15".into(),
             language: "English".into(),
             complete: false,
+            series: vec![],
         }
     }
 
@@ -2973,6 +3013,49 @@ mod tests {
         // …only an explicit clear (census reappearance) does.
         db.set_works_gone(&[7001, 7002], false).unwrap();
         assert!(db.get_gone_work_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_work_series_roundtrip() {
+        let db = open_test_db();
+        let w = sample_work(7101);
+        db.save_work(&w).unwrap();
+
+        let series = vec![
+            SeriesMembership {
+                series_id: 9000001,
+                name: "Alpha Test Series".into(),
+                part: 2,
+                prev_work_id: Some(7100),
+                next_work_id: Some(7102),
+            },
+            SeriesMembership {
+                series_id: 9000002,
+                name: "Beta Test Series".into(),
+                part: 1,
+                prev_work_id: None,
+                next_work_id: None,
+            },
+        ];
+        db.set_work_series(7101, &series).unwrap();
+        let got = db.get_work(7101).unwrap().unwrap();
+        assert_eq!(got.series, series);
+
+        // A blurb-shaped save_work (empty series) must not wipe it.
+        db.save_work(&w).unwrap();
+        let got = db.get_work(7101).unwrap().unwrap();
+        assert_eq!(got.series, series);
+
+        // The subscription-works path (which swallows row errors) must
+        // still deserialize rows with the series column intact.
+        db.add_subscription_works("series", "9000001", &[7101]).unwrap();
+        let subs = db.get_subscription_works("series", "9000001").unwrap();
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].series, series);
+
+        // Explicit empty write clears (work removed from series on AO3).
+        db.set_work_series(7101, &[]).unwrap();
+        assert!(db.get_work(7101).unwrap().unwrap().series.is_empty());
     }
 
     #[test]

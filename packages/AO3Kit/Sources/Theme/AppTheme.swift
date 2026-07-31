@@ -59,6 +59,18 @@ final class AppTheme {
     var uiFontScale: Double {
         didSet { UserDefaults.standard.set(uiFontScale, forKey: "uiFontScale") }
     }
+    /// Load chapter-embedded images automatically. Off = tap-to-load; every
+    /// image request reveals reading activity to its (third-party) host, so
+    /// the reader opts in per image by default.
+    var imageAutoLoad: Bool {
+        didSet { UserDefaults.standard.set(imageAutoLoad, forKey: "imageAutoLoad") }
+    }
+    /// Per-image download cap in megabytes; 0 = no limit. Default 2 MB.
+    var imageMaxMB: Int {
+        didSet { UserDefaults.standard.set(imageMaxMB, forKey: "imageMaxMB") }
+    }
+    /// The cap as bytes for the fetch APIs.
+    var imageMaxBytes: UInt64 { UInt64(max(0, imageMaxMB)) * 1_048_576 }
     /// Hyphenate reading text at line breaks.
     var readHyphenation: Bool {
         didSet { UserDefaults.standard.set(readHyphenation, forKey: "readHyphenation") }
@@ -115,6 +127,8 @@ final class AppTheme {
         uiFontScale = d.object(forKey: "uiFontScale") as? Double ?? 1.0
         readHyphenation = d.object(forKey: "readHyphenation") as? Bool ?? false
         readJustified = d.object(forKey: "readJustified") as? Bool ?? false
+        imageAutoLoad = d.object(forKey: "imageAutoLoad") as? Bool ?? false
+        imageMaxMB = d.object(forKey: "imageMaxMB") as? Int ?? 2
     }
 
     // MARK: - Theme switching

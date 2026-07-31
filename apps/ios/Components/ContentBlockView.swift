@@ -98,6 +98,9 @@ struct ContentBlockView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(theme.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        case .image(let src, let alt):
+            ChapterImageView(src: src, alt: alt)
         }
     }
 
@@ -263,6 +266,101 @@ struct DropCapParagraphView: View {
             return s
         case .lineBreak:
             return AttributedString("\n")
+        }
+    }
+}
+
+/// A chapter-embedded image: cache-first, tap-to-load by default (auto-load
+/// honors the shared setting). Bytes always travel over the private
+/// connection and land in the encrypted image cache.
+struct ChapterImageView: View {
+    @Environment(AppTheme.self) private var theme
+    @Environment(AppState.self) private var state
+
+    let src: String
+    let alt: String
+
+    @State private var image: UIImage?
+    @State private var loading = false
+    @State private var error: String?
+
+    var body: some View {
+        Group {
+            if let image {
+                VStack(spacing: 4) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    if !alt.isEmpty {
+                        Text(alt)
+                            .font(Typography.uiCaption())
+                            .foregroundStyle(theme.ink3)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            } else {
+                Button {
+                    load()
+                } label: {
+                    HStack(spacing: 8) {
+                        if loading {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "photo")
+                        }
+                        Text(placeholderLabel)
+                            .lineLimit(2)
+                    }
+                    .font(Typography.uiBody())
+                    .foregroundStyle(error == nil ? theme.accent : theme.ink3)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(theme.surface2)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(loading)
+            }
+        }
+        .onAppear {
+            if let data = state.bridge.cachedChapterImage(url: src) {
+                image = UIImage(data: data)
+            } else if theme.imageAutoLoad {
+                load()
+            }
+        }
+    }
+
+    private var placeholderLabel: String {
+        if loading { return "Loading image…" }
+        if let error { return "\(error) — tap to retry" }
+        return alt.isEmpty ? "Tap to load image" : "Tap to load image — \(alt)"
+    }
+
+    private func load() {
+        guard !loading else { return }
+        loading = true
+        error = nil
+        Task { @MainActor in
+            do {
+                let data = try await state.bridge.fetchChapterImage(url: src, maxBytes: theme.imageMaxBytes)
+                if let decoded = UIImage(data: data) {
+                    image = decoded
+                } else {
+                    let head = data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                    state.bridge.writeLog(level: "ERROR", tag: "image",
+                        message: "UIImage decode failed for \(src): \(data.count) bytes, head [\(head)]")
+                    error = "Couldn’t decode image"
+                }
+            } catch let fetchError {
+                state.bridge.writeLog(level: "ERROR", tag: "image",
+                    message: "Fetch failed for \(src): \(fetchError.localizedDescription)")
+                error = fetchError.localizedDescription
+            }
+            loading = false
         }
     }
 }

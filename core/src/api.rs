@@ -79,6 +79,28 @@ impl From<AppError> for AO3Error {
 // UniFFI-compatible record types (flat, no generics)
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct USeriesMembership {
+    pub series_id: u64,
+    pub name: String,
+    /// 1-based position within the series; 0 = unknown.
+    pub part: u32,
+    pub prev_work_id: Option<u64>,
+    pub next_work_id: Option<u64>,
+}
+
+impl From<SeriesMembership> for USeriesMembership {
+    fn from(s: SeriesMembership) -> Self {
+        USeriesMembership {
+            series_id: s.series_id,
+            name: s.name,
+            part: s.part,
+            prev_work_id: s.prev_work_id,
+            next_work_id: s.next_work_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct UWorkSummary {
     pub id: u64,
     pub title: String,
@@ -102,6 +124,7 @@ pub struct UWorkSummary {
     pub date_updated: String,
     pub language: String,
     pub complete: bool,
+    pub series: Vec<USeriesMembership>,
 }
 
 impl From<WorkSummary> for UWorkSummary {
@@ -129,6 +152,7 @@ impl From<WorkSummary> for UWorkSummary {
             date_updated: w.date_updated,
             language: w.language,
             complete: w.complete,
+            series: w.series.into_iter().map(USeriesMembership::from).collect(),
         }
     }
 }
@@ -955,6 +979,7 @@ impl AO3App {
             c.clear_active_progress();
             let s = storage.lock().await;
             let _ = s.save_work(&summary);
+            let _ = s.set_work_series(summary.id, &summary.series);
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
             Ok(UWorkSummary::from(summary))
         }).await;
@@ -971,6 +996,7 @@ impl AO3App {
             c.clear_active_progress();
             let s = storage.lock().await;
             let _ = s.save_work(&summary);
+            let _ = s.set_work_series(summary.id, &summary.series);
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
             Ok(UWorkSummary::from(summary))
         }).await;
@@ -2050,6 +2076,119 @@ impl AO3App {
         s.get_gone_work_ids().map_err(AO3Error::from)
     }
 
+    // -- Chapter images (tap-to-load; bytes cached in image_cache) --
+
+    /// Cache-only lookup — the renderer's synchronous "is it already here".
+    /// A cached body that isn't a real image (poison from before the sniff
+    /// guard existed) is purged and reported as absent.
+    pub fn get_cached_chapter_image(&self, url: String) -> Result<Option<Vec<u8>>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let key = chapter_image_key(&url);
+        match s.get_cached_image(&key).map_err(AO3Error::from)? {
+            Some(data) if crate::client::sniff_image_kind(&data) == "not-an-image" => {
+                log_info!("image", "Purging non-image cache entry ({} bytes) for {url}", data.len());
+                let _ = s.delete_cached_image(&key);
+                Ok(None)
+            }
+            other => Ok(other),
+        }
+    }
+
+    /// Fetch one embedded image (cache-first, over the private connection).
+    /// `max_bytes` 0 = unlimited; an over-cap image errors and is not cached.
+    pub async fn fetch_chapter_image(&self, url: String, max_bytes: u64) -> Result<Vec<u8>, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            log_info!("image", "Chapter image requested (cap {} bytes): {url}", max_bytes);
+            {
+                let s = storage.lock().await;
+                if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&url)) {
+                    let kind = crate::client::sniff_image_kind(&data);
+                    if kind == "not-an-image" {
+                        // Poisoned entry from before the sniff guard — purge
+                        // and fall through to a fresh fetch.
+                        log_info!("image", "Purging non-image cache entry ({} bytes), refetching {url}", data.len());
+                        let _ = s.delete_cached_image(&chapter_image_key(&url));
+                    } else {
+                        log_info!("image", "Cache hit ({} bytes, {kind}): {url}", data.len());
+                        return Ok(data);
+                    }
+                }
+            }
+            let c = client.read().await;
+            let bytes = c.fetch_image(&url).await.map_err(AO3Error::from)?;
+            drop(c);
+            if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+                log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
+                return Err(AO3Error::Network {
+                    message: format!("Image is {:.1} MB — over the size limit",
+                                     bytes.len() as f64 / 1_048_576.0),
+                });
+            }
+            // Never cache non-image bodies, and tell the user what actually
+            // happened instead of a downstream decode failure.
+            if crate::client::sniff_image_kind(&bytes) == "not-an-image" {
+                return Err(AO3Error::Network {
+                    message: "The host sent a web page instead of the image — it may be blocking private connections".to_string(),
+                });
+            }
+            let s = storage.lock().await;
+            let _ = s.save_cached_image(&chapter_image_key(&url), &bytes);
+            log_info!("image", "Cached {} bytes ({}) for {url}",
+                      bytes.len(), crate::client::sniff_image_kind(&bytes));
+            Ok(bytes)
+        }).await
+    }
+
+    /// Prefetch every embedded image of a downloaded work into the cache so
+    /// offline reading is complete. Over-cap and failed images are skipped
+    /// (logged), not fatal. Returns how many images were newly fetched.
+    pub async fn download_work_images(&self, work_id: u64, max_bytes: u64) -> Result<u32, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let srcs: Vec<String> = {
+                let s = storage.lock().await;
+                let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+                let mut srcs = Vec::new();
+                for chapter in &chapters {
+                    collect_image_srcs(&chapter.content, &mut srcs);
+                }
+                srcs
+            };
+            log_info!("image", "Offline prefetch for work {work_id}: {} image(s), cap {max_bytes} bytes",
+                      srcs.len());
+            let mut fetched = 0u32;
+            for src in srcs {
+                {
+                    let s = storage.lock().await;
+                    if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&src)) {
+                        if crate::client::sniff_image_kind(&data) != "not-an-image" {
+                            continue;
+                        }
+                        // Poisoned entry — purge and refetch below.
+                        let _ = s.delete_cached_image(&chapter_image_key(&src));
+                    }
+                }
+                let c = client.read().await;
+                let result = c.fetch_image(&src).await;
+                drop(c);
+                match result {
+                    Ok(bytes) => {
+                        if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+                            log_info!("image", "Offline prefetch skipping {src}: {} bytes over cap", bytes.len());
+                            continue;
+                        }
+                        let s = storage.lock().await;
+                        let _ = s.save_cached_image(&chapter_image_key(&src), &bytes);
+                        fetched += 1;
+                    }
+                    Err(e) => {
+                        log_info!("image", "Offline prefetch failed for {src}: {e}");
+                    }
+                }
+            }
+            Ok(fetched)
+        }).await
+    }
+
     /// Stamp "a full works crawl for this author/series completed now".
     pub fn set_works_crawled_now(&self, sub_type: String, sub_id: String) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
@@ -2985,6 +3124,33 @@ fn requeue_census_marker(s: &Storage, sub_type: &str, sub_id: &str, name: &str) 
     }));
     let _ = s.set_check_queue(&serde_json::to_string(&queue).unwrap_or_default());
     queue.len() as u32
+}
+
+/// Chapter-image cache key — the full URL keeps it unique, the prefix
+/// groups the rows apart from avatars.
+fn chapter_image_key(url: &str) -> String {
+    format!("chimg:{url}")
+}
+
+/// Every image URL in a ContentBlock tree, depth-first (blockquotes, lists).
+fn collect_image_srcs(blocks: &[crate::models::ContentBlock], out: &mut Vec<String>) {
+    use crate::models::ContentBlock;
+    for block in blocks {
+        match block {
+            ContentBlock::Image { src, .. } => {
+                if !out.contains(src) {
+                    out.push(src.clone());
+                }
+            }
+            ContentBlock::Blockquote { blocks } => collect_image_srcs(blocks, out),
+            ContentBlock::List { items, .. } => {
+                for item in items {
+                    collect_image_srcs(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn chrono_now() -> String {

@@ -972,10 +972,20 @@ final class AppState {
             if let cached = bridge.getCachedWork(workId) {
                 fetchedWorks[id] = Self.workFromSummary(cached)
             }
+            // Complete offline reading: prefetch embedded images too
+            // (over-cap and failed images are skipped, never fatal).
+            await bridge.downloadWorkImages(workId: workId, maxBytes: Self.imageMaxBytesSetting)
         } catch {
             downloadedWorkIDs.remove(id)
         }
         downloadingWorkIDs.remove(id)
+    }
+
+    /// The user's per-image size cap (AppTheme persists it in UserDefaults;
+    /// read directly here to keep AppState theme-independent). 0 = no limit.
+    static var imageMaxBytesSetting: UInt64 {
+        let mb = UserDefaults.standard.object(forKey: "imageMaxMB") as? Int ?? 2
+        return UInt64(max(0, mb)) * 1_048_576
     }
 
     func isDownloading(_ id: String) -> Bool {
@@ -1493,7 +1503,16 @@ final class AppState {
             lastChapter: nil,
             downloaded: false,
             content: nil,
-            fandoms: s.fandoms
+            fandoms: s.fandoms,
+            series: s.series.map {
+                SeriesInfo(
+                    seriesID: String($0.seriesId),
+                    name: $0.name,
+                    part: Int($0.part),
+                    prevWorkID: $0.prevWorkId.map(String.init),
+                    nextWorkID: $0.nextWorkId.map(String.init)
+                )
+            }
         )
     }
 

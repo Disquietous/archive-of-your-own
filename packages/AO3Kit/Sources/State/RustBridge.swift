@@ -889,6 +889,25 @@ final class RustBridge {
         (try? app?.getGoneWorkIds()) ?? []
     }
 
+    /// Cache-only lookup for a chapter-embedded image.
+    func cachedChapterImage(url: String) -> Data? {
+        guard let bytes = (try? app?.getCachedChapterImage(url: url)) ?? nil else { return nil }
+        return Data(bytes)
+    }
+
+    /// Fetch a chapter-embedded image over the private connection
+    /// (cache-first). maxBytes 0 = unlimited.
+    func fetchChapterImage(url: String, maxBytes: UInt64) async throws -> Data {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await Data(app.fetchChapterImage(url: url, maxBytes: maxBytes))
+    }
+
+    /// Prefetch all of a downloaded work's embedded images for offline
+    /// reading. Failures and over-cap images are skipped, not fatal.
+    func downloadWorkImages(workId: UInt64, maxBytes: UInt64) async {
+        _ = try? await app?.downloadWorkImages(workId: workId, maxBytes: maxBytes)
+    }
+
     /// Stamp "a full works crawl for this author/series completed now".
     func setWorksCrawledNow(subType: String, subId: String) {
         try? app?.setWorksCrawledNow(subType: subType, subId: subId)

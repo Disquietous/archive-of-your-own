@@ -121,6 +121,21 @@ fn scan_attr_near(html: &str, marker: &str, attr_prefix: &str) -> Option<String>
     if value.is_empty() { None } else { Some(value.to_string()) }
 }
 
+/// Identify an image payload by magic bytes — the formats AO3 embeds use.
+pub fn sniff_image_kind(bytes: &[u8]) -> &'static str {
+    if bytes.len() < 12 { return "not-an-image" }
+    match bytes {
+        b if b.starts_with(&[0x89, b'P', b'N', b'G']) => "png",
+        b if b.starts_with(&[0xFF, 0xD8, 0xFF]) => "jpeg",
+        b if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") => "gif",
+        b if b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" => "webp",
+        b if b.starts_with(b"BM") => "bmp",
+        b if &b[4..8] == b"ftyp" => "heif/avif",
+        b if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "svg",
+        _ => "not-an-image",
+    }
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -500,6 +515,26 @@ impl AO3Client {
 
     pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {
         let _active = ActiveRequestGuard::new("GET (image)", url);
+        let fetch_start = std::time::Instant::now();
+        let record_started_ms = now_ms();
+        let request_bytes = (url.len() + 380) as u64;
+        // Every terminal outcome lands in the request log, like page fetches.
+        macro_rules! audit {
+            ($status:expr, $resp:expr, $err:expr) => {
+                push_request_record(RequestRecord {
+                    started_at_ms: record_started_ms,
+                    method: "GET (image)".into(),
+                    url: url.to_string(),
+                    status: $status,
+                    duration_ms: fetch_start.elapsed().as_millis() as u64,
+                    request_bytes,
+                    response_bytes: $resp,
+                    error: $err,
+                    payload: None,
+                });
+            };
+        }
+
         self.enforce_rate_limit().await;
         let client = match &self.transport {
             Transport::Direct(c) => c,
@@ -517,26 +552,69 @@ impl AO3Client {
             url.to_string()
         };
 
-        log_debug!("image", "Fetching {}", full_url);
-        let response = tokio::time::timeout(timeout, client.get(&full_url).send())
-            .await
-            .map_err(|_| AppError::NetworkError("timeout".to_string()))?
-            .map_err(|e| {
-                log_debug!("image", "Error fetching {}: {}", full_url, e);
-                AppError::NetworkError(format!("{e}"))
-            })?;
+        log_info!("image", "Fetching {}", full_url);
+        // Image-appropriate headers (override the client's document-navigation
+        // defaults): a CDN seeing Accept: text/html on an image URL may serve
+        // its HTML viewer/block page instead of the bytes.
+        let request = client.get(&full_url)
+            .header("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5")
+            .header("Sec-Fetch-Dest", "image")
+            .header("Sec-Fetch-Mode", "no-cors")
+            .header("Sec-Fetch-Site", "cross-site");
+        let response = match tokio::time::timeout(timeout, request.send()).await {
+            Err(_) => {
+                log_error!("image", "Timeout connecting to {}", full_url);
+                audit!(0, 0, Some("timeout".to_string()));
+                return Err(AppError::NetworkError("timeout".to_string()));
+            }
+            Ok(Err(e)) => {
+                log_error!("image", "Error fetching {}: {}", full_url, e);
+                audit!(0, 0, Some(format!("{e}")));
+                return Err(AppError::NetworkError(format!("{e}")));
+            }
+            Ok(Ok(r)) => r,
+        };
 
         let status = response.status();
+        let content_type = response.headers().get("content-type")
+            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+        let content_encoding = response.headers().get("content-encoding")
+            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+        let content_length = response.headers().get("content-length")
+            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+        log_info!("image", "HTTP {} type={} encoding={} length={} for {}",
+                  status.as_u16(), content_type, content_encoding, content_length, full_url);
+
         if !status.is_success() {
-            log_debug!("image", "HTTP {} for {}", status, full_url);
+            audit!(status.as_u16(), 0, Some(format!("HTTP {status}")));
             return Err(AppError::NetworkError(format!("HTTP {status}")));
         }
 
-        let bytes = tokio::time::timeout(timeout, response.bytes())
-            .await
-            .map_err(|_| AppError::NetworkError("timeout".to_string()))?
-            .map_err(|e| AppError::NetworkError(format!("{e}")))?;
-        log_debug!("image", "Downloaded {} bytes from {}", bytes.len(), full_url);
+        let bytes = match tokio::time::timeout(timeout, response.bytes()).await {
+            Err(_) => {
+                log_error!("image", "Timeout reading body of {}", full_url);
+                audit!(status.as_u16(), 0, Some("body timeout".to_string()));
+                return Err(AppError::NetworkError("timeout".to_string()));
+            }
+            Ok(Err(e)) => {
+                log_error!("image", "Failed reading body of {}: {}", full_url, e);
+                audit!(status.as_u16(), 0, Some(format!("{e}")));
+                return Err(AppError::NetworkError(format!("{e}")));
+            }
+            Ok(Ok(b)) => b,
+        };
+
+        let kind = sniff_image_kind(&bytes);
+        log_info!("image", "Downloaded {} bytes ({}) from {}", bytes.len(), kind, full_url);
+        if kind == "not-an-image" {
+            // The body isn't any known image format — log what the host
+            // actually sent so decode failures are diagnosable.
+            let snippet: String = String::from_utf8_lossy(&bytes[..bytes.len().min(300)])
+                .chars().filter(|c| !c.is_control()).collect();
+            log_error!("image", "Body of {} is not a recognized image (type={} encoding={}): {}",
+                       full_url, content_type, content_encoding, snippet);
+        }
+        audit!(status.as_u16(), bytes.len() as u64, None);
         Ok(bytes.to_vec())
     }
 

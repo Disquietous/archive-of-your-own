@@ -133,6 +133,10 @@ struct InboxView: View {
                 .padding(8)
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
+        case .image(_, let alt):
+            Text(alt.isEmpty ? "[image]" : "[image: \(alt)]")
+                .font(Font(MacFont.ui(12)).italic())
+                .foregroundStyle(theme.ink3)
         }
     }
 

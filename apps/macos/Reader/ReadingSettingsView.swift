@@ -86,6 +86,32 @@ struct ReadingSettingsView: View {
                 .foregroundStyle(theme.ink2)
             }
 
+            group("Images") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Load images automatically", isOn: $theme.imageAutoLoad)
+                        .toggleStyle(.checkbox)
+                        .font(Font(MacFont.ui(12.5, weight: .medium)))
+                        .foregroundStyle(theme.ink2)
+                        .help("Off = images show as tap-to-load placeholders. Every image is fetched over your private connection either way.")
+                    HStack(spacing: 8) {
+                        Text("Size limit")
+                            .font(Font(MacFont.ui(12.5, weight: .medium)))
+                            .foregroundStyle(theme.ink2)
+                        Picker("", selection: $theme.imageMaxMB) {
+                            Text("1 MB").tag(1)
+                            Text("2 MB").tag(2)
+                            Text("5 MB").tag(5)
+                            Text("10 MB").tag(10)
+                            Text("No limit").tag(0)
+                        }
+                        .labelsHidden()
+                        .frame(width: 110)
+                        .help("Images over the limit aren’t downloaded — the placeholder stays.")
+                        Spacer()
+                    }
+                }
+            }
+
             group("App text size") {
                 HStack {
                     stepButton("minus") { setUIScale(theme.uiFontScale - 0.05) }

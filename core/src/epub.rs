@@ -250,6 +250,12 @@ fn render_block(block: &ContentBlock, out: &mut String) {
         ContentBlock::PreFormatted { text } => {
             out.push_str(&format!("  <pre>{}</pre>\n", xml_escape(text)));
         }
+        // Image bytes aren't bundled into the EPUB (yet) — degrade to the
+        // alt text so the reference isn't a broken link in the book.
+        ContentBlock::Image { src: _, alt } => {
+            let label = if alt.trim().is_empty() { "image" } else { alt.trim() };
+            out.push_str(&format!("  <p><em>[{}]</em></p>\n", xml_escape(label)));
+        }
     }
 }
 
@@ -404,6 +410,7 @@ mod tests {
             date_updated: "2024-01-02".to_string(),
             language: "English".to_string(),
             complete: true,
+            series: vec![],
         }
     }
 

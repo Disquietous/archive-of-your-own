@@ -9,6 +9,7 @@ enum ParsedContentBlock: Hashable {
     case horizontalRule
     case list(ordered: Bool, items: [[ParsedContentBlock]])
     case preFormatted(text: String)
+    case image(src: String, alt: String)
 
     static func fromJSON(_ json: String) -> [ParsedContentBlock] {
         guard let data = json.data(using: .utf8),
@@ -48,6 +49,7 @@ private enum RawContentBlock: Decodable {
     case horizontalRule
     case list(Bool, [[RawContentBlock]])
     case preFormatted(String)
+    case image(String, String)
     case unknown
 
     private struct ParagraphPayload: Decodable { let text: [RawInlineContent] }
@@ -55,9 +57,10 @@ private enum RawContentBlock: Decodable {
     private struct BlockquotePayload: Decodable { let blocks: [RawContentBlock] }
     private struct ListPayload: Decodable { let ordered: Bool; let items: [[RawContentBlock]] }
     private struct PreFormattedPayload: Decodable { let text: String }
+    private struct ImagePayload: Decodable { let src: String; let alt: String }
 
     private enum Tag: String, CodingKey {
-        case Paragraph, Heading, Blockquote, HorizontalRule, List, PreFormatted
+        case Paragraph, Heading, Blockquote, HorizontalRule, List, PreFormatted, Image
     }
 
     init(from decoder: Decoder) throws {
@@ -87,6 +90,9 @@ private enum RawContentBlock: Decodable {
         if let p = try? container.decode(PreFormattedPayload.self, forKey: .PreFormatted) {
             self = .preFormatted(p.text); return
         }
+        if let i = try? container.decode(ImagePayload.self, forKey: .Image) {
+            self = .image(i.src, i.alt); return
+        }
         self = .unknown
     }
 
@@ -98,6 +104,7 @@ private enum RawContentBlock: Decodable {
         case .horizontalRule: .horizontalRule
         case .list(let ordered, let items): .list(ordered: ordered, items: items.map { $0.map { $0.toParsed() } })
         case .preFormatted(let text): .preFormatted(text: text)
+        case .image(let src, let alt): .image(src: src, alt: alt)
         case .unknown: .paragraph(text: [])
         }
     }

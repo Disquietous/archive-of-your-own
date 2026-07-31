@@ -85,6 +85,19 @@ impl Warning {
     }
 }
 
+/// One "Part N of <series>" membership from a work page, including the
+/// adjacent works in that series when AO3 provides the links.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeriesMembership {
+    pub series_id: u64,
+    pub name: String,
+    /// 1-based position within the series; 0 when the position text
+    /// couldn't be parsed.
+    pub part: u32,
+    pub prev_work_id: Option<u64>,
+    pub next_work_id: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkSummary {
     pub id: u64,
@@ -109,6 +122,10 @@ pub struct WorkSummary {
     pub date_updated: String,
     pub language: String,
     pub complete: bool,
+    /// Series this work belongs to (work pages only; listing blurbs leave
+    /// this empty). Default keeps previously serialized summaries readable.
+    #[serde(default)]
+    pub series: Vec<SeriesMembership>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +270,10 @@ pub enum ContentBlock {
     HorizontalRule,
     List { ordered: bool, items: Vec<Vec<ContentBlock>> },
     PreFormatted { text: String },
+    /// An embedded image, kept block-level (AO3 fics embed images as figures
+    /// between paragraphs). Only the resolved URL and alt text are stored;
+    /// bytes live in image_cache and are fetched on demand (tap-to-load).
+    Image { src: String, alt: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

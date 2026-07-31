@@ -203,6 +203,9 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
             }.joined(separator: "\n")
         case .horizontalRule:
             return nil
+        case .image(_, let alt):
+            // Speak the alt text when the author provided one.
+            return alt.isEmpty ? nil : "Image: \(alt)"
         }
     }
 

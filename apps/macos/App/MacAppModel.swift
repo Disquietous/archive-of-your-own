@@ -295,6 +295,20 @@ final class MacAppModel {
         }
     }
 
+    /// Jump from the end of a work straight into the next work of its
+    /// series, fetching metadata first when it isn't known locally.
+    func openNextWorkInSeries(_ id: String) {
+        Task { @MainActor in
+            if appState.work(byID: id) == nil {
+                await appState.fetchWorkMetadata(id)
+            }
+            // Restricted/deleted next work: stay where we are.
+            guard appState.work(byID: id) != nil else { return }
+            selectWork(id)
+            openReader(id, chapter: 0)
+        }
+    }
+
     /// Escape: close the innermost open context.
     /// Returns false when there was nothing left to close.
     @discardableResult

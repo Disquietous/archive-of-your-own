@@ -91,6 +91,9 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         date_updated,
         language,
         complete,
+        // Listing blurbs do carry series markup (ul.series) but blurb series
+        // parsing is out of scope; only the work page populates this.
+        series: Vec::new(),
     })
 }
 
@@ -461,6 +464,7 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
         date_updated = date_published.clone();
     }
     let complete = total_chapters.map_or(false, |t| chapter_count >= t);
+    let series = extract_work_page_series(&doc);
 
     let chapters = parse_chapters_content(&doc);
 
@@ -487,6 +491,7 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
         date_updated,
         language,
         complete,
+        series,
     };
 
     Ok((summary_obj, chapters))
@@ -570,6 +575,79 @@ fn extract_work_meta(doc: &Html) -> (Rating, Vec<Warning>, Vec<String>, Vec<Stri
     let tags: Vec<String> = doc.select(&tag_sel).map(|el| text(&el)).collect();
 
     (rating, warnings, categories, fandoms, relationships, characters, tags)
+}
+
+fn extract_work_page_series(doc: &Html) -> Vec<SeriesMembership> {
+    let span_sel = sel("dd.series span.series");
+    let pos_sel = sel("span.position");
+    let series_link_sel = sel("a[href^='/series/']");
+    let prev_sel = sel("a.previous");
+    let next_sel = sel("a.next");
+
+    let mut memberships = Vec::new();
+    for span in doc.select(&span_sel) {
+        let Some(position) = span.select(&pos_sel).next() else {
+            continue;
+        };
+        let Some(link) = position.select(&series_link_sel).next() else {
+            continue;
+        };
+        let Some(series_id) = link
+            .value()
+            .attr("href")
+            .and_then(|href| href.split('/').find_map(|seg| seg.parse::<u64>().ok()))
+        else {
+            continue;
+        };
+        let name = text(&link);
+
+        // Position number: first integer in the text nodes before the series
+        // link. The wording around it is localizable and series names may
+        // start with digits, so neither "Part" nor the full flattened text
+        // is safe to match against.
+        let mut before_link = String::new();
+        for child in position.children() {
+            if child.id() == link.id() {
+                break;
+            }
+            if let Some(t) = child.value().as_text() {
+                before_link.push_str(t);
+            }
+        }
+        let part = first_number_in(&before_link) as u32;
+
+        let prev_work_id = span.select(&prev_sel).next().and_then(work_id_from_href);
+        let next_work_id = span.select(&next_sel).next().and_then(work_id_from_href);
+
+        memberships.push(SeriesMembership {
+            series_id,
+            name,
+            part,
+            prev_work_id,
+            next_work_id,
+        });
+    }
+    memberships
+}
+
+fn work_id_from_href(el: ElementRef) -> Option<u64> {
+    el.value()
+        .attr("href")?
+        .split('/')
+        .find_map(|seg| seg.parse::<u64>().ok())
+}
+
+/// First integer in `s`, honoring comma grouping ("1,002"); 0 if none.
+fn first_number_in(s: &str) -> u64 {
+    let mut num = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_digit() || (ch == ',' && !num.is_empty()) {
+            num.push(ch);
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    parse_number(num.trim_end_matches(','))
 }
 
 fn extract_work_page_summary(doc: &Html) -> String {
@@ -730,6 +808,14 @@ pub fn parse_element_children(el: &ElementRef) -> Vec<ContentBlock> {
                     if !inlines.is_empty() {
                         blocks.push(ContentBlock::Paragraph { text: inlines });
                     }
+                    // AO3 usually embeds images inside a paragraph of their
+                    // own; inline parsing ignores them, so lift any imgs out
+                    // as block-level images after the paragraph's text.
+                    for img in child_ref.select(&sel("img")) {
+                        if let Some(block) = image_block(&img) {
+                            blocks.push(block);
+                        }
+                    }
                 }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     let level = element.name().chars().last().unwrap().to_digit(10).unwrap() as u8;
@@ -760,12 +846,34 @@ pub fn parse_element_children(el: &ElementRef) -> Vec<ContentBlock> {
                     let inner = parse_element_children(&child_ref);
                     blocks.extend(inner);
                 }
+                "img" => {
+                    if let Some(block) = image_block(&child_ref) {
+                        blocks.push(block);
+                    }
+                }
                 _ => {}
             }
         }
     }
 
     blocks
+}
+
+/// An `<img>` as a block, with its URL resolved to an absolute https form.
+/// Returns None for sources the app won't fetch (data: URIs, junk).
+fn image_block(img: &ElementRef) -> Option<ContentBlock> {
+    let raw = img.value().attr("src")?.trim();
+    let src = if raw.starts_with("https://") || raw.starts_with("http://") {
+        raw.to_string()
+    } else if let Some(rest) = raw.strip_prefix("//") {
+        format!("https://{rest}")
+    } else if raw.starts_with('/') {
+        format!("{}{raw}", crate::client::BASE_URL)
+    } else {
+        return None;
+    };
+    let alt = img.value().attr("alt").unwrap_or("").trim().to_string();
+    Some(ContentBlock::Image { src, alt })
 }
 
 fn parse_list_items(list: &ElementRef) -> Vec<Vec<ContentBlock>> {
@@ -1655,6 +1763,41 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chapter_images() {
+        let html = r#"<div class="userstuff">
+            <p>Before the art.</p>
+            <p><img src="https://example.com/a.png" alt="fan art"></p>
+            <blockquote><p><img src="//cdn.example.com/b.jpg"></p></blockquote>
+            <p><img src="/system/images/c.gif" alt=""></p>
+            <p><img src="data:image/png;base64,xyz"></p>
+        </div>"#;
+        let doc = Html::parse_document(html);
+        let el = doc.select(&sel("div.userstuff")).next().unwrap();
+        let blocks = parse_element_children(&el);
+        fn walk<'a>(blocks: &'a [ContentBlock], out: &mut Vec<(&'a str, &'a str)>) {
+            for b in blocks {
+                match b {
+                    ContentBlock::Image { src, alt } => out.push((src, alt)),
+                    ContentBlock::Blockquote { blocks } => walk(blocks, out),
+                    ContentBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
+                    _ => {}
+                }
+            }
+        }
+        let mut images = Vec::new();
+        walk(&blocks, &mut images);
+        assert_eq!(images, vec![
+            ("https://example.com/a.png", "fan art"),
+            ("https://cdn.example.com/b.jpg", ""),
+            ("https://archiveofourown.org/system/images/c.gif", ""),
+        ], "absolute kept, protocol-relative and rooted resolved, data: dropped");
+        // Round-trips through the stored JSON encoding.
+        let json = serde_json::to_string(&blocks).unwrap();
+        let back: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
+        assert_eq!(blocks, back);
+    }
+
+    #[test]
     fn test_parse_results_total() {
         // Search results heading.
         let search = r#"<div id="main"><h3 class="heading">1,234 Found</h3></div>"#;
@@ -1707,6 +1850,81 @@ mod tests {
         assert!(!summary.title.is_empty(), "Should have title");
         assert!(!chapters.is_empty(), "Should have at least one chapter");
         assert!(!chapters[0].content.is_empty(), "Chapter should have content blocks");
+    }
+
+    #[test]
+    fn test_parse_work_page_series() {
+        let html = fs::read_to_string("tests/fixtures/work_series.html")
+            .expect("Failed to read series work page fixture");
+        let (summary, _) = parse_work_page(&html).expect("Should parse series work page");
+
+        assert_eq!(summary.series.len(), 2, "Should find both memberships");
+
+        let alpha = &summary.series[0];
+        assert_eq!(alpha.series_id, 9000001);
+        assert_eq!(alpha.name, "Alpha Test Series");
+        assert_eq!(alpha.part, 2);
+        assert_eq!(alpha.prev_work_id, Some(2000010));
+        assert_eq!(alpha.next_work_id, Some(2000012));
+
+        let beta = &summary.series[1];
+        assert_eq!(beta.series_id, 9000002);
+        assert_eq!(beta.name, "Beta Test Series");
+        assert_eq!(beta.part, 1);
+        assert_eq!(beta.prev_work_id, None);
+        assert_eq!(beta.next_work_id, Some(2000013));
+    }
+
+    #[test]
+    fn test_parse_work_page_no_series() {
+        let html = fs::read_to_string("tests/fixtures/work_page.html")
+            .expect("Failed to read work page fixture");
+        let (summary, _) = parse_work_page(&html).expect("Should parse work page");
+        assert!(summary.series.is_empty(), "Work not in a series should have none");
+    }
+
+    #[test]
+    fn test_extract_series_edge_cases() {
+        // No prev/next links, comma-grouped part number.
+        let html = r#"<dl class="work meta group"><dd class="series">
+            <span class="series">
+              <span class="position">Part 1,002 of <a href="/series/77">Long Haul</a></span>
+            </span>
+        </dd></dl>"#;
+        let doc = Html::parse_document(html);
+        let series = extract_work_page_series(&doc);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].series_id, 77);
+        assert_eq!(series[0].part, 1002);
+        assert_eq!(series[0].prev_work_id, None);
+        assert_eq!(series[0].next_work_id, None);
+
+        // No leading number → part 0, membership still captured.
+        let html = r#"<dd class="series"><span class="series">
+            <span class="position">A work in <a href="/series/88">Numberless</a></span>
+        </span></dd>"#;
+        let doc = Html::parse_document(html);
+        let series = extract_work_page_series(&doc);
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].part, 0);
+        assert_eq!(series[0].name, "Numberless");
+
+        // Series name starting with a digit: part comes from text before the
+        // link, never from the name.
+        let html = r#"<dd class="series"><span class="series">
+            <span class="position">Part 3 of <a href="/series/99">2 Fast 2 Fictional</a></span>
+        </span></dd>"#;
+        let doc = Html::parse_document(html);
+        let series = extract_work_page_series(&doc);
+        assert_eq!(series[0].part, 3);
+        assert_eq!(series[0].name, "2 Fast 2 Fictional");
+
+        // span.series with no /series/ link is skipped, not an error.
+        let html = r#"<dd class="series"><span class="series">
+            <span class="position">Part 1 of a mystery</span>
+        </span></dd>"#;
+        let doc = Html::parse_document(html);
+        assert!(extract_work_page_series(&doc).is_empty());
     }
 
     #[test]
