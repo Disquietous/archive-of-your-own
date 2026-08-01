@@ -21,6 +21,16 @@ final class ReadPaneViewController: NSViewController {
     private var commentsButton: ToolButton!
     private var chaptersButton: ToolButton!
     private var chaptersPopover: NSPopover?
+    // Detail-mode work actions (the detail view's buttons live in this
+    // header toolbar, not in the scroll body).
+    private var startReadingButton: ToolButton!
+    private var downloadButton: ToolButton!
+    private var readingListButton: ToolButton!
+    private var subscribeButton: ToolButton!
+    private var kudosButton: ToolButton!
+    private var workCommentsButton: ToolButton!
+    private var editBookmarkButton: ToolButton!
+    private var readingListPopover: NSPopover?
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
@@ -29,7 +39,6 @@ final class ReadPaneViewController: NSViewController {
     private var resultsBackButton: ToolButton!
     private var detailHost: NSHostingView<AnyView>?
     private var emptyHost: NSHostingView<AnyView>?
-    private var settingsPopover: NSPopover?
 
     private enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
@@ -77,6 +86,32 @@ final class ReadPaneViewController: NSViewController {
         }
         resultsBackButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to results") { [weak self] in
             self?.model.backToResults()
+        }
+        startReadingButton = ToolButton(theme: theme, symbol: "book", tooltip: "Start reading") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            model.openReader(id, chapter: max(0, (appState.progressMap[id]?.chapter ?? 1) - 1))
+        }
+        downloadButton = ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Download for offline") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            appState.toggleDownload(id)
+        }
+        readingListButton = ToolButton(theme: theme, symbol: "books.vertical", tooltip: "Add to reading list") { [weak self] in
+            self?.toggleReadingListPopover()
+        }
+        subscribeButton = ToolButton(theme: theme, symbol: "bell", tooltip: "Subscribe to this work on AO3") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            appState.toggleWorkSubscription(id)
+        }
+        kudosButton = ToolButton(theme: theme, symbol: "heart", tooltip: "Leave kudos on AO3") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            appState.giveKudos(id)
+        }
+        workCommentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Comments") { [weak self] in
+            self?.showWorkComments()
+        }
+        editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
+                                        tooltip: "Edit bookmark — notes, tags, sync to AO3") { [weak self] in
+            self?.showBookmarkEditSheet()
         }
 
         addChild(readerController)
@@ -150,7 +185,9 @@ final class ReadPaneViewController: NSViewController {
                 readerController.goToAdjacentChapter(1)
                 return nil
             case 53 where !hasModifiers: // Escape
-                if let popover = settingsPopover, popover.isShown { return event }
+                // Sheets (settings, comments, bookmark edit) and popovers
+                // own Escape while they're up.
+                if presentedViewControllers?.isEmpty == false { return event }
                 if let popover = chaptersPopover, popover.isShown { return event }
                 return model.escapeInnermost() ? nil : event
             default:
@@ -660,6 +697,7 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .inbox, let item = appState.selectedInboxItem {
             toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
             toolbar.setLeading([])
+            toolbar.setAfterTitle([])
             toolbar.setTrailing([])
             let mode = Mode.inboxThread(item.commentId)
             show(mode: mode)
@@ -672,6 +710,7 @@ final class ReadPaneViewController: NSViewController {
         guard let work = model.selectedWork else {
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
+            toolbar.setAfterTitle([])
             toolbar.setTrailing([])
             show(mode: .empty)
             return
@@ -689,9 +728,20 @@ final class ReadPaneViewController: NSViewController {
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
-        toolbar.setTrailing(reading ? [settingsButton, immersiveButton, chaptersButton,
-                                       readerRefreshButton(), commentsButton, bookmarkButton]
-                                    : [settingsButton, detailRefreshButton(), bookmarkButton])
+        if reading {
+            toolbar.setAfterTitle([])
+            toolbar.setTrailing([settingsButton, immersiveButton, chaptersButton,
+                                 readerRefreshButton(), commentsButton, bookmarkButton])
+        } else {
+            refreshDetailActionButtons(for: work, bookmarked: bookmarked)
+            toolbar.setAfterTitle([startReadingButton])
+            var trailing: [NSView] = [settingsButton, detailRefreshButton(),
+                                      downloadButton, readingListButton, subscribeButton,
+                                      kudosButton, workCommentsButton]
+            if bookmarked { trailing.append(editBookmarkButton) }
+            trailing.append(bookmarkButton)
+            toolbar.setTrailing(trailing)
+        }
 
         show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))
 
@@ -805,19 +855,62 @@ final class ReadPaneViewController: NSViewController {
         ])
     }
 
+    /// Symbols, tints, and enabled states for the detail-mode work action
+    /// buttons — re-run on every render, like the bookmark button.
+    private func refreshDetailActionButtons(for work: Work, bookmarked: Bool) {
+        let started = model.progress(for: work) > 0
+        let currentChapter = appState.progressMap[work.id]?.chapter ?? 1
+        startReadingButton.isOn = true
+        startReadingButton.toolTip = started
+            ? "Continue reading · Chapter \(currentChapter)" : "Start reading"
+
+        let downloaded = appState.downloadedWorkIDs.contains(work.id)
+        downloadButton.setSymbol(appState.isDownloading(work.id) ? "arrow.down.circle.dotted"
+                                 : downloaded ? "checkmark.circle" : "arrow.down.circle")
+        downloadButton.tintOverride = downloaded ? theme.nsSage : nil
+        downloadButton.toolTip = downloaded ? "Downloaded" : "Download for offline"
+
+        let workId = UInt64(work.id)
+        let inList = workId.map { id in
+            appState.readingLists.contains { appState.bridge.getReadingListItems($0.id).contains(id) }
+        } ?? false
+        readingListButton.setSymbol(inList ? "books.vertical.fill" : "books.vertical")
+        readingListButton.tintOverride = inList ? theme.nsAccent : nil
+        readingListButton.isEnabled = workId != nil
+
+        let subscribed = appState.isSubscribedToWork(work.id)
+        subscribeButton.setSymbol(subscribed ? "bell.fill" : "bell")
+        subscribeButton.tintOverride = subscribed ? theme.nsAccent : nil
+        subscribeButton.isEnabled = appState.ao3Username != nil
+            && !appState.subscriptionTogglingWorkIDs.contains(work.id)
+        subscribeButton.toolTip = appState.ao3Username == nil
+            ? "Sign in to subscribe to this work"
+            : subscribed ? "Unsubscribe from this work on AO3" : "Subscribe to this work on AO3"
+
+        let hasKudos = appState.kudosGivenWorkIDs.contains(work.id)
+        kudosButton.setSymbol(hasKudos ? "heart.fill" : "heart")
+        kudosButton.tintOverride = hasKudos ? theme.nsAccent : nil
+        kudosButton.isEnabled = !hasKudos
+        kudosButton.toolTip = hasKudos
+            ? "Kudos left — kudos are permanent on AO3" : "Leave kudos on AO3"
+
+        workCommentsButton.toolTip = work.comments > 0
+            ? "Comments · \(Fmt.k(work.comments))" : "Comments"
+    }
+
     // MARK: - Actions
 
+    /// Reading settings as a window sheet — a popover this wide would hang
+    /// outside the window's visual bounds when anchored to the toolbar.
     private func toggleSettingsPopover() {
-        if let popover = settingsPopover, popover.isShown {
-            popover.close()
-            settingsPopover = nil
-            return
+        guard presentedViewControllers?.isEmpty != false else { return }
+        var dismissRef: () -> Void = {}
+        let view = ReadingSettingsView(theme: theme, onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
         }
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: ReadingSettingsView(theme: theme))
-        popover.show(relativeTo: settingsButton.bounds, of: settingsButton, preferredEdge: .maxY)
-        settingsPopover = popover
+        presentAsSheet(hosting)
     }
 
     @objc private func exitImmersive() {
@@ -842,6 +935,52 @@ final class ReadPaneViewController: NSViewController {
                                          }))
         popover.show(relativeTo: chaptersButton.bounds, of: chaptersButton, preferredEdge: .maxY)
         chaptersPopover = popover
+    }
+
+    private func toggleReadingListPopover() {
+        if let popover = readingListPopover, popover.isShown {
+            popover.close()
+            readingListPopover = nil
+            return
+        }
+        guard let work = model.selectedWork else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = NSHostingController(
+            rootView: ReadingListPopover(theme: theme, appState: appState, work: work))
+        popover.show(relativeTo: readingListButton.bounds, of: readingListButton, preferredEdge: .maxY)
+        readingListPopover = popover
+    }
+
+    /// Comments for the whole work (detail-mode toolbar), as a sheet.
+    private func showWorkComments() {
+        guard let work = model.selectedWork else { return }
+        var dismissRef: () -> Void = {}
+        let view = MacCommentsView(theme: theme, appState: appState,
+                                   workID: work.id,
+                                   chapterID: nil,
+                                   title: work.title,
+                                   subtitle: nil,
+                                   onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
+        }
+        presentAsSheet(hosting)
+    }
+
+    private func showBookmarkEditSheet() {
+        guard let work = model.selectedWork else { return }
+        var dismissRef: () -> Void = {}
+        let view = MacBookmarkEditView(theme: theme, appState: appState,
+                                       workID: work.id,
+                                       workTitle: work.title,
+                                       onClose: { dismissRef() })
+        let hosting = NSHostingController(rootView: view)
+        dismissRef = { [weak self, weak hosting] in
+            if let hosting { self?.dismiss(hosting) }
+        }
+        presentAsSheet(hosting)
     }
 
     /// Comments for the chapter currently open in the reader, as a sheet.

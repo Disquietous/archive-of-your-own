@@ -6,6 +6,7 @@ final class PaneToolbarView: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let subLabel = NSTextField(labelWithString: "")
     private let leadingStack = NSStackView()
+    private let afterTitleStack = NSStackView()
     private let trailingStack = NSStackView()
     private let separator = NSView()
 
@@ -27,11 +28,15 @@ final class PaneToolbarView: NSView {
         // meaningful baseline, and baseline-derived alignment pins their top
         // edge to the midline instead.
         leadingStack.alignment = .centerY
+        afterTitleStack.orientation = .horizontal
+        afterTitleStack.spacing = 4
+        afterTitleStack.alignment = .centerY
+        afterTitleStack.isHidden = true
         trailingStack.orientation = .horizontal
         trailingStack.spacing = 4
         trailingStack.alignment = .centerY
 
-        let bar = NSStackView(views: [leadingStack, titleStack, NSView(), trailingStack])
+        let bar = NSStackView(views: [leadingStack, titleStack, afterTitleStack, NSView(), trailingStack])
         bar.orientation = .horizontal
         bar.spacing = 10
         bar.alignment = .centerY
@@ -72,6 +77,13 @@ final class PaneToolbarView: NSView {
 
     func setTrailing(_ views: [NSView]) {
         trailingStack.setViews(views, in: .trailing)
+    }
+
+    /// Views placed directly after the title block (e.g. the detail pane's
+    /// primary reading action), separate from the trailing button cluster.
+    func setAfterTitle(_ views: [NSView]) {
+        afterTitleStack.setViews(views, in: .leading)
+        afterTitleStack.isHidden = views.isEmpty
     }
 
     func applyTheme() {

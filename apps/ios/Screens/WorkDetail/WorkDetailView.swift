@@ -85,6 +85,8 @@ struct WorkDetailView: View {
         .toolbar(.hidden, for: .navigationBar)
         .task(id: workID) {
             if isLiveWork {
+                // Opening the detail view counts as "seen" for What's New.
+                state.markDetailViewed(workID)
                 await state.fetchWorkMetadata(workID)
             }
         }

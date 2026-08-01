@@ -12,20 +12,12 @@ struct DetailView: View {
     private var started: Bool { progress > 0 }
     private var currentChapter: Int { appState.progressMap[work.id]?.chapter ?? 1 }
     private var warnOK: Bool { work.warnings.contains("No Archive") }
-    private var bookmarked: Bool { appState.bookmarkedWorkIDs.contains(work.id) }
-    private var downloaded: Bool { appState.downloadedWorkIDs.contains(work.id) }
-    private var hasKudos: Bool { appState.kudosGivenWorkIDs.contains(work.id) }
     private var followingAuthor: Bool { model.followedAuthorNames.contains(work.author) }
-    private var workSubscribed: Bool { appState.isSubscribedToWork(work.id) }
 
-    @State private var showComments = false
-    @State private var showBookmarkEdit = false
-    @State private var showReadingLists = false
-
-    private var inAnyReadingList: Bool {
-        guard let id = UInt64(work.id) else { return false }
-        return appState.readingLists.contains { appState.bridge.getReadingListItems($0.id).contains(id) }
-    }
+    @State private var selectedChapter = 0
+    /// Chapter titles for the dropdown — session cache first, then the
+    /// copy persisted in the encrypted DB by any earlier fetch.
+    @State private var chapterTitles: [String] = []
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -67,6 +59,12 @@ struct DetailView: View {
                     }
                 }
                 .padding(.bottom, 10)
+                if appState.kudosFailedWorkID == work.id {
+                    Text("Couldn’t leave kudos — the archive rejected the request. Try again.")
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(Color(hex: "CE514D"))
+                        .padding(.bottom, 14)
+                }
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(work.fandomList, id: \.self) { fandom in
                         Text(fandom)
@@ -95,13 +93,6 @@ struct DetailView: View {
                 }
 
                 pills.padding(.bottom, 22)
-                actions.padding(.bottom, appState.kudosFailedWorkID == work.id ? 8 : 26)
-                if appState.kudosFailedWorkID == work.id {
-                    Text("Couldn’t leave kudos — the archive rejected the request. Try again.")
-                        .font(Font(MacFont.ui(12)))
-                        .foregroundStyle(Color(hex: "CE514D"))
-                        .padding(.bottom, 18)
-                }
                 statGrid.padding(.bottom, 24)
                 if !work.summary.isEmpty {
                     summaryBox.padding(.bottom, 22)
@@ -131,20 +122,6 @@ struct DetailView: View {
             }
         } message: {
             Text("This bookmark is synced with your AO3 account. Remove it from AO3 as well, or only from this device?")
-        }
-        .sheet(isPresented: $showComments) {
-            MacCommentsView(theme: theme, appState: appState,
-                            workID: work.id,
-                            chapterID: nil,
-                            title: work.title,
-                            subtitle: nil,
-                            onClose: { showComments = false })
-        }
-        .sheet(isPresented: $showBookmarkEdit) {
-            MacBookmarkEditView(theme: theme, appState: appState,
-                                workID: work.id,
-                                workTitle: work.title,
-                                onClose: { showBookmarkEdit = false })
         }
     }
 
@@ -187,131 +164,12 @@ struct DetailView: View {
         .clipShape(Capsule())
     }
 
-    private var actions: some View {
-        HStack(spacing: 10) {
-            Button {
-                model.openReader(work.id, chapter: started ? currentChapter - 1 : 0)
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "book")
-                        .font(.system(size: 15, weight: .semibold))
-                    Text(started ? "Continue · Ch. \(currentChapter)" : "Start reading")
-                        .font(Font(MacFont.ui(14.5, weight: .bold)))
-                }
-                .foregroundStyle(theme.onAccent)
-                .padding(.horizontal, 20)
-                .frame(height: 42)
-                .background(theme.accent)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
-                .shadow(color: theme.accent.opacity(0.28), radius: 5, y: 3)
-            }
-            .buttonStyle(.plain)
-
-            iconButton(bookmarked ? "bookmark.fill" : "bookmark",
-                       tint: bookmarked ? theme.accent : theme.ink,
-                       help: "Bookmark") {
-                appState.toggleBookmark(work.id)
-            }
-            if bookmarked {
-                iconButton("square.and.pencil",
-                           tint: theme.ink,
-                           help: "Edit bookmark — notes, tags, sync to AO3") {
-                    showBookmarkEdit = true
-                }
-            }
-            iconButton(downloadSymbol,
-                       tint: downloaded ? theme.sage : theme.ink,
-                       help: downloaded ? "Downloaded" : "Download for offline") {
-                appState.toggleDownload(work.id)
-            }
-
-            if UInt64(work.id) != nil {
-                iconButton(inAnyReadingList ? "books.vertical.fill" : "books.vertical",
-                           tint: inAnyReadingList ? theme.accent : theme.ink,
-                           help: "Add to reading list") {
-                    showReadingLists = true
-                }
-                .popover(isPresented: $showReadingLists, arrowEdge: .bottom) {
-                    ReadingListPopover(theme: theme, appState: appState, work: work)
-                }
-            }
-
-            iconButton(workSubscribed ? "bell.fill" : "bell",
-                       tint: workSubscribed ? theme.accent : theme.ink,
-                       help: appState.ao3Username == nil
-                           ? "Sign in to subscribe to this work"
-                           : (workSubscribed ? "Unsubscribe from this work on AO3"
-                                             : "Subscribe to this work on AO3")) {
-                appState.toggleWorkSubscription(work.id)
-            }
-            .disabled(appState.ao3Username == nil
-                      || appState.subscriptionTogglingWorkIDs.contains(work.id))
-
-            Button {
-                appState.giveKudos(work.id)
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: hasKudos ? "heart.fill" : "heart")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(hasKudos ? "Kudos left" : "Kudos")
-                        .font(Font(MacFont.ui(14.5, weight: .bold)))
-                }
-                .foregroundStyle(hasKudos ? theme.accent : theme.ink)
-                .padding(.horizontal, 20)
-                .frame(height: 42)
-                .background(theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(theme.line, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .disabled(hasKudos)
-            .help(hasKudos ? "Kudos are permanent on AO3" : "Leave kudos on AO3")
-
-            Button {
-                showComments = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "bubble.right")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text(work.comments > 0 ? "Comments · \(Fmt.k(work.comments))" : "Comments")
-                        .font(Font(MacFont.ui(14.5, weight: .bold)))
-                }
-                .foregroundStyle(theme.ink)
-                .padding(.horizontal, 20)
-                .frame(height: 42)
-                .background(theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(theme.line, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var downloadSymbol: String {
-        if appState.isDownloading(work.id) { return "arrow.down.circle.dotted" }
-        return downloaded ? "checkmark.circle" : "arrow.down.circle"
-    }
-
-    private func iconButton(_ symbol: String, tint: Color, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 42, height: 42)
-                .background(theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 11).stroke(theme.line, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .help(help)
-    }
-
     private var statGrid: some View {
         HStack(spacing: 1) {
             statCell(Fmt.k(work.words), "Words")
             statCell("\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")", "Chapters")
             statCell(Fmt.k(work.kudos), "Kudos")
-            statCell(Fmt.k(work.bookmarks), "Saved")
+            statCell(Fmt.k(work.bookmarks), "Bookmarked")
         }
         .background(theme.line)
         .clipShape(RoundedRectangle(cornerRadius: 14))
@@ -343,7 +201,7 @@ struct DetailView: View {
                 .kerning(0.9)
                 .foregroundStyle(theme.ink3)
             Text(work.summary)
-                .font(Font(MacFont.reading(named: theme.readingFont.fontName, size: size)).italic())
+                .font(Font(MacFont.reading(named: theme.readingFont.fontName, size: size)))
                 .lineSpacing(size * (theme.readLeading - 1) * 0.45)
                 .foregroundStyle(theme.ink)
         }
@@ -356,7 +214,8 @@ struct DetailView: View {
 
     private var tags: some View {
         FlowLayout(spacing: 7) {
-            ForEach(work.tags, id: \.self) { tag in
+            ForEach(work.tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+                    id: \.self) { tag in
                 Button {
                     model.searchTag(tag)
                 } label: {
@@ -373,6 +232,29 @@ struct DetailView: View {
         }
     }
 
+    private var postedChapterCount: Int { max(1, work.chapterCount) }
+
+    /// Titles come from the session cache when this work's chapters were
+    /// fetched this run, else from the chapters persisted in the encrypted
+    /// DB by any earlier session's fetch or download.
+    private func reloadChapterTitles() {
+        if let session = appState.chaptersForWork(work.id) {
+            chapterTitles = session.map(\.title)
+        } else if let workId = UInt64(work.id) {
+            chapterTitles = appState.bridge.getCachedChapters(workId).map(\.title)
+        } else {
+            chapterTitles = []
+        }
+    }
+
+    private func chapterLabel(_ index: Int) -> String {
+        let number = index + 1
+        let stored = index < chapterTitles.count ? chapterTitles[index] : ""
+        let title = stored.isEmpty ? "Chapter \(number)" : stored
+        let read = started && number < currentChapter
+        return (read ? "✓ " : "") + (title == "Chapter \(number)" ? title : "\(number) · \(title)")
+    }
+
     private var chapters: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("CHAPTERS")
@@ -380,67 +262,78 @@ struct DetailView: View {
                 .kerning(0.8)
                 .foregroundStyle(theme.ink3)
                 .padding(.bottom, 8)
-            ForEach(0..<max(1, work.totalChapters), id: \.self) { index in
-                chapterRow(index)
-            }
-        }
-    }
-
-    private func chapterRow(_ index: Int) -> some View {
-        let number = index + 1
-        let unposted = number > work.chapterCount
-        let read = started && number < currentChapter
-        let fetchedTitle = appState.chaptersForWork(work.id)
-            .flatMap { index < $0.count ? $0[index].title : nil }
-        let title = fetchedTitle?.isEmpty == false ? fetchedTitle! : "Chapter \(number)"
-        return Button {
-            model.openReader(work.id, chapter: index)
-        } label: {
-            HStack(spacing: 12) {
-                Group {
-                    if read {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(theme.onAccent)
-                            .frame(width: 26, height: 26)
-                            .background(theme.accent)
-                    } else {
-                        Text("\(number)")
-                            .font(Font(MacFont.ui(12, weight: .bold)))
-                            .foregroundStyle(theme.ink3)
-                            .frame(width: 26, height: 26)
-                            .background(theme.surface2)
+            HStack(spacing: 10) {
+                Menu {
+                    ForEach(0..<postedChapterCount, id: \.self) { index in
+                        Button(chapterLabel(index)) { selectedChapter = index }
                     }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(chapterLabel(min(selectedChapter, postedChapterCount - 1)))
+                            .font(Font(MacFont.ui(12.5, weight: .medium)))
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(theme.accent)
+                            .frame(width: 20, height: 20)
+                            .overlay(
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.system(size: 8.5, weight: .bold))
+                                    .foregroundStyle(theme.onAccent)
+                            )
+                    }
+                    .padding(.leading, 10)
+                    .padding(.trailing, 5)
+                    .frame(height: 30)
+                    .frame(maxWidth: .infinity)
+                    .background(theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                Text(unposted ? "Chapter \(number)" : title)
-                    .font(Font(MacFont.ui(14.5, weight: .medium)))
-                    .foregroundStyle(read ? theme.ink3 : theme.ink)
-                Spacer()
-                if unposted {
-                    Text("Not posted")
-                        .font(Font(MacFont.ui(11)))
-                        .foregroundStyle(theme.ink3)
-                } else {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.ink3)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .frame(maxWidth: 340)
+
+                Button {
+                    model.openReader(work.id, chapter: min(selectedChapter, postedChapterCount - 1))
+                } label: {
+                    Text("Go")
+                        .font(Font(MacFont.ui(12.5, weight: .bold)))
+                        .foregroundStyle(theme.onAccent)
+                        .padding(.horizontal, 18)
+                        .frame(height: 30)
+                        .background(theme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+                .buttonStyle(.plain)
+                .help("Open the selected chapter")
             }
-            .padding(.init(top: 12, leading: 4, bottom: 12, trailing: 4))
-            .contentShape(Rectangle())
+            if work.totalChapters > work.chapterCount {
+                Text("\(work.totalChapters - work.chapterCount) more not posted yet")
+                    .font(Font(MacFont.ui(11)))
+                    .foregroundStyle(theme.ink3)
+                    .padding(.top, 8)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(unposted)
-        .opacity(unposted ? 0.4 : 1)
-        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+        .onAppear {
+            selectedChapter = min(max(0, currentChapter - 1), postedChapterCount - 1)
+            reloadChapterTitles()
+        }
+        .onChange(of: work.id) {
+            selectedChapter = min(max(0, currentChapter - 1), postedChapterCount - 1)
+            reloadChapterTitles()
+        }
     }
 }
 
 /// Find-or-create reading list popover: type to filter the lists, click to
 /// toggle membership, and when the typed name matches nothing, a Create row
-/// makes the list with this work already in it.
-private struct ReadingListPopover: View {
+/// makes the list with this work already in it. Anchored to the reading
+/// pane toolbar's reading-list button.
+struct ReadingListPopover: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     let work: Work

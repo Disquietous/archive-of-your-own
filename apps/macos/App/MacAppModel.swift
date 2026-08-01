@@ -343,6 +343,8 @@ final class MacAppModel {
     func selectWork(_ id: String) {
         if selectedWorkID != id { selectedWorkID = id }
         if readerOpen { readerOpen = false }
+        // Opening the detail view counts as "seen" for the What's New badge.
+        appState.markDetailViewed(id)
         // Fill in full metadata (tags, summary, chapter titles) if the row
         // came from a listing with partial data.
         Task { await appState.fetchWorkMetadata(id) }

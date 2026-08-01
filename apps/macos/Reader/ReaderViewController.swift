@@ -404,6 +404,7 @@ final class ReaderViewController: NSViewController {
         renderer.imageDisplayWidth = max(240, CGFloat(theme.measure) - 60)
         let body = NSMutableAttributedString(attributedString: renderer.render(blocks: content.blocks))
         applyDropCap(to: body, bodySize: bodySize)
+        remapAnchor(toNewText: body.string)
         textView.textStorage?.setAttributedString(body)
         textView.invalidateIntrinsicContentSize()
 
@@ -502,6 +503,45 @@ final class ReaderViewController: NSViewController {
         }
     }
 
+    /// Re-rendering replaces the whole text storage, and the rendered string
+    /// changes length around image blocks (a tap-to-load placeholder line
+    /// becomes attachment + caption, and its status text varies). A raw
+    /// character-offset anchor below any such block would then point at
+    /// different TEXT, and the restore would faithfully pin the wrong lines.
+    /// Re-locate the anchor's actual words in the new string before the swap
+    /// so the reader lands back on what they were reading.
+    private func remapAnchor(toNewText newText: String) {
+        guard let offset = anchorOffset,
+              let oldText = textView.textStorage?.string,
+              oldText != newText, !oldText.isEmpty, !newText.isEmpty else { return }
+        let old = oldText as NSString
+        let new = newText as NSString
+        guard offset > 0, offset < old.length else { return }
+        let snippetLen = min(96, old.length - offset)
+        let snippet = old.substring(with: NSRange(location: offset, length: snippetLen))
+        // ~96 chars of prose is unique in practice, but search a window
+        // around the old offset first so a repeated phrase resolves to the
+        // nearest occurrence.
+        let drift = abs(new.length - old.length) + 256
+        let windowStart = max(0, offset - drift)
+        let windowLen = min(new.length - windowStart, snippetLen + 2 * drift)
+        var found = windowLen > 0
+            ? new.range(of: snippet, options: [], range: NSRange(location: windowStart, length: windowLen))
+            : NSRange(location: NSNotFound, length: 0)
+        if found.location == NSNotFound {
+            found = new.range(of: snippet)
+        }
+        // Not found: the anchor line itself was swapped (it WAS the image
+        // placeholder). Content before the block is unchanged, so the old
+        // offset already points at the block's start — keep it.
+        guard found.location != NSNotFound, found.location != offset else { return }
+        posLog("anchor remap \(offset) -> \(found.location) after re-render")
+        anchorOffset = found.location
+        // Line starts moved with the text; restore recomputes this after
+        // landing, and a stale value would read as drift in the meantime.
+        expectedTopLine = nil
+    }
+
     /// Character offset of the first body-text line at the top of the
     /// viewport, or nil while the header above the body is showing (there the
     /// raw offset is stable enough and there is no line to anchor to).
@@ -553,6 +593,7 @@ final class ReaderViewController: NSViewController {
         // offset stopped moving" as done; only "the anchor's line is what's
         // at the top".
         var passes = 0
+        var finalPass = false
         while passes < 10 {
             passes += 1
             view.layoutSubtreeIfNeeded()
@@ -565,7 +606,20 @@ final class ReaderViewController: NSViewController {
             let currentTop = captureAnchor()
 
             let delta: CGFloat
-            if let currentTop, currentTop == target.start {
+            let dropCapMaxY = textView.textContainer?.exclusionPaths.first?.bounds.maxY ?? 0
+            if dropCapMaxY > 0, target.y <= dropCapMaxY {
+                // Opening lines: the drop-cap exclusion makes fragment
+                // enumeration and the viewport hit-test disagree by a
+                // constant few points, so converging on "the anchor's line
+                // is what's at the top" ping-pongs between the first two
+                // lines until the pass budget runs out. This close to the
+                // document top everything above the anchor is materialized,
+                // so the enumerated position IS visual truth — pin it once
+                // and accept.
+                delta = target.y - viewportTop
+                if abs(delta) < 1 { break }
+                finalPass = true
+            } else if let currentTop, currentTop == target.start {
                 // Right line is on top — pin its top edge exactly, using
                 // now-local (real) geometry.
                 delta = target.y - viewportTop
@@ -595,6 +649,7 @@ final class ReaderViewController: NSViewController {
             NSAnimationContext.endGrouping()
             // Materialize real layout at the new position before re-checking.
             layoutManager.textViewportLayoutController.layoutViewport()
+            if finalPass { break }
         }
         lastLayoutWidth = scrollView.contentView.bounds.width
         lastDocumentHeight = document.bounds.height

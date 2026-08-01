@@ -82,6 +82,14 @@ final class AppState {
     var unreadNotificationCount: Int = 0
     var notifications: [UNotification] = []
     var newWorkIDs: [String] = []
+    /// Works whose detail view has been opened at least once (persisted as
+    /// works.detail_viewed_at). The What's New badge counts only works the
+    /// user hasn't looked at yet.
+    var detailViewedWorkIDs: Set<String> = []
+    /// What's New badge: new works whose details the user has yet to view.
+    var newUnviewedWorkCount: Int {
+        newWorkIDs.filter { !detailViewedWorkIDs.contains($0) }.count
+    }
     /// Works a census confirmed are no longer listed on AO3 — cached copies
     /// are retained everywhere; views may badge them.
     var goneWorkIDs: Set<String> = []
@@ -553,6 +561,11 @@ final class AppState {
                 try await self.bridge.fetchWork(workId)
             }
             fetchedWorks[id] = Self.workFromSummary(summary)
+            // A detail open can mark before this fetch created the work's
+            // row (Rust-side no-op) — re-assert now that the row exists.
+            if detailViewedWorkIDs.contains(id) {
+                bridge.markWorkDetailViewed(workId)
+            }
         } catch {
             if !metadataTask.isCancelled && !"\(error)".contains("cancelled") {
                 searchError = error.localizedDescription
@@ -1317,6 +1330,17 @@ final class AppState {
     func loadNewWorks() {
         newWorkIDs = bridge.getNewWorkIds().map { String($0) }
         goneWorkIDs = Set(bridge.getGoneWorkIds().map { String($0) })
+        detailViewedWorkIDs = Set(bridge.getDetailViewedWorkIds().map { String($0) })
+    }
+
+    /// Called whenever a work's detail view opens; first view persists a
+    /// timestamp and drops the work from the What's New badge count.
+    func markDetailViewed(_ id: String) {
+        guard !detailViewedWorkIDs.contains(id) else { return }
+        detailViewedWorkIDs.insert(id)
+        if let workId = UInt64(id) {
+            bridge.markWorkDetailViewed(workId)
+        }
     }
 
     func removeNewWork(_ id: String) {

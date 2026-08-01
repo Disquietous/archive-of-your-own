@@ -4,34 +4,67 @@ import SwiftUI
 /// spacing segmented control. Writes straight to the shared AppTheme.
 struct ReadingSettingsView: View {
     @Bindable var theme: AppTheme
-    /// True in the reader popover (themed surface); false when hosted in the
+    /// True in the reader sheet (themed surface); false when hosted in the
     /// system-styled Settings window.
     var themedBackground = true
+    /// Set when presented as a sheet — shows the close button.
+    var onClose: (() -> Void)?
 
     private let presets = [PresetThemes.paper, PresetThemes.sepia, PresetThemes.night]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Reading")
-                .font(Font(MacFont.ui(14, weight: .bold)))
-                .foregroundStyle(theme.ink)
-
-            group("Theme") {
-                HStack(spacing: 8) {
-                    ForEach(presets) { preset in
-                        themeSwatch(preset)
+            HStack {
+                Text("Reading")
+                    .font(Font(MacFont.ui(14, weight: .bold)))
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                if let onClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(theme.ink2)
+                            .frame(width: 26, height: 26)
+                            .background(theme.surface2)
+                            .clipShape(Circle())
                     }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Close")
                 }
             }
 
-            group("Typeface") {
-                VStack(spacing: 7) {
-                    ForEach(ReadingFont.allCases, id: \.self) { font in
-                        fontOption(font)
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
+                    group("Theme") {
+                        HStack(spacing: 8) {
+                            ForEach(presets) { preset in
+                                themeSwatch(preset)
+                            }
+                        }
+                    }
+
+                    group("Typeface") {
+                        VStack(spacing: 7) {
+                            ForEach(ReadingFont.allCases, id: \.self) { font in
+                                fontOption(font)
+                            }
+                        }
                     }
                 }
-            }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
+                rightColumn
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .padding(16)
+        .frame(width: 560)
+        .background(themedBackground ? theme.surface : .clear)
+    }
+
+    private var rightColumn: some View {
+        VStack(alignment: .leading, spacing: 16) {
             group("Text size") {
                 HStack {
                     stepButton("minus") { theme.fontSize = max(15, theme.fontSize - 1) }
@@ -128,9 +161,6 @@ struct ReadingSettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.line, lineWidth: 1))
             }
         }
-        .padding(16)
-        .frame(width: 320)
-        .background(themedBackground ? theme.surface : .clear)
     }
 
     /// Update the chrome font scale before the observable write so every

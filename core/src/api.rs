@@ -2076,6 +2076,18 @@ impl AO3App {
         s.get_gone_work_ids().map_err(AO3Error::from)
     }
 
+    /// Record that the user opened this work's detail view (first view
+    /// wins). The What's New badge counts only never-viewed works.
+    pub fn mark_work_detail_viewed(&self, work_id: u64) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.mark_work_detail_viewed(work_id, &chrono_now()).map_err(AO3Error::from)
+    }
+
+    pub fn get_detail_viewed_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_detail_viewed_work_ids().map_err(AO3Error::from)
+    }
+
     // -- Chapter images (tap-to-load; bytes cached in image_cache) --
 
     /// Cache-only lookup — the renderer's synchronous "is it already here".

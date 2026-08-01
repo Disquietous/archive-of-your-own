@@ -153,6 +153,39 @@ impl Storage {
         Ok(())
     }
 
+    /// Record the first time the user opened this work's detail view
+    /// (unix-seconds string). First view wins — later opens keep the
+    /// original timestamp. Kept out of `save_work` so listing upserts
+    /// can't clobber it. No-op when the work has no row yet (only works
+    /// discovered by crawls feed the What's New badge, and those always
+    /// have blurb rows).
+    pub fn mark_work_detail_viewed(&self, work_id: u64, at: &str) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "UPDATE works SET detail_viewed_at = ?2
+                 WHERE id = ?1 AND detail_viewed_at = ''",
+                params![work_id as i64, at],
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Ids of every work whose detail view has been opened at least once.
+    pub fn get_detail_viewed_work_ids(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM works WHERE detail_viewed_at != ''")
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(map_sql)?;
+        let mut ids = Vec::new();
+        for r in rows {
+            ids.push(r.map_err(map_sql)? as u64);
+        }
+        Ok(ids)
+    }
+
     /// Persist series memberships for a work. Separate from `save_work`
     /// because listing blurbs never carry series data and their upserts
     /// must not clobber it; only full work-page fetches call this. Always
@@ -1657,7 +1690,8 @@ impl Storage {
                     date_updated    TEXT NOT NULL,
                     language        TEXT NOT NULL,
                     complete        INTEGER NOT NULL,
-                    series_json     TEXT NOT NULL DEFAULT '[]'
+                    series_json     TEXT NOT NULL DEFAULT '[]',
+                    detail_viewed_at TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS chapters (
@@ -1953,6 +1987,12 @@ impl Storage {
         // listing blurbs don't carry series and would wipe it (same
         // rationale as gone_from_ao3 above); set_work_series writes it.
         self.conn.execute("ALTER TABLE works ADD COLUMN series_json TEXT NOT NULL DEFAULT '[]'", []).ok();
+
+        // Migration: unix-seconds timestamp of the first time the user
+        // opened this work's detail view in-app ('' = never). Kept out of
+        // save_work like the columns above; feeds the What's New badge
+        // (only never-viewed works count).
+        self.conn.execute("ALTER TABLE works ADD COLUMN detail_viewed_at TEXT NOT NULL DEFAULT ''", []).ok();
 
         // Migration: full user profiles + block/mute state on ao3_users.
         // pseuds and bio are JSON (bio is a serialized ContentBlock tree,
@@ -3056,6 +3096,31 @@ mod tests {
         // Explicit empty write clears (work removed from series on AO3).
         db.set_work_series(7101, &[]).unwrap();
         assert!(db.get_work(7101).unwrap().unwrap().series.is_empty());
+    }
+
+    #[test]
+    fn test_detail_viewed_at() {
+        let db = open_test_db();
+        let w = sample_work(7201);
+        db.save_work(&w).unwrap();
+        assert!(db.get_detail_viewed_work_ids().unwrap().is_empty());
+
+        db.mark_work_detail_viewed(7201, "1750000000").unwrap();
+        assert_eq!(db.get_detail_viewed_work_ids().unwrap(), vec![7201]);
+
+        // First view wins — a later mark keeps the original timestamp.
+        db.mark_work_detail_viewed(7201, "1760000000").unwrap();
+        let at: String = db.conn.query_row(
+            "SELECT detail_viewed_at FROM works WHERE id = 7201", [], |r| r.get(0)).unwrap();
+        assert_eq!(at, "1750000000");
+
+        // Blurb-shaped save_work must not wipe it.
+        db.save_work(&w).unwrap();
+        assert_eq!(db.get_detail_viewed_work_ids().unwrap(), vec![7201]);
+
+        // Marking a work with no row is a silent no-op.
+        db.mark_work_detail_viewed(9999, "1750000000").unwrap();
+        assert_eq!(db.get_detail_viewed_work_ids().unwrap(), vec![7201]);
     }
 
     #[test]

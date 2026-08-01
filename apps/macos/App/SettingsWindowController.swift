@@ -8,28 +8,32 @@ final class SettingsWindowController: NSWindowController {
         let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
 
-        func pane(_ content: some View, minHeight: CGFloat) -> NSHostingController<AnyView> {
-            NSHostingController(rootView: AnyView(
-                ScrollView {
-                    content.frame(maxWidth: .infinity, alignment: .top)
-                }
-                .frame(width: 360)
-                .frame(minHeight: minHeight, maxHeight: .infinity)
-            ))
+        // Panes size the window, not the other way around: the hosting
+        // controller publishes its SwiftUI content size as
+        // preferredContentSize, and the tab controller resizes the window
+        // whenever the selected pane's content size changes (tab switches,
+        // app text scale, controls appearing/disappearing). A pane that
+        // wants a fixed width sets it; height always follows content.
+        func pane(_ content: some View, width: CGFloat? = nil) -> NSHostingController<AnyView> {
+            var view = AnyView(content.frame(maxWidth: .infinity, alignment: .top))
+            if let width { view = AnyView(view.frame(width: width)) }
+            let host = NSHostingController(rootView: view)
+            host.sizingOptions = .preferredContentSize
+            return host
         }
 
         let general = NSTabViewItem(viewController: pane(
-            GeneralSettingsPane(theme: theme, appState: appState, model: model), minHeight: 420))
+            GeneralSettingsPane(theme: theme, appState: appState, model: model), width: 360))
         general.label = "General"
         general.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "General")
 
         let reading = NSTabViewItem(viewController: pane(
-            ReadingSettingsView(theme: theme, themedBackground: false), minHeight: 480))
+            ReadingSettingsView(theme: theme, themedBackground: false)))
         reading.label = "Reading"
         reading.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Reading")
 
         let privacy = NSTabViewItem(viewController: pane(
-            PrivacySettingsPane(theme: theme, appState: appState, model: model), minHeight: 420))
+            PrivacySettingsPane(theme: theme, appState: appState, model: model), width: 360))
         privacy.label = "Privacy"
         privacy.image = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "Privacy")
 

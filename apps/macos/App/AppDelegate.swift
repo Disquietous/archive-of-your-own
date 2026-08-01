@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         ObservationRelay.track { [weak self] in
             guard let self else { return }
-            let count = appState.newWorkIDs.count
+            let count = appState.newUnviewedWorkCount
             DispatchQueue.main.async {
                 NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
             }
