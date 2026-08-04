@@ -10,6 +10,9 @@ final class AppState {
     var downloadedWorkIDs: Set<String> = []
     var history: [String] = []
     var progressMap: [String: ReadingProgress] = [:]
+    /// works.last_read_dt per work ("YYYY-MM-DD HH:MM:SS" UTC, sortable) —
+    /// stamped on every chapter open; Currently Reading sorts by it.
+    var lastReadMap: [String: String] = [:]
     var lastReadID: String?
     var hideExplicit: Bool = UserDefaults.standard.bool(forKey: "hideExplicit") {
         didSet { UserDefaults.standard.set(hideExplicit, forKey: "hideExplicit") }
@@ -360,6 +363,10 @@ final class AppState {
             progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pct: p.position)
         }
 
+        // Last-read datetimes (Currently Reading sort)
+        lastReadMap = Dictionary(uniqueKeysWithValues:
+            bridge.getWorkLastReadTimes().map { (String($0.workId), $0.lastReadDt) })
+
         // Intentionally downloaded works
         downloadedWorkIDs = Set(bridge.getDownloadedIds().map { String($0) })
 
@@ -539,6 +546,8 @@ final class AppState {
                 try await self.bridge.fetchWork(workId)
             }
             fetchedWorks[id] = Self.workFromSummary(summary)
+            // The fetched page may have revealed kudos left outside the app.
+            kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
         } catch {
             if !metadataTask.isCancelled && !"\(error)".contains("cancelled") {
                 bridge.writeLog(level: "ERROR", tag: "work",
@@ -561,6 +570,8 @@ final class AppState {
                 try await self.bridge.fetchWork(workId)
             }
             fetchedWorks[id] = Self.workFromSummary(summary)
+            // The fetched page may have revealed kudos left outside the app.
+            kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
             // A detail open can mark before this fetch created the work's
             // row (Rust-side no-op) — re-assert now that the row exists.
             if detailViewedWorkIDs.contains(id) {
@@ -886,23 +897,29 @@ final class AppState {
 
     /// Work ID of the last kudos POST that failed, for inline error display.
     var kudosFailedWorkID: String?
+    /// Kudos POSTs in flight — the heart shows faded until AO3 confirms.
+    var kudosPendingWorkIDs: Set<String> = []
 
     /// Leave kudos on AO3. One-way — kudos are permanent on the archive, so
-    /// there is no local toggle-off. The heart fills optimistically and
-    /// reverts (with kudosFailedWorkID set) only if the archive rejects it.
+    /// there is no local toggle-off. The heart fades while the request is in
+    /// flight, fills fully once AO3 confirms, and empties again (with
+    /// kudosFailedWorkID set) if the archive rejects it.
     func giveKudos(_ id: String) {
-        guard !kudosGivenWorkIDs.contains(id), let workId = UInt64(id) else { return }
-        kudosGivenWorkIDs.insert(id)
+        guard !kudosGivenWorkIDs.contains(id), !kudosPendingWorkIDs.contains(id),
+              let workId = UInt64(id) else { return }
+        kudosPendingWorkIDs.insert(id)
         kudosFailedWorkID = nil
         Task { @MainActor in
             do {
                 let success = try await bridge.leaveKudos(workId: workId)
-                if !success {
-                    kudosGivenWorkIDs.remove(id)
+                kudosPendingWorkIDs.remove(id)
+                if success {
+                    kudosGivenWorkIDs.insert(id)
+                } else {
                     kudosFailedWorkID = id
                 }
             } catch {
-                kudosGivenWorkIDs.remove(id)
+                kudosPendingWorkIDs.remove(id)
                 kudosFailedWorkID = id
             }
         }
@@ -940,6 +957,8 @@ final class AppState {
         for p in progressEntries {
             progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pct: p.position)
         }
+        lastReadMap = Dictionary(uniqueKeysWithValues:
+            bridge.getWorkLastReadTimes().map { (String($0.workId), $0.lastReadDt) })
 
         // Crash safety for clear-on-close: if the quit hook never ran (force
         // quit, crash), sweep the leftover history at launch instead.
@@ -1331,6 +1350,20 @@ final class AppState {
         newWorkIDs = bridge.getNewWorkIds().map { String($0) }
         goneWorkIDs = Set(bridge.getGoneWorkIds().map { String($0) })
         detailViewedWorkIDs = Set(bridge.getDetailViewedWorkIds().map { String($0) })
+    }
+
+    /// Called whenever a chapter of the work opens — stamps last_read_dt
+    /// (Currently Reading sorts by it, latest first).
+    func markWorkRead(_ id: String) {
+        guard let workId = UInt64(id) else { return }
+        // Mirror SQLite's datetime('now') format so in-session values sort
+        // against persisted ones.
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        lastReadMap[id] = fmt.string(from: Date())
+        bridge.markWorkRead(workId)
     }
 
     /// Called whenever a work's detail view opens; first view persists a

@@ -899,21 +899,39 @@ fn parse_list_items(list: &ElementRef) -> Vec<Vec<ContentBlock>> {
         .collect()
 }
 
+/// Collapse every run of whitespace (spaces, newlines, tabs) to one space,
+/// preserving a leading/trailing space when the node had any — that space
+/// is significant between inline elements ("word <b>bold</b>").
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_whitespace = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !in_whitespace {
+                out.push(' ');
+            }
+            in_whitespace = true;
+        } else {
+            out.push(ch);
+            in_whitespace = false;
+        }
+    }
+    out
+}
+
 pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
     let mut inlines = Vec::new();
 
     for child in el.children() {
         if child.value().is_text() {
             let t = child.value().as_text().unwrap();
-            let s = t.to_string();
+            // HTML whitespace semantics: newlines/tabs/space runs in source
+            // markup collapse to a single space when rendered. Passing them
+            // through verbatim made the UI draw authors' source-file line
+            // wraps as real line breaks mid-paragraph.
+            let s = collapse_whitespace(t);
             if !s.is_empty() {
-                if s.contains('\n') && s.trim().is_empty() {
-                    inlines.push(InlineContent::Text {
-                        value: " ".to_string(),
-                    });
-                } else {
-                    inlines.push(InlineContent::Text { value: s });
-                }
+                inlines.push(InlineContent::Text { value: s });
             }
         } else if child.value().is_element() {
             let element = child.value().as_element().unwrap();
@@ -971,6 +989,15 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
         inlines.pop();
     }
     inlines
+}
+
+/// Usernames shown in a work page's kudos list ("X, Y, and Z left kudos on
+/// this work"). Truncated by AO3 past ~150 names ("and N more users"), so
+/// absence proves nothing — presence proves the user left kudos.
+pub fn parse_kudos_usernames(html: &str) -> Vec<String> {
+    let doc = Html::parse_document(html);
+    let link_sel = sel("#kudos a[href^='/users/']");
+    doc.select(&link_sel).map(|el| text(&el)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,6 +1952,44 @@ mod tests {
         </span></dd>"#;
         let doc = Html::parse_document(html);
         assert!(extract_work_page_series(&doc).is_empty());
+    }
+
+    #[test]
+    fn test_parse_kudos_usernames() {
+        let html = r#"<div id="kudos"><p class="kudos">
+            <a href="/users/MockReaderOne">MockReaderOne</a>,
+            <a href="/users/MockReaderTwo/pseuds/AltPseud">AltPseud</a>,
+            and <a href="/works/123?show_comments=true">12 more users</a>
+            as well as 30 guests left kudos on this work!</p></div>"#;
+        let names = parse_kudos_usernames(html);
+        assert_eq!(names, vec!["MockReaderOne", "AltPseud"]);
+
+        // No kudos section at all.
+        assert!(parse_kudos_usernames("<div id='main'></div>").is_empty());
+    }
+
+    #[test]
+    fn test_inline_whitespace_collapses() {
+        // Authors' HTML often wraps source lines mid-paragraph; rendered
+        // text must treat those newlines as ordinary spaces.
+        let html = "<p>measured distance. Three\n            days of separate meals and\t\tavoided eye contact</p>";
+        let doc = Html::parse_fragment(html);
+        let p = doc.select(&sel("p")).next().unwrap();
+        let inlines = parse_inline_content(&p);
+        assert_eq!(inlines.len(), 1);
+        let InlineContent::Text { value } = &inlines[0] else {
+            panic!("expected text, got {:?}", inlines[0]);
+        };
+        assert_eq!(value, "measured distance. Three days of separate meals and avoided eye contact");
+
+        // The space between a text node and an inline element survives.
+        let html = "<p>word <b>bold</b>\nand more</p>";
+        let doc = Html::parse_fragment(html);
+        let p = doc.select(&sel("p")).next().unwrap();
+        let inlines = parse_inline_content(&p);
+        assert_eq!(inlines.len(), 3);
+        assert!(matches!(&inlines[0], InlineContent::Text { value } if value == "word "));
+        assert!(matches!(&inlines[2], InlineContent::Text { value } if value == " and more"));
     }
 
     #[test]

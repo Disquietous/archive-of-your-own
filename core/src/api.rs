@@ -199,6 +199,13 @@ pub struct UReadingProgress {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct ULastRead {
+    pub work_id: u64,
+    /// SQLite UTC "YYYY-MM-DD HH:MM:SS" — lexicographically sortable.
+    pub last_read_dt: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct UHistoryEntry {
     pub work_id: u64,
     pub accessed_at: String,
@@ -975,11 +982,12 @@ impl AO3App {
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let (summary, chapters) = c.get_work(work_id).await.map_err(AO3Error::from)?;
+            let (summary, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             let _ = s.save_work(&summary);
             let _ = s.set_work_series(summary.id, &summary.series);
+            record_kudos_if_listed(&s, work_id, &kudos_names);
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
             Ok(UWorkSummary::from(summary))
         }).await;
@@ -992,11 +1000,12 @@ impl AO3App {
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let (summary, chapters) = c.get_work(work_id).await.map_err(AO3Error::from)?;
+            let (summary, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
             let _ = s.save_work(&summary);
             let _ = s.set_work_series(summary.id, &summary.series);
+            record_kudos_if_listed(&s, work_id, &kudos_names);
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
             Ok(UWorkSummary::from(summary))
         }).await;
@@ -1009,9 +1018,10 @@ impl AO3App {
         let result = self.run_on_runtime(move |client, storage| async move {
             let c = client.read().await;
             c.set_active_progress(progress);
-            let (_, chapters) = c.get_work(work_id).await.map_err(AO3Error::from)?;
+            let (_, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
             c.clear_active_progress();
             let s = storage.lock().await;
+            record_kudos_if_listed(&s, work_id, &kudos_names);
             for ch in &chapters { let _ = s.save_chapter(work_id, ch); }
             // Content pages carry the posting credentials (CSRF token, pseud) —
             // persist what the fetch harvested so later kudos/comment POSTs
@@ -2076,6 +2086,22 @@ impl AO3App {
         s.get_gone_work_ids().map_err(AO3Error::from)
     }
 
+    /// Stamp that the user opened a chapter of this work right now —
+    /// drives the Currently Reading sort (latest first).
+    pub fn mark_work_read(&self, work_id: u64) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.mark_work_read(work_id).map_err(AO3Error::from)
+    }
+
+    pub fn get_work_last_read_times(&self) -> Result<Vec<ULastRead>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_work_last_read_times()
+            .map_err(AO3Error::from)?
+            .into_iter()
+            .map(|(id, at)| ULastRead { work_id: id, last_read_dt: at })
+            .collect())
+    }
+
     /// Record that the user opened this work's detail view (first view
     /// wins). The What's New badge counts only never-viewed works.
     pub fn mark_work_detail_viewed(&self, work_id: u64) -> Result<(), AO3Error> {
@@ -2991,6 +3017,17 @@ fn seed_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::St
 }
 
 /// Persist the freshest harvested posting credentials for the next launch.
+/// A fetched work page's kudos list names the signed-in user → they left
+/// kudos at some point (website, another device, pre-tracking). Record it
+/// so the heart shows full. The list truncates past ~150 names, so absence
+/// never clears anything.
+fn record_kudos_if_listed(s: &crate::storage::Storage, work_id: u64, kudos_names: &[String]) {
+    let Ok(Some((_, username, _))) = s.get_active_account() else { return };
+    if !username.is_empty() && kudos_names.iter().any(|n| n.eq_ignore_ascii_case(&username)) {
+        let _ = s.mark_kudos_given(work_id);
+    }
+}
+
 fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::Storage) {
     if let Some(token) = c.cached_csrf_token() {
         let _ = s.set_state("csrf_token", &token);

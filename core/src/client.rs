@@ -122,6 +122,39 @@ fn scan_attr_near(html: &str, marker: &str, attr_prefix: &str) -> Option<String>
 }
 
 /// Identify an image payload by magic bytes — the formats AO3 embeds use.
+/// Escape the five characters Rails' HTML escaping rewrites — the form
+/// AO3 renders posted comment text back in.
+fn html_escape_min(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Did the response page actually include the posted comment? AO3 echoes
+/// the comment HTML-ESCAPED and splits multi-line comments into <p>
+/// blocks, so a verbatim substring check fails for any comment with an
+/// apostrophe, quote, or line break despite a successful post.
+pub(crate) fn comment_post_succeeded(body: &str, content: &str) -> bool {
+    if body.contains("Comment created") || body.contains("was added") || body.contains(content) {
+        return true;
+    }
+    let escaped = html_escape_min(content);
+    if body.contains(&escaped) {
+        return true;
+    }
+    // Multi-line comments never appear contiguously (paragraph markup
+    // between lines) — match the longest single line instead. Guard the
+    // length so a trivial fragment can't false-positive off page chrome.
+    let longest = escaped
+        .lines()
+        .map(str::trim)
+        .max_by_key(|l| l.len())
+        .unwrap_or("");
+    longest.len() >= 8 && body.contains(longest)
+}
+
 pub fn sniff_image_kind(bytes: &[u8]) -> &'static str {
     if bytes.len() < 12 { return "not-an-image" }
     match bytes {
@@ -446,12 +479,16 @@ impl AO3Client {
     }
 
     /// Fetch a single work's metadata and all its chapters.
-    pub async fn get_work(&self, work_id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
+    /// Returns the parsed work plus the usernames visible in the page's
+    /// kudos list — the caller checks the signed-in user against them to
+    /// learn about kudos left outside the app (website, other devices).
+    pub async fn get_work(&self, work_id: u64) -> Result<(WorkSummary, Vec<Chapter>, Vec<String>), AppError> {
         let url = format!("{BASE_URL}/works/{work_id}?view_full_work=true&view_adult=true");
         let html = self.fetch(&url).await?;
         let (mut summary, chapters) = parser::parse_work_page(&html)?;
         summary.id = work_id;
-        Ok((summary, chapters))
+        let kudos_names = parser::parse_kudos_usernames(&html);
+        Ok((summary, chapters, kudos_names))
     }
 
     /// Fetch a specific chapter by its AO3 chapter ID.
@@ -1526,7 +1563,7 @@ impl AO3Client {
                 ("commit".to_string(), "Comment".to_string()),
             ];
             let body = self.post_form_raw(endpoint, params).await?;
-            if body.contains("Comment created") || body.contains("was added") || body.contains(content) {
+            if comment_post_succeeded(&body, content) {
                 return Ok(true);
             }
             if !refreshed {
@@ -2214,6 +2251,26 @@ async fn handle_socks_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_comment_post_succeeded() {
+        // AO3 echoes the comment HTML-escaped.
+        let content = "This doesn't read like a \"draft\" — loved it";
+        let body = r#"<blockquote class="userstuff"><p>This doesn&#39;t read like a &quot;draft&quot; — loved it</p></blockquote>"#;
+        assert!(comment_post_succeeded(body, content));
+
+        // Multi-line comments come back split into paragraphs.
+        let content = "First line of praise\nSecond, much longer line with more detail";
+        let body = "<p>First line of praise</p>\n<p>Second, much longer line with more detail</p>";
+        assert!(comment_post_succeeded(body, content));
+
+        // Plain comments still match verbatim.
+        assert!(comment_post_succeeded("<p>lovely chapter</p>", "lovely chapter"));
+
+        // A rejection page without the comment stays a failure.
+        let body = "<div class=\"error\">Sorry, you can't post comments</div>";
+        assert!(!comment_post_succeeded(body, "This doesn't appear anywhere"));
+    }
 
     #[test]
     fn test_urlencoded() {

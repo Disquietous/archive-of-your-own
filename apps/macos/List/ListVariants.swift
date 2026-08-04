@@ -396,18 +396,25 @@ struct AuthorsList: View {
 
     @State private var newAuthor = ""
 
-    /// Local follows first, then AO3 subscription authors not already followed.
+    /// Local follows and AO3 subscription authors in one alphabetical list
+    /// (source shown per row, never used for ordering), narrowed by the
+    /// header's source checkboxes and the in-list username filter.
     /// `username` is the canonical AO3 username (subscription display names
     /// can differ) — used for opening works and fetching avatars.
     private var authors: [(name: String, username: String, source: String)] {
         var seen = Set<String>()
         var result: [(String, String, String)] = []
-        for name in model.followedAuthorNames where seen.insert(name).inserted {
-            result.append((name, name, "Followed"))
+        if model.authorsIncludeFollowed {
+            for name in model.followedAuthorNames where seen.insert(name).inserted {
+                result.append((name, name, "Followed"))
+            }
         }
-        for sub in model.followedAuthors where seen.insert(sub.name).inserted {
-            result.append((sub.name, sub.id, "Subscribed on AO3"))
+        if model.authorsIncludeSubscribed {
+            for sub in model.followedAuthors where seen.insert(sub.name).inserted {
+                result.append((sub.name, sub.id, "Subscribed on AO3"))
+            }
         }
+        result.sort { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
         let needle = model.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !needle.isEmpty else { return result }
         return result.filter { $0.0.lowercased().contains(needle) || $0.1.lowercased().contains(needle) }
@@ -417,8 +424,13 @@ struct AuthorsList: View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                followField
-                    .padding(.init(top: 12, leading: 16, bottom: 2, trailing: 16))
+                if model.showFollowAuthorField {
+                    followField
+                        .padding(.init(top: 12, leading: 16, bottom: 2, trailing: 16))
+                }
+                usernameFilterField
+                    .padding(.init(top: model.showFollowAuthorField ? 0 : 12,
+                                   leading: 16, bottom: 2, trailing: 16))
 
                 if authors.isEmpty {
                     EmptyStateMac(theme: theme, icon: "person",
@@ -448,7 +460,38 @@ struct AuthorsList: View {
                 .onSubmit {
                     model.followAuthor(newAuthor)
                     newAuthor = ""
+                    model.showFollowAuthorField = false
                 }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+    }
+
+    private var usernameFilterField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.ink3)
+            TextField("Filter by username", text: Binding(
+                get: { model.authorsListFilter },
+                set: { model.authorsListFilter = $0 }))
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(12.5)))
+                .foregroundStyle(theme.ink)
+            if !model.authorsListFilter.isEmpty {
+                Button {
+                    model.authorsListFilter = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.ink3)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: 32)

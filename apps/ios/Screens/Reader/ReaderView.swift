@@ -114,6 +114,7 @@ struct ReaderView: View {
             .toolbar(.hidden, for: .navigationBar)
             .onAppear {
                 state.pushHistory(workID)
+                state.markWorkRead(workID)
             }
             .task(id: workID) {
                 if fetchedChapters == nil, UInt64(workID) != nil {

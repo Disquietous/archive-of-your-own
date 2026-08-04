@@ -106,6 +106,10 @@ final class ReadPaneViewController: NSViewController {
             guard let self, let id = model.selectedWorkID else { return }
             appState.giveKudos(id)
         }
+        // Kudos-given disables the button, but the heart's color IS the
+        // state display — AppKit's automatic disabled dim would wash the
+        // full-red confirmation down to what reads as the faded state.
+        (kudosButton.cell as? NSButtonCell)?.imageDimsWhenDisabled = false
         workCommentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Comments") { [weak self] in
             self?.showWorkComments()
         }
@@ -887,12 +891,17 @@ final class ReadPaneViewController: NSViewController {
             ? "Sign in to subscribe to this work"
             : subscribed ? "Unsubscribe from this work on AO3" : "Subscribe to this work on AO3"
 
+        // Heart states: empty = no kudos (or the POST failed), faded red =
+        // request in flight, full red = AO3 confirmed.
         let hasKudos = appState.kudosGivenWorkIDs.contains(work.id)
-        kudosButton.setSymbol(hasKudos ? "heart.fill" : "heart")
-        kudosButton.tintOverride = hasKudos ? theme.nsAccent : nil
-        kudosButton.isEnabled = !hasKudos
-        kudosButton.toolTip = hasKudos
-            ? "Kudos left — kudos are permanent on AO3" : "Leave kudos on AO3"
+        let kudosPending = appState.kudosPendingWorkIDs.contains(work.id)
+        let kudosRed = NSColor(Color(hex: "CE514D"))
+        kudosButton.setSymbol(hasKudos || kudosPending ? "heart.fill" : "heart")
+        kudosButton.tintOverride = hasKudos ? kudosRed
+            : kudosPending ? kudosRed.withAlphaComponent(0.45) : nil
+        kudosButton.isEnabled = !hasKudos && !kudosPending
+        kudosButton.toolTip = hasKudos ? "Kudos left — kudos are permanent on AO3"
+            : kudosPending ? "Leaving kudos…" : "Leave kudos on AO3"
 
         workCommentsButton.toolTip = work.comments > 0
             ? "Comments · \(Fmt.k(work.comments))" : "Comments"

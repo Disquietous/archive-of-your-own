@@ -889,6 +889,14 @@ final class RustBridge {
         try? app?.markWorkDetailViewed(workId: workId)
     }
 
+    func markWorkRead(_ workId: UInt64) {
+        try? app?.markWorkRead(workId: workId)
+    }
+
+    func getWorkLastReadTimes() -> [ULastRead] {
+        (try? app?.getWorkLastReadTimes()) ?? []
+    }
+
     func getDetailViewedWorkIds() -> [UInt64] {
         (try? app?.getDetailViewedWorkIds()) ?? []
     }

@@ -162,6 +162,32 @@ struct SingleFieldFilterView: View {
     }
 }
 
+/// Authors filter: which sources appear — local follows and/or AO3
+/// subscriptions. Username filtering lives in the list itself.
+struct AuthorsSourceFilterView: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+
+    var body: some View {
+        let _ = theme.uiFontScale
+        VStack(alignment: .leading, spacing: 10) {
+            header(theme: theme, title: "Filter Authors",
+                   clearEnabled: !(model.authorsIncludeFollowed && model.authorsIncludeSubscribed)) {
+                model.authorsIncludeFollowed = true
+                model.authorsIncludeSubscribed = true
+            }
+            Toggle("Include Followed", isOn: $model.authorsIncludeFollowed)
+            Toggle("Include Subscribed", isOn: $model.authorsIncludeSubscribed)
+        }
+        .toggleStyle(.checkbox)
+        .font(Font(MacFont.ui(12.5, weight: .medium)))
+        .foregroundStyle(theme.ink2)
+        .padding(14)
+        .frame(width: 280)
+        .background(theme.surface)
+    }
+}
+
 /// Inbox filter: sender, work, and message text as separate fields.
 struct InboxFilterView: View {
     @Bindable var theme: AppTheme

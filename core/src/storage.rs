@@ -170,6 +170,35 @@ impl Storage {
         Ok(())
     }
 
+    /// Stamp "the user just opened a chapter of this work" — every open
+    /// overwrites, so the value is always the most recent read.
+    pub fn mark_work_read(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "UPDATE works SET last_read_dt = datetime('now') WHERE id = ?1",
+                params![work_id as i64],
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Last-read datetimes for every work that has one, as
+    /// `(work_id, "YYYY-MM-DD HH:MM:SS")` — lexicographically sortable UTC.
+    pub fn get_work_last_read_times(&self) -> Result<Vec<(u64, String)>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, last_read_dt FROM works WHERE last_read_dt != ''")
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get(0)?;
+                let at: String = row.get(1)?;
+                Ok((id as u64, at))
+            })
+            .map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
     /// Ids of every work whose detail view has been opened at least once.
     pub fn get_detail_viewed_work_ids(&self) -> Result<Vec<u64>, AppError> {
         let mut stmt = self
@@ -1691,7 +1720,8 @@ impl Storage {
                     language        TEXT NOT NULL,
                     complete        INTEGER NOT NULL,
                     series_json     TEXT NOT NULL DEFAULT '[]',
-                    detail_viewed_at TEXT NOT NULL DEFAULT ''
+                    detail_viewed_at TEXT NOT NULL DEFAULT '',
+                    last_read_dt    TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS chapters (
@@ -1993,6 +2023,19 @@ impl Storage {
         // save_work like the columns above; feeds the What's New badge
         // (only never-viewed works count).
         self.conn.execute("ALTER TABLE works ADD COLUMN detail_viewed_at TEXT NOT NULL DEFAULT ''", []).ok();
+
+        // Migration: UTC datetime of the last time the user opened a chapter
+        // of this work ('' = never). Drives the Currently Reading sort.
+        // Kept out of save_work like the columns above.
+        self.conn.execute("ALTER TABLE works ADD COLUMN last_read_dt TEXT NOT NULL DEFAULT ''", []).ok();
+        // Backfill: works read before last_read_dt existed inherit their
+        // most recent progress write, so Currently Reading orders sensibly
+        // on the first launch after the upgrade. Idempotent — only ever
+        // touches rows still at ''.
+        self.conn.execute(
+            "UPDATE works SET last_read_dt = COALESCE(
+                 (SELECT rp.updated_at FROM reading_progress rp WHERE rp.work_id = works.id), '')
+             WHERE last_read_dt = ''", []).ok();
 
         // Migration: full user profiles + block/mute state on ao3_users.
         // pseuds and bio are JSON (bio is a serialized ContentBlock tree,
@@ -3121,6 +3164,28 @@ mod tests {
         // Marking a work with no row is a silent no-op.
         db.mark_work_detail_viewed(9999, "1750000000").unwrap();
         assert_eq!(db.get_detail_viewed_work_ids().unwrap(), vec![7201]);
+    }
+
+    #[test]
+    fn test_last_read_dt() {
+        let db = open_test_db();
+        let w = sample_work(7301);
+        db.save_work(&w).unwrap();
+        assert!(db.get_work_last_read_times().unwrap().is_empty());
+
+        db.mark_work_read(7301).unwrap();
+        let times = db.get_work_last_read_times().unwrap();
+        assert_eq!(times.len(), 1);
+        assert_eq!(times[0].0, 7301);
+        assert!(!times[0].1.is_empty());
+
+        // Blurb-shaped save_work must not wipe it.
+        db.save_work(&w).unwrap();
+        assert_eq!(db.get_work_last_read_times().unwrap().len(), 1);
+
+        // Marking a work with no row is a silent no-op.
+        db.mark_work_read(9999).unwrap();
+        assert_eq!(db.get_work_last_read_times().unwrap().len(), 1);
     }
 
     #[test]

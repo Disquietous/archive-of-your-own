@@ -281,9 +281,13 @@ final class ReaderViewController: NSViewController {
         }
         guard let workId = UInt64(work.id) else { return }
 
+        // A cached copy only satisfies the request if it reaches the chapter
+        // being opened — a work updated since the last fetch falls through
+        // to the network for the new chapter.
         if !force {
             // Already fetched this session?
-            if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty {
+            if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty,
+               chapterIndex < fetched.count {
                 chapters = fetched
                 renderChapter()
                 return
@@ -291,7 +295,7 @@ final class ReaderViewController: NSViewController {
 
             // Local database cache (downloaded / recently read works).
             let cached = appState.bridge.getCachedChapters(workId)
-            if !cached.isEmpty {
+            if !cached.isEmpty, chapterIndex < cached.count {
                 appState.fetchedChapters[work.id] = cached
                 chapters = cached
                 renderChapter()
@@ -309,6 +313,12 @@ final class ReaderViewController: NSViewController {
             }
             appState.fetchedChapters[work.id] = fetched
             chapters = fetched
+            // Stale metadata promised a chapter AO3 doesn't have — land on
+            // the last real one rather than an empty page.
+            if !fetched.isEmpty, chapterIndex >= fetched.count {
+                chapterIndex = fetched.count - 1
+                model.readerChapter = chapterIndex
+            }
         } catch {
             if !chapterTask.isCancelled && !"\(error)".contains("cancelled") {
                 loadError = error.localizedDescription
@@ -358,7 +368,10 @@ final class ReaderViewController: NSViewController {
     }
 
     private var postedChapterCount: Int {
-        chapters?.count ?? work?.chapterCount ?? 1
+        // Metadata can know about chapters our cached copy predates (the
+        // work updated since the last fetch) — trust whichever is larger,
+        // so "Next chapter" appears and navigation triggers the fetch.
+        max(chapters?.count ?? 0, max(work?.chapterCount ?? 0, 1))
     }
 
     private func renderChapter() {
@@ -401,7 +414,12 @@ final class ReaderViewController: NSViewController {
         var renderer = ContentBlockRenderer(theme: theme, paragraphStyle: .macReading)
         renderer.loadedImages = loadedChapterImages
         renderer.imageStatus = chapterImageStatus
-        renderer.imageDisplayWidth = max(240, CGFloat(theme.measure) - 60)
+        // Cap fixed-width elements (images, the hr rule) at the column the
+        // text is ACTUALLY laid out in — the measure setting, or less when
+        // the pane is narrower. An attachment wider than the container
+        // can't wrap and distorts line layout.
+        let liveColumn = min(CGFloat(theme.measure), scrollView.contentView.bounds.width - 80)
+        renderer.imageDisplayWidth = max(240, liveColumn - 60)
         let body = NSMutableAttributedString(attributedString: renderer.render(blocks: content.blocks))
         applyDropCap(to: body, bodySize: bodySize)
         remapAnchor(toNewText: body.string)
@@ -476,11 +494,32 @@ final class ReaderViewController: NSViewController {
         super.viewDidLayout()
         let width = scrollView.contentView.bounds.width
         let height = scrollView.documentView?.bounds.height ?? 0
-        guard width != lastLayoutWidth || abs(height - lastDocumentHeight) > 0.5 else { return }
+        let widthChanged = width != lastLayoutWidth
+        guard widthChanged || abs(height - lastDocumentHeight) > 0.5 else { return }
         lastLayoutWidth = width
         lastDocumentHeight = height
+        // Width changes resize the fixed-width attachments (images, rules),
+        // which requires a re-render, not just a re-wrap. renderChapter is
+        // anchor-preserving, so the reader stays on the same words.
+        if widthChanged, currentChapterContent != nil {
+            scheduleRerender()
+        }
         if anchorOffset != nil, pendingRestorePct == nil, !isLiveScrolling {
             scheduleAnchorRestore()
+        }
+    }
+
+    /// Coalesces width-driven re-renders onto the next runloop turn, same
+    /// rationale as scheduleAnchorRestore.
+    private var renderPending = false
+
+    private func scheduleRerender() {
+        guard !renderPending else { return }
+        renderPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            renderPending = false
+            renderChapter()
         }
     }
 
@@ -799,10 +838,18 @@ final class ReaderViewController: NSViewController {
         verifyGeneration += 1
         model.readerChapter = target
         appState.pushHistory(work.id)
+        appState.markWorkRead(work.id)
         // Reaching a chapter records it even if the reader never scrolls.
         appState.setProgress(work.id, chapter: target + 1, pct: 0)
-        renderChapter()
         scrollToTop()
+        // Stepping into a chapter the cached copy doesn't have yet (the
+        // work updated since the last fetch): refetch past the caches —
+        // the loading overlay renders until the new chapter arrives.
+        if let chapters, target >= chapters.count {
+            refreshChaptersFromAO3()
+            return
+        }
+        renderChapter()
     }
 
     private func scrollToTop() {

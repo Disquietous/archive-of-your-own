@@ -389,11 +389,14 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             let count = model.followedAuthorNames.count + model.followedAuthors.count
             toolbar.configure(title: "Authors", sub: "\(count) followed")
             toolbar.setLeading([])
-            toolbar.setTrailing([filterButton(key: "authors", active: !model.authorsListFilter.isEmpty) { [theme, model] in
-                AnyView(SingleFieldFilterView(theme: theme, title: "Filter Authors",
-                                              placeholder: "Username",
-                                              text: Binding(get: { model.authorsListFilter },
-                                                            set: { model.authorsListFilter = $0 })))
+            let followButton = ToolButton(theme: theme, symbol: "plus", tooltip: "Follow an author") { [model] in
+                model.showFollowAuthorField.toggle()
+            }
+            followButton.isOn = model.showFollowAuthorField
+            let sourceFiltered = !(model.authorsIncludeFollowed && model.authorsIncludeSubscribed)
+            toolbar.setTrailing([followButton,
+                                 filterButton(key: "authors", active: sourceFiltered) { [theme, model] in
+                AnyView(AuthorsSourceFilterView(theme: theme, model: model))
             }])
             showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
 

@@ -362,6 +362,7 @@ final class MacAppModel {
         readerChapter = chapter
         readerOpen = true
         appState.pushHistory(id)
+        appState.markWorkRead(id)
         // Opening a chapter enrolls the work in Currently Reading immediately —
         // scrolling only refines the position. Progress is monotonic, so
         // revisiting an earlier chapter never regresses anything.
@@ -826,7 +827,15 @@ final class MacAppModel {
     var currentlyReading: [Work] {
         appState.progressMap.keys
             .compactMap { appState.work(byID: $0) }
-            .sorted { appState.history.firstIndex(of: $0.id) ?? .max < appState.history.firstIndex(of: $1.id) ?? .max }
+            .sorted {
+                // Most recently read first; works never stamped (read
+                // before last_read_dt existed) sink to the bottom.
+                let a = appState.lastReadMap[$0.id] ?? ""
+                let b = appState.lastReadMap[$1.id] ?? ""
+                if a.isEmpty != b.isEmpty { return b.isEmpty }
+                if a != b { return a > b }
+                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
     }
 
     func works(for section: Section) -> [Work] {
@@ -907,6 +916,11 @@ final class MacAppModel {
     var subscriptionListFilter = ""
     /// Authors list: username.
     var authorsListFilter = ""
+    /// Authors list source filters (header popover checkboxes).
+    var authorsIncludeFollowed = true
+    var authorsIncludeSubscribed = true
+    /// Whether the "Follow an author" input is showing (header + button).
+    var showFollowAuthorField = false
     /// Fandoms list: fandom name.
     var fandomsListFilter = ""
     /// Inbox: three targeted fields.

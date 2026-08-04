@@ -152,18 +152,27 @@ struct ContentBlockRenderer {
             }
 
         case .horizontalRule:
+            // An actual drawn rule (like HTML <hr>), centered at the full
+            // text measure, via a 1pt-high tinted attachment image.
             let style = NSMutableParagraphStyle()
             style.alignment = .center
             style.paragraphSpacingBefore = 14
             style.paragraphSpacing = 14
-            result.append(NSAttributedString(
-                string: "⁂\n",
-                attributes: [
-                    .font: bodyFont,
-                    .foregroundColor: ink3Color,
-                    .paragraphStyle: style,
-                ]
-            ))
+            let ruleWidth = max(120, imageDisplayWidth)
+            let lineColor = NSColor(theme.line)
+            let image = NSImage(size: NSSize(width: ruleWidth, height: 1), flipped: false) { rect in
+                lineColor.setFill()
+                rect.fill()
+                return true
+            }
+            let attachment = NSTextAttachment()
+            attachment.image = image
+            attachment.bounds = CGRect(x: 0, y: bodySize * 0.22, width: ruleWidth, height: 1)
+            let rule = NSMutableAttributedString(attachment: attachment)
+            rule.append(NSAttributedString(string: "\n"))
+            rule.addAttributes([.paragraphStyle: style],
+                               range: NSRange(location: 0, length: rule.length))
+            result.append(rule)
 
         case .list(let ordered, let items):
             for (index, itemBlocks) in items.enumerated() {
