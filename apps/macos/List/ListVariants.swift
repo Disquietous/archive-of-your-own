@@ -387,6 +387,158 @@ struct FollowedFandomsView: View {
     }
 }
 
+// MARK: - Collections (AO3 /collections index)
+
+struct CollectionsListView: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+
+    var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
+        ScrollView {
+            VStack(spacing: 0) {
+                if model.collections.isEmpty {
+                    if model.isLoadingCollections {
+                        LoadingStateMac(theme: theme, message: "Loading collections…",
+                                        detail: "Requests are rate-limited to be kind to the archive.",
+                                        onCancel: { model.cancelCollectionsLoad() })
+                            .frame(minHeight: 260)
+                    } else if let error = model.collectionsError {
+                        VStack(spacing: 12) {
+                            EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                          title: "Couldn’t reach the archive", message: error)
+                            retryButton("Try Again")
+                        }
+                        .frame(minHeight: 260)
+                        .padding(.bottom, 20)
+                    } else {
+                        EmptyStateMac(theme: theme, icon: "square.grid.2x2",
+                                      title: "No collections",
+                                      message: "Collections from the archive appear here.")
+                            .frame(minHeight: 260)
+                    }
+                } else {
+                    ForEach(model.filteredCollections, id: \.name) { collection in
+                        collectionRow(collection)
+                    }
+                    footer
+                }
+            }
+        }
+    }
+
+    /// Load-more footer: spinner while a page fetch runs, an inline error
+    /// with retry when one failed, otherwise Load More until AO3 says the
+    /// index has no next page.
+    @ViewBuilder
+    private var footer: some View {
+        if model.isLoadingCollections {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Loading more…")
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(theme.ink3)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+        } else if let error = model.collectionsError {
+            VStack(spacing: 8) {
+                Text(error)
+                    .font(Font(MacFont.ui(12)))
+                    .foregroundStyle(Color(hex: "CE514D"))
+                    .multilineTextAlignment(.center)
+                retryButton("Try Again")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .padding(.horizontal, 16)
+        } else if model.collectionsHasNext {
+            retryButton("Load More")
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+        }
+    }
+
+    private func retryButton(_ label: String) -> some View {
+        Button {
+            model.loadMoreCollections()
+        } label: {
+            Text(label)
+                .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                .foregroundStyle(theme.accent)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func collectionRow(_ collection: UCollection) -> some View {
+        // Same selection treatment as the fandom and author lists: accent-soft
+        // fill with a 3pt accent bar on the leading edge.
+        let selected = model.collectionWorksName == collection.name
+        let title = collection.title.isEmpty ? collection.name : collection.title
+        return Button {
+            model.openCollectionWorks(slug: collection.name, title: title)
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(Font(MacFont.ui(14.5, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text(statusLine(collection))
+                        .font(Font(MacFont.ui(11)))
+                        .foregroundStyle(theme.ink3)
+                        .lineLimit(1)
+                    Text(countsLine(collection))
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(theme.ink3)
+                    if !collection.summary.isEmpty {
+                        Text(collection.summary)
+                            .font(Font(MacFont.ui(12)))
+                            .foregroundStyle(theme.ink2)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .padding(.top, 1)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.ink3)
+            }
+            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(selected ? theme.accentSoft : .clear)
+        .overlay(alignment: .leading) {
+            if selected { theme.accent.frame(width: 3) }
+        }
+        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+    }
+
+    private func statusLine(_ collection: UCollection) -> String {
+        var parts: [String] = [collection.isOpen ? "Open" : "Closed"]
+        if collection.isModerated { parts.append("Moderated") }
+        if collection.isAnonymous { parts.append("Anonymous") }
+        if !collection.collectionType.isEmpty { parts.append(collection.collectionType) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func countsLine(_ collection: UCollection) -> String {
+        let works = collection.workCount == 1 ? "1 work" : "\(collection.workCount) works"
+        let bookmarks = collection.bookmarkedCount == 1
+            ? "1 bookmarked item" : "\(collection.bookmarkedCount) bookmarked items"
+        return "\(works) · \(bookmarks)"
+    }
+}
+
 // MARK: - Authors (followed locally + AO3 subscriptions)
 
 struct AuthorsList: View {

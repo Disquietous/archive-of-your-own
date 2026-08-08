@@ -9,7 +9,7 @@ crate-type = ["lib", "staticlib"]
 
 [features]
 default = []
-tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip"]
+tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip", "tor-proto"]
 
 [dependencies]
 uniffi = { version = "0.31", features = ["cli"] }
@@ -31,6 +31,8 @@ tor-rtcompat = { version = "0.42", optional = true, features = ["tokio"] }
 tor-linkspec = { version = "0.42", optional = true }
 tor-netdir = { version = "0.42", optional = true, features = ["geoip"] }
 tor-dirmgr = { version = "0.42", optional = true }
+# stream-ctrl exposes DataStream::client_stream_ctrl() -> tunnel -> real path
+tor-proto = { version = "0.42", optional = true, features = ["stream-ctrl"] }
 
 [[bin]]
 name = "uniffi-bindgen"

@@ -411,6 +411,7 @@ mod tests {
             language: "English".to_string(),
             complete: true,
             series: vec![],
+            fetched_at: String::new(),
         }
     }
 

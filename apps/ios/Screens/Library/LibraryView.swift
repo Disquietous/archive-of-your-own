@@ -108,8 +108,7 @@ struct LibraryView: View {
     private var lastCheckedLabel: some View {
         Group {
             if state.ao3Username != nil, let ts = state.bridge.getLastSubscriptionCheck(),
-               let epoch = TimeInterval(ts) {
-                let date = Date(timeIntervalSince1970: epoch)
+               let date = DBTimestamp.date(ts) {
                 Text("Last checked: \(date.formatted(.relative(presentation: .named)))")
                     .font(.custom("HankenGrotesk", size: 11).weight(.medium))
                     .foregroundStyle(theme.ink3)

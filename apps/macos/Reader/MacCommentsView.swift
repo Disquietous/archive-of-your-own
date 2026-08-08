@@ -456,7 +456,7 @@ struct MacCommentsView: View {
             currentPage = result.currentPage
             totalPages = result.totalPages
         } catch {
-            if !commentTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !commentTask.isCancelled && !error.isCancellation {
                 loadError = error.localizedDescription
             }
         }
@@ -483,7 +483,7 @@ struct MacCommentsView: View {
                 totalPages = result.totalPages
                 nextPage += 1
             } catch {
-                if !commentTask.isCancelled && !"\(error)".contains("cancelled") {
+                if !commentTask.isCancelled && !error.isCancellation {
                     loadError = error.localizedDescription
                 }
                 break

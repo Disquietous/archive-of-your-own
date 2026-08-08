@@ -17,11 +17,13 @@ final class MacSearchModel {
     var formError: String?
     var hasSearched = false
 
-    /// What the current results represent — the form's criteria, or a tag
-    /// (fandom card / tag pill). Pagination re-runs whichever is active.
+    /// What the current results represent — the form's criteria, a tag
+    /// (fandom card / tag pill), or a collection's works (by URL slug).
+    /// Pagination re-runs whichever is active.
     enum ActiveQuery {
         case form(keys: [String], values: [String])
         case tag(String)
+        case collection(String)
     }
 
     var activeQuery: ActiveQuery?
@@ -141,7 +143,7 @@ final class MacSearchModel {
                 appState.bridge.setSessionCache(key: Self.dbFormKey, data: json, sessionId: Self.dbSessionID)
             }
         } catch {
-            if !appState.searchTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !appState.searchTask.isCancelled && !error.isCancellation {
                 formError = error.localizedDescription
             }
         }
@@ -160,8 +162,14 @@ final class MacSearchModel {
     /// query flips to results; the header's back button returns to the form.
     var showingResults = false
 
+    /// Called when a query discards the previous results. MacAppModel hangs
+    /// the list-filter reset off this — paging keeps the filter, a new query
+    /// does not.
+    var onNewQuery: (() -> Void)?
+
     @MainActor
     private func beginNewQuery(_ appState: AppState) {
+        onNewQuery?()
         appState.searchResults = []
         appState.searchError = nil
         appState.isSearching = true
@@ -198,6 +206,14 @@ final class MacSearchModel {
         Task { await fetch(page: 1, appState: appState) }
     }
 
+    /// A collection's paged works — `name` is the /collections/{name} slug.
+    @MainActor
+    func startCollectionQuery(_ name: String, appState: AppState) {
+        activeQuery = .collection(name)
+        beginNewQuery(appState)
+        Task { await fetch(page: 1, appState: appState) }
+    }
+
     @MainActor
     func goToPage(_ page: UInt32, appState: AppState) {
         guard page >= 1, activeQuery != nil, !appState.isSearching else { return }
@@ -217,6 +233,8 @@ final class MacSearchModel {
                     return try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page)
                 case .tag(let tag):
                     return try await appState.bridge.searchByTagPaged(tag, page: page)
+                case .collection(let name):
+                    return try await appState.bridge.fetchCollectionWorks(name: name, page: page)
                 }
             }
             appState.searchResults = result.works.map(AppState.workFromSummary)
@@ -228,7 +246,7 @@ final class MacSearchModel {
             // refresh the library snapshot so they join local lists at once.
             appState.reloadCachedWorks()
         } catch {
-            if !appState.searchTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !appState.searchTask.isCancelled && !error.isCancellation {
                 appState.searchError = error.localizedDescription
             }
         }
@@ -264,15 +282,15 @@ final class MacSearchModel {
         loadSavedSearches(appState)
     }
 
-    /// Restore a saved search's criteria into the form and run it.
+    /// Restore a saved search's criteria into the form (query, fields,
+    /// checkboxes) so the user can tweak them before running the search.
     @MainActor
-    func runSavedSearch(_ saved: USavedSearch, appState: AppState) {
+    func applySavedSearch(_ saved: USavedSearch) {
         guard let data = saved.paramsJson.data(using: .utf8),
               let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         fieldValues = payload["fieldValues"] as? [String: String] ?? [:]
         let boxes = payload["checkboxValues"] as? [String: [String]] ?? [:]
         checkboxValues = boxes.mapValues(Set.init)
-        performSearch(appState)
     }
 
     func deleteSavedSearch(_ id: Int64, appState: AppState) {

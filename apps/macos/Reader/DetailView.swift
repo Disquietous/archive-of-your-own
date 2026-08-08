@@ -142,6 +142,9 @@ struct DetailView: View {
             if !work.updated.isEmpty {
                 pill("Updated \(work.updated)", bg: theme.surface2, fg: theme.ink3)
             }
+            if let fetched = DBTimestamp.relative(work.fetchedAt) {
+                pill("Fetched \(fetched)", bg: theme.surface2, fg: theme.ink3)
+            }
             if appState.goneWorkIDs.contains(work.id) {
                 pill("No longer on AO3", icon: "archivebox",
                      bg: theme.accent2.opacity(0.13), fg: theme.accent2)

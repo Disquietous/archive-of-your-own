@@ -39,6 +39,11 @@ struct PrivacyPopoverView: View {
         .padding(16)
         .frame(width: 310)
         .background(theme.surface)
+        .onAppear {
+            // Re-read the captured circuit path so the footer pill's node
+            // chips reflect the circuit that most recently carried traffic.
+            appState.bridge.refreshCircuitHops()
+        }
     }
 
     private var divider: some View {

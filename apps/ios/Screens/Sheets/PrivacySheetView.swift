@@ -262,7 +262,7 @@ struct PrivacySheetView: View {
             }
             .padding(.horizontal, theme.pad)
 
-            TorCircuitView()
+            TorCircuitView(showsPathNote: true)
                 .padding(.horizontal, theme.pad + 8)
         }
     }

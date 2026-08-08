@@ -361,10 +361,17 @@ struct WorkDetailView: View {
 
             Spacer()
 
-            // Updated date
-            Text("Updated \(work.updated)")
-                .font(Typography.uiSmall())
-                .foregroundStyle(theme.ink3)
+            // Updated date + local cache age
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("Updated \(work.updated)")
+                    .font(Typography.uiSmall())
+                    .foregroundStyle(theme.ink3)
+                if let fetched = DBTimestamp.relative(work.fetchedAt) {
+                    Text("Fetched \(fetched)")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3.opacity(0.7))
+                }
+            }
         }
     }
 

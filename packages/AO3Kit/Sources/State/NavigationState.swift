@@ -8,6 +8,8 @@ enum AppDestination: Hashable {
     case workDetail(workID: String)
     case reader(workID: String, chapterIndex: Int, entireWork: Bool = false)
     case tagBrowse(tag: String)
+    case collectionsBrowse
+    case collectionWorks(name: String, title: String)
     case readingList(listID: Int64, name: String)
     case authorWorks(username: String)
     case downloads
@@ -94,6 +96,26 @@ final class NavigationState {
 
     func openTag(_ tag: String) {
         let dest = AppDestination.tagBrowse(tag: tag)
+        switch selectedTab {
+        case .library: libraryPath.append(dest)
+        case .browse: browsePath.append(dest)
+        case .search: searchPath.append(dest)
+        case .settings: settingsPath.append(dest)
+        }
+    }
+
+    func openCollections() {
+        let dest = AppDestination.collectionsBrowse
+        switch selectedTab {
+        case .library: libraryPath.append(dest)
+        case .browse: browsePath.append(dest)
+        case .search: searchPath.append(dest)
+        case .settings: settingsPath.append(dest)
+        }
+    }
+
+    func openCollection(name: String, title: String) {
+        let dest = AppDestination.collectionWorks(name: name, title: title)
         switch selectedTab {
         case .library: libraryPath.append(dest)
         case .browse: browsePath.append(dest)

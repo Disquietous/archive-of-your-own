@@ -31,6 +31,9 @@ struct Work: Identifiable, Hashable {
     /// Series this work belongs to. Only populated by full work-page
     /// fetches; listing rows and older caches leave it empty.
     var series: [SeriesInfo] = []
+    /// When this work's metadata last arrived from AO3 (DB datetime text,
+    /// "" = unknown). Shown to the user; never triggers a refetch.
+    var fetchedAt: String = ""
 
     /// The membership to follow at end-of-work — first series that has a
     /// next work.

@@ -42,7 +42,6 @@ extension AppState {
             Task { @MainActor in self.activeUserFetches -= 1 }
         }
         task.reset()
-        var sessionRetried = false
         var timeoutCount = 0
         var blockedCount = 0
         while !task.isCancelled {
@@ -51,27 +50,15 @@ extension AppState {
             } catch {
                 if task.isCancelled { throw error }
                 let desc = "\(error)"
-                if desc.contains("cancelled") { throw error }
-                if desc.contains("session_expired") && !sessionRetried {
-                    sessionRetried = true
-                    task.statusMessage = "Session expired. Re-authenticating…"
-                    let loggedIn = await bridge.ensureLoggedIn()
-                    if task.isCancelled { throw error }
-                    if loggedIn {
-                        task.statusMessage = "Retrying…"
-                        continue
-                    }
+                if error.isCancellation { throw error }
+                // Never probe or silently repair login state — the Rust layer
+                // has already purged the cached token; surface the manual
+                // sign-in prompt and stop.
+                if error.isSessionExpired || error.isPasswordNeeded {
                     await MainActor.run {
                         needsReauth = true
                     }
-                    throw Ao3Error.Network(message: "Session expired. Please re-enter your password.")
-                }
-                if desc.contains("password_needed") && !sessionRetried {
-                    sessionRetried = true
-                    await MainActor.run {
-                        needsReauth = true
-                    }
-                    throw Ao3Error.Network(message: "Session expired. Please re-enter your password.")
+                    throw Ao3Error.Network(message: "Session expired. Please sign in again.")
                 }
                 if desc.contains("timeout") {
                     timeoutCount += 1
@@ -136,6 +123,6 @@ extension AppState {
                 throw error
             }
         }
-        throw Ao3Error.Network(message: "cancelled")
+        throw Ao3Error.Cancelled
     }
 }

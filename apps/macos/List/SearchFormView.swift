@@ -15,6 +15,9 @@ struct SearchFormView: View {
         @Bindable var search = model.search
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if !search.savedSearches.isEmpty {
+                    SavedSearchField(theme: theme, appState: appState, search: search)
+                }
                 queryField
 
                 if search.isLoadingForm {
@@ -288,6 +291,129 @@ struct SearchFormView: View {
             return "A date (2024-01), or relative: < 2 weeks ago, > 3 months ago"
         }
         return nil
+    }
+}
+
+/// Type-to-look-up field over the user's saved searches, in the tag fields'
+/// local-suggestion paradigm (TagTokenField): typing filters the saved list
+/// by case-insensitive substring on name — no network, the list is already
+/// loaded from the database. Picking one prefills the whole criteria form
+/// (ready to tweak and run) and shows its name in the field; clearing the
+/// text only clears the field, never the form. Each suggestion row grows a
+/// small × on hover to delete that saved search.
+private struct SavedSearchField: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    @Bindable var search: MacSearchModel
+
+    @State private var input = ""
+    @FocusState private var focused: Bool
+
+    private var term: String {
+        input.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Saved searches are a short, already-loaded list — unlike the huge
+    /// tag cache there's no minimum-length gate: focusing shows them all,
+    /// typing narrows by name.
+    private var matches: [USavedSearch] {
+        guard !term.isEmpty else { return search.savedSearches }
+        return search.savedSearches.filter { $0.name.localizedCaseInsensitiveContains(term) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("SAVED SEARCH")
+                .font(Font(MacFont.ui(10.5, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+            HStack(spacing: 7) {
+                Image(systemName: "star")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(theme.ink3)
+                TextField("Type to find a saved search…", text: $input)
+                    .textFieldStyle(.plain)
+                    .font(Font(MacFont.ui(13)))
+                    .foregroundStyle(theme.ink)
+                    .focused($focused)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9)
+                .stroke(focused ? theme.accent : theme.line, lineWidth: 1))
+
+            if focused && !matches.isEmpty {
+                suggestionList
+            }
+        }
+    }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(matches, id: \.id) { saved in
+                SavedSearchSuggestionRow(theme: theme, saved: saved) {
+                    search.applySavedSearch(saved)
+                    input = saved.name
+                    focused = false
+                } onDelete: {
+                    search.deleteSavedSearch(saved.id, appState: appState)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+    }
+}
+
+/// One suggestion row: name plus the criteria summary the sidebar rows used
+/// to show, and a hover-only × that deletes the saved search.
+private struct SavedSearchSuggestionRow: View {
+    @Bindable var theme: AppTheme
+    let saved: USavedSearch
+    let onPick: () -> Void
+    let onDelete: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onPick) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(saved.name)
+                        .font(Font(MacFont.ui(12, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+                    if let summary = MacSearchModel.summary(of: saved) {
+                        Text(summary)
+                            .font(Font(MacFont.ui(11)))
+                            .foregroundStyle(theme.ink3)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if hovering {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(theme.ink3)
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Delete saved search")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(hovering ? theme.ink.opacity(0.06) : .clear)
+        .onHover { hovering = $0 }
     }
 }
 

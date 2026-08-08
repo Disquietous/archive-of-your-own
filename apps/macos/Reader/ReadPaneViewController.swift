@@ -210,6 +210,7 @@ final class ReadPaneViewController: NSViewController {
     private var readingListCloseBtn: ToolButton?
     private var authorCloseBtn: ToolButton?
     private var fandomCloseBtn: ToolButton?
+    private var collectionCloseBtn: ToolButton?
     private var fandomSearchBtn: ToolButton?
     private var fandomLibraryBackBtn: ToolButton?
     private var filterButtons: [String: ToolButton] = [:]
@@ -514,6 +515,14 @@ final class ReadPaneViewController: NSViewController {
         return eye
     }
 
+    private func collectionCloseButton() -> ToolButton {
+        let button = collectionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
+            self?.model.closeCollectionWorks()
+        }
+        collectionCloseBtn = button
+        return button
+    }
+
     private func fandomCloseButton() -> ToolButton {
         let button = fandomCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
             self?.model.closeFandomWorks()
@@ -652,6 +661,20 @@ final class ReadPaneViewController: NSViewController {
             return
         }
 
+        // Collections drill-in, without leaving the Collections section: the
+        // collection's paged works via the search-results flow (a collection
+        // query drives the pager exactly like a fandom's AO3 tag search).
+        if model.section == .collections, let title = model.collectionWorksTitle,
+           model.selectedWork == nil {
+            let search = model.search
+            toolbar.configure(title: title, sub: search.resultsSubtitle)
+            toolbar.setLeading([collectionCloseButton()])
+            toolbar.setTrailing(search.hasSearched
+                ? [makePagerHost(), worksFilterButton(for: .search)] : [])
+            show(mode: .searchResults)
+            return
+        }
+
         // Reading Lists drill-in: the selected list's works, mirroring the
         // Subscriptions → works flow.
         if model.section == .readingLists, let listID = model.selectedReadingListID,
@@ -725,6 +748,7 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
             || (model.section == .authors && model.authorUsername != nil)
             || (model.section == .fandoms && model.fandomWorksTag != nil)
+            || (model.section == .collections && model.collectionWorksTitle != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))

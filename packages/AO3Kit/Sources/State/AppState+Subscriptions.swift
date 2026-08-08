@@ -1,0 +1,200 @@
+import SwiftUI
+
+// MARK: - Subscriptions, What's New & notifications
+
+extension AppState {
+    func isSubscribedToWork(_ id: String) -> Bool {
+        subscriptions.contains { $0.id == id && $0.subType.lowercased().contains("work") }
+    }
+
+    func toggleWorkSubscription(_ id: String) {
+        guard let workId = UInt64(id), !subscriptionTogglingWorkIDs.contains(id) else { return }
+        subscriptionTogglingWorkIDs.insert(id)
+        Task { @MainActor in
+            if (try? await bridge.toggleWorkSubscription(workId: workId, username: ao3Username)) != nil {
+                // The Rust side already updated the subscriptions table —
+                // refresh the in-memory list from it.
+                subscriptions = bridge.getPersistedSubscriptions()
+            }
+            subscriptionTogglingWorkIDs.remove(id)
+        }
+    }
+
+    func loadSubscriptions(force: Bool = false) async {
+        guard let username = ao3Username else {
+            subscriptionError = "Sign in to AO3 in Settings first"
+            return
+        }
+        guard !isLoadingSubscriptions else { return }
+
+        let accountChanged = subscriptionsLoadedForAccount != username
+        let shouldForce = force || accountChanged
+
+        if !shouldForce {
+            let persisted = bridge.getPersistedSubscriptions()
+            if !persisted.isEmpty {
+                subscriptions = persisted
+                subscriptionsLoadedForAccount = username
+                return
+            }
+        }
+
+        isLoadingSubscriptions = true
+        subscriptionError = nil
+        subscriptionLoadTask.reset()
+        defer { isLoadingSubscriptions = false }
+
+        do {
+            subscriptions = try await retryOnTimeout(task: subscriptionLoadTask, using: bridge) {
+                try await self.bridge.fetchSubscriptions(username: username)
+            }
+            subscriptionsLoadedForAccount = username
+            try bridge.persistSubscriptions(subscriptions)
+        } catch {
+            if !subscriptionLoadTask.isCancelled && !error.isCancellation {
+                subscriptionError = Self.readableError(error)
+            }
+        }
+    }
+
+    func checkSubscriptions() async {
+        guard ao3Username != nil else { return }
+        guard !isCheckingSubscriptions else { return }
+
+        if bridge.networkBlocked {
+            guard await ensureTorConnected() else { return }
+        }
+
+        isCheckingSubscriptions = true
+        subscriptionCheckTask.reset()
+        subscriptionCheckFailed = 0
+        let newWorksBefore = Set(newWorkIDs)
+
+        do {
+            // Device-local follows join the check queue alongside real AO3
+            // subscriptions — read from the shared Rust store, so follows
+            // added on any platform are checked here.
+            let follows = bridge.getFollowed(kind: "author")
+            let total = try bridge.startSubscriptionCheck(extraAuthors: follows)
+            subscriptionCheckTotal = Int(total)
+            subscriptionCheckRemaining = Int(total)
+
+            var consecutiveRetries = 0
+            while !subscriptionCheckTask.isCancelled {
+                // Yield to the user: while they're actively fetching something,
+                // pause between items so the background check never competes
+                // for the circuit or the rate limiter.
+                var pausedForUser = false
+                while activeUserFetches > 0 && !subscriptionCheckTask.isCancelled {
+                    if !pausedForUser {
+                        pausedForUser = true
+                        subscriptionCheckTask.statusMessage = "Paused while you browse…"
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+                if subscriptionCheckTask.isCancelled { break }
+                if pausedForUser {
+                    subscriptionCheckTask.statusMessage = nil
+                }
+
+                guard let result = try await bridge.checkNextSubscription() else { break }
+                subscriptionCheckRemaining = Int(result.remaining)
+
+                if let error = result.error {
+                    let isRetryable = error.lowercased().contains("timeout")
+                        || error.contains("HTTP 403") || error.contains("HTTP 429")
+                    if isRetryable && consecutiveRetries < 3 {
+                        consecutiveRetries += 1
+                        let reason = if error.lowercased().contains("timeout") {
+                            "Timed out"
+                        } else if error.contains("HTTP 429") {
+                            "Rate limited"
+                        } else {
+                            "Blocked"
+                        }
+                        subscriptionCheckTask.isReconnecting = true
+                        subscriptionCheckTask.statusMessage = "\(reason). Getting new circuit… (\(consecutiveRetries)/3)"
+                        await rotateCircuit()
+                        if subscriptionCheckTask.isCancelled { break }
+                        subscriptionCheckTask.isReconnecting = false
+                        subscriptionCheckTask.statusMessage = nil
+                        continue
+                    }
+                    subscriptionCheckFailed += 1
+                    consecutiveRetries = 0
+                } else {
+                    consecutiveRetries = 0
+                    if result.changed {
+                        loadNewWorks()
+                        reloadCachedWorks()
+                        // work(byID:) consults fetchedWorks before the
+                        // cachedWorks snapshot — a copy viewed earlier this
+                        // session would shadow the freshly saved row, so
+                        // replace any flagged entries from the DB.
+                        for id in newWorkIDs where fetchedWorks[id] != nil {
+                            if let workId = UInt64(id),
+                               let fresh = bridge.getCachedWork(workId) {
+                                fetchedWorks[id] = Self.workFromSummary(fresh)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !subscriptionCheckTask.isCancelled {
+                loadNotifications()
+                let added = newWorkIDs.filter { !newWorksBefore.contains($0) }.count
+                if added > 0 {
+                    onNewWorksFound?(added)
+                }
+            }
+        } catch {
+            if !subscriptionCheckTask.isCancelled {
+                subscriptionCheckTask.statusMessage = "Check failed: \(Self.readableError(error))"
+            }
+        }
+        if subscriptionCheckFailed > 0 {
+            subscriptionCheckTask.statusMessage = "\(subscriptionCheckFailed) subscription\(subscriptionCheckFailed == 1 ? "" : "s") failed to fetch"
+        }
+        isCheckingSubscriptions = false
+        subscriptionCheckTotal = 0
+        subscriptionCheckRemaining = 0
+    }
+
+    func loadNewWorks() {
+        newWorkIDs = bridge.getNewWorkIds().map { String($0) }
+        goneWorkIDs = Set(bridge.getGoneWorkIds().map { String($0) })
+        detailViewedWorkIDs = Set(bridge.getDetailViewedWorkIds().map { String($0) })
+    }
+
+    func removeNewWork(_ id: String) {
+        if let workId = UInt64(id) {
+            bridge.removeNewWork(workId)
+        }
+        newWorkIDs.removeAll { $0 == id }
+    }
+
+    func clearNewWorks() {
+        bridge.clearNewWorks()
+        newWorkIDs = []
+    }
+
+    func reloadCachedWorks() {
+        cachedWorks = bridge.getAllCachedWorks().map(Self.workFromSummary)
+    }
+
+    func loadNotifications() {
+        notifications = bridge.getNotifications()
+        unreadNotificationCount = Int(bridge.getUnreadNotificationCount())
+    }
+
+    func markNotificationRead(_ id: Int64) {
+        bridge.markNotificationRead(id)
+        loadNotifications()
+    }
+
+    func markAllNotificationsRead() {
+        bridge.markAllNotificationsRead()
+        loadNotifications()
+    }
+}

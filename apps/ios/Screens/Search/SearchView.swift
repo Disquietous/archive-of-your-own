@@ -354,11 +354,12 @@ struct SearchView: View {
                 performSearch()
             })
         } else if hasSearched {
-            HStack {
+            HStack(spacing: 12) {
                 Text("\(displayedWorks.count) results")
                     .font(Typography.uiBody())
                     .foregroundStyle(theme.ink2)
                 Spacer()
+                resultsSortMenu
                 Button {
                     showSaveDialog = true
                 } label: {
@@ -411,6 +412,64 @@ struct SearchView: View {
         }
     }
 
+    // MARK: - Server-side sort
+
+    /// The scraped AO3 sort fields, when the form has them.
+    private var sortColumnField: UFormField? {
+        formFields.first { $0.name.hasSuffix("[sort_column]") }
+    }
+
+    private var sortDirectionField: UFormField? {
+        formFields.first { $0.name.hasSuffix("[sort_direction]") }
+    }
+
+    /// AO3 pre-selects a default when the field is unset locally.
+    private func currentSortValue(of field: UFormField) -> String {
+        fieldValues[field.name] ?? field.options.first { $0.selected }?.value ?? ""
+    }
+
+    /// Server-side sort for the results: picking a column or direction
+    /// rewrites the criteria and re-runs the query from page 1.
+    @ViewBuilder
+    private var resultsSortMenu: some View {
+        if let sortField = sortColumnField {
+            Menu {
+                Picker("Sort by", selection: sortSelectionBinding(for: sortField)) {
+                    ForEach(sortField.options.filter { !$0.label.isEmpty }, id: \.value) { option in
+                        Text(option.label).tag(option.value)
+                    }
+                }
+                .pickerStyle(.inline)
+                if let directionField = sortDirectionField {
+                    Picker("Direction", selection: sortSelectionBinding(for: directionField)) {
+                        ForEach(directionField.options.filter { !$0.label.isEmpty }, id: \.value) { option in
+                            Text(option.label).tag(option.value)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(sortField.options.first { $0.value == currentSortValue(of: sortField) }?.label ?? "Sort")
+                        .font(Typography.uiSmall())
+                }
+                .foregroundStyle(theme.accent)
+            }
+        }
+    }
+
+    private func sortSelectionBinding(for field: UFormField) -> Binding<String> {
+        Binding(
+            get: { currentSortValue(of: field) },
+            set: { newValue in
+                fieldValues[field.name] = newValue
+                performSearch()
+            }
+        )
+    }
+
     // MARK: - Data
 
     private func binding(for name: String) -> Binding<String> {
@@ -438,7 +497,7 @@ struct SearchView: View {
             formFields = fields
             Self.cacheForm(fields)
         } catch {
-            if !state.searchTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !state.searchTask.isCancelled && !error.isCancellation {
                 formError = error.localizedDescription
             }
         }

@@ -365,7 +365,7 @@ struct AuthorWorksView: View {
             hasMore = result.hasNextPage
             saveToCache(results)
         } catch {
-            if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !authorTask.isCancelled && !error.isCancellation {
                 self.error = error.localizedDescription
             }
         }
@@ -388,7 +388,7 @@ struct AuthorWorksView: View {
             hasMore = result.hasNextPage
             saveToCache(results)
         } catch {
-            if !authorTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !authorTask.isCancelled && !error.isCancellation {
                 self.error = error.localizedDescription
             }
         }
@@ -396,13 +396,13 @@ struct AuthorWorksView: View {
     }
 
     private func saveToCache(_ works: [Work]) {
-        if let json = AppState.encodeWorks(works) {
-            state.bridge.setSessionCache(key: cacheKey, data: json, sessionId: state.sessionId)
-        }
+        state.bridge.setCachedWorkList(key: cacheKey, sessionId: state.sessionId,
+                                       ids: works.compactMap { UInt64($0.id) })
     }
 
     private func loadFromCache() -> [Work]? {
-        guard let json = state.bridge.getSessionCache(key: cacheKey, sessionId: state.sessionId) else { return nil }
-        return AppState.decodeWorks(json)
+        guard let cached = state.bridge.getCachedWorkList(key: cacheKey, sessionId: state.sessionId)
+        else { return nil }
+        return cached.map(AppState.workFromSummary)
     }
 }

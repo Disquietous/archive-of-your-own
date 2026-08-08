@@ -167,6 +167,25 @@ struct BrowseView: View {
             Spacer()
 
             Button {
+                nav.openCollections()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Collections")
+                        .font(Typography.uiSmall())
+                }
+                .foregroundStyle(theme.ink3)
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.chip)
+                        .fill(theme.surface2)
+                )
+            }
+            .buttonStyle(ChipPressStyle())
+
+            Button {
                 withAnimation(.easeInOut(duration: 0.2)) { showFilters.toggle() }
             } label: {
                 HStack(spacing: 5) {

@@ -1,0 +1,293 @@
+use super::*;
+
+#[uniffi::export]
+impl AO3App {
+    pub async fn fetch_search_form(&self) -> Result<Vec<UFormField>, AO3Error> {
+        self.run_on_runtime(|client, _storage| async move {
+            let c = client.read().await;
+            let form = c.fetch_search_form().await.map_err(AO3Error::from)?;
+            Ok(form.fields.into_iter().map(UFormField::from).collect())
+        }).await
+    }
+
+    /// One page of an author's works. `username` may be a raw byline
+    /// ("Pseud (Username)") — it's split here so URLs always carry the
+    /// real account name; an explicit `pseud` wins over the byline's.
+    pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("author_works", move |client| async move {
+            let c = client.read().await;
+            let (user, byline_pseud) = split_author_byline(&username);
+            let pseud = pseud.filter(|p| !p.is_empty()).or(byline_pseud);
+            let (works, has_next, total) = c.fetch_author_works(&user, pseud.as_deref(), page).await.map_err(AO3Error::from)?;
+            Ok((works, has_next, total, None))
+        }).await
+    }
+
+    pub async fn fetch_series_works_paged(&self, series_id: u64, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("series_works", move |client| async move {
+            let c = client.read().await;
+            let (works, has_next, total) = c.fetch_series_works_page(series_id, page).await.map_err(AO3Error::from)?;
+            Ok((works, has_next, total, None))
+        }).await
+    }
+
+    pub async fn browse_works(&self, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
+        self.run_listing_fetch("browse", move |client| async move {
+            let c = client.read().await;
+            let works = c.browse_works(page).await.map_err(AO3Error::from)?;
+            Ok((works, false, 1, None))
+        }).await.map(|p| p.works)
+    }
+
+    pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
+        let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
+        self.run_listing_fetch("search", move |client| async move {
+            let c = client.read().await;
+            c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)
+        }).await
+    }
+
+    pub async fn search_works(&self, params: USearchParams, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let search_params: SearchParams = params.into();
+        self.run_listing_fetch("search", move |client| async move {
+            let c = client.read().await;
+            let works = c.search_works(&search_params, page).await.map_err(AO3Error::from)?;
+            Ok((works, false, 1, None))
+        }).await.map(|p| p.works)
+    }
+
+    pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("tag_browse", move |client| async move {
+            let c = client.read().await;
+            c.search_by_tag(&tag, page).await.map_err(AO3Error::from)
+        }).await
+    }
+
+    /// One page of the public collections index. Collections aren't cached
+    /// in the DB — the parsed page goes straight back to the caller.
+    pub async fn browse_collections(&self, page: u32) -> Result<UCollectionsPage, AO3Error> {
+        let progress = self.register_progress("collections");
+        let result = self.run_on_runtime(move |client, _storage| async move {
+            let c = client.read().await;
+            c.set_active_progress(progress);
+            let fetched = c.fetch_collections(page).await;
+            c.clear_active_progress();
+            let (collections, has_next, total) = fetched.map_err(AO3Error::from)?;
+            Ok(UCollectionsPage {
+                collections: collections.into_iter().map(UCollection::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+            })
+        }).await;
+        self.clear_progress("collections");
+        result
+    }
+
+    /// One page of a collection's works, cached like every other listing.
+    /// `name` is the collection's URL slug from UCollection.name.
+    pub async fn fetch_collection_works(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("collection_works", move |client| async move {
+            let c = client.read().await;
+            c.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
+        }).await
+    }
+
+    pub async fn fetch_work_full(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
+        let progress = self.register_progress("work");
+        let result = self.run_on_runtime(move |client, storage| async move {
+            let c = client.read().await;
+            c.set_active_progress(progress);
+            let (summary, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
+            c.clear_active_progress();
+            let s = storage.lock().await;
+            // Work + series + chapters land atomically.
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            log_db("save_work", s.save_work(&summary));
+            log_db("set_work_series", s.set_work_series(summary.id, &summary.series));
+            record_kudos_if_listed(&s, work_id, &kudos_names);
+            for ch in &chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
+            log_db("commit work save", tx.commit());
+            Ok(UWorkSummary::from(summary))
+        }).await;
+        self.clear_progress("work");
+        result
+    }
+
+    pub async fn fetch_work(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
+        self.fetch_work_full(work_id).await
+    }
+
+    pub async fn fetch_chapters(&self, work_id: u64) -> Result<Vec<UChapter>, AO3Error> {
+        let progress = self.register_progress("chapters");
+        let result = self.run_on_runtime(move |client, storage| async move {
+            let c = client.read().await;
+            c.set_active_progress(progress);
+            let (_, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
+            c.clear_active_progress();
+            let s = storage.lock().await;
+            record_kudos_if_listed(&s, work_id, &kudos_names);
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            for ch in &chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
+            log_db("commit chapters", tx.commit());
+            // Content pages carry the posting credentials (CSRF token, pseud) —
+            // persist what the fetch harvested so later kudos/comment POSTs
+            // need no preparatory request.
+            persist_posting_credentials(&c, &s);
+            Ok(chapters.into_iter().map(UChapter::from).collect())
+        }).await;
+        self.clear_progress("chapters");
+        result
+    }
+
+    pub async fn fetch_image(&self, url: String) -> Result<Vec<u8>, AO3Error> {
+        self.run_on_runtime(move |client, _storage| async move {
+            let c = client.read().await;
+            c.fetch_image(&url).await.map_err(AO3Error::from)
+        }).await
+    }
+
+    // -- Chapter images (tap-to-load; bytes cached in image_cache) --
+
+    /// Cache-only lookup — the renderer's synchronous "is it already here".
+    /// A cached body that isn't a real image (poison from before the sniff
+    /// guard existed) is purged and reported as absent.
+    pub fn get_cached_chapter_image(&self, url: String) -> Result<Option<Vec<u8>>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let key = chapter_image_key(&url);
+        match s.get_cached_image(&key).map_err(AO3Error::from)? {
+            Some(data) if crate::client::sniff_image_kind(&data) == "not-an-image" => {
+                log_info!("image", "Purging non-image cache entry ({} bytes) for {url}", data.len());
+                log_db("delete_cached_image", s.delete_cached_image(&key));
+                Ok(None)
+            }
+            other => Ok(other),
+        }
+    }
+
+    /// Fetch one embedded image (cache-first, over the private connection).
+    /// `max_bytes` 0 = unlimited; an over-cap image errors and is not cached.
+    pub async fn fetch_chapter_image(&self, url: String, max_bytes: u64) -> Result<Vec<u8>, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            log_info!("image", "Chapter image requested (cap {} bytes): {url}", max_bytes);
+            {
+                let s = storage.lock().await;
+                if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&url)) {
+                    let kind = crate::client::sniff_image_kind(&data);
+                    if kind == "not-an-image" {
+                        // Poisoned entry from before the sniff guard — purge
+                        // and fall through to a fresh fetch.
+                        log_info!("image", "Purging non-image cache entry ({} bytes), refetching {url}", data.len());
+                        log_db("delete_cached_image", s.delete_cached_image(&chapter_image_key(&url)));
+                    } else {
+                        log_info!("image", "Cache hit ({} bytes, {kind}): {url}", data.len());
+                        return Ok(data);
+                    }
+                }
+            }
+            let c = client.read().await;
+            let bytes = c.fetch_image(&url).await.map_err(AO3Error::from)?;
+            drop(c);
+            if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+                log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
+                return Err(AO3Error::Network {
+                    message: format!("Image is {:.1} MB — over the size limit",
+                                     bytes.len() as f64 / 1_048_576.0),
+                });
+            }
+            // Never cache non-image bodies, and tell the user what actually
+            // happened instead of a downstream decode failure.
+            if crate::client::sniff_image_kind(&bytes) == "not-an-image" {
+                return Err(AO3Error::Network {
+                    message: "The host sent a web page instead of the image — it may be blocking private connections".to_string(),
+                });
+            }
+            let s = storage.lock().await;
+            log_db("save_cached_image", s.save_cached_image(&chapter_image_key(&url), &bytes));
+            log_info!("image", "Cached {} bytes ({}) for {url}",
+                      bytes.len(), crate::client::sniff_image_kind(&bytes));
+            Ok(bytes)
+        }).await
+    }
+
+    /// Prefetch every embedded image of a downloaded work into the cache so
+    /// offline reading is complete. Over-cap and failed images are skipped
+    /// (logged), not fatal. Returns how many images were newly fetched.
+    pub async fn download_work_images(&self, work_id: u64, max_bytes: u64) -> Result<u32, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let srcs: Vec<String> = {
+                let s = storage.lock().await;
+                let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+                let mut srcs = Vec::new();
+                for chapter in &chapters {
+                    collect_image_srcs(&chapter.content, &mut srcs);
+                }
+                srcs
+            };
+            log_info!("image", "Offline prefetch for work {work_id}: {} image(s), cap {max_bytes} bytes",
+                      srcs.len());
+            let mut fetched = 0u32;
+            for src in srcs {
+                {
+                    let s = storage.lock().await;
+                    if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&src)) {
+                        if crate::client::sniff_image_kind(&data) != "not-an-image" {
+                            continue;
+                        }
+                        // Poisoned entry — purge and refetch below.
+                        log_db("delete_cached_image", s.delete_cached_image(&chapter_image_key(&src)));
+                    }
+                }
+                let c = client.read().await;
+                let result = c.fetch_image(&src).await;
+                drop(c);
+                match result {
+                    Ok(bytes) => {
+                        if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+                            log_info!("image", "Offline prefetch skipping {src}: {} bytes over cap", bytes.len());
+                            continue;
+                        }
+                        let s = storage.lock().await;
+                        log_db("save_cached_image", s.save_cached_image(&chapter_image_key(&src), &bytes));
+                        fetched += 1;
+                    }
+                    Err(e) => {
+                        log_info!("image", "Offline prefetch failed for {src}: {e}");
+                    }
+                }
+            }
+            Ok(fetched)
+        }).await
+    }
+
+    /// Local tag autocomplete — instant, DB-only, works offline. Suggests
+    /// from tags harvested off every work the user has seen.
+    pub fn search_local_tags(&self, tag_type: String, term: String, limit: u32) -> Result<Vec<String>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.search_known_tags(&tag_type, &term, limit).map_err(AO3Error::from)
+    }
+
+    /// Explicit AO3 autocomplete lookup (user-triggered only). Successful
+    /// results are cached as canonical, permanently improving local
+    /// suggestions.
+    pub async fn autocomplete_tags_remote(&self, tag_type: String, term: String) -> Result<Vec<String>, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let c = client.read().await;
+            let names = c.autocomplete(&tag_type, &term).await.map_err(AO3Error::from)?;
+            let s = storage.lock().await;
+            log_db("mark_tags_canonical", s.mark_tags_canonical(&tag_type, &names));
+            Ok(names)
+        }).await
+    }
+
+    /// Export a downloaded work as an EPUB3 file. Requires cached chapters.
+    pub fn export_epub(&self, work_id: u64, dest_path: String) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        let work = s.get_work(work_id).map_err(AO3Error::from)?
+            .ok_or(AO3Error::Network { message: "This work isn’t in the local library.".to_string() })?;
+        let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+        if chapters.is_empty() {
+            return Err(AO3Error::Network { message: "No downloaded chapters — download the work first.".to_string() });
+        }
+        crate::epub::export_epub(&work, &chapters, &dest_path).map_err(AO3Error::from)
+    }
+}

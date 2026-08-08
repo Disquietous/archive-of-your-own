@@ -126,6 +126,10 @@ struct ContentView: View {
             ReaderView(workID: workID, chapterIndex: chapterIndex, entireWork: entireWork)
         case .tagBrowse(let tag):
             TagBrowseView(tag: tag)
+        case .collectionsBrowse:
+            CollectionsBrowseView()
+        case .collectionWorks(let name, let title):
+            CollectionWorksView(name: name, title: title)
         case .readingList(let listID, let name):
             ReadingListView(listID: listID, listName: name)
         case .authorWorks(let username):

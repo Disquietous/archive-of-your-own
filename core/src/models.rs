@@ -126,6 +126,11 @@ pub struct WorkSummary {
     /// this empty). Default keeps previously serialized summaries readable.
     #[serde(default)]
     pub series: Vec<SeriesMembership>,
+    /// When this summary last arrived from AO3 (UTC "YYYY-MM-DD HH:MM:SS");
+    /// set by storage on save, "" for freshly parsed summaries. Display
+    /// metadata only — never a refresh trigger.
+    #[serde(default)]
+    pub fetched_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +175,27 @@ pub struct BookmarkListing {
     pub ao3_bookmark_id: u64,
     pub note: String,
     pub work_summary: Option<WorkSummary>,
+}
+
+/// One collection blurb from the /collections index (li.collection.blurb).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionSummary {
+    /// URL slug — the path segment in /collections/{name}.
+    pub name: String,
+    /// Display title from the blurb heading link.
+    pub title: String,
+    /// Plain-text summary (blockquote.userstuff.summary), "" when absent.
+    pub summary: String,
+    pub is_open: bool,
+    pub is_moderated: bool,
+    pub is_anonymous: bool,
+    pub work_count: u32,
+    pub bookmarked_count: u32,
+    /// Maintainer usernames from the heading's "by …" owner links.
+    pub maintainers: Vec<String>,
+    /// Challenge type from the p.type line, e.g. "Gift Exchange Challenge"
+    /// or "Prompt Meme Challenge"; "" for a plain (non-challenge) collection.
+    pub collection_type: String,
 }
 
 /// A subscription entry from AO3's subscriptions page.

@@ -33,10 +33,33 @@ struct WorkListFilterView: View {
                                placeholder: "Type to add a tag…",
                                selected: filter.tags,
                                allOptions: model.availableTags(for: section))
+            FilterRetentionToggle(theme: theme, model: model)
         }
         .padding(14)
         .frame(width: 320)
         .background(theme.surface)
+    }
+}
+
+/// The app-wide filter-retention switch, offered in every filter popover so
+/// the choice is at hand wherever a filter is set. Off, a filter is scoped
+/// to the list it was set on and clears when that list closes or changes to
+/// a different target; on, it carries across lists until cleared by hand.
+struct FilterRetentionToggle: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+
+    var body: some View {
+        Toggle("Keep filter across lists", isOn: Binding(
+            get: { model.retainListFilters },
+            set: { model.setRetainListFilters($0) }))
+            .toggleStyle(.checkbox)
+            .font(Font(MacFont.ui(11.5, weight: .medium)))
+            .foregroundStyle(theme.ink3)
+            .help(model.retainListFilters
+                  ? "Filters stay put as you move between authors, fandoms, and searches."
+                  : "A filter clears itself when the list it was set on closes or changes.")
+            .padding(.top, 2)
     }
 }
 
@@ -145,6 +168,7 @@ private struct TokenFilterSection: View {
 /// Fandoms/Following: name).
 struct SingleFieldFilterView: View {
     @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
     let title: String
     let placeholder: String
     @Binding var text: String
@@ -155,6 +179,7 @@ struct SingleFieldFilterView: View {
             header(theme: theme, title: title,
                    clearEnabled: !text.isEmpty) { text = "" }
             FilterTextField(theme: theme, placeholder: placeholder, text: $text)
+            FilterRetentionToggle(theme: theme, model: model)
         }
         .padding(14)
         .frame(width: 280)
@@ -178,6 +203,7 @@ struct AuthorsSourceFilterView: View {
             }
             Toggle("Include Followed", isOn: $model.authorsIncludeFollowed)
             Toggle("Include Subscribed", isOn: $model.authorsIncludeSubscribed)
+            FilterRetentionToggle(theme: theme, model: model)
         }
         .toggleStyle(.checkbox)
         .font(Font(MacFont.ui(12.5, weight: .medium)))
@@ -208,6 +234,7 @@ struct InboxFilterView: View {
             FilterTextField(theme: theme, placeholder: "From user", text: $model.inboxFilterAuthor)
             FilterTextField(theme: theme, placeholder: "Work title", text: $model.inboxFilterWork)
             FilterTextField(theme: theme, placeholder: "Message text", text: $model.inboxFilterText)
+            FilterRetentionToggle(theme: theme, model: model)
         }
         .padding(14)
         .frame(width: 280)

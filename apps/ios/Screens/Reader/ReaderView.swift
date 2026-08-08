@@ -74,11 +74,6 @@ struct ReaderView: View {
         return chapterIndex >= work.chapterCount - 1
     }
 
-    private var isLastWrittenChapter: Bool {
-        guard let work else { return true }
-        return chapterIndex >= work.chapterCount - 1
-    }
-
     var body: some View {
         if let work {
             ZStack(alignment: .top) {
@@ -510,7 +505,7 @@ struct ReaderView: View {
                 state.fetchedWorks[workID] = AppState.workFromSummary(w)
             }
         } catch {
-            if !chapterTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !chapterTask.isCancelled && !error.isCancellation {
                 loadError = error.localizedDescription
             }
         }
@@ -592,7 +587,7 @@ struct ReaderView: View {
                 }
             }
 
-            if isLastWrittenChapter {
+            if isLastChapter {
                 if work?.complete == true {
                     VStack(spacing: 6) {
                         Text("The end")

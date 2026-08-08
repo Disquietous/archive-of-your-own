@@ -100,8 +100,8 @@ struct TagBrowseView: View {
     private var cacheKey: String { "tag_\(tag)" }
 
     private func loadInitial() async {
-        if let cached = state.bridge.getSessionCache(key: cacheKey, sessionId: state.sessionId),
-           let works = AppState.decodeWorks(cached) {
+        if let cached = state.bridge.getCachedWorkList(key: cacheKey, sessionId: state.sessionId) {
+            let works = cached.map(AppState.workFromSummary)
             results = works
             currentPage = UInt32(max(1, works.count / 20))
             for w in works { state.fetchedWorks[w.id] = w }
@@ -127,11 +127,10 @@ struct TagBrowseView: View {
                 for w in unique { state.fetchedWorks[w.id] = w }
             }
             currentPage = page
-            if let json = AppState.encodeWorks(results) {
-                state.bridge.setSessionCache(key: cacheKey, data: json, sessionId: state.sessionId)
-            }
+            state.bridge.setCachedWorkList(key: cacheKey, sessionId: state.sessionId,
+                                           ids: results.compactMap { UInt64($0.id) })
         } catch {
-            if !tagTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !tagTask.isCancelled && !error.isCancellation {
                 self.error = error.localizedDescription
             }
         }

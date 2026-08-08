@@ -8,7 +8,7 @@ import Observation
 final class MacAppModel {
     enum Section: String, CaseIterable {
         case browse, reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
-             bookmarks, downloads, stats, search, authorWorks, readingLists
+             bookmarks, downloads, stats, search, authorWorks, readingLists, collections
     }
 
     let appState: AppState
@@ -29,6 +29,9 @@ final class MacAppModel {
     init(appState: AppState) {
         self.appState = appState
         self.search = MacSearchModel()
+        // A new query throws away the previous results, so the filter that
+        // targeted them goes too — the same rule every other list follows.
+        search.onNewQuery = { [weak self] in self?.listEmptied(.search) }
     }
 
     var selectedWork: Work? {
@@ -54,6 +57,7 @@ final class MacAppModel {
         }
         if isLoadingSubscriptionWorks { ops.append("Fetching \(subscriptionWorksTitle ?? "author")’s works") }
         if isLoadingAuthor { ops.append("Fetching \(authorUsername ?? "author")’s works") }
+        if isLoadingCollections { ops.append("Loading collections") }
         if search.isLoadingForm { ops.append("Loading search criteria") }
         if let sync = appState.bookmarkSyncTask.statusMessage { ops.append(sync) }
         return ops
@@ -92,11 +96,12 @@ final class MacAppModel {
         }
     }
 
-    /// Per-section sort choice (persisted; sections not present sort naturally).
-    private var workSorts: [String: String] =
-        UserDefaults.standard.dictionary(forKey: "workSorts") as? [String: String] ?? [:] {
-        didSet { UserDefaults.standard.set(workSorts, forKey: "workSorts") }
-    }
+    /// Per-section sort/filter choices — durable in the encrypted DB (pref
+    /// keys "workSort.<section>" etc.), cached here for synchronous reads.
+    /// Loaded by loadPersistedPrefs() once the DB is unlocked.
+    private var workSorts: [String: String] = [:]
+    private var completionFilters: [String: String] = [:]
+    private var ratingFilters: [String: String] = [:]
 
     func workSort(for section: Section) -> WorkSort {
         WorkSort(rawValue: workSorts[String(describing: section)] ?? "") ?? .natural
@@ -104,58 +109,91 @@ final class MacAppModel {
 
     func setWorkSort(_ sort: WorkSort, for section: Section) {
         workSorts[String(describing: section)] = sort.rawValue
+        appState.bridge.setPref(key: "workSort.\(section)", value: sort.rawValue)
     }
-
-    /// Per-section completion/rating filters (persisted), matching the sort
-    /// scoping — a rating filter chosen for Bookmarks no longer silently
-    /// constrains History. The old global keys seed every section once so
-    /// existing choices carry over.
-    private var completionFilters: [String: String] =
-        UserDefaults.standard.dictionary(forKey: "completionFilters") as? [String: String] ?? [:] {
-        didSet { UserDefaults.standard.set(completionFilters, forKey: "completionFilters") }
-    }
-
-    private var ratingFilters: [String: String] =
-        UserDefaults.standard.dictionary(forKey: "ratingFilters") as? [String: String] ?? [:] {
-        didSet { UserDefaults.standard.set(ratingFilters, forKey: "ratingFilters") }
-    }
-
-    /// Legacy global values, used as the default where no per-section choice
-    /// has been made yet.
-    private let legacyCompletionFilter =
-        CompletionFilter(rawValue: UserDefaults.standard.string(forKey: "completionFilter") ?? "") ?? .all
-    private let legacyRatingFilter =
-        UserDefaults.standard.string(forKey: "ratingFilter").flatMap(Rating.init(rawValue:))
 
     func completionFilter(for section: Section) -> CompletionFilter {
-        guard let raw = completionFilters[String(describing: section)] else { return legacyCompletionFilter }
-        return CompletionFilter(rawValue: raw) ?? .all
+        CompletionFilter(rawValue: completionFilters[String(describing: section)] ?? "") ?? .all
     }
 
     func setCompletionFilter(_ filter: CompletionFilter, for section: Section) {
         completionFilters[String(describing: section)] = filter.rawValue
+        appState.bridge.setPref(key: "completionFilter.\(section)", value: filter.rawValue)
     }
 
     func ratingFilter(for section: Section) -> Rating? {
-        guard let raw = ratingFilters[String(describing: section)] else { return legacyRatingFilter }
-        return Rating(rawValue: raw)
+        ratingFilters[String(describing: section)].flatMap(Rating.init(rawValue:))
     }
 
     func setRatingFilter(_ rating: Rating?, for section: Section) {
-        // "" = an explicit All choice — distinct from "never chosen", which
-        // falls back to the legacy global value.
+        // "" = All (Rating(rawValue: "") is nil, same as no entry).
         ratingFilters[String(describing: section)] = rating?.rawValue ?? ""
+        appState.bridge.setPref(key: "ratingFilter.\(section)", value: rating?.rawValue ?? "")
     }
 
-    /// Sort a filtered list by the section's persisted choice. Dates are
-    /// ISO-normalized (yyyy-mm-dd) so string comparison orders correctly.
-    func sorted(_ works: [Work], for section: Section) -> [Work] {
-        switch workSort(for: section) {
-        case .natural: works
-        case .updated: works.sorted { $0.updated > $1.updated }
-        case .kudos: works.sorted { $0.kudos > $1.kudos }
-        case .words: works.sorted { $0.words > $1.words }
-        case .title: works.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    /// Whether a list filter outlives the list it was set on. Off (the
+    /// default) makes a filter belong to its list: close an author's works,
+    /// pick a different fandom, run a new search, and the filter clears so
+    /// the next list opens whole. On makes filters standing preferences that
+    /// carry from list to list until cleared by hand. One app-wide choice,
+    /// durable in the encrypted DB.
+    private(set) var retainListFilters = false
+
+    func setRetainListFilters(_ retain: Bool) {
+        retainListFilters = retain
+        appState.bridge.setPref(key: "retainListFilters", value: retain ? "1" : "0")
+    }
+
+    private var prefsLoaded = false
+
+    /// Load prefs + follows from the Rust core (migrating any pre-DB
+    /// UserDefaults values into it, once). Called after the encrypted DB
+    /// unlocks, alongside AppState.loadPersistedState().
+    func loadPersistedPrefs() {
+        guard !prefsLoaded, appState.bridge.isDatabaseOpen else { return }
+        prefsLoaded = true
+        migrateUserDefaultsPrefs()
+        let bridge = appState.bridge
+        for s in Section.allCases {
+            let name = String(describing: s)
+            if let v = bridge.getPref(key: "workSort.\(name)") { workSorts[name] = v }
+            if let v = bridge.getPref(key: "completionFilter.\(name)") { completionFilters[name] = v }
+            if let v = bridge.getPref(key: "ratingFilter.\(name)") { ratingFilters[name] = v }
+        }
+        retainListFilters = bridge.getPref(key: "retainListFilters") == "1"
+        followedFandoms = bridge.getFollowed(kind: "fandom")
+        followedAuthorNames = bridge.getFollowed(kind: "author")
+    }
+
+    /// One-time move of prefs and follows out of UserDefaults into the
+    /// encrypted DB. The legacy global completion/rating filters seed every
+    /// section that never made a per-section choice; every old key vanishes.
+    private func migrateUserDefaultsPrefs() {
+        let defaults = UserDefaults.standard
+        let bridge = appState.bridge
+        let dictKeys = [("workSorts", "workSort"),
+                        ("completionFilters", "completionFilter"),
+                        ("ratingFilters", "ratingFilter")]
+        for (defaultsKey, prefPrefix) in dictKeys {
+            if let dict = defaults.dictionary(forKey: defaultsKey) as? [String: String] {
+                for (section, v) in dict { bridge.setPref(key: "\(prefPrefix).\(section)", value: v) }
+                defaults.removeObject(forKey: defaultsKey)
+            }
+        }
+        for (legacyKey, prefPrefix) in [("completionFilter", "completionFilter"),
+                                        ("ratingFilter", "ratingFilter")] {
+            if let legacy = defaults.string(forKey: legacyKey) {
+                for s in Section.allCases where bridge.getPref(key: "\(prefPrefix).\(s)") == nil {
+                    bridge.setPref(key: "\(prefPrefix).\(s)", value: legacy)
+                }
+                defaults.removeObject(forKey: legacyKey)
+            }
+        }
+        for (defaultsKey, kind) in [("followedFandoms", "fandom"), ("followedAuthors", "author")] {
+            if let names = defaults.stringArray(forKey: defaultsKey) {
+                for name in names { bridge.addFollowed(kind: kind, name: name) }
+                defaults.removeObject(forKey: defaultsKey)
+            }
         }
     }
 
@@ -225,6 +263,10 @@ final class MacAppModel {
         case .inbox:
             appState.loadCachedInbox()
             Task { await appState.checkInbox() }
+        case .collections:
+            if collections.isEmpty {
+                loadMoreCollections()
+            }
         default:
             break
         }
@@ -234,6 +276,7 @@ final class MacAppModel {
     /// section's drill-in, mirroring the Subscriptions → works flow).
     func goReadingList(_ listID: Int64) {
         goSection(.readingLists)
+        if selectedReadingListID != listID { listEmptied(.readingLists) }
         selectedReadingListID = listID
         selectedWorkID = nil
         readerOpen = false
@@ -241,6 +284,7 @@ final class MacAppModel {
 
     /// Close the drill-in: back to "select a list".
     func closeReadingList() {
+        listEmptied(.readingLists)
         selectedReadingListID = nil
         selectedWorkID = nil
         readerOpen = false
@@ -335,6 +379,10 @@ final class MacAppModel {
         }
         if section == .fandoms && fandomWorksTag != nil {
             closeFandomWorks()
+            return true
+        }
+        if section == .collections && collectionWorksName != nil {
+            closeCollectionWorks()
             return true
         }
         return false
@@ -450,12 +498,10 @@ final class MacAppModel {
 
     // MARK: - Followed fandoms & authors (device-local follows)
 
-    var followedFandoms: [String] = UserDefaults.standard.stringArray(forKey: "followedFandoms") ?? [] {
-        didSet { UserDefaults.standard.set(followedFandoms, forKey: "followedFandoms") }
-    }
-    var followedAuthorNames: [String] = UserDefaults.standard.stringArray(forKey: "followedAuthors") ?? [] {
-        didSet { UserDefaults.standard.set(followedAuthorNames, forKey: "followedAuthors") }
-    }
+    /// User library data — lives in the encrypted Rust DB (followed_items),
+    /// mirrored here for synchronous reads. Loaded by loadPersistedPrefs().
+    private(set) var followedFandoms: [String] = []
+    private(set) var followedAuthorNames: [String] = []
 
     /// Fandom drill-in: a followed fandom's works shown in the reading pane
     /// without ever leaving the Fandoms section. Local-first — opening shows
@@ -465,6 +511,7 @@ final class MacAppModel {
     var fandomSearchActive = false
 
     func openFandomWorks(_ tag: String) {
+        if fandomWorksTag != tag { listEmptied(.fandoms) }
         fandomWorksTag = tag
         fandomSearchActive = false
         readerOpen = false
@@ -490,6 +537,7 @@ final class MacAppModel {
     }
 
     func closeFandomWorks() {
+        listEmptied(.fandoms)
         fandomWorksTag = nil
         fandomSearchActive = false
         selectedWorkID = nil
@@ -499,7 +547,11 @@ final class MacAppModel {
     /// on the work (crossovers count), the same tally the Fandoms list rows
     /// show.
     var fandomLibraryWorks: [Work] {
-        applyListFilter(fandomLibraryWorksRaw, for: .fandoms)
+        // List filter only — the fandom drill-in never applied the section
+        // completion/rating filters or a sort.
+        filterAndSort(fandomLibraryWorksRaw,
+                      query: query(for: .fandoms, sectionFilters: false, listFilter: true,
+                                   sort: .natural))
     }
 
     private var fandomLibraryWorksRaw: [Work] {
@@ -511,20 +563,100 @@ final class MacAppModel {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !followedFandoms.contains(trimmed) else { return }
         followedFandoms.append(trimmed)
+        appState.bridge.addFollowed(kind: "fandom", name: trimmed)
     }
 
     func unfollowFandom(_ name: String) {
         followedFandoms.removeAll { $0 == name }
+        appState.bridge.removeFollowed(kind: "fandom", name: name)
+    }
+
+    // MARK: - Collections browsing (AO3 /collections index)
+
+    /// Loaded /collections index pages, accumulated. A discovery surface —
+    /// never persisted, refetched per session.
+    var collections: [UCollection] = []
+    var collectionsPage: UInt32 = 0
+    var collectionsHasNext = false
+    var isLoadingCollections = false
+    var collectionsError: String?
+    /// Collections list: title/slug filter (session-scoped, like fandoms).
+    var collectionsListFilter = ""
+    private(set) var collectionsTask = NetworkTask()
+    /// Collection drill-in: URL slug + display title of the open collection,
+    /// whose works show in the reading pane via the search-results flow.
+    var collectionWorksName: String?
+    var collectionWorksTitle: String?
+
+    var filteredCollections: [UCollection] {
+        let needle = collectionsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return collections }
+        return collections.filter {
+            $0.title.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
+        }
+    }
+
+    /// Fetch the next /collections index page (page 1 when nothing is loaded).
+    func loadMoreCollections() {
+        guard !isLoadingCollections else { return }
+        isLoadingCollections = true
+        collectionsError = nil
+        let page = collectionsPage + 1
+        let task = NetworkTask()
+        collectionsTask = task
+        Task { @MainActor in
+            do {
+                let result = try await appState.retryOnTimeout(task: task, using: appState.bridge) {
+                    try await self.appState.bridge.browseCollections(page: page)
+                }
+                let existing = Set(collections.map(\.name))
+                collections.append(contentsOf: result.collections.filter { !existing.contains($0.name) })
+                collectionsPage = page
+                collectionsHasNext = result.hasNextPage
+            } catch {
+                if !task.isCancelled && !error.isCancellation {
+                    collectionsError = error.localizedDescription
+                }
+            }
+            isLoadingCollections = false
+        }
+    }
+
+    func cancelCollectionsLoad() {
+        collectionsTask.cancel()
+    }
+
+    /// Collection drill-in: the collection's paged works in the reading pane
+    /// without leaving the Collections section — the search-results flow
+    /// (pager and all) driven by a collection query.
+    func openCollectionWorks(slug: String, title: String) {
+        collectionWorksName = slug
+        collectionWorksTitle = title
+        selectedWorkID = nil
+        readerOpen = false
+        immersive = false
+        Task { @MainActor in
+            search.startCollectionQuery(slug, appState: appState)
+        }
+    }
+
+    func closeCollectionWorks() {
+        collectionWorksName = nil
+        collectionWorksTitle = nil
+        selectedWorkID = nil
+        readerOpen = false
     }
 
     func followAuthor(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !followedAuthorNames.contains(trimmed) else { return }
         followedAuthorNames.append(trimmed)
+        appState.bridge.addFollowed(kind: "author", name: trimmed)
     }
 
     func unfollowAuthor(_ name: String) {
         followedAuthorNames.removeAll { $0 == name }
+        appState.bridge.removeFollowed(kind: "author", name: name)
     }
 
     // MARK: - Sample data (testing/demo)
@@ -586,7 +718,7 @@ final class MacAppModel {
     var subscriptionWorksCrawledAt: String?
 
     var filteredSubscriptionWorks: [Work] {
-        sorted(applyListFilter(filtered(subscriptionWorksList, for: .subscriptions), for: .subscriptions), for: .subscriptions)
+        works(for: .subscriptions)
     }
 
     /// Show a subscription's locally stored works (author or series). Never
@@ -599,6 +731,7 @@ final class MacAppModel {
 
     func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
         authorTask.cancel()
+        if subscriptionWorksSubId != subscriptionID { listEmptied(.subscriptions) }
         showingAuthorProfile = false
         subscriptionWorksTitle = author
         subscriptionWorksError = nil
@@ -657,7 +790,7 @@ final class MacAppModel {
                     appState.reloadCachedWorks()
                 }
             } catch {
-                if !task.isCancelled && !"\(error)".contains("cancelled"),
+                if !task.isCancelled && !error.isCancellation,
                    subscriptionWorksSubId == subId {
                     subscriptionWorksError = error.localizedDescription
                 }
@@ -676,6 +809,7 @@ final class MacAppModel {
 
     func closeSubscriptionWorks() {
         authorTask.cancel()
+        listEmptied(.subscriptions)
         showingAuthorProfile = false
         subscriptionWorksTitle = nil
         subscriptionWorksList = []
@@ -693,7 +827,7 @@ final class MacAppModel {
     var authorWorksCrawledAt: String?
 
     var filteredAuthorWorks: [Work] {
-        sorted(applyListFilter(filtered(authorWorksList, for: .authors), for: .authors), for: .authors)
+        works(for: .authors)
     }
     var isLoadingAuthor = false
     var authorError: String?
@@ -707,6 +841,7 @@ final class MacAppModel {
     /// current list comes from the user pressing Refresh Works.
     func openAuthor(_ username: String) {
         authorTask.cancel()
+        if authorUsername != username { listEmptied(.authors, .authorWorks) }
         showingAuthorProfile = false
         authorUsername = username
         authorError = nil
@@ -753,7 +888,7 @@ final class MacAppModel {
                     authorWorksList = works.isEmpty ? all : works
                 }
             } catch {
-                if !task.isCancelled && !"\(error)".contains("cancelled"),
+                if !task.isCancelled && !error.isCancellation,
                    authorUsername == username {
                     authorError = error.localizedDescription
                 }
@@ -771,6 +906,7 @@ final class MacAppModel {
 
     func closeAuthorWorks() {
         authorTask.cancel()
+        listEmptied(.authors, .authorWorks)
         showingAuthorProfile = false
         authorUsername = nil
         authorWorksList = []
@@ -839,7 +975,9 @@ final class MacAppModel {
     }
 
     func works(for section: Section) -> [Work] {
-        sorted(applyListFilter(filtered(rawWorks(for: section), for: section), for: section), for: section)
+        filterAndSort(rawWorks(for: section),
+                      query: query(for: section, sectionFilters: true, listFilter: true,
+                                   sort: workSort(for: section)))
     }
 
     private func rawWorks(for section: Section) -> [Work] {
@@ -877,19 +1015,36 @@ final class MacAppModel {
         }
     }
 
-    private func filtered(_ works: [Work], for section: Section) -> [Work] {
-        let completion = completionFilter(for: section)
-        let rating = ratingFilter(for: section)
-        return works.filter { w in
-            let passesExplicit = !hideExplicit || w.rating != .explicit
-            let passesCompletion = switch completion {
-            case .all: true
-            case .complete: w.complete
-            case .inProgress: !w.complete
-            }
-            let passesRating = rating == nil || w.rating == rating
-            return passesExplicit && passesCompletion && passesRating
-        }
+    // MARK: - Filter/sort compute (delegated to the Rust core)
+
+    /// Assemble the Rust-side query for a section from its persisted
+    /// sort/filter prefs and (optionally) its session list filter.
+    private func query(for section: Section, sectionFilters: Bool, listFilter: Bool,
+                       sort: WorkSort) -> UWorkListQuery {
+        let f = listFilter ? workListFilter(for: section) : WorkListFilter()
+        return UWorkListQuery(
+            sort: sort.rawValue,
+            completion: sectionFilters ? completionFilter(for: section).rawValue
+                                       : CompletionFilter.all.rawValue,
+            rating: sectionFilters ? ratingFilter(for: section)?.rawValue : nil,
+            hideExplicit: sectionFilters && hideExplicit,
+            text: f.text,
+            kudosExpr: f.kudos,
+            wordsExpr: f.words,
+            tags: Array(f.tags),
+            fandoms: Array(f.fandoms))
+    }
+
+    /// Run a work list through the Rust core's filter/sort engine. Sample
+    /// works use slug ids and exist only in Swift memory — they can't
+    /// round-trip through the works cache, so sample-mode lists pass through
+    /// unmodified.
+    private func filterAndSort(_ works: [Work], query: UWorkListQuery) -> [Work] {
+        let ids = works.compactMap { UInt64($0.id) }
+        guard ids.count == works.count else { return works }
+        let ordered = appState.bridge.filterAndSortWorks(ids: ids, query: query)
+        let byID = Dictionary(works.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return ordered.compactMap { byID[String($0)] }
     }
 
     // MARK: - 2nd-pane list filters (session-scoped, tailored per content type)
@@ -932,60 +1087,46 @@ final class MacAppModel {
         workListFilters[s] ?? WorkListFilter()
     }
 
-    private func applyListFilter(_ works: [Work], for s: Section) -> [Work] {
-        guard let filter = workListFilters[s], filter.isActive else { return works }
-        let needle = filter.text.trimmingCharacters(in: .whitespaces).lowercased()
-        return works.filter { w in
-            let textOK = needle.isEmpty
-                || w.title.lowercased().contains(needle)
-                || w.author.lowercased().contains(needle)
-                || w.summary.lowercased().contains(needle)
-            // Tag/fandom selections are OR within their group: a work matches
-            // if it carries ANY selected tag / ANY selected fandom.
-            let tagsOK = filter.tags.isEmpty || w.tags.contains { filter.tags.contains($0) }
-            let workFandoms = w.fandoms.isEmpty ? [w.fandom] : w.fandoms
-            let fandomsOK = filter.fandoms.isEmpty || workFandoms.contains { filter.fandoms.contains($0) }
-            let kudosOK = Self.matchesCount(w.kudos, expression: filter.kudos)
-            let wordsOK = Self.matchesCount(w.words, expression: filter.words)
-            return textOK && tagsOK && fandomsOK && kudosOK && wordsOK
-        }
+    /// The app-wide filter rule. A list filter is scoped to the list it was
+    /// set on, so whenever one of these lists is torn down or swapped for a
+    /// different target — another author, another fandom, a new search — the
+    /// filter that targeted it is dropped and the incoming list shows whole.
+    /// `retainListFilters` opts out, keeping filters across lists instead.
+    /// Every list that can be emptied or re-targeted calls this; lists that
+    /// are always the same list (History, Bookmarks, Downloads, What's New)
+    /// never do, so their filters stand until the user clears them.
+    func listEmptied(_ sections: Section...) {
+        guard !retainListFilters else { return }
+        for section in sections { workListFilters[section] = nil }
     }
 
-    /// ">" / "<" prefixed comparisons; a plain number means "at least".
-    /// Unparseable input filters nothing.
-    private static func matchesCount(_ value: Int, expression: String) -> Bool {
-        let trimmed = expression.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return true }
-        if trimmed.hasPrefix(">") {
-            guard let n = Int(trimmed.dropFirst().trimmingCharacters(in: .whitespaces)) else { return true }
-            return value > n
-        }
-        if trimmed.hasPrefix("<") {
-            guard let n = Int(trimmed.dropFirst().trimmingCharacters(in: .whitespaces)) else { return true }
-            return value < n
-        }
-        guard let n = Int(trimmed) else { return true }
-        return value >= n
-    }
-
-    /// Distinct tags across a section's (pre-filter) work list,
+    /// Distinct tags across a section's (pre-list-filter) work list,
     /// alphabetically — the suggestion pool for the filter dialog.
     func availableTags(for s: Section) -> [String] {
-        var tags = Set<String>()
-        for work in filtered(rawWorks(for: s), for: s) {
-            tags.formUnion(work.tags)
-        }
-        return tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        filterOptions(for: s).tags
     }
 
-    /// Distinct fandoms across a section's (pre-filter) work list — the
+    /// Distinct fandoms across a section's (pre-list-filter) work list — the
     /// suggestion pool for the filter dialog's fandom field.
     func availableFandoms(for s: Section) -> [String] {
-        var fandoms = Set<String>()
-        for work in filtered(rawWorks(for: s), for: s) {
-            fandoms.formUnion(work.fandoms.isEmpty ? [work.fandom] : work.fandoms)
+        filterOptions(for: s).fandoms
+    }
+
+    private func filterOptions(for s: Section) -> UWorkFilterOptions {
+        let raw = rawWorks(for: s)
+        let ids = raw.compactMap { UInt64($0.id) }
+        guard ids.count == raw.count else {
+            // Sample-mode lists never reach the works cache — offer their
+            // tags/fandoms directly.
+            let tags = Set(raw.flatMap(\.tags))
+            let fandoms = Set(raw.flatMap { $0.fandoms.isEmpty ? [$0.fandom] : $0.fandoms })
+            return UWorkFilterOptions(
+                tags: tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+                fandoms: fandoms.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending })
         }
-        return fandoms.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return appState.bridge.workFilterOptions(
+            ids: ids,
+            query: query(for: s, sectionFilters: true, listFilter: false, sort: .natural))
     }
 
     var filteredSubscriptions: [USubscription] {

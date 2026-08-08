@@ -4,6 +4,12 @@ struct TorCircuitView: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
 
+    /// When true (the privacy sheet), an explanatory note appears under the
+    /// generic diagram while the hop list is still empty — the Rust core
+    /// captures the real path from the first stream that runs on the
+    /// circuit, so identities appear once traffic has flowed.
+    var showsPathNote: Bool = false
+
     @State private var selectedHopIndex: Int?
     @State private var pulsePhase: Int = 0
     @State private var pulseTimer: Timer?
@@ -48,15 +54,29 @@ struct TorCircuitView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(hops.enumerated()), id: \.element.id) { index, hop in
-                if index > 0 {
-                    connectorView(index: index)
+        VStack(spacing: 6) {
+            HStack(spacing: 0) {
+                ForEach(Array(hops.enumerated()), id: \.element.id) { index, hop in
+                    if index > 0 {
+                        connectorView(index: index)
+                    }
+                    nodeView(hop: hop, index: index)
                 }
-                nodeView(hop: hop, index: index)
+            }
+            if showsPathNote && state.bridge.torStatus.isConnected && state.bridge.circuitHops.isEmpty {
+                Text("No circuit used yet — nodes appear once traffic flows")
+                    .font(.custom("HankenGrotesk", size: 11))
+                    .foregroundStyle(theme.ink3)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .onAppear { startPulseIfNeeded() }
+        .onAppear {
+            // Traffic may have flowed since the last refresh point — re-read
+            // the captured path so the diagram shows the current real nodes.
+            state.bridge.refreshCircuitHops()
+            startPulseIfNeeded()
+        }
         .onChange(of: state.bridge.torStatus) { _, newStatus in
             if newStatus == .connecting { startPulseIfNeeded() }
             if newStatus.isConnected { stopPulse() }

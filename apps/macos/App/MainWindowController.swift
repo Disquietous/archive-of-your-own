@@ -68,6 +68,7 @@ final class MainWindowController: NSWindowController {
                 // Same startup sequence as iOS ContentView.onAppear, then
                 // kick the initial section load (iOS does this via .task).
                 appState.loadPersistedState()
+                model.loadPersistedPrefs()
                 model.search.loadSavedSearches(appState)
                 model.goSection(model.section)
             }

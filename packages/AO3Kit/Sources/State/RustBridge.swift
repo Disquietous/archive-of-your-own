@@ -336,7 +336,11 @@ final class RustBridge {
 
     func checkCircuitHealth() async -> Bool {
         guard let app else { return false }
-        return (try? await app.checkCircuitHealth()) ?? false
+        let healthy = (try? await app.checkCircuitHealth()) ?? false
+        // The health check is usually the first stream on a fresh circuit, so
+        // the Rust side has just captured the real path — pick it up now.
+        circuitHops = app.getCircuitHops()
+        return healthy
     }
 
     // MARK: - Network
@@ -392,6 +396,18 @@ final class RustBridge {
     func searchByTagPaged(_ tag: String, page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.searchByTag(tag: tag, page: page)
+    }
+
+    /// One page of the AO3 /collections index.
+    func browseCollections(page: UInt32 = 1) async throws -> UCollectionsPage {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.browseCollections(page: page)
+    }
+
+    /// One page of a collection's works. `name` is the collection's URL slug.
+    func fetchCollectionWorks(name: String, page: UInt32 = 1) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchCollectionWorks(name: name, page: page)
     }
 
     func searchWorksRaw(keys: [String], values: [String], page: UInt32 = 1) async throws -> [UWorkSummary] {
@@ -665,11 +681,6 @@ final class RustBridge {
         (try? app?.getSyncedBookmarkIds()) ?? []
     }
 
-    func ensureLoggedIn() async -> Bool {
-        guard let app else { return false }
-        return (try? await app.ensureLoggedIn()) ?? false
-    }
-
     func reauthenticate(password: String) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
         guard let creds = getCredentials(), let username = creds.first else {
@@ -687,11 +698,6 @@ final class RustBridge {
     func login(username: String, password: String) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.login(username: username, password: password)
-    }
-
-    func isLoggedIn() async throws -> Bool {
-        guard let app else { return false }
-        return try await app.isLoggedIn()
     }
 
     func restoreSessionCookies() {
@@ -755,6 +761,50 @@ final class RustBridge {
     func getActiveAccountUsername() -> String {
         guard let app else { return "" }
         return (try? app.getActiveAccountUsername()) ?? ""
+    }
+
+    // MARK: - Prefs, follows & work-list compute (Rust-owned state/logic)
+
+    /// True once the encrypted DB is open — prefs and follows can load.
+    var isDatabaseOpen: Bool { app != nil }
+
+    func setPref(key: String, value: String) {
+        try? app?.setPref(key: key, value: value)
+    }
+
+    func getPref(key: String) -> String? {
+        (try? app?.getPref(key: key)) ?? nil
+    }
+
+    func getFollowed(kind: String) -> [String] {
+        (try? app?.getFollowed(kind: kind)) ?? []
+    }
+
+    func addFollowed(kind: String, name: String) {
+        try? app?.addFollowed(kind: kind, name: name)
+    }
+
+    func removeFollowed(kind: String, name: String) {
+        try? app?.removeFollowed(kind: kind, name: name)
+    }
+
+    /// Rust-side filter/sort of a section's work list; falls back to the
+    /// caller's order if the DB isn't open.
+    func filterAndSortWorks(ids: [UInt64], query: UWorkListQuery) -> [UInt64] {
+        (try? app?.filterAndSortWorks(workIds: ids, query: query)) ?? ids
+    }
+
+    func workFilterOptions(ids: [UInt64], query: UWorkListQuery) -> UWorkFilterOptions {
+        (try? app?.workFilterOptions(workIds: ids, query: query))
+            ?? UWorkFilterOptions(tags: [], fandoms: [])
+    }
+
+    func setCachedWorkList(key: String, sessionId: String, ids: [UInt64]) {
+        try? app?.setCachedWorkList(key: key, sessionId: sessionId, workIds: ids)
+    }
+
+    func getCachedWorkList(key: String, sessionId: String) -> [UWorkSummary]? {
+        (try? app?.getCachedWorkList(key: key, sessionId: sessionId)) ?? nil
     }
 
     // MARK: - Session Cache

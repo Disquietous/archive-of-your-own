@@ -19,6 +19,9 @@ pub enum AppError {
 
     #[error("Tor connection error: {0}")]
     TorError(String),
+
+    #[error("session_expired")]
+    SessionExpired,
 }
 
 impl From<rusqlite::Error> for AppError {

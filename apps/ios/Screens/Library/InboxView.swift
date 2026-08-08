@@ -236,7 +236,7 @@ struct InboxView: View {
                 state.inboxUnreadCount = Int(response.unreadCount)
             }
         } catch {
-            if !inboxTask.isCancelled && !"\(error)".contains("cancelled") {
+            if !inboxTask.isCancelled && !error.isCancellation {
                 loadError = error.localizedDescription
             }
         }

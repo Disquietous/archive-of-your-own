@@ -10,11 +10,7 @@ enum Fmt {
     }
 
     /// Epoch-seconds string → "2h ago" style relative time.
-    static func relativeTime(_ epochString: String) -> String {
-        guard let epoch = TimeInterval(epochString) else { return epochString }
-        let date = Date(timeIntervalSince1970: epoch)
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+    static func relativeTime(_ dbTimestamp: String) -> String {
+        DBTimestamp.relative(dbTimestamp) ?? dbTimestamp
     }
 }

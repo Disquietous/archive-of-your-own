@@ -31,6 +31,7 @@ struct SidebarView: View {
                     topGroup
                     group("Discover") {
                         item(.fandoms, "flame", "Fandoms", count: model.followedFandoms.count)
+                        item(.collections, "square.grid.2x2", "Collections")
                         item(.authors, "person", "Authors",
                              count: model.followedAuthorNames.count + model.followedAuthors.count)
                         item(.browse, "safari", "Browse")
@@ -45,13 +46,6 @@ struct SidebarView: View {
                         item(.readingLists, "books.vertical", "Reading Lists", count: appState.readingLists.count)
                         item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
                         item(.stats, "chart.bar", "Reading Stats")
-                    }
-                    if !model.search.savedSearches.isEmpty {
-                        group("Saved Searches") {
-                            ForEach(model.search.savedSearches, id: \.id) { saved in
-                                savedSearchRow(saved)
-                            }
-                        }
                     }
                 }
                 .padding(.bottom, 8)
@@ -85,43 +79,6 @@ struct SidebarView: View {
             item(.history, "clock", "History")
         }
         .padding(.top, 6)
-    }
-
-    private func savedSearchRow(_ saved: USavedSearch) -> some View {
-        Button {
-            model.goSection(.search)
-            model.search.runSavedSearch(saved, appState: appState)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "star")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 17)
-                    .foregroundStyle(theme.ink3)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(saved.name)
-                        .font(Font(MacFont.ui(13.5, weight: .medium)))
-                        .foregroundStyle(theme.ink2)
-                        .lineLimit(1)
-                    if let summary = MacSearchModel.summary(of: saved) {
-                        Text(summary)
-                            .font(Font(MacFont.ui(11)))
-                            .foregroundStyle(theme.ink3)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 4)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
-        .padding(.horizontal, 8)
-        .contextMenu {
-            Button("Delete Saved Search", role: .destructive) {
-                model.search.deleteSavedSearch(saved.id, appState: appState)
-            }
-        }
     }
 
     private func group(_ label: String, @ViewBuilder content: () -> some View) -> some View {
@@ -248,23 +205,58 @@ struct SidebarView: View {
         } else if torConnected {
             let hops = appState.bridge.circuitHops
             if hops.isEmpty {
-                Text("Circuit established")
-                    .font(Font(MacFont.ui(11)))
-                    .foregroundStyle(theme.ink3)
-            } else {
+                // The Rust core reports the path of the circuit that actually
+                // carried traffic, so the hop list stays empty until the first
+                // stream runs on this circuit — show the generic three-node
+                // diagram (roles only, no invented identities) until then.
                 HStack(spacing: 4) {
-                    ForEach(Array(hops.enumerated()), id: \.offset) { _, hop in
-                        Text(hop.country.uppercased())
-                            .font(Font(MacFont.ui(10, weight: .bold)))
-                            .kerning(0.3)
-                            .foregroundStyle(theme.ink2)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(theme.ink.opacity(0.08))
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    ForEach(Self.genericHops, id: \.label) { hop in
+                        HStack(spacing: 3) {
+                            Image(systemName: hop.icon)
+                                .font(.system(size: 8, weight: .semibold))
+                            Text(hop.chip)
+                                .font(Font(MacFont.ui(10, weight: .bold)))
+                                .kerning(0.3)
+                        }
+                        .foregroundStyle(theme.ink2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(theme.ink.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
-                .onHover { circuitInfoShown = $0 }
+                .onHover { inside in
+                    // Traffic may have flowed since the last refresh point —
+                    // re-read so the first hover can already show real nodes.
+                    if inside { appState.bridge.refreshCircuitHops() }
+                    circuitInfoShown = inside
+                }
+                .popover(isPresented: $circuitInfoShown, arrowEdge: .top) {
+                    genericCircuitBalloon
+                }
+            } else {
+                // The real path: one chip per node, role icon plus the
+                // relay's country code (or its IP when GeoIP has no entry).
+                HStack(spacing: 4) {
+                    ForEach(Array(hops.enumerated()), id: \.offset) { _, hop in
+                        HStack(spacing: 3) {
+                            Image(systemName: Self.roleIcon(hop.role))
+                                .font(.system(size: 8, weight: .semibold))
+                            Text(hop.country.isEmpty ? hop.address : hop.country.uppercased())
+                                .font(Font(MacFont.ui(10, weight: .bold)))
+                                .kerning(0.3)
+                        }
+                        .foregroundStyle(theme.ink2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(theme.ink.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
+                .onHover { inside in
+                    if inside { appState.bridge.refreshCircuitHops() }
+                    circuitInfoShown = inside
+                }
                 .popover(isPresented: $circuitInfoShown, arrowEdge: .top) {
                     circuitBalloon
                 }
@@ -276,7 +268,53 @@ struct SidebarView: View {
         }
     }
 
-    /// Hover balloon: the full circuit, one row per node.
+    /// The generic three-hop circuit shown before any stream has run on the
+    /// current circuit: roles only — the real nodes appear once traffic flows.
+    static let genericHops: [(icon: String, chip: String, label: String)] = [
+        ("shield.lefthalf.filled", "GUARD", "Guard"),
+        ("arrow.triangle.swap", "RELAY", "Middle relay"),
+        ("arrow.up.forward", "EXIT", "Exit"),
+    ]
+
+    /// SF Symbol for a hop role reported by the Rust core.
+    static func roleIcon(_ role: String) -> String {
+        switch role {
+        case "Guard": "shield.lefthalf.filled"
+        case "Exit": "arrow.up.forward"
+        default: "arrow.triangle.swap"
+        }
+    }
+
+    /// Hover balloon for the generic circuit: the three roles plus a note
+    /// that node identities appear once the circuit carries traffic.
+    private var genericCircuitBalloon: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("RELAY CIRCUIT")
+                .font(Font(MacFont.ui(10, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+            ForEach(Self.genericHops, id: \.label) { hop in
+                HStack(spacing: 8) {
+                    Image(systemName: hop.icon)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.sage)
+                        .frame(width: 16)
+                    Text(hop.label)
+                        .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                }
+            }
+            Text("No circuit used yet — nodes appear once traffic flows")
+                .font(Font(MacFont.ui(10.5)))
+                .foregroundStyle(theme.ink3)
+        }
+        .padding(12)
+        .frame(maxWidth: 240, alignment: .leading)
+    }
+
+    /// Hover balloon: the full real circuit, one row per node — role icon and
+    /// label, the relay's country code (omitted when GeoIP has no entry, never
+    /// invented), and its IP address.
     private var circuitBalloon: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("RELAY CIRCUIT")
@@ -285,17 +323,23 @@ struct SidebarView: View {
                 .foregroundStyle(theme.ink3)
             ForEach(Array(appState.bridge.circuitHops.enumerated()), id: \.offset) { _, hop in
                 HStack(spacing: 8) {
+                    Image(systemName: Self.roleIcon(hop.role))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(theme.sage)
+                        .frame(width: 16)
                     Text(hop.role)
                         .font(Font(MacFont.ui(11.5, weight: .semibold)))
                         .foregroundStyle(theme.ink)
                         .frame(width: 42, alignment: .leading)
-                    Text(hop.country.uppercased())
-                        .font(Font(MacFont.ui(10, weight: .bold)))
-                        .foregroundStyle(theme.ink2)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(theme.surface2)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    if !hop.country.isEmpty {
+                        Text(hop.country.uppercased())
+                            .font(Font(MacFont.ui(10, weight: .bold)))
+                            .foregroundStyle(theme.ink2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(theme.surface2)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
                     Text(hop.address)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(theme.ink2)

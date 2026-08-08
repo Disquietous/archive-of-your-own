@@ -38,6 +38,13 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     /// Width the rows were last measured at — see ListPaneViewController.
     private var lastLayoutWidth: CGFloat = 0
     private lazy var sizingCell = WorkRowCellView(theme: theme)
+    /// Shared work-row context menu (same items as the list pane).
+    private lazy var workRowMenu = WorkRowMenuController(
+        theme: theme, appState: appState, model: model, presenter: self
+    ) { [weak self] row in
+        guard let self, row >= 0, row < self.works.count else { return nil }
+        return self.works[row]
+    }
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -349,136 +356,15 @@ extension SearchResultsViewController: NSMenuDelegate {
         let row = tableView.clickedRow
         guard row >= 0, row < works.count else { return }
         let work = works[row]
-        let started = (appState.progressMap[work.id]?.chapter ?? 0) > 0
 
-        menu.addItem(menuItem("Open", #selector(menuOpenWork(_:)), row))
-        menu.addItem(menuItem(started ? "Continue Reading" : "Start Reading",
-                              #selector(menuReadWork(_:)), row))
-        menu.addItem(.separator())
-        menu.addItem(menuItem(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
-                              #selector(menuToggleBookmark(_:)), row))
-        if appState.bookmarkedWorkIDs.contains(work.id) {
-            menu.addItem(menuItem("Edit Bookmark…", #selector(menuEditBookmark(_:)), row))
-        }
-        menu.addItem(menuItem(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
-                              #selector(menuToggleDownload(_:)), row))
-        if UInt64(work.id) != nil {
-            menu.addItem(menuItem("Copy AO3 Link", #selector(menuCopyWorkLink(_:)), row))
-            menu.addItem(readingListMenuItem(for: work, row: row))
-        }
+        workRowMenu.addStandardItems(to: menu, for: work, row: row)
         if context == .readingListWorks,
            let listID = model.selectedReadingListID,
            let list = appState.readingLists.first(where: { $0.id == listID }) {
             menu.addItem(.separator())
-            menu.addItem(menuItem("Remove from “\(list.name)”", #selector(menuRemoveFromReadingList(_:)), row))
-        }
-    }
-
-    /// "Add to Reading List" ▸ every list with a membership checkmark
-    /// (clicking toggles), plus "New Reading List…" — same as the list pane.
-    private func readingListMenuItem(for work: Work, row: Int) -> NSMenuItem {
-        let parent = NSMenuItem(title: "Add to Reading List", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        let workId = UInt64(work.id)
-        for list in appState.readingLists {
-            let member = workId.map { appState.bridge.getReadingListItems(list.id).contains($0) } ?? false
-            let item = menuItem(list.name, #selector(menuToggleReadingList(_:)), row)
-            item.representedObject = NSNumber(value: list.id)
-            item.state = member ? .on : .off
-            submenu.addItem(item)
-        }
-        if !appState.readingLists.isEmpty {
-            submenu.addItem(.separator())
-        }
-        submenu.addItem(menuItem("New Reading List…", #selector(menuAddToNewReadingList(_:)), row))
-        parent.submenu = submenu
-        return parent
-    }
-
-    private func menuItem(_ title: String, _ action: Selector, _ row: Int) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        item.target = self
-        item.tag = row
-        return item
-    }
-
-    private func clickedWork(_ sender: NSMenuItem) -> Work? {
-        sender.tag >= 0 && sender.tag < works.count ? works[sender.tag] : nil
-    }
-
-    @objc private func menuOpenWork(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        model.selectWork(work.id)
-    }
-
-    @objc private func menuReadWork(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        let chapter = max(0, (appState.progressMap[work.id]?.chapter ?? 1) - 1)
-        model.openReader(work.id, chapter: chapter)
-    }
-
-    @objc private func menuToggleBookmark(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        appState.toggleBookmark(work.id)
-    }
-
-    @objc private func menuToggleDownload(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        appState.toggleDownload(work.id)
-    }
-
-    @objc private func menuCopyWorkLink(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender), UInt64(work.id) != nil else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("https://archiveofourown.org/works/\(work.id)", forType: .string)
-    }
-
-    @objc private func menuEditBookmark(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        var dismissRef: () -> Void = {}
-        let view = MacBookmarkEditView(theme: theme, appState: appState,
-                                       workID: work.id, workTitle: work.title,
-                                       onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak self, weak hosting] in
-            if let hosting { self?.dismiss(hosting) }
-        }
-        presentAsSheet(hosting)
-    }
-
-    @objc private func menuRemoveFromReadingList(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender),
-              let listID = model.selectedReadingListID else { return }
-        appState.removeFromReadingList(listID, workId: work.id)
-    }
-
-    @objc private func menuToggleReadingList(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender),
-              let listId = (sender.representedObject as? NSNumber)?.int64Value else { return }
-        if sender.state == .on {
-            appState.removeFromReadingList(listId, workId: work.id)
-        } else {
-            appState.addToReadingList(listId, workId: work.id)
-        }
-    }
-
-    @objc private func menuAddToNewReadingList(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender) else { return }
-        let alert = NSAlert()
-        alert.messageText = "New Reading List"
-        alert.informativeText = "“\(work.title)” will be added to the new list."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.placeholderString = "Name"
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        alert.addButton(withTitle: "Create")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty else { return }
-        let listId = appState.createReadingList(name)
-        if listId >= 0 {
-            appState.addToReadingList(listId, workId: work.id)
+            menu.addItem(workRowMenu.workItem("Remove from \u{201C}\(list.name)\u{201D}", row: row) { [weak self] work in
+                self?.appState.removeFromReadingList(listID, workId: work.id)
+            })
         }
     }
 }

@@ -1,0 +1,617 @@
+use rusqlite::params;
+
+use crate::error::AppError;
+use crate::models::{Chapter, ContentBlock, SeriesMembership, Warning, WorkSummary};
+
+use super::{map_json, map_sql, rating_to_str, str_to_rating, Storage};
+
+impl Storage {
+    // -------------------------------------------------------------------
+    // Works
+    // -------------------------------------------------------------------
+
+    /// Upsert a work summary plus its author-index rows, atomically (a
+    /// savepoint, so it also composes inside callers' batch transactions).
+    pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
+        self.with_savepoint("save_work", || self.save_work_inner(work))
+    }
+
+    fn save_work_inner(&self, work: &WorkSummary) -> Result<(), AppError> {
+        // Upsert, NOT INSERT OR REPLACE: replace re-creates the row, wiping
+        // columns the blurb doesn't carry (gone_from_ao3).
+        self.conn
+            .execute(
+                "INSERT INTO works (
+                    id, title, authors_json, fandoms_json, rating,
+                    warnings_json, categories_json, relationships_json,
+                    characters_json, tags_json, summary, word_count,
+                    chapter_count, total_chapters, kudos, hits,
+                    bookmarks, comments, date_published, date_updated, language, complete,
+                    fetched_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5,
+                    ?6, ?7, ?8,
+                    ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16,
+                    ?17, ?18, ?19, ?20, ?21, ?22,
+                    ?23
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    title = ?2, authors_json = ?3, fandoms_json = ?4, rating = ?5,
+                    warnings_json = ?6, categories_json = ?7, relationships_json = ?8,
+                    characters_json = ?9, tags_json = ?10, summary = ?11, word_count = ?12,
+                    chapter_count = ?13, total_chapters = ?14, kudos = ?15, hits = ?16,
+                    bookmarks = ?17, comments = ?18, date_published = ?19, date_updated = ?20,
+                    language = ?21, complete = ?22, fetched_at = ?23",
+                params![
+                    work.id as i64,
+                    work.title,
+                    serde_json::to_string(&work.authors).map_err(map_json)?,
+                    serde_json::to_string(&work.fandoms).map_err(map_json)?,
+                    rating_to_str(&work.rating),
+                    serde_json::to_string(&work.warnings).map_err(map_json)?,
+                    serde_json::to_string(&work.categories).map_err(map_json)?,
+                    serde_json::to_string(&work.relationships).map_err(map_json)?,
+                    serde_json::to_string(&work.characters).map_err(map_json)?,
+                    serde_json::to_string(&work.tags).map_err(map_json)?,
+                    work.summary,
+                    work.word_count as i64,
+                    work.chapter_count as i64,
+                    work.total_chapters.map(|c| c as i64),
+                    work.kudos as i64,
+                    work.hits as i64,
+                    work.bookmarks as i64,
+                    work.comments as i64,
+                    work.date_published,
+                    work.date_updated,
+                    work.language,
+                    work.complete as i32,
+                    crate::timefmt::now_utc_datetime(),
+                ],
+            )
+            .map_err(map_sql)?;
+        self.replace_work_authors(work.id, &work.authors)?;
+        // Seeing a work's details anywhere feeds the autocomplete tag cache.
+        let _ = self.harvest_work_tags(work);
+        Ok(())
+    }
+
+    /// Rewrite the author-index rows for one work.
+    fn replace_work_authors(&self, work_id: u64, authors: &[String]) -> Result<(), AppError> {
+        self.conn
+            .execute("DELETE FROM work_authors WHERE work_id = ?1", params![work_id as i64])
+            .map_err(map_sql)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT OR IGNORE INTO work_authors (work_id, author) VALUES (?1, ?2)")
+            .map_err(map_sql)?;
+        for author in authors {
+            stmt.execute(params![work_id as i64, author]).map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// Seed the author index from every already-cached work (v2 migration).
+    pub(super) fn backfill_work_authors(&self) -> Result<(), AppError> {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, authors_json FROM works")
+                .map_err(map_sql)?;
+            let mapped = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(map_sql)?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(map_sql)?
+        };
+        let mut stmt = self
+            .conn
+            .prepare("INSERT OR IGNORE INTO work_authors (work_id, author) VALUES (?1, ?2)")
+            .map_err(map_sql)?;
+        for (id, json) in rows {
+            for author in serde_json::from_str::<Vec<String>>(&json).unwrap_or_default() {
+                stmt.execute(params![id, author]).map_err(map_sql)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist series memberships for a work. Separate from `save_work`
+    /// because listing blurbs never carry series data and their upserts
+    /// must not clobber it; only full work-page fetches call this. Always
+    /// writes — the work page is authoritative, so an empty slice clears.
+    pub fn set_work_series(&self, work_id: u64, series: &[SeriesMembership]) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "UPDATE works SET series_json = ?2 WHERE id = ?1",
+                params![
+                    work_id as i64,
+                    serde_json::to_string(series).map_err(map_json)?
+                ],
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// An avatar URL already harvested for this username (from cached
+    /// comments/inbox data) — saves the profile-page request entirely.
+    pub fn get_known_avatar_url(&self, username: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT avatar_url FROM ao3_users
+             WHERE username = ?1 COLLATE NOCASE AND avatar_url != ''
+             ORDER BY updated_at DESC LIMIT 1"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![username], |row| row.get::<_, String>(0)).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(url)) => Ok(Some(url)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Image cache (avatars etc. — fetched once, then served locally)
+    // -------------------------------------------------------------------
+
+    pub fn save_cached_image(&self, key: &str, data: &[u8]) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO image_cache (key, data) VALUES (?1, ?2)",
+            params![key, data],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn delete_cached_image(&self, key: &str) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM image_cache WHERE key = ?1", params![key])
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_cached_image(&self, key: &str) -> Result<Option<Vec<u8>>, AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT data FROM image_cache WHERE key = ?1")
+            .map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![key], |row| row.get::<_, Vec<u8>>(0)).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(data)) => Ok(Some(data)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Known tags (autocomplete cache — harvested from every viewed work)
+    // -------------------------------------------------------------------
+
+    /// Cache every tag on a work for autocomplete. Idempotent: new tags
+    /// insert, known tags bump their use count and freshness.
+    pub fn harvest_work_tags(&self, work: &WorkSummary) -> Result<(), AppError> {
+        let mut tags: Vec<(&str, &str)> = Vec::new();
+        for f in &work.fandoms { tags.push((f, "fandom")); }
+        for c in &work.characters { tags.push((c, "character")); }
+        for r in &work.relationships { tags.push((r, "relationship")); }
+        for t in &work.tags { tags.push((t, "freeform")); }
+        for a in &work.authors { tags.push((a, "creator")); }
+        self.upsert_known_tags(&tags)
+    }
+
+    pub fn upsert_known_tags(&self, tags: &[(&str, &str)]) -> Result<(), AppError> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        self.with_savepoint("known_tags", || {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT INTO known_tags (name, tag_type) VALUES (?1, ?2)
+                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                     uses = uses + 1,
+                     last_seen = datetime('now')"
+            ).map_err(map_sql)?;
+            for (name, tag_type) in tags {
+                let trimmed = name.trim();
+                if trimmed.is_empty() { continue; }
+                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Record names confirmed by AO3's autocomplete as canonical.
+    pub fn mark_tags_canonical(&self, tag_type: &str, names: &[String]) -> Result<(), AppError> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        self.with_savepoint("canonical_tags", || {
+            let mut stmt = self.conn.prepare_cached(
+                "INSERT INTO known_tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
+                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                     canonical = 1,
+                     last_seen = datetime('now')"
+            ).map_err(map_sql)?;
+            for name in names {
+                let trimmed = name.trim();
+                if trimmed.is_empty() { continue; }
+                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Local autocomplete: substring match, ranked starts-with first, then
+    /// AO3-confirmed canonical names, then by how often the tag was seen.
+    pub fn search_known_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+        let escaped = term.trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM known_tags
+             WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
+             ORDER BY (name LIKE ?3 ESCAPE '\\') DESC,
+                      canonical DESC, uses DESC, name COLLATE NOCASE
+             LIMIT ?4"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![tag_type, contains, prefix, limit], |row| {
+            row.get::<_, String>(0)
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// One-time seed of known_tags from works cached before the table existed.
+    pub(super) fn backfill_known_tags(&self) -> Result<(), AppError> {
+        if self.get_state("known_tags_backfilled")?.is_some() {
+            return Ok(());
+        }
+        for work in self.get_all_works()? {
+            let _ = self.harvest_work_tags(&work);
+        }
+        self.set_state("known_tags_backfilled", "1")
+    }
+
+    /// Retrieve a single work by its AO3 id, or `None` if not stored.
+    pub fn get_work(&self, work_id: u64) -> Result<Option<WorkSummary>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, title, authors_json, fandoms_json, rating,
+                        warnings_json, categories_json, relationships_json,
+                        characters_json, tags_json, summary, word_count,
+                        chapter_count, total_chapters, kudos, hits,
+                        bookmarks, comments, date_published, date_updated, language, complete,
+                        series_json, fetched_at
+                 FROM works WHERE id = ?1",
+            )
+            .map_err(map_sql)?;
+
+        let mut rows = stmt
+            .query_map(params![work_id as i64], |row| {
+                Ok(Self::work_from_row(row))
+            })
+            .map_err(map_sql)?;
+
+        match rows.next() {
+            Some(Ok(inner)) => Ok(Some(inner.map_err(map_sql)?)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    /// The stored works for `ids`, preserving the ids' order; ids without a
+    /// cached row are skipped.
+    pub fn get_works_by_ids(&self, ids: &[u64]) -> Result<Vec<WorkSummary>, AppError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(w) = self.get_work(*id)? {
+                out.push(w);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return every stored work (unordered).
+    pub fn get_all_works(&self) -> Result<Vec<WorkSummary>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, title, authors_json, fandoms_json, rating,
+                        warnings_json, categories_json, relationships_json,
+                        characters_json, tags_json, summary, word_count,
+                        chapter_count, total_chapters, kudos, hits,
+                        bookmarks, comments, date_published, date_updated, language, complete,
+                        series_json, fetched_at
+                 FROM works",
+            )
+            .map_err(map_sql)?;
+
+        let rows = stmt
+            .query_map([], |row| Ok(Self::work_from_row(row)))
+            .map_err(map_sql)?;
+
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        Ok(works)
+    }
+
+    /// Return works whose `authors_json` contains the given username.
+    pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
+                        w.warnings_json, w.categories_json, w.relationships_json,
+                        w.characters_json, w.tags_json, w.summary, w.word_count,
+                        w.chapter_count, w.total_chapters, w.kudos, w.hits,
+                        w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete,
+                        w.series_json, w.fetched_at
+                 FROM works w JOIN work_authors a ON a.work_id = w.id
+                 WHERE a.author = ?1
+                 ORDER BY w.date_updated DESC",
+            )
+            .map_err(map_sql)?;
+
+        let rows = stmt
+            .query_map(params![username], |row| Ok(Self::work_from_row(row)))
+            .map_err(map_sql)?;
+
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        Ok(works)
+    }
+
+    /// Delete a work (and its chapters, progress, bookmark, and history).
+    pub fn delete_work(&self, work_id: u64) -> Result<(), AppError> {
+        let id = work_id as i64;
+        self.conn
+            .execute("DELETE FROM chapters WHERE work_id = ?1", params![id])
+            .map_err(map_sql)?;
+        self.conn
+            .execute("DELETE FROM reading_progress WHERE work_id = ?1", params![id])
+            .map_err(map_sql)?;
+        self.conn
+            .execute("DELETE FROM bookmarks WHERE work_id = ?1", params![id])
+            .map_err(map_sql)?;
+        self.conn
+            .execute("DELETE FROM history WHERE work_id = ?1", params![id])
+            .map_err(map_sql)?;
+        self.conn
+            .execute("DELETE FROM works WHERE id = ?1", params![id])
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Chapters
+    // -------------------------------------------------------------------
+
+    /// Insert or replace a chapter for the given work.
+    pub fn save_chapter(&self, work_id: u64, chapter: &Chapter) -> Result<(), AppError> {
+        let content_json = serde_json::to_string(&chapter.content).map_err(map_json)?;
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO chapters
+                    (work_id, number, chapter_id, title, content_json,
+                     notes_before, notes_after)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    work_id as i64,
+                    chapter.number as i64,
+                    chapter.id.map(|id| id as i64),
+                    chapter.title,
+                    content_json,
+                    chapter.notes_before,
+                    chapter.notes_after,
+                ],
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// All chapters for a work, ordered by chapter number.
+    pub fn get_chapters(&self, work_id: u64) -> Result<Vec<Chapter>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT chapter_id, title, number, content_json,
+                        notes_before, notes_after
+                 FROM chapters WHERE work_id = ?1 ORDER BY number ASC",
+            )
+            .map_err(map_sql)?;
+
+        let rows = stmt
+            .query_map(params![work_id as i64], |row| {
+                Ok(Self::chapter_from_row(row))
+            })
+            .map_err(map_sql)?;
+
+        let mut chapters = Vec::new();
+        for row in rows {
+            chapters.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        Ok(chapters)
+    }
+
+    /// A single chapter by work id and chapter number.
+    pub fn get_chapter(
+        &self,
+        work_id: u64,
+        chapter_number: u32,
+    ) -> Result<Option<Chapter>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT chapter_id, title, number, content_json,
+                        notes_before, notes_after
+                 FROM chapters WHERE work_id = ?1 AND number = ?2",
+            )
+            .map_err(map_sql)?;
+
+        let mut rows = stmt
+            .query_map(
+                params![work_id as i64, chapter_number as i64],
+                |row| Ok(Self::chapter_from_row(row)),
+            )
+            .map_err(map_sql)?;
+
+        match rows.next() {
+            Some(Ok(inner)) => Ok(Some(inner.map_err(map_sql)?)),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Downloads (intentional user downloads)
+    // -------------------------------------------------------------------
+
+    pub fn mark_downloaded(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO downloads (work_id) VALUES (?1)",
+            params![work_id as i64],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn unmark_downloaded(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn.execute(
+            "DELETE FROM downloads WHERE work_id = ?1",
+            params![work_id as i64],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn is_downloaded(&self, work_id: u64) -> Result<bool, AppError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE work_id = ?1",
+            params![work_id as i64],
+            |row| row.get(0),
+        ).map_err(map_sql)?;
+        Ok(count > 0)
+    }
+
+    pub fn get_downloaded_ids(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare("SELECT work_id FROM downloads").map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            Ok(id as u64)
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    // -------------------------------------------------------------------
+    // Cleanup — purge chapters for works that aren't downloaded or currently reading
+    // -------------------------------------------------------------------
+
+    pub fn purge_non_retained_chapters(&self) -> Result<(), AppError> {
+        self.conn.execute(
+            "DELETE FROM chapters WHERE work_id NOT IN (SELECT work_id FROM downloads)
+                                    AND work_id NOT IN (SELECT work_id FROM reading_progress)",
+            [],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Map a row from the `works` SELECT into a `WorkSummary`.
+    /// Column order must match the SELECT used by get_work / get_all_works.
+    pub(super) fn work_from_row(row: &rusqlite::Row<'_>) -> Result<WorkSummary, rusqlite::Error> {
+        let id: i64 = row.get(0)?;
+        let title: String = row.get(1)?;
+        let authors_json: String = row.get(2)?;
+        let fandoms_json: String = row.get(3)?;
+        let rating_str: String = row.get(4)?;
+        let warnings_json: String = row.get(5)?;
+        let categories_json: String = row.get(6)?;
+        let relationships_json: String = row.get(7)?;
+        let characters_json: String = row.get(8)?;
+        let tags_json: String = row.get(9)?;
+        let summary: String = row.get(10)?;
+        let word_count: i64 = row.get(11)?;
+        let chapter_count: i64 = row.get(12)?;
+        let total_chapters: Option<i64> = row.get(13)?;
+        let kudos: i64 = row.get(14)?;
+        let hits: i64 = row.get(15)?;
+        let bookmarks: i64 = row.get(16)?;
+        let comments: i64 = row.get(17)?;
+        let date_published: String = row.get(18)?;
+        let date_updated: String = row.get(19)?;
+        let language: String = row.get(20)?;
+        let complete: i32 = row.get(21)?;
+        let series_json: String = row.get(22)?;
+        let fetched_at: String = row.get(23)?;
+
+        // Deserialize JSON columns — use unwrap_or_default so a corrupted
+        // row doesn't crash the whole query; the caller can still surface the
+        // remaining intact fields.
+        let authors: Vec<String> =
+            serde_json::from_str(&authors_json).unwrap_or_default();
+        let fandoms: Vec<String> =
+            serde_json::from_str(&fandoms_json).unwrap_or_default();
+        let warnings: Vec<Warning> =
+            serde_json::from_str(&warnings_json).unwrap_or_default();
+        let categories: Vec<String> =
+            serde_json::from_str(&categories_json).unwrap_or_default();
+        let relationships: Vec<String> =
+            serde_json::from_str(&relationships_json).unwrap_or_default();
+        let characters: Vec<String> =
+            serde_json::from_str(&characters_json).unwrap_or_default();
+        let tags: Vec<String> =
+            serde_json::from_str(&tags_json).unwrap_or_default();
+        let series: Vec<SeriesMembership> =
+            serde_json::from_str(&series_json).unwrap_or_default();
+
+        Ok(WorkSummary {
+            id: id as u64,
+            title,
+            authors,
+            fandoms,
+            rating: str_to_rating(&rating_str),
+            warnings,
+            categories,
+            relationships,
+            characters,
+            tags,
+            summary,
+            word_count: word_count as u64,
+            chapter_count: chapter_count as u32,
+            total_chapters: total_chapters.map(|c| c as u32),
+            kudos: kudos as u32,
+            hits: hits as u64,
+            bookmarks: bookmarks as u32,
+            comments: comments as u32,
+            date_published,
+            date_updated,
+            language,
+            complete: complete != 0,
+            series,
+            fetched_at,
+        })
+    }
+
+    /// Map a row from the `chapters` SELECT into a `Chapter`.
+    fn chapter_from_row(row: &rusqlite::Row<'_>) -> Result<Chapter, rusqlite::Error> {
+        let chapter_id: Option<i64> = row.get(0)?;
+        let title: Option<String> = row.get(1)?;
+        let number: i64 = row.get(2)?;
+        let content_json: String = row.get(3)?;
+        let notes_before: Option<String> = row.get(4)?;
+        let notes_after: Option<String> = row.get(5)?;
+
+        let content: Vec<ContentBlock> =
+            serde_json::from_str(&content_json).unwrap_or_default();
+
+        Ok(Chapter {
+            id: chapter_id.map(|i| i as u64),
+            title,
+            number: number as u32,
+            content,
+            notes_before,
+            notes_after,
+        })
+    }
+}
