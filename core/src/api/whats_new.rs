@@ -1,5 +1,7 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     // -- Sequential subscription check queue --
@@ -172,17 +174,32 @@ impl AO3App {
                 })),
             };
 
-            // Fetch (rate-limited via enforce_rate_limit inside fetch_with_progress)
-            let c = client.read().await;
-            let html = match c.fetch_with_progress(&url, 30, None).await {
+            // Fetch through the recovery engine (Idempotent — a plain GET):
+            // a transient failure already gets rotated-and-retried in Rust
+            // before ever reaching this match. What's left after that is
+            // classified (never string-matched) to decide whether it's
+            // still worth requeuing for the next census cycle.
+            let url_for_fetch = url.clone();
+            let fetch_result = with_recovery(
+                client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let url = url_for_fetch.clone();
+                    async move { client.read().await.fetch_with_progress(&url, 30).await.map_err(AO3Error::from) }
+                }).await;
+            let html = match fetch_result {
                 Ok(h) => h,
                 Err(e) => {
                     let msg = format!("{e}");
                     log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
-                    drop(c);
 
-                    let retryable = msg.to_lowercase().contains("timeout")
-                        || msg.contains("HTTP 403") || msg.contains("HTTP 429");
+                    let retryable = matches!(classify(&e), Some(
+                        crate::client::FailureKind::ConnectFailure
+                        | crate::client::FailureKind::EdgeTlsFailure
+                        | crate::client::FailureKind::RateLimited { .. }
+                        | crate::client::FailureKind::Challenged
+                        | crate::client::FailureKind::OriginUnavailable
+                        | crate::client::FailureKind::ResponseTimeout
+                    ));
                     if retryable {
                         let s = storage.lock().await;
                         if let Ok(Some(json)) = s.get_check_queue() {
@@ -201,7 +218,6 @@ impl AO3App {
                     }));
                 }
             };
-            drop(c);
 
             // Parse works and extract the newest date
             let (newest_date, parsed_works) = match sub_type.as_str() {
@@ -429,8 +445,6 @@ impl AO3App {
 
     pub async fn check_inbox(&self, username: String) -> Result<Vec<UNotification>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-
             // The inbox is sorted newest-first, and every sync stores messages
             // until it reaches ones it already has — so the moment a fetched
             // page contains ANY locally-known message, everything older is
@@ -441,7 +455,12 @@ impl AO3App {
             let mut all_items = Vec::new();
             let mut page = 1u32;
             loop {
-                let inbox = c.fetch_inbox(&username, page).await.map_err(AO3Error::from)?;
+                let username_for_fetch = username.clone();
+                let inbox = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "inbox".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let username = username_for_fetch.clone();
+                        async move { client.read().await.fetch_inbox(&username, page).await.map_err(AO3Error::from) }
+                    }).await?;
                 let reached_known = {
                     let s = storage.lock().await;
                     inbox.items.iter()
@@ -457,7 +476,6 @@ impl AO3App {
                 }
                 page += 1;
             }
-            drop(c);
             let s = storage.lock().await;
 
             // Persist all fetched messages
@@ -525,9 +543,11 @@ impl AO3App {
 
     pub async fn fetch_inbox(&self, username: String, page: u32) -> Result<String, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            let inbox = c.fetch_inbox(&username, page).await.map_err(AO3Error::from)?;
-            drop(c);
+            let inbox = with_recovery(client, storage.clone(), OpKind::Fetch { label: "inbox".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let username = username.clone();
+                    async move { client.read().await.fetch_inbox(&username, page).await.map_err(AO3Error::from) }
+                }).await?;
 
             // Persist fetched messages
             {

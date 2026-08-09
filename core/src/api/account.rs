@@ -1,5 +1,7 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     // -- Local storage operations --
@@ -13,10 +15,15 @@ impl AO3App {
 
     pub async fn login(&self, username: String, password: String) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            let result = c.login(&username, &password).await.map_err(AO3Error::from)?;
+            let result = with_recovery(client.clone(), storage.clone(), OpKind::Login, RetrySafety::Idempotent,
+                move |client| {
+                    let (username, password) = (username.clone(), password.clone());
+                    async move {
+                        client.read().await.login(&username, &password).await.map_err(AO3Error::from)
+                    }
+                }).await?;
             if result {
-                let cookies = c.get_session_cookies();
+                let cookies = client.read().await.get_session_cookies();
                 let s = storage.lock().await;
                 log_db("set_state", s.set_state("ao3_session_cookies", &cookies));
             }
@@ -123,20 +130,32 @@ impl AO3App {
         let u = username.clone();
         let p = password.clone();
         let result = self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
+            let previous_cookies = client.read().await.get_session_cookies();
+            client.read().await.clear_cookies();
 
-            let previous_cookies = c.get_session_cookies();
-            c.clear_cookies();
-
-            let success = c.login(&u, &p).await.map_err(AO3Error::from)?;
+            let (u_for_login, p_for_login) = (u.clone(), p.clone());
+            let login_result = with_recovery(client.clone(), storage.clone(), OpKind::Login, RetrySafety::Idempotent,
+                move |client| {
+                    let (u, p) = (u_for_login.clone(), p_for_login.clone());
+                    async move { client.read().await.login(&u, &p).await.map_err(AO3Error::from) }
+                }).await;
+            let success = match login_result {
+                Ok(success) => success,
+                Err(e) => {
+                    if !previous_cookies.is_empty() {
+                        client.read().await.set_session_cookies(&previous_cookies);
+                    }
+                    return Err(e);
+                }
+            };
             if !success {
                 if !previous_cookies.is_empty() {
-                    c.set_session_cookies(&previous_cookies);
+                    client.read().await.set_session_cookies(&previous_cookies);
                 }
                 return Err(AO3Error::Network { message: "Login failed".to_string() });
             }
 
-            let new_cookies = c.get_session_cookies();
+            let new_cookies = client.read().await.get_session_cookies();
             let id = format!("account-{}", u.to_lowercase());
             let s = storage.lock().await;
 
@@ -255,9 +274,14 @@ impl AO3App {
 
     pub async fn post_form(&self, url: String, keys: Vec<String>, values: Vec<String>) -> Result<String, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
-        self.run_on_runtime(move |client, _storage| async move {
-            let c = client.read().await;
-            c.post_form(&url, &pairs).await.map_err(AO3Error::from)
+        self.run_on_runtime(move |client, storage| async move {
+            // Generic form POST of unknown semantics — treated as AtMostOnce,
+            // same reasoning as post_comment/post_reply.
+            with_recovery(client, storage, OpKind::Fetch { label: "post_form".to_string() }, RetrySafety::AtMostOnce,
+                move |client| {
+                    let (url, pairs) = (url.clone(), pairs.clone());
+                    async move { client.read().await.post_form(&url, &pairs).await.map_err(AO3Error::from) }
+                }).await
         }).await
     }
 }

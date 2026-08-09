@@ -9,39 +9,54 @@ struct NetworkLoadingView: View {
     var operation: String = ""
     var onCancel: (() -> Void)?
 
-    @State private var progressText: String?
-    @State private var countdownText: String?
-    @State private var timer: Timer?
-    @State private var phaseStart = Date()
-    @State private var lastStatus: String = ""
-
-    private var isReconnecting: Bool {
-        task?.isReconnecting == true
+    private var recovery: AppState.RecoveryStatus? {
+        state.currentRecovery
     }
 
     var body: some View {
         VStack(spacing: 16) {
-            if isReconnecting {
-                reconnectingView
+            if let recovery {
+                reconnectingView(recovery)
+            } else if state.showTorConnectOverlay || state.isTestingCircuit || state.isResolvingCloudflare {
+                connectFlowView
             } else {
                 normalView
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 60)
-        .onAppear { startPolling() }
-        .onDisappear { stopPolling() }
-        .onChange(of: isReconnecting) { _, reconnecting in
-            if !reconnecting {
-                phaseStart = Date()
-                lastStatus = ""
-                progressText = nil
-                countdownText = nil
+    }
+
+    /// The recovery engine is actively rotating/backing off mid-request.
+    /// Names the remedy honestly instead of a generic "reconnecting" —
+    /// this is what the old poll-and-mute NetworkLoadingView never showed.
+    private func reconnectingView(_ recovery: AppState.RecoveryStatus) -> some View {
+        VStack(spacing: 12) {
+            TorCircuitView()
+                .padding(.horizontal, 32)
+
+            HStack(spacing: 8) {
+                ProgressView().tint(theme.sage)
+                Text(recoveryMessage(recovery))
+                    .font(Typography.uiSmall())
+                    .foregroundStyle(theme.ink3)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let onCancel {
+                Button("Cancel") {
+                    state.bridge.cancelRequest()
+                    onCancel()
+                }
+                    .font(Typography.smallButtonLabel())
+                    .foregroundStyle(theme.accent)
             }
         }
     }
 
-    private var reconnectingView: some View {
+    /// The initial connect flow (bootstrap/circuit-test/Cloudflare) — driven
+    /// by AppState+Tor.swift, not the recovery engine.
+    private var connectFlowView: some View {
         VStack(spacing: 12) {
             TorCircuitView()
                 .padding(.horizontal, 32)
@@ -92,27 +107,17 @@ struct NetworkLoadingView: View {
             ProgressView()
                 .tint(theme.accent)
 
-            Text(task?.statusMessage ?? message)
+            Text(message)
                 .font(Typography.uiBody())
                 .foregroundStyle(theme.ink3)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if progressText != nil || countdownText != nil {
-                VStack(spacing: 4) {
-                    if let progressText {
-                        Text(progressText)
-                            .font(.custom("HankenGrotesk", size: 12).weight(.medium))
-                            .foregroundStyle(theme.ink3)
-                            .monospacedDigit()
-                    }
-                    if let countdownText {
-                        Text(countdownText)
-                            .font(.custom("HankenGrotesk", size: 11).weight(.medium))
-                            .foregroundStyle(theme.ink3.opacity(0.7))
-                            .monospacedDigit()
-                    }
-                }
+            if let progressText {
+                Text(progressText)
+                    .font(.custom("HankenGrotesk", size: 12).weight(.medium))
+                    .foregroundStyle(theme.ink3)
+                    .monospacedDigit()
             }
 
             if let onCancel {
@@ -126,64 +131,27 @@ struct NetworkLoadingView: View {
         }
     }
 
-    private func startPolling() {
-        phaseStart = Date()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            guard !isReconnecting else {
-                progressText = nil
-                countdownText = nil
-                return
+    /// The last progress event reported for this specific screen's fetch —
+    /// `operation` mirrors the `OpKind::Fetch` label the engine tags each
+    /// listing/content fetch with, so a screen only shows its own progress.
+    private var progressText: String? {
+        guard !operation.isEmpty, let progress = state.currentProgress,
+              case .fetch(let label) = progress.kind, label == operation else { return nil }
+        switch progress.phase {
+        case .connecting:
+            return "Connecting…"
+        case .downloading:
+            let received = formatBytes(progress.bytes)
+            if let total = progress.total, total > 0 {
+                return "Downloading \(received) / \(formatBytes(total))"
+            } else if progress.bytes > 0 {
+                return "Downloading \(received)"
             }
-            updateProgress()
-            updateCountdown()
-        }
-    }
-
-    private func stopPolling() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func updateProgress() {
-        guard !operation.isEmpty, let progress = state.bridge.getFetchProgress(operation: operation) else { return }
-
-        if progress.status != lastStatus {
-            lastStatus = progress.status
-            phaseStart = Date()
-        }
-
-        switch progress.status {
-        case "connecting":
-            progressText = "Connecting..."
-        case "downloading":
-            let received = formatBytes(progress.bytesReceived)
-            if progress.totalBytes > 0 {
-                let total = formatBytes(UInt64(progress.totalBytes))
-                progressText = "Downloading \(received) / \(total)"
-            } else if progress.bytesReceived > 0 {
-                progressText = "Downloading \(received)"
-            } else {
-                progressText = "Downloading..."
-            }
-        case "complete":
-            if progress.bytesReceived > 0 {
-                progressText = "Downloaded \(formatBytes(progress.bytesReceived))"
-            }
-            countdownText = nil
-        default:
-            break
-        }
-    }
-
-    private func updateCountdown() {
-        let timeout = Int(state.bridge.getRequestTimeout())
-        let elapsed = Int(Date().timeIntervalSince(phaseStart))
-        let remaining = max(0, timeout - elapsed)
-
-        if remaining > 0 && lastStatus != "complete" {
-            countdownText = "Timeout in \(remaining)s"
-        } else {
-            countdownText = nil
+            return "Downloading…"
+        case .complete:
+            return progress.bytes > 0 ? "Downloaded \(formatBytes(progress.bytes))" : nil
+        case .failed:
+            return nil
         }
     }
 
@@ -191,6 +159,28 @@ struct NetworkLoadingView: View {
         if bytes < 1024 { return "\(bytes) B" }
         if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024) }
         return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+
+    /// Names the remedy honestly instead of a generic "reconnecting…" —
+    /// e.g. "Archive connection failed. Trying a new route… (2 of 3)".
+    private func recoveryMessage(_ recovery: AppState.RecoveryStatus) -> String {
+        let attempt = "(\(recovery.attempt) of \(recovery.maxAttempts))"
+        switch recovery.step {
+        case .earningClearance:
+            return "Passing the archive's connection check… \(attempt)"
+        case .backingOff(let seconds):
+            return "The archive is temporarily unavailable. Waiting \(seconds)s… \(attempt)"
+        case .rotatingCircuit, .retrying, nil:
+            break
+        }
+        switch recovery.remedy {
+        case .rotate, .rotateAndReclear:
+            return "Archive connection failed. Trying a new route… \(attempt)"
+        case .backoff:
+            return "The archive is temporarily unavailable. Retrying… \(attempt)"
+        case .purge:
+            return "Session expired. Please sign in again."
+        }
     }
 }
 

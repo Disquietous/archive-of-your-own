@@ -83,6 +83,7 @@ macro_rules! log_error {
 
 pub mod parser;
 pub mod client;
+pub mod events;
 pub mod api;
 pub mod epub;
 

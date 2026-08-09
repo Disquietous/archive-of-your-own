@@ -42,6 +42,7 @@ final class MacAppModel {
     /// feedback. Combines shared AppState flags with Mac-local operations.
     var inFlightOperations: [String] {
         var ops: [String] = []
+        if let recovery = appState.currentRecovery { ops.append(Self.recoveryStatusText(recovery)) }
         if appState.isTestingCircuit { ops.append("Testing Tor circuit \(appState.circuitAttempt)") }
         if appState.isResolvingCloudflare { ops.append("Clearing archive challenge") }
         if appState.isBrowsing { ops.append("Loading newest works") }
@@ -61,6 +62,29 @@ final class MacAppModel {
         if search.isLoadingForm { ops.append("Loading search criteria") }
         if let sync = appState.bookmarkSyncTask.statusMessage { ops.append(sync) }
         return ops
+    }
+
+    /// Names the recovery engine's remedy honestly — mirrors iOS's
+    /// NetworkLoadingView.recoveryMessage. macOS previously showed nothing
+    /// at all during a stall like this; now the status bar does.
+    static func recoveryStatusText(_ recovery: AppState.RecoveryStatus) -> String {
+        let attempt = "(\(recovery.attempt) of \(recovery.maxAttempts))"
+        switch recovery.step {
+        case .earningClearance:
+            return "Passing the archive's connection check… \(attempt)"
+        case .backingOff(let seconds):
+            return "Archive temporarily unavailable — waiting \(seconds)s… \(attempt)"
+        case .rotatingCircuit, .retrying, nil:
+            break
+        }
+        switch recovery.remedy {
+        case .rotate, .rotateAndReclear:
+            return "Archive connection failed — trying a new route… \(attempt)"
+        case .backoff:
+            return "Archive temporarily unavailable — retrying… \(attempt)"
+        case .purge:
+            return "Session expired — please sign in again"
+        }
     }
 
     var hideExplicit: Bool {

@@ -1,17 +1,29 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     // -- Kudos --
 
     pub async fn leave_kudos(&self, work_id: u64) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
             {
+                let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
             }
-            let accepted = c.leave_kudos(work_id).await.map_err(AO3Error::from)?;
+            // AO3 answers a duplicate kudos with "already left kudos"
+            // rather than erroring, so a full retry after rotation can
+            // never double-apply — safe to retry for every failure kind.
+            let accepted = with_recovery(client.clone(), storage.clone(), OpKind::Kudos, RetrySafety::Idempotent,
+                move |client| {
+                    let work_id = work_id;
+                    async move {
+                        client.read().await.leave_kudos(work_id).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let c = client.read().await;
             let s = storage.lock().await;
             persist_posting_credentials(&c, &s);
             if accepted {
@@ -31,8 +43,8 @@ impl AO3App {
 
     pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
             {
+                let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
             }
@@ -44,8 +56,19 @@ impl AO3App {
                 (format!("{base}/chapters/{chapter_id}/comments"), "chapters",
                  format!("{base}/works/{work_id}/chapters/{chapter_id}?show_comments=true&view_adult=true"))
             };
-            let posted = c.post_comment_direct(&endpoint, controller, &form_page, &comment)
-                .await.map_err(AO3Error::from)?;
+            // A comment creates a new record with no natural dedup, so this
+            // only retries failures that are provably pre-origin (525) —
+            // never on an ambiguous timeout, which could have already posted.
+            let posted = with_recovery(client.clone(), storage.clone(), OpKind::Comment, RetrySafety::AtMostOnce,
+                move |client| {
+                    let (endpoint, controller, form_page, comment) =
+                        (endpoint.clone(), controller, form_page.clone(), comment.clone());
+                    async move {
+                        client.read().await.post_comment_direct(&endpoint, controller, &form_page, &comment)
+                            .await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let c = client.read().await;
             let s = storage.lock().await;
             persist_posting_credentials(&c, &s);
             Ok(posted)
@@ -53,12 +76,11 @@ impl AO3App {
     }
 
     pub async fn fetch_chapter_comments(&self, work_id: u64, chapter_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
-        let progress = self.register_progress("comments");
-        let result = self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            c.set_active_progress(progress);
-            let cp = c.fetch_comments_for_chapter(work_id, chapter_id, page).await.map_err(AO3Error::from)?;
-            c.clear_active_progress();
+        self.run_on_runtime(move |client, storage| async move {
+            let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.fetch_comments_for_chapter(work_id, chapter_id, page).await.map_err(AO3Error::from)
+                }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
                 log_db("save_comment", s.save_comment(0, chapter_id, comment));
@@ -69,18 +91,15 @@ impl AO3App {
                 current_page: cp.current_page,
                 total_pages: cp.total_pages,
             })
-        }).await;
-        self.clear_progress("comments");
-        result
+        }).await
     }
 
     pub async fn fetch_work_comments(&self, work_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
-        let progress = self.register_progress("comments");
-        let result = self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            c.set_active_progress(progress);
-            let cp = c.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)?;
-            c.clear_active_progress();
+        self.run_on_runtime(move |client, storage| async move {
+            let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)
+                }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
                 log_db("save_comment", s.save_comment(work_id, 0, comment));
@@ -91,9 +110,7 @@ impl AO3App {
                 current_page: cp.current_page,
                 total_pages: cp.total_pages,
             })
-        }).await;
-        self.clear_progress("comments");
-        result
+        }).await
     }
 
     pub fn get_cached_comments(&self, work_id: u64, chapter_id: u64) -> Result<String, AO3Error> {
@@ -105,12 +122,20 @@ impl AO3App {
 
     pub async fn post_reply(&self, parent_comment_id: u64, comment: String) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
             {
+                let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
             }
-            let posted = c.post_reply(parent_comment_id, &comment).await.map_err(AO3Error::from)?;
+            // Same reasoning as post_comment: AtMostOnce, only 525 retries.
+            let posted = with_recovery(client.clone(), storage.clone(), OpKind::Reply, RetrySafety::AtMostOnce,
+                move |client| {
+                    let comment = comment.clone();
+                    async move {
+                        client.read().await.post_reply(parent_comment_id, &comment).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let c = client.read().await;
             let s = storage.lock().await;
             persist_posting_credentials(&c, &s);
             Ok(posted)
@@ -120,19 +145,20 @@ impl AO3App {
     // -- Subscription notifications --
 
     pub async fn fetch_subscriptions(&self, username: String) -> Result<Vec<USubscription>, AO3Error> {
-        let progress = self.register_progress("subscriptions");
-        let result = self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let mut all_subs = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
             loop {
-                let c = client.read().await;
-                c.set_active_progress(progress.clone());
-                let (subs, has_more) = c.fetch_subscriptions(&username, page)
-                    .await
-                    .map_err(AO3Error::from)?;
-                c.clear_active_progress();
-                drop(c);
+                let username_for_fetch = username.clone();
+                let (subs, has_more) = with_recovery(
+                    client.clone(), storage.clone(), OpKind::Fetch { label: "subscriptions".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let username = username_for_fetch.clone();
+                        async move {
+                            client.read().await.fetch_subscriptions(&username, page).await.map_err(AO3Error::from)
+                        }
+                    }).await?;
                 for s in subs {
                     let u = USubscription::from(s);
                     if seen.insert((u.sub_type.clone(), u.id.clone())) {
@@ -155,20 +181,22 @@ impl AO3App {
                     .collect()
             };
             for author in unknown {
-                let c = client.read().await;
-                let profile = match c.fetch_user_profile(&author).await {
+                let author_for_fetch = author.clone();
+                let profile = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let author = author_for_fetch.clone();
+                        async move { client.read().await.fetch_user_profile(&author).await.map_err(AO3Error::from) }
+                    }).await;
+                let profile = match profile {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
-                drop(c);
                 let s = storage.lock().await;
                 log_db("upsert_ao3_user", s.upsert_ao3_user(&profile));
             }
 
             Ok(all_subs)
-        }).await;
-        self.clear_progress("subscriptions");
-        result
+        }).await
     }
 
     /// Toggle the AO3 subscription for a work and mirror the result into
@@ -200,13 +228,18 @@ impl AO3App {
                     }
                 }
             }
+            drop(c);
             // Ambiguous or impossible direct path: the page-fetch path reads
-            // live state and only submits when it differs from `want`.
+            // live state and only submits when it differs from `want`. This
+            // is the one branch above that propagates a hard error, so it's
+            // the one worth routing through the recovery engine.
             let (subscribed, ao3_id) = match outcome {
                 Some(o) => o,
-                None => c.set_work_subscription(work_id, want).await.map_err(AO3Error::from)?,
+                None => with_recovery(client, storage.clone(), OpKind::Fetch { label: "work_subscribe".to_string() }, RetrySafety::Idempotent,
+                    move |client| async move {
+                        client.read().await.set_work_subscription(work_id, want).await.map_err(AO3Error::from)
+                    }).await?,
             };
-            drop(c);
 
             let s = storage.lock().await;
             if subscribed {
@@ -235,12 +268,15 @@ impl AO3App {
     /// subscription state into the local subscriptions table (only when
     /// the session was signed in — a logged-out page carries no signal).
     pub async fn fetch_user_profile(&self, username: String) -> Result<UUserProfile, AO3Error> {
-        let _progress = self.register_progress("user_profile");
-        let result = self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let (username, _) = split_author_byline(&username);
-            let c = client.read().await;
-            let profile = c.fetch_user_profile_full(&username).await.map_err(AO3Error::from)?;
-            drop(c);
+            let profile = with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let username = username.clone();
+                    async move {
+                        client.read().await.fetch_user_profile_full(&username).await.map_err(AO3Error::from)
+                    }
+                }).await?;
             let s = storage.lock().await;
             log_db("upsert_user_profile", s.upsert_user_profile(&profile));
             if profile.viewer_signed_in {
@@ -252,9 +288,7 @@ impl AO3App {
                 }
             }
             Ok(UUserProfile::from(profile))
-        }).await;
-        self.clear_progress("user_profile");
-        result
+        }).await
     }
 
     /// Toggle the AO3 subscription for a user and mirror the result into
@@ -291,11 +325,18 @@ impl AO3App {
                     }
                 }
             }
+            drop(c);
             let (subscribed, ao3_id) = match outcome {
                 Some(o) => o,
-                None => c.set_user_subscription(&target, want).await.map_err(AO3Error::from)?,
+                None => {
+                    let target_for_fetch = target.clone();
+                    with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_subscribe".to_string() }, RetrySafety::Idempotent,
+                        move |client| {
+                            let target = target_for_fetch.clone();
+                            async move { client.read().await.set_user_subscription(&target, want).await.map_err(AO3Error::from) }
+                        }).await?
+                }
             };
-            drop(c);
 
             let s = storage.lock().await;
             if subscribed {
@@ -414,9 +455,10 @@ impl AO3App {
             let mut found_thread: Option<Comment> = None;
 
             while page <= total_pages {
-                let c = client.read().await;
-                let comments_page = c.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)?;
-                drop(c);
+                let comments_page = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
+                    move |client| async move {
+                        client.read().await.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)
+                    }).await?;
 
                 total_pages = comments_page.total_pages.max(1);
 
@@ -471,14 +513,22 @@ impl AO3App {
                 url_hint.filter(|u| !u.is_empty())
                     .or_else(|| s.get_known_avatar_url(&username).unwrap_or(None))
             };
-            let c = client.read().await;
             let (bytes, fetched_icon_url) = if let Some(url) = known_url {
-                (c.fetch_image(&url).await.map_err(AO3Error::from)?, None)
+                let bytes = with_recovery(client.clone(), storage.clone(), OpKind::Image, RetrySafety::Idempotent,
+                    move |client| {
+                        let url = url.clone();
+                        async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
+                    }).await?;
+                (bytes, None)
             } else {
-                let (bytes, icon_url) = c.fetch_user_icon(&username).await.map_err(AO3Error::from)?;
+                let username_for_fetch = username.clone();
+                let (bytes, icon_url) = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let username = username_for_fetch.clone();
+                        async move { client.read().await.fetch_user_icon(&username).await.map_err(AO3Error::from) }
+                    }).await?;
                 (bytes, Some(icon_url))
             };
-            drop(c);
             let s = storage.lock().await;
             // A profile-page fetch is the authoritative source for this
             // user's avatar URL — record it so future lookups skip the

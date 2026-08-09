@@ -24,6 +24,12 @@ impl AO3App {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| db_path.clone());
 
+        // Must happen from a context that already owns a runtime — see the
+        // doc on `events::init` for why this can't be the ambient
+        // `tokio::spawn`. `new()` runs on whatever thread Swift constructs
+        // the app from, so this is the only safe place to do it once.
+        crate::events::init(&runtime.handle().clone());
+
         Ok(AO3App {
             client: Arc::new(tokio::sync::RwLock::new(client)),
             storage,
@@ -34,9 +40,23 @@ impl AO3App {
             tor_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             socks_port: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             _runtime: Arc::new(runtime),
-            progress_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             census_cycle_used: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// Register the single process-wide connection-recovery event observer.
+    /// Swift calls this once at startup; subsequent calls replace the
+    /// previous observer. Pass `None` to stop delivering events.
+    pub fn set_observer(&self, observer: Option<Box<dyn crate::events::CoreObserver>>) {
+        crate::events::set_observer(observer.map(Arc::from));
+    }
+
+    /// Register the single process-wide platform-capabilities implementation
+    /// (Cloudflare clearance via WKWebView). Pass `None` to stop offering
+    /// the capability — the recovery engine treats that the same as a
+    /// capability call failing, and simply surfaces the underlying error.
+    pub fn set_platform_capabilities(&self, capabilities: Option<Box<dyn PlatformCapabilities>>) {
+        super::capabilities::set(capabilities.map(Arc::from));
     }
 
     // -- Tor connection --
@@ -66,6 +86,10 @@ impl AO3App {
                 new_client.set_timeout(secs);
                 tor_connected.store(new_client.is_tor(), std::sync::atomic::Ordering::Relaxed);
                 socks_port.store(new_client.socks_port().unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
+                // Stop the outgoing client's SOCKS accept loop before it's
+                // dropped — otherwise the replaced client orphans a listener
+                // port and a background task on every (re)connect.
+                client.stop_socks_proxy();
                 *client = new_client;
             })
             .await
@@ -148,27 +172,11 @@ impl AO3App {
         }
     }
 
-    pub fn get_fetch_progress(&self, operation: String) -> UFetchProgress {
-        use crate::client::FetchStatus;
-        let handles = self.progress_handles.lock().unwrap();
-        let p = handles.get(&operation)
-            .map(|h| h.lock().unwrap().clone())
-            .unwrap_or(FetchProgress {
-                bytes_received: 0,
-                total_bytes: None,
-                status: FetchStatus::Idle,
-            });
-        UFetchProgress {
-            bytes_received: p.bytes_received,
-            total_bytes: p.total_bytes.map(|t| t as i64).unwrap_or(-1),
-            status: match p.status {
-                FetchStatus::Idle => "idle",
-                FetchStatus::Connecting => "connecting",
-                FetchStatus::Downloading => "downloading",
-                FetchStatus::Complete => "complete",
-                FetchStatus::Failed => "failed",
-            }.to_string(),
-        }
+    /// Every operation the recovery engine currently has in flight or is
+    /// actively recovering — the authoritative snapshot a view asks for on
+    /// mount instead of replaying events it may have missed.
+    pub fn active_operations(&self) -> Vec<crate::events::OperationStatus> {
+        crate::events::operations_snapshot()
     }
 
     pub fn is_request_active(&self) -> bool {

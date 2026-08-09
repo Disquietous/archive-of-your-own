@@ -472,13 +472,6 @@ pub struct UNotification {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct UFetchProgress {
-    pub bytes_received: u64,
-    pub total_bytes: i64,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, uniffi::Record)]
 pub struct UCustomTheme {
     pub id: String,
     pub name: String,

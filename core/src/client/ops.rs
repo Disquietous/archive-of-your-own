@@ -2,7 +2,7 @@ use crate::error::AppError;
 use crate::models::*;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, send_error_message};
+use super::{AO3Client, BASE_URL, FailureKind};
 use super::audit::{ActiveRequestGuard, AuditCtx};
 use super::helpers::{ao3_tag_encode, extract_bookmark_id_from_response, sniff_image_kind,
                      sub_id_from_action, urlencoded};
@@ -231,12 +231,12 @@ impl AO3Client {
             Err(_) => {
                 log_error!("image", "Timeout connecting to {}", full_url);
                 audit.record(0, 0, Some("timeout".to_string()));
-                return Err(AppError::NetworkError("timeout".to_string()));
+                return Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() });
             }
             Ok(Err(e)) => {
                 log_error!("image", "Error fetching {}: {}", full_url, e);
                 audit.record(0, 0, Some(format!("{e}")));
-                return Err(AppError::NetworkError(send_error_message(&e)));
+                return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") });
             }
             Ok(Ok(r)) => r,
         };
@@ -252,20 +252,23 @@ impl AO3Client {
                   status.as_u16(), content_type, content_encoding, content_length, full_url);
 
         if !status.is_success() {
-            audit.record(status.as_u16(), 0, Some(format!("HTTP {status}")));
-            return Err(AppError::NetworkError(format!("HTTP {status}")));
+            let detail = format!("HTTP {status}");
+            audit.record(status.as_u16(), 0, Some(detail.clone()));
+            return Err(AppError::Http { kind: FailureKind::from_status(status.as_u16(), None), detail });
         }
 
         let bytes = match tokio::time::timeout(timeout, response.bytes()).await {
             Err(_) => {
                 log_error!("image", "Timeout reading body of {}", full_url);
                 audit.record(status.as_u16(), 0, Some("body timeout".to_string()));
-                return Err(AppError::NetworkError("timeout".to_string()));
+                // Headers already arrived — the request reached the origin.
+                return Err(AppError::Http { kind: FailureKind::ResponseTimeout, detail: "timeout".to_string() });
             }
             Ok(Err(e)) => {
                 log_error!("image", "Failed reading body of {}: {}", full_url, e);
-                audit.record(status.as_u16(), 0, Some(format!("{e}")));
-                return Err(AppError::NetworkError(format!("{e}")));
+                let detail = format!("{e}");
+                audit.record(status.as_u16(), 0, Some(detail.clone()));
+                return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail });
             }
             Ok(Ok(b)) => b,
         };

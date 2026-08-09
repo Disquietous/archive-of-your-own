@@ -1,5 +1,7 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     pub fn get_all_progress(&self) -> Result<Vec<UReadingProgress>, AO3Error> {
@@ -204,11 +206,15 @@ impl AO3App {
             let mut all_bookmarks = Vec::new();
             let mut page = 1u32;
             loop {
-                let c = client.read().await;
-                let (listings, has_more) = c.fetch_user_bookmarks(&username, page)
-                    .await
-                    .map_err(AO3Error::from)?;
-                drop(c); // release read lock before locking storage
+                let username_for_fetch = username.clone();
+                let (listings, has_more) = with_recovery(
+                    client.clone(), storage.clone(), OpKind::Fetch { label: "bookmarks".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let username = username_for_fetch.clone();
+                        async move {
+                            client.read().await.fetch_user_bookmarks(&username, page).await.map_err(AO3Error::from)
+                        }
+                    }).await?;
 
                 let s = storage.lock().await;
                 // One transaction per pulled page.
@@ -242,8 +248,8 @@ impl AO3App {
 
     pub async fn push_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
             let details = {
+                let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
                 s.get_bookmark_details(work_id).map_err(AO3Error::from)?
@@ -252,10 +258,16 @@ impl AO3App {
                 return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
             };
 
-            let ao3_id = c.create_ao3_bookmark(work_id, &note, &tags, &collections, private, rec)
-                .await
-                .map_err(AO3Error::from)?;
-            drop(c);
+            // Creating a bookmark that already exists updates it in place
+            // (AO3-side upsert), so a full retry after rotation is safe.
+            let ao3_id = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "bookmark_push".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let (note, tags, collections) = (note.clone(), tags.clone(), collections.clone());
+                    async move {
+                        client.read().await.create_ao3_bookmark(work_id, &note, &tags, &collections, private, rec)
+                            .await.map_err(AO3Error::from)
+                    }
+                }).await?;
 
             let s = storage.lock().await;
             {
@@ -296,11 +308,10 @@ impl AO3App {
 
             match ao3_id {
                 Some(id) => {
-                    let c = client.read().await;
-                    let result = c.delete_ao3_bookmark(id)
-                        .await
-                        .map_err(AO3Error::from)?;
-                    Ok(result)
+                    with_recovery(client, storage, OpKind::Fetch { label: "bookmark_delete".to_string() }, RetrySafety::Idempotent,
+                        move |client| async move {
+                            client.read().await.delete_ao3_bookmark(id).await.map_err(AO3Error::from)
+                        }).await
                 }
                 None => Ok(false),
             }

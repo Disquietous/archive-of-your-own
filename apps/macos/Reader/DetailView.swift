@@ -60,10 +60,20 @@ struct DetailView: View {
                 }
                 .padding(.bottom, 10)
                 if appState.kudosFailedWorkID == work.id {
-                    Text("Couldn’t leave kudos — the archive rejected the request. Try again.")
-                        .font(Font(MacFont.ui(12)))
-                        .foregroundStyle(Color(hex: "CE514D"))
-                        .padding(.bottom, 14)
+                    HStack(spacing: 8) {
+                        Text(appState.kudosFailedIsRetryable
+                             ? "Couldn’t reach the archive to leave kudos."
+                             : "Couldn’t leave kudos — the archive rejected the request.")
+                            .font(Font(MacFont.ui(12)))
+                            .foregroundStyle(Color(hex: "CE514D"))
+                        if appState.kudosFailedIsRetryable {
+                            Button("Retry") { appState.giveKudos(work.id) }
+                                .buttonStyle(.plain)
+                                .font(Font(MacFont.ui(12, weight: .semibold)))
+                                .foregroundStyle(theme.accent)
+                        }
+                    }
+                    .padding(.bottom, 14)
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(work.fandomList, id: \.self) { fandom in

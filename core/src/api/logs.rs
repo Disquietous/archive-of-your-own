@@ -1,5 +1,7 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     // -- Debug Log --

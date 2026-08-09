@@ -79,7 +79,6 @@ extension AppState {
             subscriptionCheckTotal = Int(total)
             subscriptionCheckRemaining = Int(total)
 
-            var consecutiveRetries = 0
             while !subscriptionCheckTask.isCancelled {
                 // Yield to the user: while they're actively fetching something,
                 // pause between items so the background check never competes
@@ -100,30 +99,14 @@ extension AppState {
                 guard let result = try await bridge.checkNextSubscription() else { break }
                 subscriptionCheckRemaining = Int(result.remaining)
 
-                if let error = result.error {
-                    let isRetryable = error.lowercased().contains("timeout")
-                        || error.contains("HTTP 403") || error.contains("HTTP 429")
-                    if isRetryable && consecutiveRetries < 3 {
-                        consecutiveRetries += 1
-                        let reason = if error.lowercased().contains("timeout") {
-                            "Timed out"
-                        } else if error.contains("HTTP 429") {
-                            "Rate limited"
-                        } else {
-                            "Blocked"
-                        }
-                        subscriptionCheckTask.isReconnecting = true
-                        subscriptionCheckTask.statusMessage = "\(reason). Getting new circuit… (\(consecutiveRetries)/3)"
-                        await rotateCircuit()
-                        if subscriptionCheckTask.isCancelled { break }
-                        subscriptionCheckTask.isReconnecting = false
-                        subscriptionCheckTask.statusMessage = nil
-                        continue
-                    }
+                if result.error != nil {
+                    // A transient failure already got rotated-and-retried in
+                    // Rust before this returned — nothing left for Swift to
+                    // decide. A still-retryable item was requeued for later
+                    // in this cycle (reflected in `remaining`); this just
+                    // counts the attempt and moves to the next item.
                     subscriptionCheckFailed += 1
-                    consecutiveRetries = 0
                 } else {
-                    consecutiveRetries = 0
                     if result.changed {
                         loadNewWorks()
                         reloadCachedWorks()

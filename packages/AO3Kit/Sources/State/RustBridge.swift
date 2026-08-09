@@ -32,6 +32,20 @@ final class RustBridge {
     var torHasConnectedOnce = false
     var cloudflareReady = false
 
+    // Connection-recovery hooks (AppState+Recovery.swift). Set once by
+    // AppState before the first app instance exists; re-applied to every
+    // `Ao3App`/tor-only bootstrap instance this bridge creates, since each
+    // is a separate object Rust-side with its own observer/capability slot.
+    var recoveryObserver: CoreObserver?
+    var recoveryCapabilities: PlatformCapabilities?
+
+    private func registerRecoveryHooks() {
+        app?.setObserver(observer: recoveryObserver)
+        app?.setPlatformCapabilities(capabilities: recoveryCapabilities)
+        torOnlyApp?.setObserver(observer: recoveryObserver)
+        torOnlyApp?.setPlatformCapabilities(capabilities: recoveryCapabilities)
+    }
+
     var torRequired: Bool {
         UserDefaults.standard.bool(forKey: "useTorByDefault")
     }
@@ -77,6 +91,7 @@ final class RustBridge {
             torOnlyApp = nil
             isInitialized = true
             connectionError = nil
+            registerRecoveryHooks()
             return true
         } catch {
             connectionError = error.localizedDescription
@@ -117,6 +132,7 @@ final class RustBridge {
             Self.persistDbPasswordFlag(true)
             // Remove any auto-key since user owns the password now
             Self.deleteAutoKey()
+            registerRecoveryHooks()
             return true
         } catch {
             connectionError = error.localizedDescription
@@ -138,6 +154,7 @@ final class RustBridge {
             connectionError = nil
             hasDbPassword = false
             Self.persistDbPasswordFlag(false)
+            registerRecoveryHooks()
             return true
         } catch {
             connectionError = error.localizedDescription
@@ -241,6 +258,7 @@ final class RustBridge {
         let dbPath = Self.databasePath() + ".tor-temp"
         let key = UUID().uuidString
         torOnlyApp = try? Ao3App(dbPath: dbPath, dbPassphrase: key)
+        registerRecoveryHooks()
     }
 
 
@@ -349,8 +367,11 @@ final class RustBridge {
         app?.cancelRequest()
     }
 
-    func getFetchProgress(operation: String) -> UFetchProgress? {
-        app?.getFetchProgress(operation: operation)
+    /// Every operation the recovery engine currently has in flight or is
+    /// actively recovering — the authoritative snapshot a view asks for on
+    /// mount instead of replaying events it may have missed.
+    func activeOperations() -> [OperationStatus] {
+        app?.activeOperations() ?? []
     }
 
     func setRequestTimeout(_ seconds: UInt64) {

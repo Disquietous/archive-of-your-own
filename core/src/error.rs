@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::client::FailureKind;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("Failed to parse HTML: {0}")]
@@ -10,6 +12,11 @@ pub enum AppError {
 
     #[error("Network error: {0}")]
     NetworkError(String),
+
+    /// A classified HTTP/transport failure — `kind` drives the recovery
+    /// engine's remedy, `detail` is the raw message for logging.
+    #[error("HTTP failure: {detail}")]
+    Http { kind: FailureKind, detail: String },
 
     #[error("Invalid work ID: {0}")]
     InvalidWorkId(String),

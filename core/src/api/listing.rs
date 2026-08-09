@@ -9,6 +9,8 @@ use super::*;
 // id list and the user's choices.
 // ---------------------------------------------------------------------------
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     /// Filter and sort a section's work list. `work_ids` is the section's

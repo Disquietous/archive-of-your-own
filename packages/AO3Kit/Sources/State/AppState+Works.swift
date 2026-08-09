@@ -65,6 +65,7 @@ extension AppState {
               let workId = UInt64(id) else { return }
         kudosPendingWorkIDs.insert(id)
         kudosFailedWorkID = nil
+        kudosFailedIsRetryable = false
         Task { @MainActor in
             do {
                 let success = try await bridge.leaveKudos(workId: workId)
@@ -72,11 +73,19 @@ extension AppState {
                 if success {
                     kudosGivenWorkIDs.insert(id)
                 } else {
+                    // A genuine rejection (not signed in, own work, etc.) —
+                    // the recovery engine already ruled out a transport
+                    // fault before letting this surface as `false`.
                     kudosFailedWorkID = id
+                    kudosFailedIsRetryable = false
                 }
             } catch {
+                // Reaches here only after the recovery engine exhausted
+                // every retry it could safely make — a fresh attempt some
+                // time later (network back, new circuit) can still succeed.
                 kudosPendingWorkIDs.remove(id)
                 kudosFailedWorkID = id
+                kudosFailedIsRetryable = !error.isCancellation
             }
         }
     }

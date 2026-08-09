@@ -20,14 +20,16 @@ final class NetworkTask {
 }
 
 extension AppState {
-    /// Parse the Retry-After seconds the Rust layer embeds in 429 errors
-    /// ("HTTP 429 retry_after=300").
-    static func retryAfterSeconds(in description: String) -> Int? {
-        guard let range = description.range(of: "retry_after=") else { return nil }
-        let digits = description[range.upperBound...].prefix { $0.isNumber }
-        return Int(digits)
-    }
-
+    /// Run `operation`, tracking it as a user-initiated fetch. Connectivity
+    /// policy — whether to rotate, back off, or re-clear Cloudflare — lives
+    /// entirely in the Rust recovery engine now (`core/src/api/recovery.rs`):
+    /// by the time an error reaches here, the engine has already retried
+    /// everything it safely could. This wrapper only handles what's left,
+    /// which isn't a connectivity decision: user cancellation, and the
+    /// re-auth prompt for a session the engine can't repair on its own.
+    /// Live status while the engine is mid-recovery is `AppState.
+    /// currentRecovery`, projected from its event stream — see
+    /// AppState+Recovery.swift and NetworkLoadingView.
     func retryOnTimeout<T>(task: NetworkTask, using bridge: RustBridge, _ operation: () async throws -> T) async throws -> T {
         if bridge.networkBlocked {
             let connected = await ensureTorConnected()
@@ -42,87 +44,18 @@ extension AppState {
             Task { @MainActor in self.activeUserFetches -= 1 }
         }
         task.reset()
-        var timeoutCount = 0
-        var blockedCount = 0
-        while !task.isCancelled {
-            do {
-                return try await operation()
-            } catch {
-                if task.isCancelled { throw error }
-                let desc = "\(error)"
-                if error.isCancellation { throw error }
-                // Never probe or silently repair login state — the Rust layer
-                // has already purged the cached token; surface the manual
-                // sign-in prompt and stop.
-                if error.isSessionExpired || error.isPasswordNeeded {
-                    await MainActor.run {
-                        needsReauth = true
-                    }
-                    throw Ao3Error.Network(message: "Session expired. Please sign in again.")
-                }
-                if desc.contains("timeout") {
-                    timeoutCount += 1
-                    if timeoutCount >= 3 {
-                        throw error
-                    }
-                    if bridge.torStatus.isConnected {
-                        task.isReconnecting = true
-                        task.statusMessage = "Timed out. Getting new circuit… (\(timeoutCount)/3)"
-                        await rotateCircuit()
-                        if task.isCancelled { throw error }
-                        task.isReconnecting = false
-                        task.statusMessage = nil
-                        continue
-                    }
-                    task.statusMessage = "Timed out. Retrying… (\(timeoutCount)/3)"
-                    continue
-                }
-                // Rate-limited (429). The budget is per exit IP, so a fresh
-                // circuit is a fresh budget — rotate rather than waiting out
-                // the Retry-After window on the burned IP. Without Tor, all
-                // we can do is surface an honest countdown.
-                if desc.contains("HTTP 429") {
-                    blockedCount += 1
-                    let waitDescription = Self.retryAfterSeconds(in: desc).map { secs in
-                        secs >= 120 ? "about \(Int((Double(secs) / 60).rounded())) minutes"
-                                    : "about \(secs) seconds"
-                    }
-                    if blockedCount >= 3 {
-                        throw Ao3Error.Network(message: "The archive is rate-limiting this connection. Try again in \(waitDescription ?? "a few minutes").")
-                    }
-                    if bridge.torStatus.isConnected {
-                        task.isReconnecting = true
-                        task.statusMessage = "Rate limited. Getting new circuit… (\(blockedCount)/3)"
-                        await rotateCircuit()
-                        if task.isCancelled { throw error }
-                        task.isReconnecting = false
-                        task.statusMessage = nil
-                        continue
-                    }
-                    throw Ao3Error.Network(message: "The archive is rate-limiting this connection. Try again in \(waitDescription ?? "a few minutes"), or connect via Tor to get a fresh route.")
-                }
-                // Cloudflare bot rejection of this circuit/session. The fix is
-                // the same as the connect flow's: a fresh circuit + a fresh
-                // challenge clearance, both of which connectTor() performs.
-                if desc.contains("HTTP 403") {
-                    blockedCount += 1
-                    if blockedCount >= 3 {
-                        throw Ao3Error.Network(message: "The archive's protection blocked this connection repeatedly. Try again in a little while.")
-                    }
-                    if bridge.torStatus.isConnected {
-                        task.isReconnecting = true
-                        task.statusMessage = "Blocked by archive protection. Getting new circuit… (\(blockedCount)/3)"
-                        await rotateCircuit()
-                        if task.isCancelled { throw error }
-                        task.isReconnecting = false
-                        task.statusMessage = nil
-                        continue
-                    }
-                    throw Ao3Error.Network(message: "The archive's protection blocked this request. Connecting via Tor lets the app clear the challenge and retry.")
-                }
-                throw error
+        do {
+            return try await operation()
+        } catch {
+            if task.isCancelled || error.isCancellation { throw Ao3Error.Cancelled }
+            // Never probe or silently repair login state — the Rust layer
+            // has already purged the cached token; surface the manual
+            // sign-in prompt and stop.
+            if error.isSessionExpired || error.isPasswordNeeded {
+                await MainActor.run { needsReauth = true }
+                throw Ao3Error.Network(message: "Session expired. Please sign in again.")
             }
+            throw error
         }
-        throw Ao3Error.Cancelled
     }
 }

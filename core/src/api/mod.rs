@@ -1,12 +1,28 @@
+//! Lock discipline invariant: `client.blocking_read()` and
+//! `storage.blocking_lock()` are safe ONLY on a thread that is not running
+//! on `_runtime` — that's exactly the synchronous `#[uniffi::export]`
+//! methods in this module, which UniFFI calls directly on the thread Swift
+//! invoked them from. Every `blocking_*` call site in `core/src/api/` is one
+//! of these plain `fn` exports; none are reachable from `run_on_runtime` or
+//! any other code running on `_runtime`, so this holds today.
+//!
+//! Never mix `blocking_*` and async (`.lock().await` / `.read().await`)
+//! acquisition of the same mutex within a single call path, and never call a
+//! `blocking_*` method — directly or transitively — from inside a
+//! `run_on_runtime` closure or any other future spawned on `_runtime`: both
+//! panic or deadlock, since tokio's blocking acquisition methods assume they
+//! are not themselves running inside the runtime they belong to.
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::client::{AO3Client, FetchProgress, ProgressHandle, new_progress_handle};
+use crate::client::AO3Client;
 use crate::error::AppError;
 use crate::models::*;
 use crate::storage::Storage;
 
 mod account;
+mod capabilities;
 mod connection;
 mod error;
 mod helpers;
@@ -15,12 +31,17 @@ mod listing;
 mod logs;
 mod prefs;
 mod records;
+mod recovery;
 mod social;
 mod whats_new;
 mod works;
 
+pub use self::capabilities::{CapabilityError, PlatformCapabilities};
 pub use self::error::*;
 pub use self::records::*;
+pub(crate) use self::recovery::with_recovery;
+pub use self::recovery::RetrySafety;
+pub use crate::events::OpKind;
 use self::helpers::*;
 
 #[derive(uniffi::Object)]
@@ -42,7 +63,6 @@ pub struct AO3App {
     tor_connected: Arc<std::sync::atomic::AtomicBool>,
     socks_port: Arc<std::sync::atomic::AtomicU32>,
     _runtime: Arc<tokio::runtime::Runtime>,
-    progress_handles: Arc<std::sync::Mutex<std::collections::HashMap<String, crate::client::ProgressHandle>>>,
     /// One age-based works census per check cycle: keeps a fresh install (or
     /// a long-idle app) from crawling every subscription's full listing in a
     /// single cycle. Evidence-based censuses (count mismatches) ignore this.
@@ -65,11 +85,16 @@ impl AO3App {
             };
             let want = !current;
 
-            let c = client.read().await;
-            let (state, new_record) = c
-                .set_user_moderation(&me, &target, kind, want, record_id.as_deref())
-                .await.map_err(AO3Error::from)?;
-            drop(c);
+            let (target_for_fetch, me_for_fetch) = (target.clone(), me.clone());
+            let (state, new_record) = with_recovery(client, storage.clone(), OpKind::Fetch { label: "moderation".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let (target, me) = (target_for_fetch.clone(), me_for_fetch.clone());
+                    let record_id = record_id.clone();
+                    async move {
+                        client.read().await.set_user_moderation(&me, &target, kind, want, record_id.as_deref())
+                            .await.map_err(AO3Error::from)
+                    }
+                }).await?;
 
             let s = storage.lock().await;
             if kind == "blocked" {
@@ -82,22 +107,21 @@ impl AO3App {
     }
 
     /// Shared harness for every one-page listing fetch (browse, search, tag,
-    /// author, series): registers a progress handle under `key`, runs `fetch`
-    /// on the runtime with the client's active progress set, caches every
-    /// returned work (save_work also harvests tags for autocomplete), and
-    /// clears the progress handle again. `fetch` returns
-    /// (works, has_next_page, total_pages, total_works).
+    /// author, series): runs `fetch` through the recovery engine (`key`
+    /// doubles as its `OpKind::Fetch` label — the same key these screens
+    /// already read their loading state by), caches every returned work
+    /// (save_work also harvests tags for autocomplete). `fetch` returns
+    /// (works, has_next_page, total_pages, total_works) and may run more
+    /// than once — see `with_recovery`.
     async fn run_listing_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<UPagedWorks, AO3Error>
     where
-        F: FnOnce(Arc<tokio::sync::RwLock<AO3Client>>) -> Fut + Send + 'static,
+        F: Fn(Arc<tokio::sync::RwLock<AO3Client>>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AO3Error>> + Send + 'static,
     {
-        let progress = self.register_progress(key);
-        let result = self.run_on_runtime(move |client, storage| async move {
-            client.read().await.set_active_progress(progress);
-            let fetched = fetch(client.clone()).await;
-            client.read().await.clear_active_progress();
-            let (works, has_next, total, found) = fetched?;
+        let kind = OpKind::Fetch { label: key.to_string() };
+        self.run_on_runtime(move |client, storage| async move {
+            let (works, has_next, total, found) =
+                with_recovery(client, storage.clone(), kind, RetrySafety::Idempotent, fetch).await?;
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             for w in &works { log_db("save_work", s.save_work(w)); }
@@ -108,19 +132,7 @@ impl AO3App {
                 total_pages: total,
                 total_works: found,
             })
-        }).await;
-        self.clear_progress(key);
-        result
-    }
-
-    fn register_progress(&self, key: &str) -> ProgressHandle {
-        let handle = new_progress_handle();
-        self.progress_handles.lock().unwrap().insert(key.to_string(), handle.clone());
-        handle
-    }
-
-    fn clear_progress(&self, key: &str) {
-        self.progress_handles.lock().unwrap().remove(key);
+        }).await
     }
 
     /// Run a closure on our tokio runtime with timeout and cancellation.

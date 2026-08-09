@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, send_error_message};
+use super::{AO3Client, BASE_URL, FailureKind};
 use super::audit::{ActiveRequestGuard, AuditCtx, redact_payload};
 use super::helpers::{comment_post_succeeded, urlencoded};
 
@@ -47,7 +47,7 @@ impl AO3Client {
                 .form(&params)
                 .send()
                 .await
-                .map_err(|e| AppError::NetworkError(send_error_message(&e)))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
 
             let status = resp.status().as_u16();
 
@@ -58,13 +58,19 @@ impl AO3Client {
 
             let final_url = resp.url().to_string();
             let body = resp.text().await
-                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
 
             Ok::<(bool, String, String, u16, usize), AppError>((has_cred_cookie, final_url, body, status, 0))
         }).await;
 
         let (has_cred_cookie, final_url, body, status, _) = match result {
-            Err(_) => { audit.record(0, 0, Some("timeout".to_string())); return Err(AppError::NetworkError("timeout".to_string())); }
+            // The whole round trip (connect through body) shares one
+            // deadline, so a manual timeout here can't prove whether AO3
+            // ever saw the request — treat it like a dead circuit.
+            Err(_) => {
+                audit.record(0, 0, Some("timeout".to_string()));
+                return Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() });
+            }
             Ok(Err(e)) => { audit.record(0, 0, Some(format!("{e}"))); return Err(e); }
             Ok(Ok(v)) => v,
         };
@@ -173,16 +179,29 @@ impl AO3Client {
                 .form(&form_params)
                 .send()
                 .await
-                .map_err(|e| AppError::NetworkError(send_error_message(&e)))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
             let status = resp.status().as_u16();
             let body = resp.text().await
-                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
             Ok::<(u16, String), AppError>((status, body))
         }).await;
 
         match result {
-            Err(_) => { audit.record(0, 0, Some("timeout".to_string())); Err(AppError::NetworkError("timeout".to_string())) }
+            // See the comment on login()'s equivalent branch: one deadline
+            // covers the whole round trip, so this is treated as connect-class.
+            Err(_) => {
+                audit.record(0, 0, Some("timeout".to_string()));
+                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
+            }
             Ok(Err(e)) => { audit.record(0, 0, Some(format!("{e}"))); Err(e) }
+            Ok(Ok((status, body))) if status >= 400 => {
+                // A non-success POST response (e.g. a Cloudflare 525 error
+                // page) must not be mistaken for a successful post whose
+                // content just doesn't match what the caller expected.
+                let detail = format!("HTTP {status} for {url}");
+                audit.record(status, body.len() as u64, Some(detail.clone()));
+                Err(AppError::Http { kind: FailureKind::from_status(status, None), detail })
+            }
             Ok(Ok((status, body))) => { audit.record(status, body.len() as u64, None); Ok(body) }
         }
     }
@@ -206,6 +225,16 @@ impl AO3Client {
             let already = body.contains("already left kudos");
             if status < 300 || already {
                 return Ok(true);
+            }
+            // A transient infrastructure failure disguised as a completed
+            // HTTP response (e.g. a Cloudflare 525 error page) is not AO3
+            // rejecting the kudos. Surface it as a typed failure so the
+            // recovery engine can rotate and retry — returning `Ok(false)`
+            // here (the original bug) is indistinguishable from a genuine
+            // rejection to every caller above this.
+            if matches!(status, 429 | 502 | 503 | 504 | 525) {
+                let kind = FailureKind::from_status(status, None);
+                return Err(AppError::Http { kind, detail: format!("HTTP {status} leaving kudos") });
             }
             if !refreshed {
                 refreshed = true;
@@ -243,17 +272,17 @@ impl AO3Client {
                 .form(&params)
                 .send()
                 .await
-                .map_err(|e| AppError::NetworkError(send_error_message(&e)))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
             let status = resp.status().as_u16();
             let body = resp.text().await
-                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
             Ok::<(u16, String), AppError>((status, body))
         }).await;
 
         match result {
             Err(_) => {
                 audit.record(0, 0, Some("timeout".to_string()));
-                Err(AppError::NetworkError("timeout".to_string()))
+                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
             }
             Ok(Err(e)) => {
                 audit.record(0, 0, Some(format!("{e}")));

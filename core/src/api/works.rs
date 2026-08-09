@@ -1,11 +1,15 @@
 use super::*;
 
+// Every `blocking_*` call below runs on Swift's calling thread, never on
+// `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
     pub async fn fetch_search_form(&self) -> Result<Vec<UFormField>, AO3Error> {
-        self.run_on_runtime(|client, _storage| async move {
-            let c = client.read().await;
-            let form = c.fetch_search_form().await.map_err(AO3Error::from)?;
+        self.run_on_runtime(|client, storage| async move {
+            let form = with_recovery(client, storage, OpKind::Fetch { label: "search_form".to_string() }, RetrySafety::Idempotent,
+                |client| async move {
+                    client.read().await.fetch_search_form().await.map_err(AO3Error::from)
+                }).await?;
             Ok(form.fields.into_iter().map(UFormField::from).collect())
         }).await
     }
@@ -14,12 +18,15 @@ impl AO3App {
     /// ("Pseud (Username)") — it's split here so URLs always carry the
     /// real account name; an explicit `pseud` wins over the byline's.
     pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("author_works", move |client| async move {
-            let c = client.read().await;
-            let (user, byline_pseud) = split_author_byline(&username);
-            let pseud = pseud.filter(|p| !p.is_empty()).or(byline_pseud);
-            let (works, has_next, total) = c.fetch_author_works(&user, pseud.as_deref(), page).await.map_err(AO3Error::from)?;
-            Ok((works, has_next, total, None))
+        self.run_listing_fetch("author_works", move |client| {
+            let (username, pseud) = (username.clone(), pseud.clone());
+            async move {
+                let c = client.read().await;
+                let (user, byline_pseud) = split_author_byline(&username);
+                let pseud = pseud.filter(|p| !p.is_empty()).or(byline_pseud);
+                let (works, has_next, total) = c.fetch_author_works(&user, pseud.as_deref(), page).await.map_err(AO3Error::from)?;
+                Ok((works, has_next, total, None))
+            }
         }).await
     }
 
@@ -41,64 +48,69 @@ impl AO3App {
 
     pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
-        self.run_listing_fetch("search", move |client| async move {
-            let c = client.read().await;
-            c.search_works_raw(&pairs, page).await.map_err(AO3Error::from)
+        self.run_listing_fetch("search", move |client| {
+            let pairs = pairs.clone();
+            async move {
+                client.read().await.search_works_raw(&pairs, page).await.map_err(AO3Error::from)
+            }
         }).await
     }
 
     pub async fn search_works(&self, params: USearchParams, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let search_params: SearchParams = params.into();
-        self.run_listing_fetch("search", move |client| async move {
-            let c = client.read().await;
-            let works = c.search_works(&search_params, page).await.map_err(AO3Error::from)?;
-            Ok((works, false, 1, None))
+        self.run_listing_fetch("search", move |client| {
+            let search_params = search_params.clone();
+            async move {
+                let works = client.read().await.search_works(&search_params, page).await.map_err(AO3Error::from)?;
+                Ok((works, false, 1, None))
+            }
         }).await.map(|p| p.works)
     }
 
     pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("tag_browse", move |client| async move {
-            let c = client.read().await;
-            c.search_by_tag(&tag, page).await.map_err(AO3Error::from)
+        self.run_listing_fetch("tag_browse", move |client| {
+            let tag = tag.clone();
+            async move {
+                client.read().await.search_by_tag(&tag, page).await.map_err(AO3Error::from)
+            }
         }).await
     }
 
     /// One page of the public collections index. Collections aren't cached
     /// in the DB — the parsed page goes straight back to the caller.
     pub async fn browse_collections(&self, page: u32) -> Result<UCollectionsPage, AO3Error> {
-        let progress = self.register_progress("collections");
-        let result = self.run_on_runtime(move |client, _storage| async move {
-            let c = client.read().await;
-            c.set_active_progress(progress);
-            let fetched = c.fetch_collections(page).await;
-            c.clear_active_progress();
-            let (collections, has_next, total) = fetched.map_err(AO3Error::from)?;
+        self.run_on_runtime(move |client, storage| async move {
+            let (collections, has_next, total) = with_recovery(
+                client, storage, OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.fetch_collections(page).await.map_err(AO3Error::from)
+                }).await?;
             Ok(UCollectionsPage {
                 collections: collections.into_iter().map(UCollection::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
             })
-        }).await;
-        self.clear_progress("collections");
-        result
+        }).await
     }
 
     /// One page of a collection's works, cached like every other listing.
     /// `name` is the collection's URL slug from UCollection.name.
     pub async fn fetch_collection_works(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("collection_works", move |client| async move {
-            let c = client.read().await;
-            c.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
+        self.run_listing_fetch("collection_works", move |client| {
+            let name = name.clone();
+            async move {
+                client.read().await.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
+            }
         }).await
     }
 
     pub async fn fetch_work_full(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
-        let progress = self.register_progress("work");
-        let result = self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            c.set_active_progress(progress);
-            let (summary, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
-            c.clear_active_progress();
+        self.run_on_runtime(move |client, storage| async move {
+            let (summary, chapters, kudos_names) = with_recovery(
+                client, storage.clone(), OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.get_work(work_id).await.map_err(AO3Error::from)
+                }).await?;
             let s = storage.lock().await;
             // Work + series + chapters land atomically.
             let tx = s.begin_tx().map_err(AO3Error::from)?;
@@ -108,9 +120,7 @@ impl AO3App {
             for ch in &chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
             log_db("commit work save", tx.commit());
             Ok(UWorkSummary::from(summary))
-        }).await;
-        self.clear_progress("work");
-        result
+        }).await
     }
 
     pub async fn fetch_work(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
@@ -118,12 +128,13 @@ impl AO3App {
     }
 
     pub async fn fetch_chapters(&self, work_id: u64) -> Result<Vec<UChapter>, AO3Error> {
-        let progress = self.register_progress("chapters");
-        let result = self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
+            let (_, chapters, kudos_names) = with_recovery(
+                client.clone(), storage.clone(), OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.get_work(work_id).await.map_err(AO3Error::from)
+                }).await?;
             let c = client.read().await;
-            c.set_active_progress(progress);
-            let (_, chapters, kudos_names) = c.get_work(work_id).await.map_err(AO3Error::from)?;
-            c.clear_active_progress();
             let s = storage.lock().await;
             record_kudos_if_listed(&s, work_id, &kudos_names);
             let tx = s.begin_tx().map_err(AO3Error::from)?;
@@ -134,15 +145,15 @@ impl AO3App {
             // need no preparatory request.
             persist_posting_credentials(&c, &s);
             Ok(chapters.into_iter().map(UChapter::from).collect())
-        }).await;
-        self.clear_progress("chapters");
-        result
+        }).await
     }
 
     pub async fn fetch_image(&self, url: String) -> Result<Vec<u8>, AO3Error> {
-        self.run_on_runtime(move |client, _storage| async move {
-            let c = client.read().await;
-            c.fetch_image(&url).await.map_err(AO3Error::from)
+        self.run_on_runtime(move |client, storage| async move {
+            with_recovery(client, storage, OpKind::Image, RetrySafety::Idempotent, move |client| {
+                let url = url.clone();
+                async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
+            }).await
         }).await
     }
 
@@ -184,9 +195,11 @@ impl AO3App {
                     }
                 }
             }
-            let c = client.read().await;
-            let bytes = c.fetch_image(&url).await.map_err(AO3Error::from)?;
-            drop(c);
+            let url_for_fetch = url.clone();
+            let bytes = with_recovery(client, storage.clone(), OpKind::Image, RetrySafety::Idempotent, move |client| {
+                let url = url_for_fetch.clone();
+                async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
+            }).await?;
             if max_bytes > 0 && bytes.len() as u64 > max_bytes {
                 log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
                 return Err(AO3Error::Network {
@@ -237,9 +250,12 @@ impl AO3App {
                         log_db("delete_cached_image", s.delete_cached_image(&chapter_image_key(&src)));
                     }
                 }
-                let c = client.read().await;
-                let result = c.fetch_image(&src).await;
-                drop(c);
+                let src_for_fetch = src.clone();
+                let result = with_recovery(client.clone(), storage.clone(), OpKind::Image, RetrySafety::Idempotent,
+                    move |client| {
+                        let src = src_for_fetch.clone();
+                        async move { client.read().await.fetch_image(&src).await.map_err(AO3Error::from) }
+                    }).await;
                 match result {
                     Ok(bytes) => {
                         if max_bytes > 0 && bytes.len() as u64 > max_bytes {
@@ -271,8 +287,12 @@ impl AO3App {
     /// suggestions.
     pub async fn autocomplete_tags_remote(&self, tag_type: String, term: String) -> Result<Vec<String>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let c = client.read().await;
-            let names = c.autocomplete(&tag_type, &term).await.map_err(AO3Error::from)?;
+            let (tag_type_for_fetch, term_for_fetch) = (tag_type.clone(), term.clone());
+            let names = with_recovery(client, storage.clone(), OpKind::Fetch { label: "autocomplete".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let (tag_type, term) = (tag_type_for_fetch.clone(), term_for_fetch.clone());
+                    async move { client.read().await.autocomplete(&tag_type, &term).await.map_err(AO3Error::from) }
+                }).await?;
             let s = storage.lock().await;
             log_db("mark_tags_canonical", s.mark_tags_canonical(&tag_type, &names));
             Ok(names)

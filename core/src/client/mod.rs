@@ -10,6 +10,7 @@ use crate::error::AppError;
 mod audit;
 mod auth;
 mod circuit;
+mod failure;
 mod helpers;
 mod ops;
 #[cfg(feature = "tor")]
@@ -18,6 +19,7 @@ mod socks;
 pub use audit::{ActiveRequest, ActiveRequestGuard, RequestRecord, active_requests_snapshot,
                 drain_request_records, now_ms, push_request_record, redact_payload};
 pub use circuit::{CircuitHopInfo, current_circuit_hops};
+pub use failure::FailureKind;
 pub use helpers::sniff_image_kind;
 
 use audit::AuditCtx;
@@ -49,40 +51,12 @@ enum Transport {
 // AO3Client
 // ---------------------------------------------------------------------------
 
-/// Progress state for a fetch operation.
-#[derive(Debug, Clone)]
-pub struct FetchProgress {
-    pub bytes_received: u64,
-    pub total_bytes: Option<u64>,
-    pub status: FetchStatus,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FetchStatus {
-    Idle,
-    Connecting,
-    Downloading,
-    Complete,
-    Failed,
-}
-
-pub type ProgressHandle = Arc<std::sync::Mutex<FetchProgress>>;
-
-pub fn new_progress_handle() -> ProgressHandle {
-    Arc::new(std::sync::Mutex::new(FetchProgress {
-        bytes_received: 0,
-        total_bytes: None,
-        status: FetchStatus::Idle,
-    }))
-}
-
 /// HTTP client for fetching AO3 pages, with optional Tor transport.
 pub struct AO3Client {
     transport: Transport,
     cookie_jar: Arc<reqwest::cookie::Jar>,
     last_request: Arc<Mutex<Option<Instant>>>,
     timeout_secs: Arc<std::sync::atomic::AtomicU64>,
-    active_progress: Arc<std::sync::Mutex<Option<ProgressHandle>>>,
     socks_port: Option<u16>,
     /// Posting credentials harvested opportunistically from pages fetched
     /// for content — so kudos/comments POST directly, with no preparatory
@@ -131,6 +105,15 @@ impl AO3Client {
         self.socks_port
     }
 
+    /// Abort this client's SOCKS accept-loop task, if any. Must be called
+    /// before the client is replaced or dropped — an `AbortHandle` dropped
+    /// without `.abort()` leaves the listener port and accept loop running.
+    pub(crate) fn stop_socks_proxy(&mut self) {
+        if let Some(old) = self.socks_proxy_task.take() {
+            old.abort();
+        }
+    }
+
     // -- Constructors -------------------------------------------------------
 
     /// Create a client using direct HTTP (for development/testing).
@@ -141,7 +124,6 @@ impl AO3Client {
             cookie_jar: jar,
             last_request: Arc::new(Mutex::new(None)),
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
-            active_progress: Arc::new(std::sync::Mutex::new(None)),
             socks_port: None,
             csrf_token: Arc::new(std::sync::Mutex::new(None)),
             pseud_id: Arc::new(std::sync::Mutex::new(None)),
@@ -218,7 +200,6 @@ impl AO3Client {
             cookie_jar: jar,
             last_request: Arc::new(Mutex::new(None)),
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
-            active_progress: Arc::new(std::sync::Mutex::new(None)),
             socks_port: Some(port),
             csrf_token: Arc::new(std::sync::Mutex::new(None)),
             pseud_id: Arc::new(std::sync::Mutex::new(None)),
@@ -228,17 +209,16 @@ impl AO3Client {
 
     // -- Internal -----------------------------------------------------------
 
-    pub async fn fetch_ajax_with_progress(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>) -> Result<String, AppError> {
-        self.fetch_with_progress_inner(url, timeout_secs, progress, true).await
+    pub async fn fetch_ajax_with_progress(&self, url: &str, timeout_secs: u64) -> Result<String, AppError> {
+        self.fetch_with_progress_inner(url, timeout_secs, true).await
     }
 
-    pub async fn fetch_with_progress(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>) -> Result<String, AppError> {
-        self.fetch_with_progress_inner(url, timeout_secs, progress, false).await
+    pub async fn fetch_with_progress(&self, url: &str, timeout_secs: u64) -> Result<String, AppError> {
+        self.fetch_with_progress_inner(url, timeout_secs, false).await
     }
 
-    async fn fetch_with_progress_inner(&self, url: &str, timeout_secs: u64, progress: Option<ProgressHandle>, ajax: bool) -> Result<String, AppError> {
+    async fn fetch_with_progress_inner(&self, url: &str, timeout_secs: u64, ajax: bool) -> Result<String, AppError> {
         let _active = ActiveRequestGuard::new(if ajax { "GET (ajax)" } else { "GET" }, url);
-        let mut retries = 0;
         let header_timeout = std::time::Duration::from_secs(timeout_secs);
         let body_timeout = std::time::Duration::from_secs(timeout_secs);
         let fetch_start = std::time::Instant::now();
@@ -247,19 +227,22 @@ impl AO3Client {
         // Set after a first 429: the retry goes out with shift+refresh
         // (no-cache) headers to punch through a cached 429 at the edge.
         let mut hard_reload = false;
+        // Reports against the ambient operation set by `with_recovery`
+        // (`events::scoped`) — a no-op outside that scope, e.g. in tests.
+        // This is what lets code down here report status without a
+        // progress handle threaded through every call in between.
         macro_rules! progress {
-            ($status:expr, $recv:expr, $total:expr) => {
-                if let Some(ref p) = progress {
-                    let mut lock = p.lock().unwrap();
-                    lock.status = $status;
-                    lock.bytes_received = $recv;
-                    lock.total_bytes = $total;
+            ($phase:expr, $recv:expr, $total:expr) => {
+                if let Some(id) = crate::events::current_op() {
+                    crate::events::emit(crate::events::CoreEvent::OperationProgress {
+                        id, phase: $phase, bytes: $recv, total: $total,
+                    });
                 }
             };
         }
         loop {
             self.enforce_rate_limit().await;
-            progress!(FetchStatus::Connecting, 0, None);
+            progress!(crate::events::OpPhase::Connecting, 0, None);
 
             // Check cookies before sending
             let cookies = self.get_session_cookies();
@@ -285,15 +268,15 @@ impl AO3Client {
             let response = match tokio::time::timeout(header_timeout, req.send()).await {
                 Err(_) => {
                     log_debug!("http"," TIMEOUT send phase after {:?} total={:?} {}", send_start.elapsed(), fetch_start.elapsed(), url);
-                    progress!(FetchStatus::Failed, 0, None);
+                    progress!(crate::events::OpPhase::Failed, 0, None);
                     audit.record(0, 0, Some("timeout".to_string()));
-                    return Err(AppError::NetworkError("timeout".to_string()));
+                    return Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() });
                 }
                 Ok(Err(e)) => {
                     log_debug!("http"," ERROR send phase after {:?}: {e} {}", send_start.elapsed(), url);
-                    progress!(FetchStatus::Failed, 0, None);
+                    progress!(crate::events::OpPhase::Failed, 0, None);
                     audit.record(0, 0, Some(format!("{e}")));
-                    return Err(AppError::NetworkError(send_error_message(&e)));
+                    return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") });
                 }
                 Ok(Ok(r)) => {
                     log_debug!("http"," HEADERS in {:?} status={} {}", send_start.elapsed(), r.status(), url);
@@ -304,7 +287,7 @@ impl AO3Client {
             // Detect stale session — AO3 redirects to login page
             let final_url = response.url().to_string();
             if final_url.contains("/users/login") && !url.contains("/users/login") {
-                progress!(FetchStatus::Failed, 0, None);
+                progress!(crate::events::OpPhase::Failed, 0, None);
                 audit.record(response.status().as_u16(), 0, Some("session_expired".to_string()));
                 return Err(AppError::SessionExpired);
             }
@@ -324,40 +307,39 @@ impl AO3Client {
             if code == 429 && !hard_reload {
                 hard_reload = true;
                 log_info!("http", " 429 for {} — retrying with no-cache (shift+refresh)", url);
-                progress!(FetchStatus::Connecting, 0, None);
+                progress!(crate::events::OpPhase::Connecting, 0, None);
                 continue;
             }
             if code == 429 {
                 let retry_after = response.headers().get("retry-after")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().parse::<u64>().ok());
+                    .and_then(|v| v.trim().parse::<u32>().ok());
                 let detail = match retry_after {
                     Some(secs) => format!("HTTP 429 retry_after={secs}"),
                     None => "HTTP 429".to_string(),
                 };
                 log_info!("http", " 429 rate-limited ({}) for {}",
                           retry_after.map_or("no retry-after".to_string(), |s| format!("{s}s")), url);
-                progress!(FetchStatus::Failed, 0, None);
+                progress!(crate::events::OpPhase::Failed, 0, None);
                 audit.record(code, 0, Some(detail.clone()));
-                return Err(AppError::NetworkError(detail));
+                return Err(AppError::Http {
+                    kind: FailureKind::from_status(code, retry_after),
+                    detail,
+                });
             }
-            if (code == 525 || code == 503) && retries < 5 {
-                retries += 1;
-                progress!(FetchStatus::Connecting, 0, None);
-                let delay = std::cmp::min(retries as u64 * 2, 10);
-                log_debug!("http"," {} retry {}/5, waiting {}s for {}", code, retries, delay, url);
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                continue;
-            }
+            // Retry policy (rotation on 525/429/403, backoff on 502/503/504)
+            // lives entirely in the recovery engine now — this path returns
+            // the classified failure on the first non-success status.
             if !status.is_success() {
-                progress!(FetchStatus::Failed, 0, None);
-                audit.record(code, 0, Some(format!("HTTP {status}")));
-                return Err(AppError::NetworkError(format!("HTTP {status} for {url}")));
+                progress!(crate::events::OpPhase::Failed, 0, None);
+                let detail = format!("HTTP {status} for {url}");
+                audit.record(code, 0, Some(detail.clone()));
+                return Err(AppError::Http { kind: FailureKind::from_status(code, None), detail });
             }
 
             // Phase 2: Read body in chunks with idle timeout per chunk
             let total_bytes = response.content_length();
-            progress!(FetchStatus::Downloading, 0, total_bytes);
+            progress!(crate::events::OpPhase::Downloading, 0, total_bytes);
 
             let mut bytes_received: u64 = 0;
             let mut body_bytes = Vec::new();
@@ -366,30 +348,33 @@ impl AO3Client {
             loop {
                 match tokio::time::timeout(body_timeout, response.chunk()).await {
                     Err(_) => {
-                        progress!(FetchStatus::Failed, bytes_received, total_bytes);
+                        progress!(crate::events::OpPhase::Failed, bytes_received, total_bytes);
                         audit.record(code, bytes_received, Some("timeout".to_string()));
-                        return Err(AppError::NetworkError("timeout".to_string()));
+                        // Headers already arrived — the request definitely
+                        // reached the origin, unlike a header-phase timeout.
+                        return Err(AppError::Http { kind: FailureKind::ResponseTimeout, detail: "timeout".to_string() });
                     }
                     Ok(Err(e)) => {
-                        progress!(FetchStatus::Failed, bytes_received, total_bytes);
-                        audit.record(code, bytes_received, Some(format!("Failed to read body: {e}")));
-                        return Err(AppError::NetworkError(format!("Failed to read body: {e}")));
+                        progress!(crate::events::OpPhase::Failed, bytes_received, total_bytes);
+                        let detail = format!("Failed to read body: {e}");
+                        audit.record(code, bytes_received, Some(detail.clone()));
+                        return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail });
                     }
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(chunk))) => {
                         bytes_received += chunk.len() as u64;
                         body_bytes.extend_from_slice(&chunk);
-                        progress!(FetchStatus::Downloading, bytes_received, total_bytes);
+                        progress!(crate::events::OpPhase::Downloading, bytes_received, total_bytes);
                     }
                 }
             }
 
-            progress!(FetchStatus::Complete, bytes_received, total_bytes);
+            progress!(crate::events::OpPhase::Complete, bytes_received, total_bytes);
             log_debug!("http"," DONE {} bytes in {:?} {}", bytes_received, fetch_start.elapsed(), url);
             audit.record(code, bytes_received, None);
 
             let body = String::from_utf8(body_bytes)
-                .map_err(|e| AppError::NetworkError(format!("Invalid UTF-8: {e}")))?;
+                .map_err(|e| AppError::Http { kind: FailureKind::Malformed, detail: format!("Invalid UTF-8: {e}") })?;
 
             self.harvest_credentials(&body);
             return Ok(body);
@@ -442,22 +427,12 @@ impl AO3Client {
 
     async fn fetch(&self, url: &str) -> Result<String, AppError> {
         let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
-        let progress = self.active_progress.lock().unwrap().clone();
-        self.fetch_with_progress(url, timeout, progress).await
+        self.fetch_with_progress(url, timeout).await
     }
 
     async fn fetch_ajax(&self, url: &str) -> Result<String, AppError> {
         let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
-        let progress = self.active_progress.lock().unwrap().clone();
-        self.fetch_ajax_with_progress(url, timeout, progress).await
-    }
-
-    pub fn set_active_progress(&self, handle: ProgressHandle) {
-        *self.active_progress.lock().unwrap() = Some(handle);
-    }
-
-    pub fn clear_active_progress(&self) {
-        *self.active_progress.lock().unwrap() = None;
+        self.fetch_ajax_with_progress(url, timeout).await
     }
 
     /// Switch back from Tor to a direct HTTP client, preserving cookies.
@@ -489,9 +464,7 @@ impl AO3Client {
 
         self.transport = Transport::Direct(client);
         self.socks_port = None;
-        if let Some(old) = self.socks_proxy_task.take() {
-            old.abort();
-        }
+        self.stop_socks_proxy();
         // The captured circuit path belongs to the transport we just tore
         // down — never show it for a direct connection.
         circuit::clear_current_circuit_hops();
@@ -585,9 +558,7 @@ impl AO3Client {
         let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
         // Stop the previous proxy's accept loop before swapping it out —
         // otherwise every rotation orphans a listener port and a task.
-        if let Some(old) = self.socks_proxy_task.take() {
-            old.abort();
-        }
+        self.stop_socks_proxy();
         self.transport = Transport::Tor { client, _tor: isolated };
         self.cookie_jar = new_jar;
         self.socks_port = Some(local_addr.port());
@@ -616,25 +587,6 @@ impl AO3Client {
             }
         }
         *last = Some(Instant::now());
-    }
-}
-
-/// User-facing message for a reqwest send-phase error. Connect-class
-/// failures (reqwest's internal 10s `connect_timeout`, or a TCP/TLS/SOCKS
-/// connect failure on a dead circuit) must produce a message that STARTS
-/// WITH "timeout": the Swift retry layer only rotates the circuit when the
-/// error text contains that word, and reqwest 0.12's `Display` for send
-/// errors ("error sending request for url (…)") never includes it — the
-/// "timed out" detail lives in the source chain, which `{e}` doesn't print.
-/// The full detail is appended so nothing is lost; audit rows keep recording
-/// the raw error separately at each call site.
-pub(crate) fn send_error_message(e: &reqwest::Error) -> String {
-    if e.is_timeout() || e.is_connect() {
-        log_info!("tor", " connect-class send failure (is_timeout={} is_connect={}): {e}",
-                  e.is_timeout(), e.is_connect());
-        format!("timeout: {e}")
-    } else {
-        format!("{e}")
     }
 }
 

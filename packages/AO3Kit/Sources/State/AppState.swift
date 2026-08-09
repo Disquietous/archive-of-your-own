@@ -102,6 +102,8 @@ final class AppState {
     var subscriptionCheckRemaining: Int = 0
 
     init() {
+        bridge.recoveryObserver = RecoveryObserver(state: self)
+        bridge.recoveryCapabilities = RecoveryCapabilities()
         if bridge.launchState == .autoUnlock {
             _ = bridge.open()
         }
@@ -126,6 +128,15 @@ final class AppState {
     var torConnectFailed = false
     var showTorConnectOverlay = false
     var needsReauth = false
+
+    // Connection-recovery projection (AppState+Recovery.swift) — Swift never
+    // decides whether to rotate/retry; this only reflects what the Rust
+    // recovery engine is doing right now.
+    var currentRecovery: RecoveryStatus?
+    @ObservationIgnored var recoveringOperationID: UInt64?
+    var currentProgress: ProgressStatus?
+    @ObservationIgnored var progressOperationID: UInt64?
+    @ObservationIgnored var operationKinds: [UInt64: OpKind] = [:]
 
     // Fetched work details from live data
     var fetchedWorks: [String: Work] = [:]
@@ -159,6 +170,10 @@ final class AppState {
 
     /// Work ID of the last kudos POST that failed, for inline error display.
     var kudosFailedWorkID: String?
+    /// True when that failure was a transport fault (offer Retry) rather
+    /// than AO3 genuinely rejecting the kudos (retrying would just repeat
+    /// the rejection).
+    var kudosFailedIsRetryable = false
     /// Kudos POSTs in flight — the heart shows faded until AO3 confirms.
     var kudosPendingWorkIDs: Set<String> = []
 
@@ -317,6 +332,8 @@ final class AppState {
             switch ao3 {
             case .Network(let message), .Parse(let message),
                  .Storage(let message), .NotFound(let message):
+                return message
+            case .Http(_, let message):
                 return message
             case .Cancelled:
                 return "Cancelled."
