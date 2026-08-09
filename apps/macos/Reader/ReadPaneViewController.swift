@@ -596,6 +596,11 @@ final class ReadPaneViewController: NSViewController {
         immersiveExit.contentTintColor = theme.nsInk2
         immersiveExit.isHidden = !model.immersive
 
+        // Only the work-detail branch places an after-title view; clearing
+        // here keeps the list branches from inheriting the detail pane's
+        // Start Reading button.
+        toolbar.setAfterTitle([])
+
         // Subscriptions drill-in: an author subscription's works, without
         // ever leaving the Subscriptions section.
         if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
@@ -724,7 +729,6 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .inbox, let item = appState.selectedInboxItem {
             toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
             toolbar.setLeading([])
-            toolbar.setAfterTitle([])
             toolbar.setTrailing([])
             let mode = Mode.inboxThread(item.commentId)
             show(mode: mode)
@@ -737,7 +741,6 @@ final class ReadPaneViewController: NSViewController {
         guard let work = model.selectedWork else {
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
-            toolbar.setAfterTitle([])
             toolbar.setTrailing([])
             show(mode: .empty)
             return
@@ -757,7 +760,6 @@ final class ReadPaneViewController: NSViewController {
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         if reading {
-            toolbar.setAfterTitle([])
             toolbar.setTrailing([settingsButton, immersiveButton, chaptersButton,
                                  readerRefreshButton(), commentsButton, bookmarkButton])
         } else {

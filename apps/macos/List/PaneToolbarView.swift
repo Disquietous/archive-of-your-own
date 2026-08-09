@@ -16,6 +16,12 @@ final class PaneToolbarView: NSView {
 
         titleLabel.lineBreakMode = .byTruncatingTail
         subLabel.lineBreakMode = .byTruncatingTail
+        // 499: below NSWindow's stay-put priority (500) so a long title can
+        // never force the window wider, but above the stack's internal
+        // low-priority forces — at very low values the label collapses to
+        // minimum even when free space is available.
+        titleLabel.setContentCompressionResistancePriority(.init(499), for: .horizontal)
+        subLabel.setContentCompressionResistancePriority(.init(499), for: .horizontal)
 
         let titleStack = NSStackView(views: [titleLabel, subLabel])
         titleStack.orientation = .vertical
