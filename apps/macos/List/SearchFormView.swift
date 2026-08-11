@@ -15,9 +15,7 @@ struct SearchFormView: View {
         @Bindable var search = model.search
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                if !search.savedSearches.isEmpty {
-                    SavedSearchField(theme: theme, appState: appState, search: search)
-                }
+                SavedSearchField(theme: theme, appState: appState, search: search)
                 queryField
 
                 if search.isLoadingForm {
@@ -300,7 +298,8 @@ struct SearchFormView: View {
 /// loaded from the database. Picking one prefills the whole criteria form
 /// (ready to tweak and run) and shows its name in the field; clearing the
 /// text only clears the field, never the form. Each suggestion row grows a
-/// small × on hover to delete that saved search.
+/// small × on hover to delete that saved search. The Save button at the end
+/// of the row persists the current criteria under the typed name.
 private struct SavedSearchField: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
@@ -311,6 +310,12 @@ private struct SavedSearchField: View {
 
     private var term: String {
         input.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Names are unique in the database (case-insensitively) — saving to an
+    /// existing name overwrites that search, so the button reads Update.
+    private var nameExists: Bool {
+        search.savedSearches.contains { $0.name.caseInsensitiveCompare(term) == .orderedSame }
     }
 
     /// Saved searches are a short, already-loaded list — unlike the huge
@@ -336,6 +341,20 @@ private struct SavedSearchField: View {
                     .font(Font(MacFont.ui(13)))
                     .foregroundStyle(theme.ink)
                     .focused($focused)
+                Button(nameExists ? "Update" : "Save") {
+                    search.saveCurrentSearch(named: term, appState: appState)
+                    focused = false
+                }
+                .buttonStyle(.plain)
+                .font(Font(MacFont.ui(11.5, weight: .bold)))
+                .foregroundStyle(term.isEmpty ? theme.ink3 : theme.accent)
+                .disabled(term.isEmpty)
+                // Never let the label truncate when it flips Save → Update;
+                // the text field gives up the width instead.
+                .fixedSize()
+                .help(nameExists
+                    ? "Update this saved search with the current criteria"
+                    : "Save the current criteria under this name")
             }
             .padding(.horizontal, 10)
             .frame(height: 34)

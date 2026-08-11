@@ -302,6 +302,16 @@ impl Storage {
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
+                -- Names are unique (case-insensitively); drop older duplicates
+                -- (keep the newest) from databases created before the index
+                -- existed, and the short-lived case-sensitive index.
+                DELETE FROM saved_searches WHERE id NOT IN (
+                    SELECT MAX(id) FROM saved_searches GROUP BY name COLLATE NOCASE
+                );
+                DROP INDEX IF EXISTS idx_saved_searches_name;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_searches_name_nocase
+                    ON saved_searches(name COLLATE NOCASE);
+
                 CREATE TABLE IF NOT EXISTS app_state (
                     key   TEXT PRIMARY KEY,
                     value TEXT NOT NULL

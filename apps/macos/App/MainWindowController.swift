@@ -53,8 +53,10 @@ final class MainWindowController: NSWindowController {
         showingGate = gate
         let frame = window.frame
         if gate {
-            // Auto-lock drops the whole runtime (Tor included) — re-arm the
-            // auto-connect so unlocking brings the circuit back up.
+            // Locking normally keeps the circuit alive (the transport moves
+            // to a tor-only holder), so the re-armed auto-connect is a no-op
+            // after unlock; it only reconnects if the hand-off failed and
+            // the circuit really did drop.
             torAutoStarted = false
             window.contentViewController = NSHostingController(
                 rootView: LaunchGateView(theme: theme, appState: appState))
@@ -106,6 +108,17 @@ final class MainWindowController: NSWindowController {
               UserDefaults.standard.bool(forKey: "useTorByDefault"),
               !appState.torStatus.isConnected else { return }
         torAutoStarted = true
-        Task { await appState.connectTor() }
+        // Block the whole app behind the connect overlay until the circuit
+        // is up (bootstrap + health check + Cloudflare). Without this the
+        // overlay only appeared if some fetch happened to race the connect —
+        // launch-time gating must not depend on that accident. On failure
+        // the overlay stays up in its error state (Retry / Cancel).
+        appState.showTorConnectOverlay = true
+        Task {
+            await appState.connectTor()
+            if appState.torStatus.isConnected && !appState.torConnectFailed {
+                appState.showTorConnectOverlay = false
+            }
+        }
     }
 }

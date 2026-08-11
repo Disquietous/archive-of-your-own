@@ -44,6 +44,39 @@ impl AO3App {
         })
     }
 
+    /// Open a database while carrying over the transport — client (Tor
+    /// circuit, cookie jar), runtime, and connection state — from an
+    /// existing instance. Used across lock/unlock: locking must drop the
+    /// SQLCipher key material (the storage), but tearing down the circuit
+    /// with it forced a full Tor re-bootstrap on every unlock. The two
+    /// instances share the client; the caller drops the old one after.
+    #[uniffi::constructor]
+    pub fn with_transport_from(previous: Arc<AO3App>, db_path: String, db_passphrase: String) -> Result<Self, AO3Error> {
+        let storage = Storage::open(&db_path, &db_passphrase)
+            .map_err(AO3Error::from)?;
+        crate::init_logging(&db_path, &db_passphrase);
+
+        let state_dir = std::path::Path::new(&db_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| db_path.clone());
+
+        // No events::init here: the shared runtime already registered its
+        // handle when `previous` (or its ancestor) was constructed.
+        Ok(AO3App {
+            client: previous.client.clone(),
+            storage: Arc::new(Mutex::new(storage)),
+            state_dir,
+            timeout_secs: previous.timeout_secs.clone(),
+            active_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            tor_connected: previous.tor_connected.clone(),
+            socks_port: previous.socks_port.clone(),
+            _runtime: previous._runtime.clone(),
+            census_cycle_used: previous.census_cycle_used.clone(),
+        })
+    }
+
     /// Register the single process-wide connection-recovery event observer.
     /// Swift calls this once at startup; subsequent calls replace the
     /// previous observer. Pass `None` to stop delivering events.

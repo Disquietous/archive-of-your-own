@@ -453,8 +453,9 @@ final class WorkRowCellView: NSTableCellView {
 
         tagsClip.isHidden = work.tags.isEmpty
         if !work.tags.isEmpty {
+            let sortedTags = work.tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
             let tags = NSMutableAttributedString()
-            for (index, tag) in work.tags.enumerated() {
+            for (index, tag) in sortedTags.enumerated() {
                 if index > 0 {
                     tags.append(NSAttributedString(string: "  ", attributes: [.font: MacFont.ui(10.5)]))
                 }

@@ -372,7 +372,9 @@ impl Storage {
 
     pub fn save_search(&self, name: &str, params_json: &str) -> Result<(), AppError> {
         self.conn.execute(
-            "INSERT INTO saved_searches (name, params_json) VALUES (?1, ?2)",
+            "INSERT INTO saved_searches (name, params_json) VALUES (?1, ?2)
+             ON CONFLICT(name COLLATE NOCASE) DO UPDATE
+                 SET name = excluded.name, params_json = excluded.params_json",
             params![name, params_json],
         ).map_err(map_sql)?;
         Ok(())

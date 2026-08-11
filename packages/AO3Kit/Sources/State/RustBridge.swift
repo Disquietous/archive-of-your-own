@@ -87,7 +87,15 @@ final class RustBridge {
         }
         let dbPath = Self.databasePath()
         do {
-            app = try Ao3App(dbPath: dbPath, dbPassphrase: key)
+            // A tor-only holder (pre-unlock bootstrap, or a lock that kept
+            // the circuit alive) hands its transport to the real runtime —
+            // no re-bootstrap. Only cleared on success: a wrong password
+            // must not cost the circuit.
+            if let carrier = torOnlyApp {
+                app = try Ao3App.withTransportFrom(previous: carrier, dbPath: dbPath, dbPassphrase: key)
+            } else {
+                app = try Ao3App(dbPath: dbPath, dbPassphrase: key)
+            }
             torOnlyApp = nil
             isInitialized = true
             connectionError = nil
@@ -99,21 +107,33 @@ final class RustBridge {
         }
     }
 
-    /// Lock the library: persist session cookies, then drop the runtime —
-    /// the SQLCipher key material goes with it and launchState returns to
-    /// .locked, which sends the window back to the unlock gate. Only
-    /// meaningful for password-protected libraries (an auto-key DB would
-    /// simply reopen itself).
+    /// Lock the library: persist session cookies, move the live transport
+    /// (Tor circuit, cookie jar) into a tor-only holder on a throwaway
+    /// database, then drop the runtime — the SQLCipher key material goes
+    /// with it and launchState returns to .locked, which sends the window
+    /// back to the unlock gate. The circuit survives the lock, so unlocking
+    /// doesn't re-bootstrap Tor. Only meaningful for password-protected
+    /// libraries (an auto-key DB would simply reopen itself).
     func lock() {
         guard hasDbPassword, isInitialized else { return }
         saveSessionCookies()
+        if let app {
+            let tempPath = Self.databasePath() + ".tor-temp"
+            try? FileManager.default.removeItem(atPath: tempPath)
+            try? FileManager.default.removeItem(atPath: tempPath + "-wal")
+            try? FileManager.default.removeItem(atPath: tempPath + "-shm")
+            torOnlyApp = try? Ao3App.withTransportFrom(previous: app, dbPath: tempPath, dbPassphrase: UUID().uuidString)
+            registerRecoveryHooks()
+        }
         app = nil
-        torOnlyApp = nil
         isInitialized = false
-        torStatus = .disconnected
-        torHasConnectedOnce = false
-        cloudflareReady = false
-        circuitHops = []
+        if torOnlyApp == nil {
+            // Transport hand-off failed — fall back to the full teardown.
+            torStatus = .disconnected
+            torHasConnectedOnce = false
+            cloudflareReady = false
+            circuitHops = []
+        }
     }
 
     /// Create a new database with a user-chosen password.
@@ -256,6 +276,11 @@ final class RustBridge {
     private func ensureRuntime() {
         guard app == nil && torOnlyApp == nil else { return }
         let dbPath = Self.databasePath() + ".tor-temp"
+        // A leftover temp DB from a previous run can't be opened with a
+        // fresh random key — clear it first.
+        try? FileManager.default.removeItem(atPath: dbPath)
+        try? FileManager.default.removeItem(atPath: dbPath + "-wal")
+        try? FileManager.default.removeItem(atPath: dbPath + "-shm")
         let key = UUID().uuidString
         torOnlyApp = try? Ao3App(dbPath: dbPath, dbPassphrase: key)
         registerRecoveryHooks()

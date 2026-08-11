@@ -100,7 +100,8 @@ struct ContentBlockRenderer {
 
     private func append(_ block: ParsedContentBlock, to result: NSMutableAttributedString, indentLevel: Int) {
         switch block {
-        case .paragraph(let inlines):
+        case .paragraph(let rawInlines):
+            let inlines = Self.collapseDoubleBreaks(rawInlines)
             let text = renderInlines(inlines, baseFont: bodyFont, baseColor: inkColor)
             if text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // Whitespace-only paragraphs are intentional blank space —
@@ -326,6 +327,45 @@ struct ContentBlockRenderer {
         case .lineBreak:
             return NSAttributedString(string: "\n", attributes: [.font: font, .foregroundColor: color])
         }
+    }
+
+    /// AO3 authors separate lines with <br><br>; a browser shows that as a
+    /// single blank line. Rendered naively each "\n" ends an attributed-string
+    /// paragraph and collects paragraphSpacing, so a pair reads as two blank
+    /// lines. Replace each run of 2+ breaks (whitespace-only text between
+    /// them is invisible) with a paragraph end plus a U+2028 line separator —
+    /// the following line starts blank, so the gap is exactly one empty line.
+    private static func collapseDoubleBreaks(_ inlines: [ParsedInlineContent]) -> [ParsedInlineContent] {
+        var out: [ParsedInlineContent] = []
+        var i = 0
+        while i < inlines.count {
+            guard case .lineBreak = inlines[i] else {
+                out.append(inlines[i])
+                i += 1
+                continue
+            }
+            var breaks = 1
+            var lastBreak = i
+            var j = i + 1
+            scan: while j < inlines.count {
+                switch inlines[j] {
+                case .lineBreak:
+                    breaks += 1
+                    lastBreak = j
+                    j += 1
+                case .text(let value) where value.trimmingCharacters(in: .whitespaces).isEmpty:
+                    j += 1
+                default:
+                    break scan
+                }
+            }
+            out.append(.lineBreak)
+            if breaks >= 2 {
+                out.append(.text(value: "\u{2028}"))
+            }
+            i = lastBreak + 1
+        }
+        return out
     }
 
     /// Recursive count of explicit line breaks in an inline tree.

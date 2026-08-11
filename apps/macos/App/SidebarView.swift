@@ -236,13 +236,14 @@ struct SidebarView: View {
                 }
             } else {
                 // The real path: one chip per node, role icon plus the
-                // relay's country code (or its IP when GeoIP has no entry).
+                // relay's country code (or "--" when GeoIP has no entry —
+                // anything longer than two characters blows out the pill).
                 HStack(spacing: 4) {
                     ForEach(Array(hops.enumerated()), id: \.offset) { _, hop in
                         HStack(spacing: 3) {
                             Image(systemName: Self.roleIcon(hop.role))
                                 .font(.system(size: 8, weight: .semibold))
-                            Text(hop.country.isEmpty ? hop.address : hop.country.uppercased())
+                            Text(hop.country.isEmpty ? "--" : hop.country.uppercased())
                                 .font(Font(MacFont.ui(10, weight: .bold)))
                                 .kerning(0.3)
                         }
@@ -269,11 +270,13 @@ struct SidebarView: View {
     }
 
     /// The generic three-hop circuit shown before any stream has run on the
-    /// current circuit: roles only — the real nodes appear once traffic flows.
+    /// current circuit: role icons with "--" placeholder chips (country-code
+    /// width — longer text blows out the pill) — the real nodes appear once
+    /// traffic flows.
     static let genericHops: [(icon: String, chip: String, label: String)] = [
-        ("shield.lefthalf.filled", "GUARD", "Guard"),
-        ("arrow.triangle.swap", "RELAY", "Middle relay"),
-        ("arrow.up.forward", "EXIT", "Exit"),
+        ("shield.lefthalf.filled", "--", "Guard"),
+        ("arrow.triangle.swap", "--", "Middle relay"),
+        ("arrow.up.forward", "--", "Exit"),
     ]
 
     /// SF Symbol for a hop role reported by the Rust core.

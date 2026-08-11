@@ -474,26 +474,6 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    private func saveSearchToolButton() -> ToolButton {
-        ToolButton(theme: theme, symbol: "star", tooltip: "Save this search") { [weak self] in
-            guard let self else { return }
-            let alert = NSAlert()
-            alert.messageText = "Save Search"
-            alert.informativeText = "The current criteria will appear under Saved Searches in the sidebar."
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-            field.placeholderString = "Name"
-            field.stringValue = model.search.queryText
-            alert.accessoryView = field
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Cancel")
-            alert.window.initialFirstResponder = field
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return }
-            model.search.saveCurrentSearch(named: name, appState: appState)
-        }
-    }
-
     private func reloadCriteriaButton() -> ToolButton {
         let button = reloadCriteriaBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                      tooltip: "Reload search criteria from AO3") { [weak self] in
@@ -719,8 +699,8 @@ final class ReadPaneViewController: NSViewController {
                 toolbar.configure(title: "Search",
                                   sub: search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
                 toolbar.setLeading([])
-                toolbar.setTrailing([searchGoButton(), saveSearchToolButton(),
-                                     reloadCriteriaButton(), searchEyeButton()])
+                toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
+                                     searchEyeButton()])
                 show(mode: .searchForm)
             }
             return
