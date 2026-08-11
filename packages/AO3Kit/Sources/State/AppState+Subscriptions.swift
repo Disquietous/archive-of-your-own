@@ -20,6 +20,11 @@ extension AppState {
         }
     }
 
+    /// Refresh the per-row last-checked stamps from the snapshot table.
+    func loadSubscriptionLastChecked() {
+        subscriptionLastChecked = bridge.getSubscriptionLastChecked()
+    }
+
     func loadSubscriptions(force: Bool = false) async {
         guard let username = ao3Username else {
             subscriptionError = "Sign in to AO3 in Settings first"
@@ -57,7 +62,11 @@ extension AppState {
         }
     }
 
-    func checkSubscriptions() async {
+    /// `force` checks every subscription regardless of per-row freshness
+    /// (the user asked explicitly); the default lets each row's own
+    /// last-checked stamp decide, so a resumed round re-checks only what
+    /// actually needs it.
+    func checkSubscriptions(force: Bool = false) async {
         guard ao3Username != nil else { return }
         guard !isCheckingSubscriptions else { return }
 
@@ -75,7 +84,7 @@ extension AppState {
             // subscriptions — read from the shared Rust store, so follows
             // added on any platform are checked here.
             let follows = bridge.getFollowed(kind: "author")
-            let total = try bridge.startSubscriptionCheck(extraAuthors: follows)
+            let total = try bridge.startSubscriptionCheck(extraAuthors: follows, onlyStale: !force)
             subscriptionCheckTotal = Int(total)
             subscriptionCheckRemaining = Int(total)
 
@@ -98,6 +107,8 @@ extension AppState {
 
                 guard let result = try await bridge.checkNextSubscription() else { break }
                 subscriptionCheckRemaining = Int(result.remaining)
+                // Each completed check stamped its row — keep list labels live.
+                loadSubscriptionLastChecked()
 
                 if result.error != nil {
                     // A transient failure already got rotated-and-retried in

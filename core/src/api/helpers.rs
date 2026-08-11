@@ -39,6 +39,45 @@ pub(super) fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crat
     }
 }
 
+/// How old a subscription's own `last_checked_at` may be before it joins
+/// the next check round (mirrored by the Swift auto-check gate's cadence).
+pub(super) const CHECK_INTERVAL_SECS: u64 = 3600;
+
+/// Everything a check round covers: persisted subscriptions plus
+/// device-local followed authors, deduplicated.
+pub(super) fn check_entries(s: &Storage, extra_authors: &[String])
+    -> Result<Vec<(String, String, String)>, AO3Error> {
+    let subs = s.get_subscriptions().map_err(AO3Error::from)?;
+    let mut entries: Vec<(String, String, String)> = subs.into_iter()
+        .map(|(t, id, name, _)| (t, id, name))
+        .collect();
+    for follow in extra_authors {
+        let display = follow.trim();
+        let (user, _) = split_author_byline(display);
+        if user.is_empty() {
+            continue;
+        }
+        let duplicate = entries.iter().any(|(t, id, _)|
+            t == "author" && id.eq_ignore_ascii_case(&user));
+        if !duplicate {
+            entries.push(("author".to_string(), user, display.to_string()));
+        }
+    }
+    entries.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
+    Ok(entries)
+}
+
+/// Is this subscription's own check stale? Missing row, NULL, or
+/// unparseable all count as never-checked.
+pub(super) fn snapshot_check_due(s: &Storage, sub_type: &str, sub_id: &str) -> bool {
+    match s.get_snapshot_last_checked(sub_type, sub_id) {
+        Ok(Some(at)) if !at.is_empty() => {
+            let then = crate::timefmt::datetime_to_epoch(&at).unwrap_or(0);
+            crate::timefmt::epoch_now().saturating_sub(then) > CHECK_INTERVAL_SECS
+        }
+        _ => true,
+    }
+}
 /// How often an age-based full-listing census runs per subscription.
 pub(super) const CENSUS_INTERVAL_SECS: u64 = 7 * 24 * 3600;
 /// Hard page cap per census — safety valve against pagination anomalies.

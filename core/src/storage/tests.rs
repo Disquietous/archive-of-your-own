@@ -414,6 +414,25 @@ fn test_snapshot_census_meta() {
 }
 
 #[test]
+fn test_snapshot_last_checked() {
+    let db = open_test_db();
+
+    // Unknown row: never checked.
+    assert!(db.get_snapshot_last_checked("author", "u").unwrap().is_none());
+
+    // Stamp creates the row if needed and survives a snapshot-date upsert.
+    db.set_snapshot_last_checked("author", "u", "2026-08-11 01:00:00").unwrap();
+    db.save_subscription_snapshot("author", "u", "2026-08-10").unwrap();
+    assert_eq!(db.get_snapshot_last_checked("author", "u").unwrap().as_deref(),
+               Some("2026-08-11 01:00:00"));
+
+    // Restamping overwrites.
+    db.set_snapshot_last_checked("author", "u", "2026-08-11 02:00:00").unwrap();
+    assert_eq!(db.get_snapshot_last_checked("author", "u").unwrap().as_deref(),
+               Some("2026-08-11 02:00:00"));
+}
+
+#[test]
 fn test_save_search_upsert() {
     let db = open_test_db();
 
@@ -692,7 +711,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -766,7 +785,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -791,10 +810,15 @@ fn test_migration_v1_to_v2() {
         "SELECT COUNT(*) FROM sqlite_master WHERE name = 'subscription_snapshots_old'",
         [], |r| r.get(0)).unwrap();
     assert_eq!(old_count, 0);
+    // v4: last_checked_at exists on the migrated table and starts NULL.
+    assert!(db.get_snapshot_last_checked("author", "writer_one").unwrap().is_none());
+    db.set_snapshot_last_checked("author", "writer_one", "2026-08-11 03:00:00").unwrap();
+    assert_eq!(db.get_snapshot_last_checked("author", "writer_one").unwrap().as_deref(),
+               Some("2026-08-11 03:00:00"));
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 3);
+    assert_eq!(db.schema_version().unwrap(), 4);
     let _ = std::fs::remove_file(&path);
 }
 

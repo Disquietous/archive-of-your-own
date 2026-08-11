@@ -598,6 +598,7 @@ struct AuthorsList: View {
                 }
             }
         }
+        .onAppear { appState.loadSubscriptionLastChecked() }
     }
 
     private var followField: some View {
@@ -679,6 +680,9 @@ struct AuthorsList: View {
         // Same selection treatment as the work lists: accent-soft fill
         // with a 3pt accent bar on the leading edge.
         let selected = model.authorUsername == username
+        // All author checks run under sub_type "author" whether the row is a
+        // local follow or an AO3 subscription.
+        let lastChecked = appState.subscriptionLastChecked["author:\(username)"]
         return Button {
             model.openAuthor(username)
         } label: {
@@ -717,6 +721,17 @@ struct AuthorsList: View {
         .background(selected ? theme.accentSoft : .clear)
         .overlay(alignment: .leading) {
             if selected { theme.accent.frame(width: 3) }
+        }
+        // "Checked 2h ago" in the top-right corner — the same treatment as
+        // the work rows' published/updated dates.
+        .overlay(alignment: .topTrailing) {
+            if let lastChecked {
+                Text("Checked \(Fmt.relativeTime(lastChecked))")
+                    .font(Font(MacFont.ui(10, weight: .medium)))
+                    .foregroundStyle(theme.ink3)
+                    .padding(.top, 6)
+                    .padding(.trailing, 16)
+            }
         }
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }

@@ -214,6 +214,48 @@ impl Storage {
         Ok(())
     }
 
+    /// Stamp "this subscription's own check completed now" — per-row, so an
+    /// interrupted round can't misrepresent when each subscription was
+    /// actually checked (the global queue-drain time only describes the
+    /// round, never individual rows).
+    pub fn set_snapshot_last_checked(&self, sub_type: &str, sub_id: &str, at: &str) -> Result<(), AppError> {
+        self.ensure_snapshot_row(sub_type, sub_id)?;
+        self.conn.execute(
+            "UPDATE subscription_snapshots SET last_checked_at = ?3
+             WHERE sub_type = ?1 AND sub_id = ?2",
+            params![sub_type, sub_id, at],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_snapshot_last_checked(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT last_checked_at FROM subscription_snapshots
+             WHERE sub_type = ?1 AND sub_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+            row.get::<_, Option<String>>(0)
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every stamped (sub_type, sub_id, last_checked_at) — one query so list
+    /// UIs can label rows without a per-row round trip.
+    pub fn get_all_snapshot_last_checked(&self) -> Result<Vec<(String, String, String)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sub_type, sub_id, last_checked_at FROM subscription_snapshots
+             WHERE last_checked_at IS NOT NULL AND last_checked_at != ''"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
     pub fn get_works_crawled_at(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT works_crawled_at FROM subscription_snapshots

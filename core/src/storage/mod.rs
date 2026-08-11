@@ -88,7 +88,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 3;
+    const SCHEMA_VERSION: u32 = 4;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -129,6 +129,7 @@ impl Storage {
             let step = match next {
                 2 => self.migrate_v2(),
                 3 => self.migrate_v3(),
+                4 => self.migrate_v4(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -194,6 +195,18 @@ impl Storage {
                      ON saved_searches(name COLLATE NOCASE);",
             )
             .map_err(map_sql)
+    }
+
+    /// v4 — per-subscription check freshness. `last_checked_at` records when
+    /// each subscription's own check last completed; the global queue-drain
+    /// stamp only describes a round, which misrepresents rows when a round
+    /// is interrupted and resumed later. NULL = never checked, so every
+    /// subscription is due immediately after migrating.
+    fn migrate_v4(&self) -> Result<(), AppError> {
+        self.conn
+            .execute("ALTER TABLE subscription_snapshots ADD COLUMN last_checked_at TEXT", [])
+            .map_err(map_sql)?;
+        Ok(())
     }
 
     /// A write transaction for multi-row batches. Statements executed on

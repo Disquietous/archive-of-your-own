@@ -6,45 +6,53 @@ use super::*;
 impl AO3App {
     // -- Sequential subscription check queue --
 
-    /// Build (or resume) the What's-New check queue. `extra_authors` are
+    /// Build (or extend) the What's-New check queue. `extra_authors` are
     /// device-local follows — they join the queue as author checks,
-    /// deduplicated against real author subscriptions. The combined queue
-    /// is sorted alphabetically by display name so the user can predict
-    /// where a given check lands in the request order.
-    pub fn start_subscription_check(&self, extra_authors: Vec<String>) -> Result<u32, AO3Error> {
+    /// deduplicated against real author subscriptions. Leftover queue items
+    /// (an interrupted round, census continuations) keep their place at the
+    /// front; everything else joins behind them sorted alphabetically by
+    /// display name so the user can predict the request order. With
+    /// `only_stale`, a subscription joins only when its own
+    /// `last_checked_at` is missing or older than CHECK_INTERVAL_SECS —
+    /// per-row freshness, so a resumed round re-checks exactly the rows
+    /// that need it and nothing that was already checked recently.
+    pub fn start_subscription_check(&self, extra_authors: Vec<String>, only_stale: bool) -> Result<u32, AO3Error> {
         self.census_cycle_used.store(false, std::sync::atomic::Ordering::Relaxed);
         let s = self.storage.blocking_lock();
-        // Resume if a queue already exists
+        let mut queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+
+        for (t, id, name) in check_entries(&s, &extra_authors)? {
+            let queued = queue.iter().any(|q|
+                q["sub_type"].as_str() == Some(t.as_str())
+                    && q["sub_id"].as_str() == Some(id.as_str()));
+            if queued || (only_stale && !snapshot_check_due(&s, &t, &id)) {
+                continue;
+            }
+            queue.push(serde_json::json!({"sub_type": t, "sub_id": id, "name": name}));
+        }
+        let json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
+        s.set_check_queue(&json).map_err(AO3Error::from)?;
+        Ok(queue.len() as u32)
+    }
+
+    /// Would a check round have anything to do? True when leftover queue
+    /// items exist or any subscription's own `last_checked_at` is missing
+    /// or stale. This replaces gating on the global queue-drain time, which
+    /// only describes when a round finished — after an interrupted round it
+    /// overstates the freshness of every row checked before the break.
+    pub fn is_subscription_check_due(&self, extra_authors: Vec<String>) -> Result<bool, AO3Error> {
+        let s = self.storage.blocking_lock();
         if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
             let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
             if !arr.is_empty() {
-                return Ok(arr.len() as u32);
+                return Ok(true);
             }
         }
-        // Fresh queue: persisted subscriptions plus followed authors.
-        let subs = s.get_subscriptions().map_err(AO3Error::from)?;
-        let mut entries: Vec<(String, String, String)> = subs.into_iter()
-            .map(|(t, id, name, _)| (t, id, name))
-            .collect();
-        for follow in &extra_authors {
-            let display = follow.trim();
-            let (user, _) = split_author_byline(display);
-            if user.is_empty() {
-                continue;
-            }
-            let duplicate = entries.iter().any(|(t, id, _)|
-                t == "author" && id.eq_ignore_ascii_case(&user));
-            if !duplicate {
-                entries.push(("author".to_string(), user, display.to_string()));
-            }
-        }
-        entries.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
-        let arr: Vec<serde_json::Value> = entries.iter().map(|(t, id, name)| {
-            serde_json::json!({"sub_type": t, "sub_id": id, "name": name})
-        }).collect();
-        let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
-        s.set_check_queue(&json).map_err(AO3Error::from)?;
-        Ok(arr.len() as u32)
+        Ok(check_entries(&s, &extra_authors)?
+            .iter()
+            .any(|(t, id, _)| snapshot_check_due(&s, t, id)))
     }
 
     pub fn reset_subscription_check(&self) -> Result<(), AO3Error> {
@@ -98,6 +106,17 @@ impl AO3App {
     pub fn set_works_crawled_now(&self, sub_type: String, sub_id: String) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
         s.set_works_crawled_at(&sub_type, &sub_id, &now_utc()).map_err(AO3Error::from)
+    }
+
+    /// Every subscription's own last-completed-check stamp, keyed
+    /// "sub_type:sub_id" (UTC "YYYY-MM-DD HH:MM:SS" values). One call for
+    /// the whole map so list rows never make per-row storage trips.
+    pub fn get_subscription_last_checked(&self) -> Result<std::collections::HashMap<String, String>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_all_snapshot_last_checked().map_err(AO3Error::from)?
+            .into_iter()
+            .map(|(t, id, at)| (format!("{t}:{id}"), at))
+            .collect())
     }
 
     /// UTC "YYYY-MM-DD HH:MM:SS" of the last completed works crawl, or None.
@@ -343,6 +362,10 @@ impl AO3App {
             if !newest_date.is_empty() {
                 log_db("save_subscription_snapshot", s.save_subscription_snapshot(&sub_type, &sub_id, &newest_date));
             }
+            // This subscription's check completed — stamp its own freshness.
+            // Error paths above return before this line, so a failed check
+            // stays stale and re-qualifies for the next round.
+            log_db("set_snapshot_last_checked", s.set_snapshot_last_checked(&sub_type, &sub_id, &now_utc()));
             log_db("commit check page", tx.commit());
 
             // ---- Census escalation (listings only) ----

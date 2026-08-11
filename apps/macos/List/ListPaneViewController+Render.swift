@@ -79,7 +79,7 @@ extension ListPaneViewController {
                     guard let self else { return }
                     Task {
                         self.appState.bridge.resetSubscriptionCheck()
-                        await self.appState.checkSubscriptions()
+                        await self.appState.checkSubscriptions(force: true)
                     }
                 })
                 buttons.append(sortFilterMenu.makeButton(for: .whatsNew))
@@ -101,6 +101,7 @@ extension ListPaneViewController {
         case .subscriptions:
             do {
                 displayedSubscriptions = model.filteredSubscriptions
+                displayedLastChecked = appState.subscriptionLastChecked
                 works = []
                 let subtitle: String
                 if appState.isLoadingSubscriptions {

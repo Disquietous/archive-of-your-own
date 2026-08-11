@@ -100,6 +100,9 @@ final class AppState {
     let subscriptionCheckTask = NetworkTask()
     var subscriptionCheckTotal: Int = 0
     var subscriptionCheckRemaining: Int = 0
+    /// Per-subscription last-completed-check stamps ("subType:subId" →
+    /// DB datetime), mirrored from subscription_snapshots for row labels.
+    var subscriptionLastChecked: [String: String] = [:]
 
     init() {
         bridge.recoveryObserver = RecoveryObserver(state: self)
@@ -258,6 +261,7 @@ final class AppState {
         // Load notifications and What's New works
         loadNotifications()
         loadNewWorks()
+        loadSubscriptionLastChecked()
 
         // Load persisted subscriptions (no network needed)
         if ao3Username != nil {
@@ -268,16 +272,14 @@ final class AppState {
             }
         }
 
-        // Auto-check subscriptions if stale (> 1 hour)
+        // Auto-check subscriptions when due. Rust decides per row: any
+        // subscription whose own last-checked stamp is missing or stale
+        // (or a leftover queue from an interrupted round) makes the check
+        // due — the old single global date claimed round-end freshness for
+        // rows actually checked much earlier.
         if ao3Username != nil {
-            let shouldCheck: Bool
-            if let lastCheck = bridge.getLastSubscriptionCheck(),
-               let date = DBTimestamp.date(lastCheck) {
-                shouldCheck = Date().timeIntervalSince(date) > 1 * 60 * 60
-            } else {
-                shouldCheck = true
-            }
-            if shouldCheck {
+            let follows = bridge.getFollowed(kind: "author")
+            if bridge.isSubscriptionCheckDue(extraAuthors: follows) {
                 Task { await checkSubscriptions() }
             }
         }

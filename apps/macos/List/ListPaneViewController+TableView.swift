@@ -38,7 +38,8 @@ extension ListPaneViewController {
             cell.configure(with: sub,
                            isLoading: model.loadingSubscriptionID == sub.id,
                            isActive: model.subscriptionWorksSubId == sub.id
-                               && model.subscriptionWorksSubType == normalizedSubType(sub))
+                               && model.subscriptionWorksSubType == normalizedSubType(sub),
+                           lastChecked: displayedLastChecked["\(sub.subType):\(sub.id)"])
             return cell
         }
 

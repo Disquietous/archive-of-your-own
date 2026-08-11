@@ -81,7 +81,7 @@ struct LibraryView: View {
             // Subscription check button
             if state.ao3Username != nil {
                 Button {
-                    Task { await state.checkSubscriptions() }
+                    Task { await state.checkSubscriptions(force: true) }
                 } label: {
                     if state.isCheckingSubscriptions {
                         ProgressView()

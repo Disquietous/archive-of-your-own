@@ -981,9 +981,22 @@ final class RustBridge {
         (try? app?.getWorksByAuthor(username: username)) ?? []
     }
 
-    func startSubscriptionCheck(extraAuthors: [String] = []) throws -> UInt32 {
+    func startSubscriptionCheck(extraAuthors: [String] = [], onlyStale: Bool) throws -> UInt32 {
         guard let app else { throw BridgeError.notInitialized }
-        return try app.startSubscriptionCheck(extraAuthors: extraAuthors)
+        return try app.startSubscriptionCheck(extraAuthors: extraAuthors, onlyStale: onlyStale)
+    }
+
+    /// True when any subscription's own last-checked stamp is missing or
+    /// stale, or leftover queue items exist. Replaces gating on the global
+    /// round-completion date, which overstated freshness for rows checked
+    /// early in an interrupted round.
+    func isSubscriptionCheckDue(extraAuthors: [String] = []) -> Bool {
+        (try? app?.isSubscriptionCheckDue(extraAuthors: extraAuthors)) ?? false
+    }
+
+    /// Per-subscription last-completed-check stamps, keyed "subType:subId".
+    func getSubscriptionLastChecked() -> [String: String] {
+        (try? app?.getSubscriptionLastChecked()) ?? [:]
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

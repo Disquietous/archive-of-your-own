@@ -43,6 +43,9 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     var works: [Work] = []
     var displayedSubscriptions: [USubscription] = []
+    /// Per-row "Checked …" stamps keyed "subType:subId" — captured during
+    /// render (an observable read, so stamp changes re-render the list).
+    var displayedLastChecked: [String: String] = [:]
     var renderedSection: MacAppModel.Section?
     var renderedWorkIDs: [String] = []
     var renderedSubscriptionIDs: [String] = []

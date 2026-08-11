@@ -121,7 +121,8 @@ extension ListPaneViewController {
                 let sub = displayedSubscriptions[row]
                 cell.configure(with: sub,
                                isLoading: loadingID == sub.id,
-                               isActive: activeID == sub.id && activeType == normalizedSubType(sub))
+                               isActive: activeID == sub.id && activeType == normalizedSubType(sub),
+                               lastChecked: displayedLastChecked["\(sub.subType):\(sub.id)"])
             }
         }
         renderedSubscriptionIDs = ids
