@@ -506,11 +506,31 @@ final class RustBridge {
     }
 
     func saveSearch(name: String, paramsJson: String) {
-        try? app?.saveSearch(name: name, paramsJson: paramsJson)
+        guard let app else {
+            NSLog("[saved-search] saveSearch(%@): app is nil (runtime not initialized)", name)
+            return
+        }
+        do {
+            try app.saveSearch(name: name, paramsJson: paramsJson)
+            NSLog("[saved-search] saveSearch(%@): ok", name)
+        } catch {
+            NSLog("[saved-search] saveSearch(%@) failed: %@", name, String(describing: error))
+        }
     }
 
     func getSavedSearches() -> [USavedSearch] {
-        (try? app?.getSavedSearches()) ?? []
+        guard let app else {
+            NSLog("[saved-search] getSavedSearches: app is nil (runtime not initialized)")
+            return []
+        }
+        do {
+            let saved = try app.getSavedSearches()
+            NSLog("[saved-search] getSavedSearches: %d row(s)", saved.count)
+            return saved
+        } catch {
+            NSLog("[saved-search] getSavedSearches failed: %@", String(describing: error))
+            return []
+        }
     }
 
     func deleteSavedSearch(_ id: Int64) {

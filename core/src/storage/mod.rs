@@ -88,7 +88,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 2;
+    const SCHEMA_VERSION: u32 = 3;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -128,6 +128,7 @@ impl Storage {
             let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
             let step = match next {
                 2 => self.migrate_v2(),
+                3 => self.migrate_v3(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -176,6 +177,23 @@ impl Storage {
             )
             .map_err(map_sql)?;
         self.backfill_work_authors()
+    }
+
+    /// v3 — saved-search names become unique, case-insensitively, so
+    /// `save_search` can upsert (`ON CONFLICT(name COLLATE NOCASE)`).
+    /// Older duplicates are dropped (newest wins), along with the
+    /// short-lived case-sensitive index some dev databases carry.
+    fn migrate_v3(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "DELETE FROM saved_searches WHERE id NOT IN (
+                     SELECT MAX(id) FROM saved_searches GROUP BY name COLLATE NOCASE
+                 );
+                 DROP INDEX IF EXISTS idx_saved_searches_name;
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_searches_name_nocase
+                     ON saved_searches(name COLLATE NOCASE);",
+            )
+            .map_err(map_sql)
     }
 
     /// A write transaction for multi-row batches. Statements executed on
@@ -301,16 +319,6 @@ impl Storage {
                     params_json TEXT NOT NULL,
                     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
                 );
-
-                -- Names are unique (case-insensitively); drop older duplicates
-                -- (keep the newest) from databases created before the index
-                -- existed, and the short-lived case-sensitive index.
-                DELETE FROM saved_searches WHERE id NOT IN (
-                    SELECT MAX(id) FROM saved_searches GROUP BY name COLLATE NOCASE
-                );
-                DROP INDEX IF EXISTS idx_saved_searches_name;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_searches_name_nocase
-                    ON saved_searches(name COLLATE NOCASE);
 
                 CREATE TABLE IF NOT EXISTS app_state (
                     key   TEXT PRIMARY KEY,

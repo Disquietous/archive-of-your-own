@@ -342,6 +342,7 @@ private struct SavedSearchField: View {
                     .foregroundStyle(theme.ink)
                     .focused($focused)
                 Button(nameExists ? "Update" : "Save") {
+                    NSLog("[saved-search] %@ clicked for '%@'", nameExists ? "Update" : "Save", term)
                     search.saveCurrentSearch(named: term, appState: appState)
                     focused = false
                 }

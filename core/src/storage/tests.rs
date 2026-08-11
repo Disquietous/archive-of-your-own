@@ -414,6 +414,24 @@ fn test_snapshot_census_meta() {
 }
 
 #[test]
+fn test_save_search_upsert() {
+    let db = open_test_db();
+
+    db.save_search("My Search", "{\"a\":1}").unwrap();
+    let saved = db.get_saved_searches().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].1, "My Search");
+    assert_eq!(saved[0].2, "{\"a\":1}");
+
+    // Same name, different case: overwrites instead of duplicating.
+    db.save_search("my search", "{\"a\":2}").unwrap();
+    let saved = db.get_saved_searches().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].1, "my search");
+    assert_eq!(saved[0].2, "{\"a\":2}");
+}
+
+#[test]
 fn test_gone_from_ao3_flag() {
     let db = open_test_db();
     let mut w = sample_work(7001);
@@ -674,7 +692,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -722,6 +740,14 @@ fn test_migration_v1_to_v2() {
                 PRIMARY KEY (sub_type, sub_id)
             );
             CREATE TABLE subscription_snapshots_old (sub_type TEXT);
+            CREATE TABLE saved_searches (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO saved_searches (name, params_json)
+             VALUES ('Fluff', '{\"a\":1}'), ('fluff', '{\"a\":2}'), ('Angst', '{}');
             INSERT INTO works (id, title, authors_json, fandoms_json, rating,
                 warnings_json, categories_json, relationships_json, characters_json,
                 tags_json, summary, word_count, chapter_count, total_chapters,
@@ -740,7 +766,19 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
+    // v3: case-insensitive duplicates collapsed to the newest, and the
+    // unique index exists — so the ON CONFLICT upsert actually works on a
+    // migrated (not fresh-baseline) database.
+    let saved = db.get_saved_searches().unwrap();
+    let names: Vec<&str> = saved.iter().map(|(_, n, _)| n.as_str()).collect();
+    assert_eq!(saved.len(), 2, "names = {names:?}");
+    assert!(names.contains(&"fluff") && names.contains(&"Angst"), "names = {names:?}");
+    db.save_search("FLUFF", "{\"a\":3}").unwrap();
+    let saved = db.get_saved_searches().unwrap();
+    assert_eq!(saved.len(), 2);
+    let fluff = saved.iter().find(|(_, n, _)| n == "FLUFF").expect("upserted row");
+    assert_eq!(fluff.2, "{\"a\":3}");
     // Author index backfilled from authors_json.
     assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
     // Epoch strings converted to the one datetime encoding.
@@ -756,7 +794,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 2);
+    assert_eq!(db.schema_version().unwrap(), 3);
     let _ = std::fs::remove_file(&path);
 }
 

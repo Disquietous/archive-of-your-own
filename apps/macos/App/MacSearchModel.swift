@@ -272,12 +272,17 @@ final class MacSearchModel {
 
     /// Persist the current criteria (query, fields, checkboxes) under a name.
     func saveCurrentSearch(named name: String, appState: AppState) {
+        NSLog("[saved-search] saveCurrentSearch(%@): %d field(s), %d checkbox group(s)",
+              name, fieldValues.count, checkboxValues.count)
         let payload: [String: Any] = [
             "fieldValues": fieldValues,
             "checkboxValues": checkboxValues.mapValues { Array($0) },
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let json = String(data: data, encoding: .utf8) else { return }
+              let json = String(data: data, encoding: .utf8) else {
+            NSLog("[saved-search] saveCurrentSearch(%@): JSON encode failed", name)
+            return
+        }
         appState.bridge.saveSearch(name: name, paramsJson: json)
         loadSavedSearches(appState)
     }
