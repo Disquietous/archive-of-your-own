@@ -41,3 +41,13 @@ path = "src/uniffi_bindgen.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Dev-profile artifacts (cargo test / cargo build) keep line tables for
+# readable backtraces and breakpoints, but drop the type/variable DWARF
+# that made target/debug balloon to tens of GB. Release profiles (what the
+# app ships) are unaffected.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = "line-tables-only"

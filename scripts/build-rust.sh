@@ -41,6 +41,17 @@ cargo build --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features -
 echo "  Building for macOS (aarch64-apple-darwin)..."
 cargo build --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor
 
+# Cargo never garbage-collects target/, and stray invocations (a cargo
+# build without --release or without --target) quietly leave multi-GB
+# artifact trees nothing ever reads. The pipeline only consumes
+# target/<triple>/release plus the host debug tree (cargo test + the
+# uniffi-bindgen tool below) — sweep everything else on every run.
+echo "==> Sweeping unused build trees..."
+for triple in aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin; do
+    rm -rf "target/$triple/debug"
+done
+rm -rf target/release
+
 # Generate Swift bindings
 echo "==> Generating Swift bindings..."
 mkdir -p "$GENERATED_DIR"
