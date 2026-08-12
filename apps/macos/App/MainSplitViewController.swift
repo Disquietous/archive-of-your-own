@@ -53,9 +53,10 @@ final class MainSplitViewController: NSSplitViewController {
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             let immersive = self.model.immersive
-            // Search spans the reading pane full-width: the middle pane's
-            // form moved there, so the list pane has nothing to show.
+            // Search and Settings span the reading pane full-width: the
+            // middle pane has nothing to show for either.
             let hideList = immersive || self.model.section == .search
+                || self.model.section == .settings
             DispatchQueue.main.async {
                 self.applyCollapse(sidebar: immersive, list: hideList)
             }

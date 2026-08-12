@@ -9,12 +9,19 @@ impl AO3App {
             .build()
             .map_err(|e| AO3Error::Network { message: e.to_string() })?;
 
-        let client = runtime.block_on(async {
+        let mut client = runtime.block_on(async {
             AO3Client::new_direct().await
         }).map_err(AO3Error::from)?;
 
         let storage = Storage::open(&db_path, &db_passphrase)
             .map_err(AO3Error::from)?;
+
+        // Per-route timeout overrides: one shared map, handed to every
+        // client this app ever constructs, so edits reach the live client
+        // and survive reconnects.
+        let route_timeouts = Arc::new(std::sync::Mutex::new(
+            storage.get_route_timeouts().unwrap_or_default().into_iter().collect::<std::collections::HashMap<_, _>>()));
+        client.share_route_timeouts(route_timeouts.clone());
 
         let storage = Arc::new(Mutex::new(storage));
         crate::init_logging(&db_path, &db_passphrase);
@@ -39,6 +46,7 @@ impl AO3App {
             next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             tor_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             socks_port: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            route_timeouts,
             _runtime: Arc::new(runtime),
             census_cycle_used: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -72,6 +80,9 @@ impl AO3App {
             next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             tor_connected: previous.tor_connected.clone(),
             socks_port: previous.socks_port.clone(),
+            // Same DB file, same overrides — and the shared client already
+            // holds this exact Arc.
+            route_timeouts: previous.route_timeouts.clone(),
             _runtime: previous._runtime.clone(),
             census_cycle_used: previous.census_cycle_used.clone(),
         })
@@ -102,12 +113,13 @@ impl AO3App {
             let client_ref = self.client.clone();
 
             // Spawn onto our tokio runtime so arti has a live reactor
-            let new_client = runtime.spawn(async move {
+            let mut new_client = runtime.spawn(async move {
                 AO3Client::new_tor_with_dir(&state_dir).await
             })
             .await
             .map_err(|e| AO3Error::Network { message: format!("Tor task panicked: {e}") })?
             .map_err(AO3Error::from)?;
+            new_client.share_route_timeouts(self.route_timeouts.clone());
 
             let timeout = self.timeout_secs.clone();
             let client_ref2 = client_ref.clone();
@@ -195,6 +207,39 @@ impl AO3App {
 
     pub fn get_request_timeout(&self) -> u64 {
         self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The full route catalog with each route's current override (None =
+    /// following the global timeout). Ordered as the catalog lists them.
+    pub fn get_route_timeouts(&self) -> Vec<URouteTimeout> {
+        let overrides = self.route_timeouts.lock().unwrap_or_else(|e| e.into_inner());
+        crate::client::routes::ROUTES.iter().map(|r| URouteTimeout {
+            key: r.key.to_string(),
+            template: r.template.to_string(),
+            label: r.label.to_string(),
+            timeout_secs: overrides.get(r.key).copied(),
+        }).collect()
+    }
+
+    /// Set (positive seconds) or clear (None) one route's timeout override.
+    /// Applies to the live client immediately and persists across launches.
+    pub fn set_route_timeout(&self, key: String, timeout_secs: Option<u64>) -> Result<(), AO3Error> {
+        if !crate::client::routes::ROUTES.iter().any(|r| r.key == key) {
+            return Err(AO3Error::Network { message: format!("unknown route key {key}") });
+        }
+        if timeout_secs == Some(0) {
+            return Err(AO3Error::Network { message: "timeout must be positive".to_string() });
+        }
+        {
+            let s = self.storage.blocking_lock();
+            s.set_route_timeout(&key, timeout_secs).map_err(AO3Error::from)?;
+        }
+        let mut m = self.route_timeouts.lock().unwrap_or_else(|e| e.into_inner());
+        match timeout_secs {
+            Some(secs) => { m.insert(key, secs); }
+            None => { m.remove(&key); }
+        }
+        Ok(())
     }
 
     pub fn cancel_request(&self) {

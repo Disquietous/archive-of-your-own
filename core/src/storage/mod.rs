@@ -88,7 +88,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 4;
+    const SCHEMA_VERSION: u32 = 5;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -130,6 +130,7 @@ impl Storage {
                 2 => self.migrate_v2(),
                 3 => self.migrate_v3(),
                 4 => self.migrate_v4(),
+                5 => self.migrate_v5(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -205,6 +206,22 @@ impl Storage {
     fn migrate_v4(&self) -> Result<(), AppError> {
         self.conn
             .execute("ALTER TABLE subscription_snapshots ADD COLUMN last_checked_at TEXT", [])
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// v5 — per-route request timeouts. One row per overridden route key
+    /// (see client::routes::ROUTES); routes without a row use the global
+    /// timeout.
+    fn migrate_v5(&self) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "CREATE TABLE route_timeouts (
+                     route_key    TEXT PRIMARY KEY,
+                     timeout_secs INTEGER NOT NULL
+                 )",
+                [],
+            )
             .map_err(map_sql)?;
         Ok(())
     }

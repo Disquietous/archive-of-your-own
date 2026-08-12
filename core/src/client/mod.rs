@@ -13,6 +13,7 @@ mod circuit;
 mod failure;
 mod helpers;
 mod ops;
+pub mod routes;
 #[cfg(feature = "tor")]
 mod socks;
 
@@ -57,6 +58,11 @@ pub struct AO3Client {
     cookie_jar: Arc<reqwest::cookie::Jar>,
     last_request: Arc<Mutex<Option<Instant>>>,
     timeout_secs: Arc<std::sync::atomic::AtomicU64>,
+    /// Per-route timeout overrides (route key → seconds), consulted by URL
+    /// classification on every GET; routes without an entry use
+    /// `timeout_secs`. Shared with the owning AO3App so edits apply to the
+    /// live client and survive client replacement on (re)connect.
+    route_timeouts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     socks_port: Option<u16>,
     /// Posting credentials harvested opportunistically from pages fetched
     /// for content — so kudos/comments POST directly, with no preparatory
@@ -83,6 +89,23 @@ impl AO3Client {
     /// The configured per-request timeout.
     fn request_timeout(&self) -> Duration {
         Duration::from_secs(self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The timeout for a concrete URL: its route's override when one is
+    /// set, the global timeout otherwise (including unclassified URLs).
+    pub fn timeout_for_url(&self, url: &str) -> u64 {
+        let default = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(key) = routes::route_for_url(url) else { return default };
+        self.route_timeouts.lock().ok()
+            .and_then(|m| m.get(key).copied())
+            .unwrap_or(default)
+    }
+
+    /// Adopt the app-owned override map (replacing this client's own) so a
+    /// freshly built client sees existing overrides and later edits without
+    /// re-plumbing. Call at every client-creation site.
+    pub fn share_route_timeouts(&mut self, map: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>) {
+        self.route_timeouts = map;
     }
 
     pub fn is_tor(&self) -> bool {
@@ -124,6 +147,7 @@ impl AO3Client {
             cookie_jar: jar,
             last_request: Arc::new(Mutex::new(None)),
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
+            route_timeouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             socks_port: None,
             csrf_token: Arc::new(std::sync::Mutex::new(None)),
             pseud_id: Arc::new(std::sync::Mutex::new(None)),
@@ -200,6 +224,7 @@ impl AO3Client {
             cookie_jar: jar,
             last_request: Arc::new(Mutex::new(None)),
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
+            route_timeouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             socks_port: Some(port),
             csrf_token: Arc::new(std::sync::Mutex::new(None)),
             pseud_id: Arc::new(std::sync::Mutex::new(None)),
@@ -426,13 +451,11 @@ impl AO3Client {
     }
 
     async fn fetch(&self, url: &str) -> Result<String, AppError> {
-        let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
-        self.fetch_with_progress(url, timeout).await
+        self.fetch_with_progress(url, self.timeout_for_url(url)).await
     }
 
     async fn fetch_ajax(&self, url: &str) -> Result<String, AppError> {
-        let timeout = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
-        self.fetch_ajax_with_progress(url, timeout).await
+        self.fetch_ajax_with_progress(url, self.timeout_for_url(url)).await
     }
 
     /// Switch back from Tor to a direct HTTP client, preserving cookies.

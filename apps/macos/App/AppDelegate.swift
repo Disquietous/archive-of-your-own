@@ -7,7 +7,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     lazy var model = MacAppModel(appState: appState)
 
     private var mainWindowController: MainWindowController?
-    private var settingsWindowController: SettingsWindowController?
     private var requestLogWindowController: RequestLogWindowController?
     private var debugLogWindowController: DebugLogWindowController?
 
@@ -178,13 +177,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func openSettings() {
-        if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController(theme: theme, appState: appState, model: model)
-        }
-        settingsWindowController?.show()
-    }
-
     @objc private func openRequestLog() {
         if requestLogWindowController == nil {
             requestLogWindowController = RequestLogWindowController(theme: theme, appState: appState)
@@ -294,10 +286,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "About \(appName)",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
                         keyEquivalent: "")
-        appMenu.addItem(.separator())
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
-        appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide \(appName)",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

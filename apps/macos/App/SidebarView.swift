@@ -47,6 +47,9 @@ struct SidebarView: View {
                         item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
                         item(.stats, "chart.bar", "Reading Stats")
                     }
+                    group("App") {
+                        item(.settings, "gearshape", "Settings")
+                    }
                 }
                 .padding(.bottom, 8)
             }

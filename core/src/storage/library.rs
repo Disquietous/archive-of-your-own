@@ -396,6 +396,41 @@ impl Storage {
     }
 
     // -------------------------------------------------------------------
+    // Per-route request timeouts
+    // -------------------------------------------------------------------
+
+    pub fn get_route_timeouts(&self) -> Result<Vec<(String, u64)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT route_key, timeout_secs FROM route_timeouts"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.max(0) as u64))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    /// Upsert one route's timeout override; None removes it (back to the
+    /// global default).
+    pub fn set_route_timeout(&self, route_key: &str, timeout_secs: Option<u64>) -> Result<(), AppError> {
+        match timeout_secs {
+            Some(secs) => {
+                self.conn.execute(
+                    "INSERT INTO route_timeouts (route_key, timeout_secs) VALUES (?1, ?2)
+                     ON CONFLICT(route_key) DO UPDATE SET timeout_secs = excluded.timeout_secs",
+                    params![route_key, secs as i64],
+                ).map_err(map_sql)?;
+            }
+            None => {
+                self.conn.execute(
+                    "DELETE FROM route_timeouts WHERE route_key = ?1",
+                    params![route_key],
+                ).map_err(map_sql)?;
+            }
+        }
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
     // Reading Lists
     // -------------------------------------------------------------------
 

@@ -1,57 +1,84 @@
 import AppKit
 import SwiftUI
 
-/// Standard macOS Settings window (⌘,): toolbar-style tabs hosting SwiftUI
-/// panes styled with the app's design language (matching the reading pane).
-final class SettingsWindowController: NSWindowController {
-    convenience init(theme: AppTheme, appState: AppState, model: MacAppModel) {
-        let tabs = NSTabViewController()
-        tabs.tabStyle = .toolbar
+/// In-window Settings: the sidebar's Settings section hosts this in the
+/// reading pane, spanning the collapsed list pane's space. A tab strip
+/// along the top switches between the same panes the old standalone
+/// settings window showed, with pane content centered at a readable width.
+struct SettingsRootView: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
 
-        // Panes size the window, not the other way around: the hosting
-        // controller publishes its SwiftUI content size as
-        // preferredContentSize, and the tab controller resizes the window
-        // whenever the selected pane's content size changes (tab switches,
-        // app text scale, controls appearing/disappearing). A pane that
-        // wants a fixed width sets it; height always follows content.
-        func pane(_ content: some View, width: CGFloat? = nil) -> NSHostingController<AnyView> {
-            var view = AnyView(content.frame(maxWidth: .infinity, alignment: .top))
-            if let width { view = AnyView(view.frame(width: width)) }
-            let host = NSHostingController(rootView: view)
-            host.sizingOptions = .preferredContentSize
-            return host
+    private enum Tab: String, CaseIterable {
+        case general = "General"
+        case reading = "Reading"
+        case requests = "Requests"
+        case privacy = "Privacy"
+
+        var icon: String {
+            switch self {
+            case .general: "gearshape"
+            case .reading: "textformat.size"
+            case .requests: "network"
+            case .privacy: "shield.lefthalf.filled"
+            }
         }
-
-        let general = NSTabViewItem(viewController: pane(
-            GeneralSettingsPane(theme: theme, appState: appState, model: model), width: 360))
-        general.label = "General"
-        general.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: "General")
-
-        let reading = NSTabViewItem(viewController: pane(
-            ReadingSettingsView(theme: theme, themedBackground: false)))
-        reading.label = "Reading"
-        reading.image = NSImage(systemSymbolName: "textformat.size", accessibilityDescription: "Reading")
-
-        let privacy = NSTabViewItem(viewController: pane(
-            PrivacySettingsPane(theme: theme, appState: appState, model: model), width: 360))
-        privacy.label = "Privacy"
-        privacy.image = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "Privacy")
-
-        tabs.addTabViewItem(general)
-        tabs.addTabViewItem(reading)
-        tabs.addTabViewItem(privacy)
-
-        let window = NSWindow(contentViewController: tabs)
-        window.title = "Settings"
-        window.styleMask = [.titled, .closable]
-        window.setFrameAutosaveName("SettingsWindow")
-        self.init(window: window)
     }
 
-    func show() {
-        window?.center()
-        showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    @State private var tab: Tab = .general
+
+    var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
+        VStack(spacing: 0) {
+            tabStrip
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+            ScrollView {
+                Group {
+                    switch tab {
+                    case .general:
+                        GeneralSettingsPane(theme: theme, appState: appState, model: model)
+                    case .reading:
+                        ReadingSettingsView(theme: theme, themedBackground: false)
+                    case .requests:
+                        RequestsSettingsPane(theme: theme, appState: appState)
+                    case .privacy:
+                        PrivacySettingsPane(theme: theme, appState: appState, model: model)
+                    }
+                }
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private var tabStrip: some View {
+        HStack(spacing: 3) {
+            ForEach(Tab.allCases, id: \.self) { t in
+                Button {
+                    tab = t
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: t.icon)
+                            .font(.system(size: 11, weight: .medium))
+                        Text(t.rawValue)
+                            .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                    }
+                    .foregroundStyle(tab == t ? theme.ink : theme.ink3)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(tab == t ? theme.surface : .clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(theme.surface2)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -144,8 +171,6 @@ struct GeneralSettingsPane: View {
     @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
-    private let timeouts = [15, 30, 60, 120]
-
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(alignment: .leading, spacing: 16) {
@@ -155,22 +180,6 @@ struct GeneralSettingsPane: View {
                                       sublabel: "Filters Explicit-rated works from browse and search",
                                       isOn: $model.hideExplicit)
                 }
-            }
-
-            SettingsGroup(theme: theme, label: "Network") {
-                HStack(spacing: 3) {
-                    ForEach(timeouts, id: \.self) { seconds in
-                        segButton("\(seconds)s", on: theme.requestTimeout == seconds) {
-                            theme.requestTimeout = seconds
-                        }
-                    }
-                }
-                .padding(3)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                Text("How long to wait for the archive to respond")
-                    .font(Font(MacFont.ui(11.5)))
-                    .foregroundStyle(theme.ink3)
             }
 
             AccountSection(theme: theme, appState: appState)
@@ -204,6 +213,44 @@ struct GeneralSettingsPane: View {
         }
         .padding(16)
     }
+}
+
+// MARK: - Requests
+
+/// Everything about how the app talks to the archive: the global request
+/// timeout, and per-page overrides for request shapes that deserve more
+/// (an entire work) or less (an autocomplete) patience.
+struct RequestsSettingsPane: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+
+    private let timeouts = [15, 30, 60, 120]
+
+    var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsGroup(theme: theme, label: "Global timeout") {
+                HStack(spacing: 3) {
+                    ForEach(timeouts, id: \.self) { seconds in
+                        segButton("\(seconds)s", on: theme.requestTimeout == seconds) {
+                            theme.requestTimeout = seconds
+                        }
+                    }
+                }
+                .padding(3)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                Text("How long to wait for the archive to respond")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+            }
+
+            SettingsGroup(theme: theme, label: "Per-page timeouts") {
+                RouteTimeoutsList(theme: theme, appState: appState)
+            }
+        }
+        .padding(16)
+    }
 
     private func segButton(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -216,6 +263,176 @@ struct GeneralSettingsPane: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Per-page request timeouts
+
+/// The per-route timeout catalog: every request shape the app makes, each
+/// with an editable timeout. A page expected to be slow (an entire work)
+/// can wait longer than one expected to be quick (an autocomplete). An
+/// empty field means the page follows the global timeout above.
+private struct RouteTimeoutsList: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+
+    @State private var routes: [URouteTimeout] = []
+    @State private var filter = ""
+
+    private var matches: [URouteTimeout] {
+        let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return routes }
+        return routes.filter {
+            $0.label.lowercased().contains(needle) || $0.template.lowercased().contains(needle)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            searchField
+            SettingsCard(theme: theme) {
+                if matches.isEmpty {
+                    Text("No pages match “\(filter)”")
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(theme.ink3)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(matches, id: \.key) { route in
+                                RouteTimeoutRow(theme: theme, route: route,
+                                                defaultSecs: theme.requestTimeout) { secs in
+                                    appState.bridge.setRouteTimeout(key: route.key, seconds: secs)
+                                    routes = appState.bridge.getRouteTimeouts()
+                                }
+                                if route.key != matches.last?.key {
+                                    theme.line.frame(height: 1)
+                                }
+                            }
+                        }
+                    }
+                    .frame(height: 250)
+                }
+            }
+            Text("Pages without a value use the global timeout. Press Return to apply; clear the field to go back to the default.")
+                .font(Font(MacFont.ui(11.5)))
+                .foregroundStyle(theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { routes = appState.bridge.getRouteTimeouts() }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(theme.ink3)
+            TextField("Filter pages", text: $filter)
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(12.5)))
+                .foregroundStyle(theme.ink)
+            if !filter.isEmpty {
+                Button {
+                    filter = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.ink3)
+                }
+                .buttonStyle(.plain)
+                .help("Clear filter")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 30)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+    }
+}
+
+/// One catalog row: page name over its URL template, and a numeric field
+/// that commits on Return or focus loss. Any positive number of seconds;
+/// invalid input reverts.
+private struct RouteTimeoutRow: View {
+    @Bindable var theme: AppTheme
+    let route: URouteTimeout
+    let defaultSecs: Int
+    let onSet: (UInt64?) -> Void
+
+    @State private var text: String
+    @FocusState private var focused: Bool
+
+    init(theme: AppTheme, route: URouteTimeout, defaultSecs: Int, onSet: @escaping (UInt64?) -> Void) {
+        self.theme = theme
+        self.route = route
+        self.defaultSecs = defaultSecs
+        self.onSet = onSet
+        _text = State(initialValue: route.timeoutSecs.map(String.init) ?? "")
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(route.label)
+                    .font(Font(MacFont.ui(12.5, weight: .medium)))
+                    .foregroundStyle(theme.ink)
+                Text(route.template)
+                    .font(Font(MacFont.ui(10.5)))
+                    .foregroundStyle(theme.ink3)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            if route.timeoutSecs != nil {
+                Button {
+                    text = ""
+                    onSet(nil)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(theme.ink3)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Back to the global timeout")
+            }
+            TextField("\(defaultSecs)", text: $text)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .font(Font(MacFont.ui(12, weight: route.timeoutSecs != nil ? .bold : .regular)))
+                .foregroundStyle(route.timeoutSecs != nil ? theme.accent : theme.ink)
+                .frame(width: 42)
+                .focused($focused)
+                .onSubmit { commit() }
+                .onChange(of: focused) { _, isFocused in
+                    if !isFocused { commit() }
+                }
+            Text("s")
+                .font(Font(MacFont.ui(11.5)))
+                .foregroundStyle(theme.ink3)
+        }
+        .padding(.vertical, 7)
+        .onChange(of: route.timeoutSecs) { _, secs in
+            if !focused { text = secs.map(String.init) ?? "" }
+        }
+    }
+
+    /// Empty clears the override; a positive integer sets it; anything else
+    /// reverts to the stored value.
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            if route.timeoutSecs != nil { onSet(nil) }
+            return
+        }
+        if let secs = UInt64(trimmed), secs > 0 {
+            if secs != route.timeoutSecs { onSet(secs) }
+        } else {
+            text = route.timeoutSecs.map(String.init) ?? ""
+        }
     }
 }
 

@@ -41,6 +41,11 @@ extension ListPaneViewController {
         case .authorWorks:
             break
 
+        case .settings:
+            // The list pane is collapsed for Settings — the reading pane
+            // hosts the whole thing. Nothing to render here.
+            break
+
         case .reading, .history, .bookmarks, .downloads:
             works = model.works(for: section)
             let meta = sectionMeta(for: section)

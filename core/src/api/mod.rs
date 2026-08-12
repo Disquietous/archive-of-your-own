@@ -62,6 +62,10 @@ pub struct AO3App {
     /// fetches release their read guards — up to a full Tor round-trip.
     tor_connected: Arc<std::sync::atomic::AtomicBool>,
     socks_port: Arc<std::sync::atomic::AtomicU32>,
+    /// Per-route timeout overrides, loaded from storage at open and shared
+    /// into every client (current and future) — see
+    /// `client::routes::ROUTES` for the catalog.
+    route_timeouts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
     _runtime: Arc<tokio::runtime::Runtime>,
     /// One age-based works census per check cycle: keeps a fresh install (or
     /// a long-idle app) from crawling every subscription's full listing in a

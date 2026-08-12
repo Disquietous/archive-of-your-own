@@ -42,7 +42,7 @@ final class ReadPaneViewController: NSViewController {
 
     private enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
-             detail(String), reading(String, Int), inboxThread(UInt64)
+             detail(String), reading(String, Int), inboxThread(UInt64), settings
     }
 
     private var renderedMode: Mode?
@@ -677,6 +677,16 @@ final class ReadPaneViewController: NSViewController {
             return
         }
 
+        // Settings spans this pane full-width (the list pane is collapsed),
+        // hosting the same SwiftUI panes the standalone window used to.
+        if model.section == .settings {
+            toolbar.configure(title: "Settings", sub: nil)
+            toolbar.setLeading([])
+            toolbar.setTrailing([])
+            show(mode: .settings)
+            return
+        }
+
         // Search section with no selection: the list pane is collapsed, so
         // this pane holds the whole flow — the full-width criteria form,
         // flipping to paged results once a query runs (back button returns).
@@ -785,6 +795,16 @@ final class ReadPaneViewController: NSViewController {
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(SearchFormView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
+
+        case .settings:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(SettingsRootView(theme: theme, appState: appState, model: model))
             detailHost = host
             pin(host)
 

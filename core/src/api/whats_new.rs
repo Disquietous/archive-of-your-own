@@ -203,7 +203,11 @@ impl AO3App {
                 client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let url = url_for_fetch.clone();
-                    async move { client.read().await.fetch_with_progress(&url, 30).await.map_err(AO3Error::from) }
+                    async move {
+                        let c = client.read().await;
+                        let timeout = c.timeout_for_url(&url);
+                        c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
+                    }
                 }).await;
             let html = match fetch_result {
                 Ok(h) => h,

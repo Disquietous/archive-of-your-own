@@ -8,7 +8,8 @@ import Observation
 final class MacAppModel {
     enum Section: String, CaseIterable {
         case browse, reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
-             bookmarks, downloads, stats, search, authorWorks, readingLists, collections
+             bookmarks, downloads, stats, search, authorWorks, readingLists, collections,
+             settings
     }
 
     let appState: AppState

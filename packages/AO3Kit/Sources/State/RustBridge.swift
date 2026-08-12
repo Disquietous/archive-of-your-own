@@ -403,6 +403,17 @@ final class RustBridge {
         app?.setRequestTimeout(seconds: seconds)
     }
 
+    /// The per-route timeout catalog: every request shape the app makes,
+    /// with its current override (nil = follows the global timeout).
+    func getRouteTimeouts() -> [URouteTimeout] {
+        (try? app?.getRouteTimeouts()) ?? []
+    }
+
+    /// Set (positive seconds) or clear (nil) one route's timeout override.
+    func setRouteTimeout(key: String, seconds: UInt64?) {
+        try? app?.setRouteTimeout(key: key, timeoutSecs: seconds)
+    }
+
     func getRequestTimeout() -> UInt64 {
         app?.getRequestTimeout() ?? 30
     }

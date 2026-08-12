@@ -378,6 +378,17 @@ pub struct UBookmark {
     pub ao3_bookmark_id: i64, // -1 if none
 }
 
+/// One row of the per-route timeout catalog: the request shape (template is
+/// the non-dynamic URL form shown to the user) and its current override —
+/// None means the route follows the global request timeout.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct URouteTimeout {
+    pub key: String,
+    pub template: String,
+    pub label: String,
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USubscription {
     pub sub_type: String,
