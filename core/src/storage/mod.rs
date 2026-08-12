@@ -88,7 +88,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 5;
+    const SCHEMA_VERSION: u32 = 7;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -131,6 +131,8 @@ impl Storage {
                 3 => self.migrate_v3(),
                 4 => self.migrate_v4(),
                 5 => self.migrate_v5(),
+                6 => self.migrate_v6(),
+                7 => self.migrate_v7(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -223,6 +225,73 @@ impl Storage {
                 [],
             )
             .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// v6 — collection cache. Collections were the one browsable thing the
+    /// app never cached; every /collections index page now lands here
+    /// (upsert by slug), which is also what the library-scoped collection
+    /// search reads. Cache-forever like everything else — rows refresh
+    /// whenever a browse fetches their page again.
+    fn migrate_v6(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE collections (
+                     name             TEXT PRIMARY KEY,
+                     title            TEXT NOT NULL,
+                     summary          TEXT NOT NULL DEFAULT '',
+                     is_open          INTEGER NOT NULL DEFAULT 0,
+                     is_moderated     INTEGER NOT NULL DEFAULT 0,
+                     is_anonymous     INTEGER NOT NULL DEFAULT 0,
+                     work_count       INTEGER NOT NULL DEFAULT 0,
+                     bookmarked_count INTEGER NOT NULL DEFAULT 0,
+                     maintainers_json TEXT NOT NULL DEFAULT '[]',
+                     collection_type  TEXT NOT NULL DEFAULT '',
+                     fetched_at       TEXT NOT NULL DEFAULT ''
+                 );
+                 CREATE INDEX idx_collections_title ON collections(title COLLATE NOCASE);",
+            )
+            .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// v7 — reading position moves onto `works` (2026-08):
+    /// * `works.last_chapter_read`: 1-based chapter the reader last had open
+    ///   (0 = never opened). Replaces the `reading_progress` table — one
+    ///   position per work is all the reader ever tracked.
+    /// * `works.last_chapter_read_pos`: character offset (into the chapter's
+    ///   plain text) of the first line visible when the reader left. The old
+    ///   table stored a scroll *fraction*, which lands somewhere else the
+    ///   moment fonts, size, or pane width change — offsets can't be
+    ///   converted, so positions reset to chapter top on upgrade (the
+    ///   chapter itself is kept).
+    fn migrate_v7(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "ALTER TABLE works ADD COLUMN last_chapter_read INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE works ADD COLUMN last_chapter_read_pos INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(map_sql)?;
+        // A database that skipped the v1 baseline may not have the old
+        // table at all — backfill only where there's something to copy.
+        let has_old_table: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                                WHERE type = 'table' AND name = 'reading_progress')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(map_sql)?;
+        if has_old_table {
+            self.conn
+                .execute_batch(
+                    "UPDATE works SET last_chapter_read = COALESCE(
+                         (SELECT rp.chapter FROM reading_progress rp WHERE rp.work_id = works.id), 0);
+                     DROP TABLE reading_progress;",
+                )
+                .map_err(map_sql)?;
+        }
         Ok(())
     }
 

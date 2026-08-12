@@ -30,7 +30,7 @@ extension ReaderViewController {
         // Re-render of content the reader is already inside (immersive, font,
         // measure, theme changes): freeze the text anchor now and re-apply it
         // once the new layout exists.
-        let restoreAfterRender = anchorOffset != nil && pendingRestorePct == nil
+        let restoreAfterRender = anchorOffset != nil && pendingRestorePos == nil
         if restoreAfterRender { scheduleAnchorRestore() }
         posLog("render immersive=\(model.immersive) anchor=\(anchorOffset ?? -1) restoreAfter=\(restoreAfterRender)")
         let bodySize = CGFloat(theme.fontSize)
@@ -108,24 +108,20 @@ extension ReaderViewController {
         footer.applyTheme()
         updateProgress()
 
-        // Land where the reader left off (Continue, chapter list, relaunch).
-        if let pct = pendingRestorePct {
-            pendingRestorePct = nil
-            DispatchQueue.main.async { [weak self] in
-                self?.restoreScroll(to: pct)
-            }
+        // Land where the reader left off (Continue, chapter list, relaunch):
+        // the saved position is a character offset, so hand it to the same
+        // anchor machinery that survives reflows — it converges on the
+        // anchor's line being the first one visible, however the text is
+        // laid out today.
+        if let pos = pendingRestorePos {
+            pendingRestorePos = nil
+            posLog("consume pendingRestorePos=\(pos)")
+            anchorOffset = pos
+            expectedTopLine = nil
+            scheduleAnchorRestore()
         }
         // restoreAfterRender: the restore scheduled at the top of this pass
         // runs on the next turn, once this render's layout settles.
-    }
-
-    private func restoreScroll(to pct: Double) {
-        view.layoutSubtreeIfNeeded()
-        guard let documentHeight = scrollView.documentView?.bounds.height else { return }
-        let maxOffset = documentHeight - scrollView.contentView.bounds.height
-        guard maxOffset > 0 else { return }
-        scrollView.contentView.scroll(to: NSPoint(x: 0, y: maxOffset * pct))
-        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
     private func updateOverlay() {

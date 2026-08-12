@@ -397,7 +397,7 @@ struct WorkDetailView: View {
                         }()
                         let isRead: Bool = {
                             guard let p = progress else { return false }
-                            return num < p.chapter || (num == p.chapter && p.pct >= 0.99)
+                            return num < p.chapter
                         }()
 
                         Button {
@@ -507,7 +507,7 @@ struct WorkDetailView: View {
     }
 
     private var primaryButtonLabel: String {
-        if let p = progress, p.pct > 0 {
+        if let p = progress, p.pos > 0 || p.chapter > 1 {
             return "Continue \u{00B7} Ch. \(p.chapter)"
         }
         return "Start reading"

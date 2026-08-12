@@ -53,7 +53,9 @@ extension AppState {
         let totalWords = works.reduce(0) { $0 + $1.words }
         let readCount = works.filter { w in
             guard let p = progressMap[w.id] else { return false }
-            return p.pct >= 0.99
+            // Position is a character offset now, so "finished the chapter"
+            // isn't knowable here — reaching the last posted chapter is.
+            return p.chapter >= max(1, w.totalChapters)
         }.count
 
         var tagCounts: [String: Int] = [:]

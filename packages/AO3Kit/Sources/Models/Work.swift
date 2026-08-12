@@ -73,8 +73,22 @@ struct ChapterContent: Hashable {
 }
 
 struct ReadingProgress: Hashable {
+    /// 1-based chapter number the reader last had open.
     var chapter: Int
-    var pct: Double
+    /// Character offset (into the chapter's plain text) of the first line
+    /// visible when the reader left. Anchored to the TEXT, not the scroll
+    /// geometry, so it survives font, size, and layout changes.
+    var pos: Int
+    /// Character count of that chapter's text (0 = not known here). From the
+    /// rendered document while reading; from the cached chapter tree at load.
+    var chapterLen: Int
+
+    /// Fraction of the chapter the position represents. Falls back to
+    /// half-credit for a started chapter whose length isn't known.
+    var pct: Double {
+        guard chapterLen > 0 else { return pos > 0 ? 0.5 : 0 }
+        return min(1, Double(pos) / Double(chapterLen))
+    }
 }
 
 enum Fandom {

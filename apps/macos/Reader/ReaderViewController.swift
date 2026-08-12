@@ -1,4 +1,19 @@
 import AppKit
+
+/// Diagnostic trail readable outside Xcode. Mirrors the [ReaderPos] NSLogs.
+func aoyoPosLog(_ message: String) {
+    NSLog("[ReaderPos] %@", message)
+    let line = "\(Date()) \(message)\n"
+    if let data = line.data(using: .utf8),
+       let handle = FileHandle(forWritingAtPath: "/tmp/aoyo-readerpos.log") {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        handle.closeFile()
+    } else {
+        try? (line as NSString).write(toFile: "/tmp/aoyo-readerpos.log",
+                                      atomically: false, encoding: String.Encoding.utf8.rawValue)
+    }
+}
 import SwiftUI
 
 /// In-place reading view: a TextKit 2 text view in a centered column at the
@@ -159,6 +174,7 @@ final class ReaderViewController: NSViewController {
 
         footer.onPrevious = { [weak self] in self?.goChapter(-1) }
         footer.onNext = { [weak self] in self?.goChapter(1) }
+        footer.onReturn = { [weak self] in self?.model.returnToPreviousPosition() }
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         footer.translatesAutoresizingMaskIntoConstraints = false
@@ -195,8 +211,9 @@ final class ReaderViewController: NSViewController {
         }
     }
 
-    /// Saved scroll fraction to restore once the chapter content renders.
-    var pendingRestorePct: Double?
+    /// Saved position (character offset) to restore once the chapter
+    /// content renders.
+    var pendingRestorePos: Int?
 
     /// Character offset (from the document start) of the first body-text line
     /// visible at the top of the viewport. Unlike the scroll fraction, this
@@ -232,20 +249,13 @@ final class ReaderViewController: NSViewController {
     /// Coalesces restore requests onto the next runloop turn (see
     /// scheduleAnchorRestore).
     var restorePending = false
+    /// Last persisted pct that was logged — keeps the diagnostic trail from
+    /// recording every scroll tick.
+    var lastPersistLogPct: Double = -1
 
     /// Diagnostic trail readable outside Xcode. Mirrors the [ReaderPos] NSLogs.
     func posLog(_ message: String) {
-        NSLog("[ReaderPos] %@", message)
-        let line = "\(Date()) \(message)\n"
-        if let data = line.data(using: .utf8),
-           let handle = FileHandle(forWritingAtPath: "/tmp/aoyo-readerpos.log") {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            try? (line as NSString).write(toFile: "/tmp/aoyo-readerpos.log",
-                                          atomically: false, encoding: String.Encoding.utf8.rawValue)
-        }
+        aoyoPosLog(message)
     }
 
     func show(work: Work, chapterIndex: Int) {
@@ -262,8 +272,9 @@ final class ReaderViewController: NSViewController {
         anchorOffset = nil
         expectedTopLine = nil
         verifyGeneration += 1
-        pendingRestorePct = model.readerResumePct > 0.02 ? model.readerResumePct : nil
-        model.readerResumePct = 0
+        pendingRestorePos = model.readerResumePos > 0 ? model.readerResumePos : nil
+        posLog("show work=\(work.id) ch=\(chapterIndex) resumePos=\(model.readerResumePos)")
+        model.readerResumePos = 0
         renderChapter()
         scrollToTop()
         Task { await loadChapters() }
@@ -283,7 +294,7 @@ final class ReaderViewController: NSViewController {
         if widthChanged, currentChapterContent != nil {
             scheduleRerender()
         }
-        if anchorOffset != nil, pendingRestorePct == nil, !isLiveScrolling {
+        if anchorOffset != nil, pendingRestorePos == nil, !isLiveScrolling {
             scheduleAnchorRestore()
         }
     }

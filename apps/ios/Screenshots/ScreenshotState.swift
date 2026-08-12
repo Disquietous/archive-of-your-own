@@ -12,8 +12,8 @@ enum ScreenshotState {
         state.downloadedWorkIDs = Set(["baker", "lamplight"])
         state.history = ["baker", "olive", "wireframe", "moor"]
         state.progressMap = [
-            "baker": ReadingProgress(chapter: 4, pct: 0.38),
-            "olive": ReadingProgress(chapter: 17, pct: 0.71),
+            "baker": ReadingProgress(chapter: 4, pos: 1180, chapterLen: 3100),
+            "olive": ReadingProgress(chapter: 17, pos: 4930, chapterLen: 6950),
         ]
         state.lastReadID = "baker"
 

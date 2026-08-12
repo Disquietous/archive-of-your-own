@@ -210,8 +210,15 @@ impl From<Chapter> for UChapter {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UReadingProgress {
     pub work_id: u64,
+    /// 1-based chapter number the reader last had open.
     pub chapter: u32,
-    pub position: f64,
+    /// Character offset (into the chapter's plain text) of the first line
+    /// visible when the reader left — not a scroll fraction, so it survives
+    /// font, size, and layout changes.
+    pub position: u32,
+    /// Character count of that chapter's cached text (0 when the chapter
+    /// isn't cached) — divide `position` by this for a fraction.
+    pub chapter_len: u32,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -376,6 +383,14 @@ pub struct UBookmark {
     pub note: String,
     pub sync_to_ao3: bool,
     pub ao3_bookmark_id: i64, // -1 if none
+}
+
+/// One library-scoped tag search hit: the tag and its kind ("fandom",
+/// "character", "relationship", "freeform", "creator").
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UTagHit {
+    pub name: String,
+    pub tag_type: String,
 }
 
 /// One row of the per-route timeout catalog: the request shape (template is

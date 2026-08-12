@@ -628,7 +628,7 @@ final class RustBridge {
 
     // MARK: - Progress
 
-    func saveProgress(workId: UInt64, chapter: UInt32, position: Double) {
+    func saveProgress(workId: UInt64, chapter: UInt32, position: UInt32) {
         try? app?.saveProgress(workId: workId, chapter: chapter, position: position)
     }
 
@@ -1008,6 +1008,24 @@ final class RustBridge {
     /// Per-subscription last-completed-check stamps, keyed "subType:subId".
     func getSubscriptionLastChecked() -> [String: String] {
         (try? app?.getSubscriptionLastChecked()) ?? [:]
+    }
+
+    // MARK: - Library-scoped search (cached data only, no network)
+
+    func searchLibraryWorks(_ term: String) -> [UWorkSummary] {
+        (try? app?.searchLibraryWorks(term: term)) ?? []
+    }
+
+    func searchLibraryTags(_ term: String) -> [UTagHit] {
+        (try? app?.searchLibraryTags(term: term)) ?? []
+    }
+
+    func searchLibraryUsers(_ term: String) -> [String] {
+        (try? app?.searchLibraryUsers(term: term)) ?? []
+    }
+
+    func searchLibraryCollections(_ term: String) -> [UCollection] {
+        (try? app?.searchLibraryCollections(term: term)) ?? []
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

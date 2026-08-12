@@ -963,7 +963,9 @@ struct ReaderView: View {
         let progress = min(max(totalScroll / max(viewHeight, 1), 0), 1)
         scrollProgress = progress
 
-        state.setProgress(workID, chapter: chapterIndex + 1, pct: progress)
+        // Position is a character offset the SwiftUI reader can't capture
+        // yet — record the chapter only (0 = chapter top).
+        state.setProgress(workID, chapter: chapterIndex + 1, pos: 0)
     }
 
     private func handleEntireWorkScroll(offset: CGFloat, viewHeight: CGFloat) {
@@ -986,7 +988,7 @@ struct ReaderView: View {
         let progress = min(max(totalScroll / max(viewHeight, 1), 0), 1)
         scrollProgress = progress
 
-        state.setProgress(workID, chapter: visibleChapterIndex + 1, pct: progress)
+        state.setProgress(workID, chapter: visibleChapterIndex + 1, pos: 0)
     }
 }
 

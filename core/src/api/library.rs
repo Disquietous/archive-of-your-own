@@ -9,6 +9,7 @@ impl AO3App {
         let entries = storage.get_all_progress().map_err(AO3Error::from)?;
         Ok(entries.into_iter().map(|(wid, ch, pos)| UReadingProgress {
             work_id: wid, chapter: ch, position: pos,
+            chapter_len: storage.chapter_char_len(wid, ch),
         }).collect())
     }
 
@@ -325,7 +326,7 @@ impl AO3App {
 
     // -- Reading Progress --
 
-    pub fn save_progress(&self, work_id: u64, chapter: u32, position: f64) -> Result<(), AO3Error> {
+    pub fn save_progress(&self, work_id: u64, chapter: u32, position: u32) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.save_progress(work_id, chapter, position).map_err(AO3Error::from)
     }
@@ -342,6 +343,7 @@ impl AO3App {
             work_id,
             chapter: ch,
             position: pos,
+            chapter_len: storage.chapter_char_len(work_id, ch),
         }))
     }
 

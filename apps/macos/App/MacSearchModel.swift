@@ -17,6 +17,42 @@ final class MacSearchModel {
     var formError: String?
     var hasSearched = false
 
+    // MARK: - Scope tabs & source toggle
+
+    /// What kind of thing the search targets — the title-bar tabs.
+    enum SearchScope: String, CaseIterable {
+        case works = "Works"
+        case collections = "Collections"
+        case bookmarks = "Bookmarks"
+        case tags = "Tags"
+        case users = "Users"
+    }
+
+    var scope: SearchScope = .works
+    /// true (default) searches only what's already in the app's database;
+    /// false runs a full search on AO3.
+    var searchLibraryOnly = true
+    /// Query text for the non-works scopes (Works keeps the criteria form).
+    var scopeQuery = ""
+
+    // Library-scope results. Works and Bookmarks reuse the works results
+    // list (appState.searchResults); these hold the other scopes' hits.
+    var tagHits: [UTagHit] = []
+    var userHits: [String] = []
+    var collectionHits: [UCollection] = []
+    /// Shown in the form when the scope+source combination can't run yet
+    /// (AO3-side search for the non-works scopes).
+    var scopeNotice: String?
+
+    /// Switch tabs: back to that scope's form, stale notice cleared.
+    @MainActor
+    func setScope(_ s: SearchScope) {
+        guard s != scope else { return }
+        scope = s
+        scopeNotice = nil
+        showingResults = false
+    }
+
     /// What the current results represent — the form's criteria, a tag
     /// (fandom card / tag pill), or a collection's works (by URL slug).
     /// Pagination re-runs whichever is active.
@@ -180,6 +216,66 @@ final class MacSearchModel {
         showingResults = true
     }
 
+    /// The Go button and every form's Return key land here: dispatch by
+    /// scope tab and library/AO3 toggle. Library scopes are synchronous
+    /// reads of the encrypted database — no network, per the toggle's
+    /// promise. AO3-side search exists for Works only so far; the other
+    /// scopes surface a notice instead of failing silently.
+    @MainActor
+    func performScopedSearch(_ appState: AppState) {
+        scopeNotice = nil
+        switch (scope, searchLibraryOnly) {
+        case (.works, false):
+            performSearch(appState)
+        case (.works, true):
+            runLibraryWorksSearch(appState, term: queryText, bookmarkedOnly: false)
+        case (.bookmarks, true):
+            runLibraryWorksSearch(appState, term: scopeQuery, bookmarkedOnly: true)
+        case (.tags, true):
+            beginLibraryScopeResults(appState)
+            tagHits = appState.bridge.searchLibraryTags(scopeQuery)
+        case (.users, true):
+            beginLibraryScopeResults(appState)
+            userHits = appState.bridge.searchLibraryUsers(scopeQuery)
+        case (.collections, true):
+            beginLibraryScopeResults(appState)
+            collectionHits = appState.bridge.searchLibraryCollections(scopeQuery)
+        case (.collections, false), (.bookmarks, false), (.tags, false), (.users, false):
+            scopeNotice = "Searching AO3 for \(scope.rawValue.lowercased()) isn't available yet — switch the source toggle to search your library."
+        }
+    }
+
+    /// Library mode for Works and Bookmarks: query the cached works and
+    /// reuse the works results pane. No pagination — the library returns
+    /// everything at once (activeQuery stays nil so the pager stays inert).
+    @MainActor
+    private func runLibraryWorksSearch(_ appState: AppState, term: String, bookmarkedOnly: Bool) {
+        onNewQuery?()
+        activeQuery = nil
+        appState.searchError = nil
+        var works = appState.bridge.searchLibraryWorks(term).map(AppState.workFromSummary)
+        if bookmarkedOnly {
+            works = works.filter { appState.bookmarkedWorkIDs.contains($0.id) }
+        }
+        appState.searchResults = works
+        currentPage = 1
+        hasNextPage = false
+        totalPages = 1
+        totalWorks = UInt32(works.count)
+        hasSearched = true
+        showingResults = true
+    }
+
+    @MainActor
+    private func beginLibraryScopeResults(_ appState: AppState) {
+        onNewQuery?()
+        tagHits = []
+        userHits = []
+        collectionHits = []
+        hasSearched = true
+        showingResults = true
+    }
+
     @MainActor
     func performSearch(_ appState: AppState) {
         var keys: [String] = []
@@ -201,6 +297,9 @@ final class MacSearchModel {
 
     @MainActor
     func startTagQuery(_ tag: String, appState: AppState) {
+        // Tag/collection listings are works results — land on the Works tab
+        // whatever scope the search section was left on.
+        scope = .works
         activeQuery = .tag(tag)
         beginNewQuery(appState)
         Task { await fetch(page: 1, appState: appState) }
@@ -209,6 +308,7 @@ final class MacSearchModel {
     /// A collection's paged works — `name` is the /collections/{name} slug.
     @MainActor
     func startCollectionQuery(_ name: String, appState: AppState) {
+        scope = .works
         activeQuery = .collection(name)
         beginNewQuery(appState)
         Task { await fetch(page: 1, appState: appState) }

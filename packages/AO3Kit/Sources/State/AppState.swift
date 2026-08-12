@@ -233,7 +233,7 @@ final class AppState {
         let progressEntries = bridge.getAllProgress()
         progressMap = [:]
         for p in progressEntries {
-            progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pct: p.position)
+            progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pos: Int(p.position), chapterLen: Int(p.chapterLen))
         }
 
         // Last-read datetimes (Currently Reading sort)
@@ -302,7 +302,8 @@ final class AppState {
 
     var shelfWorks: [Work] {
         allKnownWorks.filter { w in
-            downloadedWorkIDs.contains(w.id) || (progressMap[w.id]?.pct ?? 0) > 0
+            downloadedWorkIDs.contains(w.id)
+                || progressMap[w.id].map { $0.pos > 0 || $0.chapter > 1 } ?? false
         }
     }
 

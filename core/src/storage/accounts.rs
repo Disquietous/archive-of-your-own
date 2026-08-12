@@ -478,6 +478,28 @@ impl Storage {
         }
     }
 
+    /// Library-scope user search: every AO3 user the app has cached (from
+    /// works, comments, kudos, profiles) whose username matches. Prefix
+    /// matches rank first.
+    pub fn search_ao3_usernames(&self, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+        let escaped = Self::escape_like(term);
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT username FROM ao3_users
+             WHERE username LIKE ?1 ESCAPE '\\'
+             ORDER BY (username LIKE ?2 ESCAPE '\\') DESC, username COLLATE NOCASE
+             LIMIT ?3"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![contains, prefix, limit], |row| {
+            row.get::<_, String>(0)
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     /// Persist a fetched profile onto the user's ao3_users row (keyed by
     /// username, matching how author rows are recorded elsewhere).
     /// Creates the row when the user has never been seen.

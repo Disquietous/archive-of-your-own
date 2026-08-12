@@ -1,8 +1,11 @@
 import AppKit
 
-/// Bottom navigation bar: Previous · chapter progress line · running % · Next.
+/// Bottom navigation bar: Return · Previous · chapter progress line ·
+/// running % · Next. The return button shows only while a previous
+/// chapter/position is stashed to go back to.
 final class ReadFooterView: NSView {
     private let theme: AppTheme
+    private let returnButton = NSButton(title: "", target: nil, action: nil)
     private let previousButton = NSButton(title: "‹ Previous", target: nil, action: nil)
     private let nextButton = NSButton(title: "Next ›", target: nil, action: nil)
     private let track = NSView()
@@ -10,7 +13,9 @@ final class ReadFooterView: NSView {
     private let pctLabel = NSTextField(labelWithString: "0%")
     private let topLine = NSView()
     private var fillWidth: NSLayoutConstraint!
+    private var returnChapter: Int?
 
+    var onReturn: (() -> Void)?
     var onPrevious: (() -> Void)?
     var onNext: (() -> Void)?
 
@@ -19,7 +24,8 @@ final class ReadFooterView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
 
-        for (button, selector) in [(previousButton, #selector(prev)), (nextButton, #selector(next))] {
+        for (button, selector) in [(returnButton, #selector(goBack)),
+                                   (previousButton, #selector(prev)), (nextButton, #selector(next))] {
             button.isBordered = false
             button.wantsLayer = true
             button.layer?.cornerRadius = 9
@@ -41,7 +47,10 @@ final class ReadFooterView: NSView {
 
         topLine.wantsLayer = true
 
-        let bar = NSStackView(views: [previousButton, track, pctLabel, nextButton])
+        returnButton.isHidden = true
+        returnButton.toolTip = "Return to where you were before the last chapter change"
+
+        let bar = NSStackView(views: [returnButton, previousButton, track, pctLabel, nextButton])
         bar.orientation = .horizontal
         bar.spacing = 14
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -74,6 +83,10 @@ final class ReadFooterView: NSView {
         fatalError("init(coder:) is not supported")
     }
 
+    @objc private func goBack() {
+        onReturn?()
+    }
+
     @objc private func prev() {
         onPrevious?()
     }
@@ -82,7 +95,8 @@ final class ReadFooterView: NSView {
         onNext?()
     }
 
-    func update(chapterPct: Double, bookPct: Double, canGoBack: Bool, canGoForward: Bool) {
+    func update(chapterPct: Double, bookPct: Double, canGoBack: Bool, canGoForward: Bool,
+                returnChapter: Int?) {
         layoutSubtreeIfNeeded()
         fillWidth.constant = track.bounds.width * chapterPct
         pctLabel.stringValue = "\(Int((bookPct * 100).rounded()))%"
@@ -90,6 +104,16 @@ final class ReadFooterView: NSView {
         previousButton.alphaValue = canGoBack ? 1 : 0.4
         nextButton.isEnabled = canGoForward
         nextButton.alphaValue = canGoForward ? 1 : 0.4
+        self.returnChapter = returnChapter
+        returnButton.isHidden = returnChapter == nil
+        if returnChapter != nil { styleReturnButton() }
+    }
+
+    private func styleReturnButton() {
+        guard let chapter = returnChapter else { return }
+        returnButton.attributedTitle = NSAttributedString(
+            string: "↩ Ch. \(chapter)",
+            attributes: [.font: MacFont.ui(13, weight: .semibold), .foregroundColor: theme.nsAccent])
     }
 
     func applyTheme() {
@@ -105,6 +129,9 @@ final class ReadFooterView: NSView {
                 string: title,
                 attributes: [.font: MacFont.ui(13, weight: .semibold), .foregroundColor: theme.nsInk2])
         }
+        returnButton.layer?.backgroundColor = theme.nsSurface.cgColor
+        returnButton.layer?.borderColor = theme.nsLine.cgColor
+        styleReturnButton()
     }
 }
 

@@ -76,21 +76,57 @@ impl AO3App {
         }).await
     }
 
-    /// One page of the public collections index. Collections aren't cached
-    /// in the DB — the parsed page goes straight back to the caller.
+    /// One page of the public collections index. Every fetched page is
+    /// cached into the collections table (upsert by slug) — the library-
+    /// scoped collection search reads that cache.
     pub async fn browse_collections(&self, page: u32) -> Result<UCollectionsPage, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let (collections, has_next, total) = with_recovery(
-                client, storage, OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
+                client, storage.clone(), OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
                     client.read().await.fetch_collections(page).await.map_err(AO3Error::from)
                 }).await?;
+            {
+                let s = storage.lock().await;
+                log_db("save_collections", s.save_collections(&collections));
+            }
             Ok(UCollectionsPage {
                 collections: collections.into_iter().map(UCollection::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
             })
         }).await
+    }
+
+    // -- Library-scoped search (cached data only, no network) --
+
+    /// Cached works whose title, creators, fandoms, tags, or summary match.
+    pub fn search_library_works(&self, term: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_local_works(&term, 500).map_err(AO3Error::from)?
+            .into_iter().map(UWorkSummary::from).collect())
+    }
+
+    /// Cached tag names matching, across every tag type.
+    pub fn search_library_tags(&self, term: String) -> Result<Vec<UTagHit>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_known_tags_all(&term, 500).map_err(AO3Error::from)?
+            .into_iter()
+            .map(|(name, tag_type)| UTagHit { name, tag_type })
+            .collect())
+    }
+
+    /// Cached AO3 usernames matching.
+    pub fn search_library_users(&self, term: String) -> Result<Vec<String>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.search_ao3_usernames(&term, 500).map_err(AO3Error::from)
+    }
+
+    /// Cached collection blurbs matching.
+    pub fn search_library_collections(&self, term: String) -> Result<Vec<UCollection>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_collections(&term, 500).map_err(AO3Error::from)?
+            .into_iter().map(UCollection::from).collect())
     }
 
     /// One page of a collection's works, cached like every other listing.

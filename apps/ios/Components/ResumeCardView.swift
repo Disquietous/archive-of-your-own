@@ -8,6 +8,12 @@ struct ResumeCardView: View {
     var chapter: String? = nil
     var onTap: () -> Void
 
+    /// Book-level completion fraction.
+    private var bookFraction: Double {
+        let chapters = max(1, work.totalChapters)
+        return min(1, (Double(progress.chapter - 1) + progress.pct) / Double(chapters))
+    }
+
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 10) {
@@ -43,9 +49,9 @@ struct ResumeCardView: View {
 
                 // Progress bar + percentage
                 HStack(spacing: 10) {
-                    ProgressTrackView(progress: progress.pct)
+                    ProgressTrackView(progress: bookFraction)
 
-                    Text("\(Int(progress.pct * 100))%")
+                    Text("\(Int(bookFraction * 100))%")
                         .font(.custom("HankenGrotesk", size: 12).weight(.bold))
                         .foregroundStyle(theme.ink2)
                 }
@@ -98,7 +104,7 @@ struct ResumeCardView: View {
     )
     ResumeCardView(
         work: work,
-        progress: ReadingProgress(chapter: 4, pct: 0.38),
+        progress: ReadingProgress(chapter: 4, pos: 1180, chapterLen: 3100),
         chapter: "Ch. 4: The Empty House",
         onTap: {}
     )

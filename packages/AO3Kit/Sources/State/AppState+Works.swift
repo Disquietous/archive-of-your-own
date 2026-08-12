@@ -144,13 +144,19 @@ extension AppState {
         }
     }
 
-    func setProgress(_ id: String, chapter: Int, pct: Double) {
+    /// Progress is wherever the reader is NOW: revisiting chapter 1 moves the
+    /// work's progress back to chapter 1. The chapter left behind lives only
+    /// in the UI's in-memory return point, never here.
+    func setProgress(_ id: String, chapter: Int, pos: Int, chapterLen: Int = 0) {
         let existing = progressMap[id]
-        let highestChapter = max(chapter, existing?.chapter ?? 0)
-        let storedPct = chapter == highestChapter ? pct : (existing?.pct ?? 0)
-        progressMap[id] = ReadingProgress(chapter: highestChapter, pct: storedPct)
+        // A caller that doesn't know the chapter's length (chapterLen 0)
+        // must not wipe one a previous save recorded.
+        let len = chapterLen > 0 ? chapterLen
+            : (existing?.chapter == chapter ? existing?.chapterLen ?? 0 : 0)
+        progressMap[id] = ReadingProgress(chapter: chapter, pos: pos, chapterLen: len)
         if let workId = UInt64(id) {
-            bridge.saveProgress(workId: workId, chapter: UInt32(highestChapter), position: storedPct)
+            bridge.saveProgress(workId: workId, chapter: UInt32(chapter),
+                                position: UInt32(max(0, pos)))
         }
     }
 

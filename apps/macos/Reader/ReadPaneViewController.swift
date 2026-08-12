@@ -42,7 +42,8 @@ final class ReadPaneViewController: NSViewController {
 
     private enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
-             detail(String), reading(String, Int), inboxThread(UInt64), settings
+             detail(String), reading(String, Int), inboxThread(UInt64), settings,
+             scopeForm, scopeResults
     }
 
     private var renderedMode: Mode?
@@ -452,7 +453,60 @@ final class ReadPaneViewController: NSViewController {
     private var searchBackBtn: ToolButton?
     private var searchGoBtn: ToolButton?
     private var reloadCriteriaBtn: ToolButton?
+    private var scopeTabs: ScopeTabsView?
+    private var searchSourceBtn: ToolButton?
     private var searchEyeBtn: ToolButton?
+
+    /// The search scope tabs living where the "Search" title used to be.
+    /// One instance for the pane's lifetime; render() re-reads the model's
+    /// scope into it every pass (observable input, per the relay rule).
+    private func scopeTabsView() -> ScopeTabsView {
+        let tabs = scopeTabs ?? {
+            let view = ScopeTabsView(theme: theme)
+            view.onSelect = { [weak self] scope in
+                guard let self else { return }
+                self.model.search.setScope(scope)
+            }
+            return view
+        }()
+        scopeTabs = tabs
+        return tabs
+    }
+
+    /// Library/AO3 source toggle: internaldrive = only the app's database,
+    /// globe = full search on AO3.
+    private func searchSourceButton() -> ToolButton {
+        let button = searchSourceBtn ?? ToolButton(theme: theme, symbol: "internaldrive",
+                                                   tooltip: "Search source") { [weak self] in
+            guard let self else { return }
+            model.search.searchLibraryOnly.toggle()
+        }
+        searchSourceBtn = button
+        let libraryOnly = model.search.searchLibraryOnly
+        button.setSymbol(libraryOnly ? "internaldrive" : "globe")
+        button.toolTip = libraryOnly
+            ? "Searching your library only — click to search AO3"
+            : "Searching AO3 — click to search only your library"
+        button.isOn = !libraryOnly
+        return button
+    }
+
+    /// Results subtitle per scope: works-style results reuse the pager
+    /// subtitle; the others report their own hit counts.
+    private func scopeResultsSubtitle(_ search: MacSearchModel) -> String? {
+        switch search.scope {
+        case .works, .bookmarks:
+            let parts = [model.searchDisplayTitle, search.resultsSubtitle].compactMap { $0 }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case .tags:
+            return search.tagHits.count == 1 ? "1 tag" : "\(search.tagHits.count) tags"
+        case .users:
+            return search.userHits.count == 1 ? "1 user" : "\(search.userHits.count) users"
+        case .collections:
+            return search.collectionHits.count == 1
+                ? "1 collection" : "\(search.collectionHits.count) collections"
+        }
+    }
 
     private func searchFormBackButton() -> ToolButton {
         let button = searchBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left",
@@ -467,7 +521,7 @@ final class ReadPaneViewController: NSViewController {
         let button = searchGoBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass",
                                                tooltip: "Search") { [weak self] in
             guard let self else { return }
-            model.search.performSearch(appState)
+            model.search.performScopedSearch(appState)
         }
         searchGoBtn = button
         button.isOn = true
@@ -688,30 +742,45 @@ final class ReadPaneViewController: NSViewController {
         }
 
         // Search section with no selection: the list pane is collapsed, so
-        // this pane holds the whole flow — the full-width criteria form,
-        // flipping to paged results once a query runs (back button returns).
+        // this pane holds the whole flow — scope tabs in place of the title,
+        // the scope's form, flipping to results once a query runs (back
+        // button returns). Works/Bookmarks results use the works table;
+        // Tags/Users/Collections render their own hit lists.
         if model.section == .search, model.selectedWork == nil {
             let search = model.search
+            let tabs = scopeTabsView()
+            tabs.configure(selected: search.scope)
+            toolbar.setAfterTitle([tabs])
             if search.showingResults {
-                toolbar.configure(title: model.searchDisplayTitle ?? "Results",
-                                  sub: search.resultsSubtitle)
+                let worksStyle = search.scope == .works || search.scope == .bookmarks
+                toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
                 toolbar.setLeading([searchFormBackButton()])
-                var trailing: [NSView] = search.hasSearched
-                    ? [makePagerHost(), worksFilterButton(for: .search)] : []
-                // Server-side sort — only form queries carry AO3 sort params.
-                if search.hasSearched, case .form = search.activeQuery,
-                   searchSortField() != nil {
-                    trailing.insert(searchSortButton(), at: 0)
+                if worksStyle {
+                    var trailing: [NSView] = search.hasSearched
+                        ? [makePagerHost(), worksFilterButton(for: .search)] : []
+                    // Server-side sort — only form queries carry AO3 sort params.
+                    if search.hasSearched, case .form = search.activeQuery,
+                       searchSortField() != nil {
+                        trailing.insert(searchSortButton(), at: 0)
+                    }
+                    trailing.append(searchSourceButton())
+                    toolbar.setTrailing(trailing)
+                    show(mode: .searchResults)
+                } else {
+                    toolbar.setTrailing([searchSourceButton()])
+                    show(mode: .scopeResults)
                 }
-                toolbar.setTrailing(trailing)
-                show(mode: .searchResults)
             } else {
-                toolbar.configure(title: "Search",
-                                  sub: search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
+                toolbar.configure(title: "", sub: nil)
                 toolbar.setLeading([])
-                toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
-                                     searchEyeButton()])
-                show(mode: .searchForm)
+                if search.scope == .works {
+                    toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
+                                         searchEyeButton(), searchSourceButton()])
+                    show(mode: .searchForm)
+                } else {
+                    toolbar.setTrailing([searchGoButton(), searchSourceButton()])
+                    show(mode: .scopeForm)
+                }
             }
             return
         }
@@ -805,6 +874,26 @@ final class ReadPaneViewController: NSViewController {
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(SettingsRootView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
+
+        case .scopeForm:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(ScopeSearchFormView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
+
+        case .scopeResults:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(ScopeResultsView(theme: theme, appState: appState, model: model))
             detailHost = host
             pin(host)
 

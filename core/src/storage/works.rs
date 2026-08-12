@@ -235,13 +235,19 @@ impl Storage {
         })
     }
 
+    /// Escape LIKE metacharacters so a search term is matched literally
+    /// (queries pair this with `ESCAPE '\'`).
+    pub(super) fn escape_like(term: &str) -> String {
+        term.trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    }
+
     /// Local autocomplete: substring match, ranked starts-with first, then
     /// AO3-confirmed canonical names, then by how often the tag was seen.
     pub fn search_known_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
-        let escaped = term.trim()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
@@ -258,6 +264,67 @@ impl Storage {
             row.get::<_, String>(0)
         }).map_err(map_sql)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Library-scope tag search: like `search_known_tags` but across every
+    /// tag type. Returns (name, tag_type) so rows can say what kind of tag
+    /// each hit is.
+    pub fn search_known_tags_all(&self, term: &str, limit: u32) -> Result<Vec<(String, String)>, AppError> {
+        let escaped = Self::escape_like(term);
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT name, tag_type FROM known_tags
+             WHERE name LIKE ?1 ESCAPE '\\'
+             ORDER BY (name LIKE ?2 ESCAPE '\\') DESC,
+                      canonical DESC, uses DESC, name COLLATE NOCASE
+             LIMIT ?3"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![contains, prefix, limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Library-scope work search: case-insensitive substring across the
+    /// title, creators, fandoms, tags, and summary of every cached work.
+    /// Title matches rank first, then most recently updated.
+    pub fn search_local_works(&self, term: &str, limit: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let escaped = Self::escape_like(term);
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let title_prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, authors_json, fandoms_json, rating,
+                    warnings_json, categories_json, relationships_json,
+                    characters_json, tags_json, summary, word_count,
+                    chapter_count, total_chapters, kudos, hits,
+                    bookmarks, comments, date_published, date_updated, language, complete,
+                    series_json, fetched_at
+             FROM works
+             WHERE title LIKE ?1 ESCAPE '\\'
+                OR authors_json LIKE ?1 ESCAPE '\\'
+                OR fandoms_json LIKE ?1 ESCAPE '\\'
+                OR relationships_json LIKE ?1 ESCAPE '\\'
+                OR characters_json LIKE ?1 ESCAPE '\\'
+                OR tags_json LIKE ?1 ESCAPE '\\'
+                OR summary LIKE ?1 ESCAPE '\\'
+             ORDER BY (title LIKE ?2 ESCAPE '\\') DESC, date_updated DESC
+             LIMIT ?3"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![contains, title_prefix, limit], |row| {
+            Ok(Self::work_from_row(row))
+        }).map_err(map_sql)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        Ok(out)
     }
 
     /// One-time seed of known_tags from works cached before the table existed.
@@ -370,9 +437,6 @@ impl Storage {
         let id = work_id as i64;
         self.conn
             .execute("DELETE FROM chapters WHERE work_id = ?1", params![id])
-            .map_err(map_sql)?;
-        self.conn
-            .execute("DELETE FROM reading_progress WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
         self.conn
             .execute("DELETE FROM bookmarks WHERE work_id = ?1", params![id])
@@ -511,7 +575,7 @@ impl Storage {
     pub fn purge_non_retained_chapters(&self) -> Result<(), AppError> {
         self.conn.execute(
             "DELETE FROM chapters WHERE work_id NOT IN (SELECT work_id FROM downloads)
-                                    AND work_id NOT IN (SELECT work_id FROM reading_progress)",
+                                    AND work_id NOT IN (SELECT id FROM works WHERE last_chapter_read > 0)",
             [],
         ).map_err(map_sql)?;
         Ok(())

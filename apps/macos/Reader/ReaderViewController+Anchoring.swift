@@ -85,7 +85,7 @@ extension ReaderViewController {
     /// Character offset of the first body-text line at the top of the
     /// viewport, or nil while the header above the body is showing (there the
     /// raw offset is stable enough and there is no line to anchor to).
-    private func captureAnchor() -> Int? {
+    func captureAnchor() -> Int? {
         guard let layoutManager = textView.textLayoutManager,
               let contentManager = layoutManager.textContentManager,
               let document = scrollView.documentView else { return nil }
@@ -258,13 +258,16 @@ extension ReaderViewController {
         // produced for) is not reader movement: viewDidLayout / restoreAnchor
         // will republish once the geometry settles.
         guard !suppressTracking, scrollView.contentView.bounds.width == lastLayoutWidth else { return }
-        refreshProgress(persist: true)
-        guard currentChapterContent != nil else { return }
+        guard currentChapterContent != nil else {
+            refreshProgress(persist: false)
+            return
+        }
         let y = scrollView.contentView.bounds.minY
         let captured = captureAnchor()
         // Top text changed while the viewport barely moved: the ground moved
         // (TextKit materializing real layout at paint time), not the reader.
-        // Re-pin to the anchor rather than adopting the shifted position.
+        // Re-pin to the anchor rather than adopting the shifted position —
+        // and never persist it.
         if !isLiveScrolling, abs(y - lastScrollY) < 3,
            let captured, let expected = expectedTopLine, captured != expected {
             posLog("shift under viewport: top \(captured) expected \(expected) at y \(Int(y))")
@@ -282,6 +285,10 @@ extension ReaderViewController {
             expectedTopLine = captured
             lastScrollY = y
             lastDocumentHeight = height
+            // The anchor just adopted real reader movement — safe to persist.
+            refreshProgress(persist: true)
+        } else {
+            refreshProgress(persist: false)
         }
     }
 }

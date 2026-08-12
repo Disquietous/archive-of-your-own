@@ -109,6 +109,9 @@ extension ReaderViewController {
         guard let work else { return }
         let target = chapterIndex + delta
         guard target >= 0, target < postedChapterCount else { return }
+        // Remember the position being left so the footer's return control
+        // can take the reader back (in-memory only).
+        model.stashReturnPoint(chapter: chapterIndex, pos: anchorOffset ?? 0)
         chapterIndex = target
         chapterPct = 0
         anchorOffset = nil
@@ -118,7 +121,7 @@ extension ReaderViewController {
         appState.pushHistory(work.id)
         appState.markWorkRead(work.id)
         // Reaching a chapter records it even if the reader never scrolls.
-        appState.setProgress(work.id, chapter: target + 1, pct: 0)
+        appState.setProgress(work.id, chapter: target + 1, pos: 0)
         scrollToTop()
         // Stepping into a chapter the cached copy doesn't have yet (the
         // work updated since the last fetch): refetch past the caches —
@@ -141,9 +144,22 @@ extension ReaderViewController {
         let max = documentHeight - visible.height
         chapterPct = max > 0 ? min(1, Swift.max(0, visible.origin.y / max)) : 0
         updateProgress()
-        if persist, let work, currentChapterContent != nil {
-            // 1-based chapter; AppState keeps progress monotonic.
-            appState.setProgress(work.id, chapter: chapterIndex + 1, pct: chapterPct)
+        // Persist only when the geometry is trustworthy: a pending or
+        // in-flight restore means the viewport is mid-churn and a captured
+        // offset could be layout noise, not the reader's place.
+        if persist, let work, currentChapterContent != nil,
+           pendingRestorePos == nil, !restorePending, !suppressTracking {
+            // 1-based chapter; the position is the settled text anchor (nil
+            // while the header above the body shows — that IS the chapter
+            // top). The rendered document's length rides along so the
+            // position reads back as a chapter fraction.
+            let pos = anchorOffset ?? 0
+            appState.setProgress(work.id, chapter: chapterIndex + 1, pos: pos,
+                                 chapterLen: textView.textStorage?.length ?? 0)
+            if abs(chapterPct - lastPersistLogPct) > 0.05 {
+                lastPersistLogPct = chapterPct
+                posLog("persist work=\(work.id) ch=\(chapterIndex + 1) pos=\(pos) stored=\(appState.progressMap[work.id].map { "ch\($0.chapter)@\($0.pos)" } ?? "nil")")
+            }
         }
     }
 
@@ -153,7 +169,8 @@ extension ReaderViewController {
         let bookPct = (Double(chapterIndex) + chapterPct) / total
         footer.update(chapterPct: chapterPct, bookPct: bookPct,
                       canGoBack: chapterIndex > 0,
-                      canGoForward: chapterIndex < postedChapterCount - 1)
+                      canGoForward: chapterIndex < postedChapterCount - 1,
+                      returnChapter: model.readerReturnPoint.map { $0.chapter + 1 })
     }
 
     // MARK: - Chapter-embedded images

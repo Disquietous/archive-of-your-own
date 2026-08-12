@@ -255,9 +255,9 @@ final class MacAppModel {
             // Reopening the reader lands where it was — stash the saved
             // position exactly like openReader does.
             if let progress = appState.progressMap[id], progress.chapter == snap.readerChapter + 1 {
-                readerResumePct = progress.pct
+                readerResumePos = progress.pos
             } else {
-                readerResumePct = 0
+                readerResumePos = 0
             }
             readerOpen = true
         } else {
@@ -272,6 +272,8 @@ final class MacAppModel {
         // is deliberately left alive — it only renders in its own section,
         // and in-flight crawls keep their bookkeeping.
         snapshotPane(for: section)
+        // Leaving the work (even to another section) drops the return point.
+        readerReturnPoint = nil
         section = s
         restorePane(for: s)
         switch s {
@@ -416,6 +418,7 @@ final class MacAppModel {
     func selectWork(_ id: String) {
         if selectedWorkID != id { selectedWorkID = id }
         if readerOpen { readerOpen = false }
+        readerReturnPoint = nil
         // Opening the detail view counts as "seen" for the What's New badge.
         appState.markDetailViewed(id)
         // Fill in full metadata (tags, summary, chapter titles) if the row
@@ -423,32 +426,72 @@ final class MacAppModel {
         Task { await appState.fetchWorkMetadata(id) }
     }
 
-    func openReader(_ id: String, chapter: Int) {
-        // Stash the saved in-chapter position before setProgress(pct: 0)
-        // overwrites it — the reader consumes this to restore the scroll.
-        if let existing = appState.progressMap[id], existing.chapter == chapter + 1 {
-            readerResumePct = existing.pct
+    func openReader(_ id: String, chapter: Int, at pos: Int? = nil) {
+        // A chapter change within the open work remembers where the reader
+        // was, so the footer's return control can take them back. A fresh
+        // open starts with no return point — only this chapter has been seen.
+        if readerOpen && selectedWorkID == id {
+            if chapter != readerChapter {
+                let stored = appState.progressMap[id]
+                stashReturnPoint(chapter: readerChapter,
+                                 pos: stored?.chapter == readerChapter + 1 ? stored?.pos ?? 0 : 0)
+            }
         } else {
-            readerResumePct = 0
+            readerReturnPoint = nil
         }
+        // Stash the in-chapter position — the reader consumes this to land
+        // back on the anchored line. An explicit `pos` (the return control)
+        // wins over the saved progress.
+        if let pos {
+            readerResumePos = pos
+        } else if let existing = appState.progressMap[id], existing.chapter == chapter + 1 {
+            readerResumePos = existing.pos
+        } else {
+            readerResumePos = 0
+        }
+        aoyoPosLog("openReader work=\(id) ch=\(chapter) existing=\(appState.progressMap[id].map { "ch\($0.chapter)@\($0.pos)" } ?? "nil") stash=\(readerResumePos)")
         selectedWorkID = id
         readerChapter = chapter
         readerOpen = true
         appState.pushHistory(id)
         appState.markWorkRead(id)
         // Opening a chapter enrolls the work in Currently Reading immediately —
-        // scrolling only refines the position. Progress is monotonic, so
-        // revisiting an earlier chapter never regresses anything.
-        appState.setProgress(id, chapter: chapter + 1, pct: 0)
+        // scrolling only refines the position. Re-recording the stashed
+        // position keeps the saved place intact until the reader actually
+        // moves; a chapter never visited starts at its top.
+        appState.setProgress(id, chapter: chapter + 1, pos: readerResumePos)
     }
 
-    /// Saved scroll position (0–1) for the chapter being opened; consumed by
-    /// the reader on its first successful render.
-    var readerResumePct: Double = 0
+    /// Saved position (character offset) for the chapter being opened;
+    /// consumed by the reader on its first successful render.
+    var readerResumePos: Int = 0
+
+    /// Where the reader was before the last chapter change — UI memory only,
+    /// never persisted. Backs the footer's "return to previous position"
+    /// control; empty on a fresh open and cleared when the work is left.
+    struct ReaderReturnPoint: Equatable {
+        /// 0-based chapter index.
+        let chapter: Int
+        /// Character offset within that chapter.
+        let pos: Int
+    }
+    var readerReturnPoint: ReaderReturnPoint?
+
+    func stashReturnPoint(chapter: Int, pos: Int) {
+        readerReturnPoint = ReaderReturnPoint(chapter: chapter, pos: pos)
+    }
+
+    func returnToPreviousPosition() {
+        guard readerOpen, let point = readerReturnPoint, let id = selectedWorkID else { return }
+        // openReader stashes the chapter being left, so the control swaps
+        // between the two positions rather than consuming itself.
+        openReader(id, chapter: point.chapter, at: point.pos)
+    }
 
     func closeReader() {
         readerOpen = false
         immersive = false
+        readerReturnPoint = nil
     }
 
     /// Remove one work from Currently Reading; if it's showing in the reading
@@ -698,8 +741,8 @@ final class MacAppModel {
             appState.fetchedWorks[work.id] = work
         }
         // Seed library state so every section has examples.
-        appState.progressMap["baker"] = ReadingProgress(chapter: 4, pct: 0.38)
-        appState.progressMap["olive"] = ReadingProgress(chapter: 17, pct: 0.71)
+        appState.progressMap["baker"] = ReadingProgress(chapter: 4, pos: 1180, chapterLen: 3100)
+        appState.progressMap["olive"] = ReadingProgress(chapter: 17, pos: 4930, chapterLen: 6950)
         for id in ["lamplight", "baker"] where !appState.history.contains(id) {
             appState.history.append(id)
         }

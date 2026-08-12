@@ -72,41 +72,51 @@ impl Storage {
     // -------------------------------------------------------------------
 
     /// Save the reader's position inside a work.
-    /// `chapter` is the 1-based chapter number; `position` is a normalised
-    /// scroll offset (0.0 – 1.0).
+    /// `chapter` is the 1-based chapter number; `position` is the character
+    /// offset (into the chapter's plain text) of the first visible line.
+    /// The work must already be cached in `works` — position lives on that
+    /// row.
     pub fn save_progress(
         &self,
         work_id: u64,
         chapter: u32,
-        position: f64,
+        position: u32,
     ) -> Result<(), AppError> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO reading_progress
-                    (work_id, chapter, position, updated_at)
-                 VALUES (?1, ?2, ?3, datetime('now'))",
-                params![work_id as i64, chapter as i64, position],
+                "UPDATE works SET last_chapter_read = ?2, last_chapter_read_pos = ?3
+                 WHERE id = ?1",
+                params![work_id as i64, chapter as i64, position as i64],
             )
             .map_err(map_sql)?;
         Ok(())
     }
 
     pub fn delete_progress(&self, work_id: u64) -> Result<(), AppError> {
-        self.conn.execute("DELETE FROM reading_progress WHERE work_id = ?1", params![work_id as i64]).map_err(map_sql)?;
+        self.conn
+            .execute(
+                "UPDATE works SET last_chapter_read = 0, last_chapter_read_pos = 0
+                 WHERE id = ?1",
+                params![work_id as i64],
+            )
+            .map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_progress(&self, work_id: u64) -> Result<Option<(u32, f64)>, AppError> {
+    pub fn get_progress(&self, work_id: u64) -> Result<Option<(u32, u32)>, AppError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT chapter, position FROM reading_progress WHERE work_id = ?1")
+            .prepare(
+                "SELECT last_chapter_read, last_chapter_read_pos FROM works
+                 WHERE id = ?1 AND last_chapter_read > 0",
+            )
             .map_err(map_sql)?;
 
         let mut rows = stmt
             .query_map(params![work_id as i64], |row| {
                 let chapter: i64 = row.get(0)?;
-                let position: f64 = row.get(1)?;
-                Ok((chapter as u32, position))
+                let position: i64 = row.get(1)?;
+                Ok((chapter as u32, position as u32))
             })
             .map_err(map_sql)?;
 
@@ -117,15 +127,61 @@ impl Storage {
         }
     }
 
-    pub fn get_all_progress(&self) -> Result<Vec<(u64, u32, f64)>, AppError> {
+    /// Character count of a cached chapter's plain text (0 when the chapter
+    /// isn't cached). Lets position offsets read back as a fraction of the
+    /// chapter without the UI having to load the text itself.
+    pub fn chapter_char_len(&self, work_id: u64, chapter_number: u32) -> u32 {
+        use crate::models::{ContentBlock, InlineContent};
+
+        fn inline_len(items: &[InlineContent]) -> usize {
+            items
+                .iter()
+                .map(|i| match i {
+                    InlineContent::Text { value } => value.chars().count(),
+                    InlineContent::Bold { content }
+                    | InlineContent::Italic { content }
+                    | InlineContent::Link { content, .. }
+                    | InlineContent::Strikethrough { content }
+                    | InlineContent::Superscript { content } => inline_len(content),
+                    InlineContent::LineBreak => 1,
+                })
+                .sum()
+        }
+        fn block_len(blocks: &[ContentBlock]) -> usize {
+            blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Paragraph { text } => inline_len(text) + 1,
+                    ContentBlock::Heading { text, .. } => text.chars().count() + 1,
+                    ContentBlock::Blockquote { blocks } => block_len(blocks),
+                    ContentBlock::HorizontalRule => 1,
+                    ContentBlock::List { items, .. } => {
+                        items.iter().map(|i| block_len(i)).sum::<usize>()
+                    }
+                    ContentBlock::PreFormatted { text } => text.chars().count() + 1,
+                    ContentBlock::Image { alt, .. } => alt.chars().count() + 1,
+                })
+                .sum()
+        }
+
+        match self.get_chapter(work_id, chapter_number) {
+            Ok(Some(chapter)) => block_len(&chapter.content) as u32,
+            _ => 0,
+        }
+    }
+
+    pub fn get_all_progress(&self) -> Result<Vec<(u64, u32, u32)>, AppError> {
         let mut stmt = self.conn
-            .prepare("SELECT work_id, chapter, position FROM reading_progress")
+            .prepare(
+                "SELECT id, last_chapter_read, last_chapter_read_pos FROM works
+                 WHERE last_chapter_read > 0",
+            )
             .map_err(map_sql)?;
         let rows = stmt.query_map([], |row| {
             let work_id: i64 = row.get(0)?;
             let chapter: i64 = row.get(1)?;
-            let position: f64 = row.get(2)?;
-            Ok((work_id as u64, chapter as u32, position))
+            let position: i64 = row.get(2)?;
+            Ok((work_id as u64, chapter as u32, position as u32))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
@@ -393,6 +449,80 @@ impl Storage {
     pub fn delete_saved_search(&self, id: i64) -> Result<(), AppError> {
         self.conn.execute("DELETE FROM saved_searches WHERE id = ?1", params![id]).map_err(map_sql)?;
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Collections cache (blurbs from the /collections index)
+    // -------------------------------------------------------------------
+
+    /// Upsert one fetched index page of collection blurbs — the cache-forever
+    /// store the library-scoped collection search reads.
+    pub fn save_collections(&self, collections: &[crate::models::CollectionSummary]) -> Result<(), AppError> {
+        self.with_savepoint("save_collections", || {
+            let mut stmt = self.conn.prepare(
+                "INSERT INTO collections (name, title, summary, is_open, is_moderated,
+                                          is_anonymous, work_count, bookmarked_count,
+                                          maintainers_json, collection_type, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+                 ON CONFLICT(name) DO UPDATE SET
+                     title = excluded.title, summary = excluded.summary,
+                     is_open = excluded.is_open, is_moderated = excluded.is_moderated,
+                     is_anonymous = excluded.is_anonymous, work_count = excluded.work_count,
+                     bookmarked_count = excluded.bookmarked_count,
+                     maintainers_json = excluded.maintainers_json,
+                     collection_type = excluded.collection_type,
+                     fetched_at = excluded.fetched_at",
+            ).map_err(map_sql)?;
+            for c in collections {
+                let maintainers = serde_json::to_string(&c.maintainers)
+                    .unwrap_or_else(|_| "[]".to_string());
+                stmt.execute(params![
+                    c.name, c.title, c.summary, c.is_open as i64, c.is_moderated as i64,
+                    c.is_anonymous as i64, c.work_count, c.bookmarked_count,
+                    maintainers, c.collection_type,
+                ]).map_err(map_sql)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Library-scope collection search over the cached blurbs: substring on
+    /// title, slug, summary, and maintainer names; title matches rank first,
+    /// then the biggest collections.
+    pub fn search_collections(&self, term: &str, limit: u32) -> Result<Vec<crate::models::CollectionSummary>, AppError> {
+        let escaped = Self::escape_like(term);
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+        let contains = format!("%{escaped}%");
+        let title_prefix = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT name, title, summary, is_open, is_moderated, is_anonymous,
+                    work_count, bookmarked_count, maintainers_json, collection_type
+             FROM collections
+             WHERE title LIKE ?1 ESCAPE '\\'
+                OR name LIKE ?1 ESCAPE '\\'
+                OR summary LIKE ?1 ESCAPE '\\'
+                OR maintainers_json LIKE ?1 ESCAPE '\\'
+             ORDER BY (title LIKE ?2 ESCAPE '\\') DESC, work_count DESC, title COLLATE NOCASE
+             LIMIT ?3"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![contains, title_prefix, limit], |row| {
+            let maintainers_json: String = row.get(8)?;
+            Ok(crate::models::CollectionSummary {
+                name: row.get(0)?,
+                title: row.get(1)?,
+                summary: row.get(2)?,
+                is_open: row.get::<_, i64>(3)? != 0,
+                is_moderated: row.get::<_, i64>(4)? != 0,
+                is_anonymous: row.get::<_, i64>(5)? != 0,
+                work_count: row.get(6)?,
+                bookmarked_count: row.get(7)?,
+                maintainers: serde_json::from_str(&maintainers_json).unwrap_or_default(),
+                collection_type: row.get(9)?,
+            })
+        }).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     // -------------------------------------------------------------------

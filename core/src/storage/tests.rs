@@ -140,7 +140,7 @@ fn test_save_and_load_work() {
 
     // Delete cascades
     db.save_chapter(42, &sample_chapter(1)).unwrap();
-    db.save_progress(42, 1, 0.5).unwrap();
+    db.save_progress(42, 1, 250).unwrap();
     db.add_bookmark(42, None, false).unwrap();
     db.add_to_history(42).unwrap();
 
@@ -210,16 +210,26 @@ fn test_reading_progress() {
 
     assert!(db.get_progress(1).unwrap().is_none());
 
-    db.save_progress(1, 3, 0.75).unwrap();
+    // Position lives on the works row — a work never opened has none.
+    db.save_work(&sample_work(1)).unwrap();
+    assert!(db.get_progress(1).unwrap().is_none());
+
+    db.save_progress(1, 3, 750).unwrap();
     let (ch, pos) = db.get_progress(1).unwrap().unwrap();
     assert_eq!(ch, 3);
-    assert!((pos - 0.75).abs() < f64::EPSILON);
+    assert_eq!(pos, 750);
 
     // Overwrite
-    db.save_progress(1, 4, 0.1).unwrap();
+    db.save_progress(1, 4, 10).unwrap();
     let (ch2, pos2) = db.get_progress(1).unwrap().unwrap();
     assert_eq!(ch2, 4);
-    assert!((pos2 - 0.1).abs() < f64::EPSILON);
+    assert_eq!(pos2, 10);
+
+    // Clearing resets both columns; the work stays cached.
+    db.delete_progress(1).unwrap();
+    assert!(db.get_progress(1).unwrap().is_none());
+    assert!(db.get_work(1).unwrap().is_some());
+    assert!(db.get_all_progress().unwrap().is_empty());
 }
 
 #[test]
@@ -430,6 +440,69 @@ fn test_snapshot_last_checked() {
     db.set_snapshot_last_checked("author", "u", "2026-08-11 02:00:00").unwrap();
     assert_eq!(db.get_snapshot_last_checked("author", "u").unwrap().as_deref(),
                Some("2026-08-11 02:00:00"));
+}
+
+#[test]
+fn test_collections_cache_and_library_search() {
+    let db = open_test_db();
+    let c = crate::models::CollectionSummary {
+        name: "test_fest".into(),
+        title: "Test Fest 2026".into(),
+        summary: "A synthetic collection".into(),
+        is_open: true,
+        is_moderated: false,
+        is_anonymous: false,
+        work_count: 12,
+        bookmarked_count: 3,
+        maintainers: vec!["mod_one".into()],
+        collection_type: "Prompt Meme Challenge".into(),
+    };
+    db.save_collections(std::slice::from_ref(&c)).unwrap();
+
+    // Substring hit on title; full round trip including maintainers.
+    let hits = db.search_collections("fest", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0], c);
+    // Maintainer names are searchable too.
+    assert_eq!(db.search_collections("mod_one", 10).unwrap().len(), 1);
+
+    // Re-saving the same slug updates instead of duplicating.
+    let mut updated = c.clone();
+    updated.work_count = 20;
+    db.save_collections(std::slice::from_ref(&updated)).unwrap();
+    let hits = db.search_collections("fest", 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].work_count, 20);
+
+    // LIKE metacharacters are literal.
+    assert!(db.search_collections("%", 10).unwrap().is_empty());
+}
+
+#[test]
+fn test_library_scoped_searches() {
+    let db = open_test_db();
+    db.save_work(&sample_work(1)).unwrap();
+
+    // Works: title, tag, and summary substrings all hit; misses miss.
+    assert_eq!(db.search_local_works("Test Work", 10).unwrap().len(), 1);
+    assert_eq!(db.search_local_works("Fluff", 10).unwrap().len(), 1);
+    assert_eq!(db.search_local_works("test summary", 10).unwrap().len(), 1);
+    assert!(db.search_local_works("nonexistent", 10).unwrap().is_empty());
+    assert!(db.search_local_works("  ", 10).unwrap().is_empty());
+
+    // Tags across every type, with the type reported.
+    let hits = db.search_known_tags_all("fluff", 10).unwrap();
+    assert!(hits.iter().any(|(n, t)| n == "Fluff" && t == "freeform"), "hits = {hits:?}");
+    let creators = db.search_known_tags_all("Author1", 10).unwrap();
+    assert!(creators.iter().any(|(_, t)| t == "creator"));
+
+    // Users come from the harvested ao3_users rows.
+    db.upsert_ao3_user(&crate::models::AO3User {
+        id: "someuser".into(), username: "someuser".into(),
+        profile_url: None, avatar_url: None,
+    }).unwrap();
+    assert_eq!(db.search_ao3_usernames("some", 10).unwrap(), vec!["someuser".to_string()]);
+    assert!(db.search_ao3_usernames("other", 10).unwrap().is_empty());
 }
 
 #[test]
@@ -711,7 +784,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 5);
+    assert_eq!(db.schema_version().unwrap(), 7);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -785,7 +858,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 5);
+    assert_eq!(db.schema_version().unwrap(), 7);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -818,7 +891,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 5);
+    assert_eq!(db.schema_version().unwrap(), 7);
     let _ = std::fs::remove_file(&path);
 }
 
