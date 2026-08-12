@@ -155,6 +155,12 @@ final class ReaderViewController: NSViewController {
         column.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(column)
         columnFill = column.widthAnchor.constraint(equalTo: document.widthAnchor, constant: -80)
+        // Below windowSizeStayPut (500): with the fill required, fill + cap +
+        // the required chain up through the split view demanded
+        // window ≤ sidebar + list + measure + 80, and re-activating the cap on
+        // immersive exit resolved that by shrinking the window. Sub-500, the
+        // cap narrows the column instead and can never touch the window frame.
+        columnFill.priority = NSLayoutConstraint.Priority(490)
         columnCap = column.widthAnchor.constraint(lessThanOrEqualToConstant: 680)
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: document.topAnchor),
