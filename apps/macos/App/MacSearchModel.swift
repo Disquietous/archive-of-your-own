@@ -228,9 +228,11 @@ final class MacSearchModel {
         case (.works, false):
             performSearch(appState)
         case (.works, true):
-            runLibraryWorksSearch(appState, term: queryText, bookmarkedOnly: false)
+            runLibraryWorksSearch(appState, criteria: libraryCriteria(), bookmarkedOnly: false)
         case (.bookmarks, true):
-            runLibraryWorksSearch(appState, term: scopeQuery, bookmarkedOnly: true)
+            var criteria = Self.emptyLibraryCriteria()
+            criteria.query = scopeQuery
+            runLibraryWorksSearch(appState, criteria: criteria, bookmarkedOnly: true)
         case (.tags, true):
             beginLibraryScopeResults(appState)
             tagHits = appState.bridge.searchLibraryTags(scopeQuery)
@@ -245,15 +247,76 @@ final class MacSearchModel {
         }
     }
 
-    /// Library mode for Works and Bookmarks: query the cached works and
-    /// reuse the works results pane. No pagination — the library returns
-    /// everything at once (activeQuery stays nil so the pager stays inert).
+    /// An all-blank criteria record (blank matches everything in the core).
+    static func emptyLibraryCriteria() -> ULibrarySearchCriteria {
+        ULibrarySearchCriteria(
+            query: "", title: "", creators: "", revisedAt: "", complete: "",
+            crossover: "", singleChapter: false, wordCount: "", language: "",
+            fandomNames: "", characterNames: "", relationshipNames: "",
+            freeformNames: "", ratings: [], warnings: [], categories: [],
+            hits: "", kudosCount: "", commentsCount: "", bookmarksCount: "",
+            sortColumn: "", sortDirection: "")
+    }
+
+    /// The current works-form state as label-based criteria for the local
+    /// library search. Select and checkbox choices are stored as AO3's
+    /// option values (numeric ids); the scraped form knows each value's
+    /// label, and the core matches on names — translate here so the Rust
+    /// side never needs AO3's id tables.
     @MainActor
-    private func runLibraryWorksSearch(_ appState: AppState, term: String, bookmarkedOnly: Bool) {
+    func libraryCriteria() -> ULibrarySearchCriteria {
+        var c = Self.emptyLibraryCriteria()
+        // Works even when the criteria form was never scraped.
+        c.query = queryText
+        for field in formFields {
+            let name = field.name
+            let value = (fieldValues[name] ?? "").trimmingCharacters(in: .whitespaces)
+            let checked = checkboxValues[name] ?? []
+            // Selected option values → their labels, for id-valued controls.
+            func labels() -> [String] {
+                let values = checked.isEmpty ? (value.isEmpty ? [] : [value]) : Array(checked)
+                return values.compactMap { v in
+                    field.options.first { $0.value == v }?.label
+                        .trimmingCharacters(in: .whitespaces)
+                }.filter { !$0.isEmpty }
+            }
+            if name.hasSuffix("[title]") { c.title = value }
+            else if name.hasSuffix("[creators]") { c.creators = value }
+            else if name.hasSuffix("[revised_at]") { c.revisedAt = value }
+            else if name.hasSuffix("[complete]") { c.complete = value }
+            else if name.hasSuffix("[crossover]") { c.crossover = value }
+            else if name.hasSuffix("[single_chapter]") { c.singleChapter = checked.contains("1") || value == "1" }
+            else if name.hasSuffix("[word_count]") { c.wordCount = value }
+            else if name.hasSuffix("[language_id]") { c.language = labels().first ?? "" }
+            else if name.hasSuffix("[fandom_names]") { c.fandomNames = value }
+            else if name.hasSuffix("[character_names]") { c.characterNames = value }
+            else if name.hasSuffix("[relationship_names]") { c.relationshipNames = value }
+            else if name.hasSuffix("[freeform_names]") { c.freeformNames = value }
+            else if name.contains("[rating_ids]") { c.ratings = labels() }
+            else if name.contains("[archive_warning_ids]") { c.warnings = labels() }
+            else if name.contains("[category_ids]") { c.categories = labels() }
+            else if name.hasSuffix("[hits]") { c.hits = value }
+            else if name.hasSuffix("[kudos_count]") { c.kudosCount = value }
+            else if name.hasSuffix("[comments_count]") { c.commentsCount = value }
+            else if name.hasSuffix("[bookmarks_count]") { c.bookmarksCount = value }
+            else if name.hasSuffix("[sort_column]") { c.sortColumn = value }
+            else if name.hasSuffix("[sort_direction]") { c.sortDirection = value }
+        }
+        return c
+    }
+
+    /// Library mode for Works and Bookmarks: evaluate the form's criteria
+    /// against the cached works and reuse the works results pane. No
+    /// pagination — the library returns everything at once (activeQuery
+    /// stays nil so the pager stays inert).
+    @MainActor
+    private func runLibraryWorksSearch(_ appState: AppState,
+                                       criteria: ULibrarySearchCriteria,
+                                       bookmarkedOnly: Bool) {
         onNewQuery?()
         activeQuery = nil
         appState.searchError = nil
-        var works = appState.bridge.searchLibraryWorks(term).map(AppState.workFromSummary)
+        var works = appState.bridge.searchLibraryWorksFiltered(criteria).map(AppState.workFromSummary)
         if bookmarkedOnly {
             works = works.filter { appState.bookmarkedWorkIDs.contains($0.id) }
         }

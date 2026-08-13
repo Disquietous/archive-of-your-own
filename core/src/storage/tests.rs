@@ -1,7 +1,7 @@
 use super::*;
 use crate::models::{
-    AO3User, Chapter, ContentBlock, InlineContent, Rating, SeriesMembership, UserProfile,
-    Warning, WorkSummary,
+    AO3User, Chapter, ContentBlock, InlineContent, LocalSearchCriteria, Rating, SeriesMembership,
+    UserProfile, Warning, WorkSummary,
 };
 
 fn sample_work(id: u64) -> WorkSummary {
@@ -488,7 +488,10 @@ fn test_library_scoped_searches() {
     assert_eq!(db.search_local_works("Fluff", 10).unwrap().len(), 1);
     assert_eq!(db.search_local_works("test summary", 10).unwrap().len(), 1);
     assert!(db.search_local_works("nonexistent", 10).unwrap().is_empty());
-    assert!(db.search_local_works("  ", 10).unwrap().is_empty());
+    // A blank query is the search form's default state and means the whole
+    // library; 0 is the no-limit sentinel.
+    assert_eq!(db.search_local_works("  ", 0).unwrap().len(), 1);
+    assert_eq!(db.search_local_works("", 0).unwrap().len(), 1);
 
     // Tags across every type, with the type reported.
     let hits = db.search_known_tags_all("fluff", 10).unwrap();
@@ -503,6 +506,113 @@ fn test_library_scoped_searches() {
     }).unwrap();
     assert_eq!(db.search_ao3_usernames("some", 10).unwrap(), vec!["someuser".to_string()]);
     assert!(db.search_ao3_usernames("other", 10).unwrap().is_empty());
+}
+
+#[test]
+fn test_filtered_library_search() {
+    let db = open_test_db();
+    // Work 1: sample defaults — Fandom A, Teen, Warning::None, F/M, tags
+    // Fluff/Angst, 12,345 words, 3 chapters, incomplete, English,
+    // updated 2025-01-15, kudos 42.
+    db.save_work(&sample_work(1)).unwrap();
+    let mut b = sample_work(2);
+    b.title = "Another Story".into();
+    b.fandoms = vec!["Fandom B".into(), "Fandom C".into()];
+    b.rating = Rating::Explicit;
+    b.warnings = vec![Warning::Violence];
+    b.categories = vec!["M/M".into()];
+    b.tags = vec!["Slow Burn".into()];
+    b.word_count = 100_000;
+    b.chapter_count = 1;
+    b.complete = true;
+    b.language = "Deutsch".into();
+    b.date_updated = "2026-08-01".into();
+    b.kudos = 500;
+    db.save_work(&b).unwrap();
+
+    let ids = |c: &LocalSearchCriteria| -> Vec<u64> {
+        db.search_local_works_filtered(c, 0).unwrap().iter().map(|w| w.id).collect()
+    };
+
+    // Empty criteria: whole library, newest-updated first.
+    assert_eq!(ids(&LocalSearchCriteria::default()), vec![2, 1]);
+
+    // Freeform tag present on one work / on none.
+    let mut c = LocalSearchCriteria::default();
+    c.freeform_names = "Fluff".into();
+    assert_eq!(ids(&c), vec![1]);
+    c.freeform_names = "Coffee Shops".into();
+    assert!(ids(&c).is_empty());
+
+    // Fandom name, and crossover flags.
+    let mut c = LocalSearchCriteria::default();
+    c.fandom_names = "Fandom B".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.crossover = "T".into();
+    assert_eq!(ids(&c), vec![2]);
+    c.crossover = "F".into();
+    assert_eq!(ids(&c), vec![1]);
+
+    // Rating / warning / category labels as AO3's form spells them.
+    let mut c = LocalSearchCriteria::default();
+    c.ratings = vec!["Explicit".into()];
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.warnings = vec!["Graphic Depictions Of Violence".into()];
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.categories = vec!["F/M".into()];
+    assert_eq!(ids(&c), vec![1]);
+
+    // Completion, single chapter, language.
+    let mut c = LocalSearchCriteria::default();
+    c.complete = "T".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.single_chapter = true;
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.language = "deutsch".into();
+    assert_eq!(ids(&c), vec![2]);
+
+    // Numeric ranges: >N and lo-hi.
+    let mut c = LocalSearchCriteria::default();
+    c.word_count = ">50,000".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = LocalSearchCriteria::default();
+    c.kudos_count = "10-100".into();
+    assert_eq!(ids(&c), vec![1]);
+
+    // Date updated: prefix, absolute after, and a relative window wide
+    // enough to stay deterministic.
+    let mut c = LocalSearchCriteria::default();
+    c.revised_at = "2025".into();
+    assert_eq!(ids(&c), vec![1]);
+    c.revised_at = "> 2025".into();
+    assert_eq!(ids(&c), vec![2]);
+    c.revised_at = "< 100 years ago".into();
+    assert_eq!(ids(&c), vec![2, 1]);
+
+    // Sorting: kudos ascending, title ascending by AO3's default direction.
+    let mut c = LocalSearchCriteria::default();
+    c.sort_column = "kudos_count".into();
+    c.sort_direction = "asc".into();
+    assert_eq!(ids(&c), vec![1, 2]);
+    let mut c = LocalSearchCriteria::default();
+    c.sort_column = "title_to_sort_on".into();
+    assert_eq!(ids(&c), vec![2, 1]); // "Another…" before "Test…"
+
+    // Creators substring hits both (shared author), title narrows to one.
+    let mut c = LocalSearchCriteria::default();
+    c.creators = "Author1".into();
+    assert_eq!(ids(&c), vec![2, 1]);
+    let mut c = LocalSearchCriteria::default();
+    c.title = "another".into();
+    assert_eq!(ids(&c), vec![2]);
+
+    // Limit still applies when requested.
+    assert_eq!(db.search_local_works_filtered(&LocalSearchCriteria::default(), 1).unwrap().len(), 1);
 }
 
 #[test]

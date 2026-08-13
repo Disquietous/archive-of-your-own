@@ -1012,20 +1012,25 @@ final class RustBridge {
 
     // MARK: - Library-scoped search (cached data only, no network)
 
-    func searchLibraryWorks(_ term: String) -> [UWorkSummary] {
-        (try? app?.searchLibraryWorks(term: term)) ?? []
+    func searchLibraryWorks(_ term: String, limit: UInt32? = nil) -> [UWorkSummary] {
+        (try? app?.searchLibraryWorks(term: term, limit: limit)) ?? []
     }
 
-    func searchLibraryTags(_ term: String) -> [UTagHit] {
-        (try? app?.searchLibraryTags(term: term)) ?? []
+    func searchLibraryWorksFiltered(_ criteria: ULibrarySearchCriteria,
+                                    limit: UInt32? = nil) -> [UWorkSummary] {
+        (try? app?.searchLibraryWorksFiltered(criteria: criteria, limit: limit)) ?? []
     }
 
-    func searchLibraryUsers(_ term: String) -> [String] {
-        (try? app?.searchLibraryUsers(term: term)) ?? []
+    func searchLibraryTags(_ term: String, limit: UInt32? = nil) -> [UTagHit] {
+        (try? app?.searchLibraryTags(term: term, limit: limit)) ?? []
     }
 
-    func searchLibraryCollections(_ term: String) -> [UCollection] {
-        (try? app?.searchLibraryCollections(term: term)) ?? []
+    func searchLibraryUsers(_ term: String, limit: UInt32? = nil) -> [String] {
+        (try? app?.searchLibraryUsers(term: term, limit: limit)) ?? []
+    }
+
+    func searchLibraryCollections(_ term: String, limit: UInt32? = nil) -> [UCollection] {
+        (try? app?.searchLibraryCollections(term: term, limit: limit)) ?? []
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

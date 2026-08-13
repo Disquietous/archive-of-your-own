@@ -482,6 +482,7 @@ impl Storage {
     /// works, comments, kudos, profiles) whose username matches. Prefix
     /// matches rank first.
     pub fn search_ao3_usernames(&self, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+        let limit = Self::sql_limit(limit);
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());

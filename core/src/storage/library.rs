@@ -490,6 +490,7 @@ impl Storage {
     /// title, slug, summary, and maintainer names; title matches rank first,
     /// then the biggest collections.
     pub fn search_collections(&self, term: &str, limit: u32) -> Result<Vec<crate::models::CollectionSummary>, AppError> {
+        let limit = Self::sql_limit(limit);
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());

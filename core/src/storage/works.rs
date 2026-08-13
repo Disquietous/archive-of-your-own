@@ -1,7 +1,8 @@
 use rusqlite::params;
 
 use crate::error::AppError;
-use crate::models::{Chapter, ContentBlock, SeriesMembership, Warning, WorkSummary};
+use crate::models::{Chapter, ContentBlock, LocalSearchCriteria, Rating, SeriesMembership, Warning,
+                    WorkSummary};
 
 use super::{map_json, map_sql, rating_to_str, str_to_rating, Storage};
 
@@ -244,6 +245,12 @@ impl Storage {
             .replace('_', "\\_")
     }
 
+    /// Map the search functions' `limit` to SQL: 0 means no limit, which
+    /// SQLite spells as a negative LIMIT.
+    pub(super) fn sql_limit(limit: u32) -> i64 {
+        if limit == 0 { -1 } else { limit as i64 }
+    }
+
     /// Local autocomplete: substring match, ranked starts-with first, then
     /// AO3-confirmed canonical names, then by how often the tag was seen.
     pub fn search_known_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
@@ -270,6 +277,7 @@ impl Storage {
     /// tag type. Returns (name, tag_type) so rows can say what kind of tag
     /// each hit is.
     pub fn search_known_tags_all(&self, term: &str, limit: u32) -> Result<Vec<(String, String)>, AppError> {
+        let limit = Self::sql_limit(limit);
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());
@@ -293,9 +301,30 @@ impl Storage {
     /// title, creators, fandoms, tags, and summary of every cached work.
     /// Title matches rank first, then most recently updated.
     pub fn search_local_works(&self, term: &str, limit: u32) -> Result<Vec<WorkSummary>, AppError> {
+        let limit = Self::sql_limit(limit);
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
-            return Ok(Vec::new());
+            // An empty query means "my whole library", not "nothing" — the
+            // search form's default state runs it with no criteria.
+            let mut stmt = self.conn.prepare(
+                "SELECT id, title, authors_json, fandoms_json, rating,
+                        warnings_json, categories_json, relationships_json,
+                        characters_json, tags_json, summary, word_count,
+                        chapter_count, total_chapters, kudos, hits,
+                        bookmarks, comments, date_published, date_updated, language, complete,
+                        series_json, fetched_at
+                 FROM works
+                 ORDER BY date_updated DESC
+                 LIMIT ?1"
+            ).map_err(map_sql)?;
+            let rows = stmt.query_map(params![limit], |row| {
+                Ok(Self::work_from_row(row))
+            }).map_err(map_sql)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(map_sql)?.map_err(map_sql)?);
+            }
+            return Ok(out);
         }
         let contains = format!("%{escaped}%");
         let title_prefix = format!("{escaped}%");
@@ -325,6 +354,196 @@ impl Storage {
             out.push(row.map_err(map_sql)?.map_err(map_sql)?);
         }
         Ok(out)
+    }
+
+    /// Library-scope search with the full works-search form: every AO3
+    /// criterion evaluated against the cached works. Blank criteria match
+    /// everything, so the default form returns the whole library.
+    /// `limit` of 0 means no limit.
+    pub fn search_local_works_filtered(&self, c: &LocalSearchCriteria, limit: u32)
+        -> Result<Vec<WorkSummary>, AppError>
+    {
+        let mut works: Vec<WorkSummary> = self.get_all_works()?
+            .into_iter()
+            .filter(|w| Self::work_matches(c, w))
+            .collect();
+        Self::sort_filtered(&mut works, &c.sort_column, &c.sort_direction);
+        if limit > 0 {
+            works.truncate(limit as usize);
+        }
+        Ok(works)
+    }
+
+    fn work_matches(c: &LocalSearchCriteria, w: &WorkSummary) -> bool {
+        // Free-text query: substring across everything searchable, like the
+        // term-only search.
+        let q = c.query.trim();
+        if !q.is_empty() {
+            let hit = Self::contains_ci(&w.title, q)
+                || Self::any_ci(&w.authors, q)
+                || Self::any_ci(&w.fandoms, q)
+                || Self::any_ci(&w.relationships, q)
+                || Self::any_ci(&w.characters, q)
+                || Self::any_ci(&w.tags, q)
+                || Self::contains_ci(&w.summary, q);
+            if !hit { return false; }
+        }
+        let title = c.title.trim();
+        if !title.is_empty() && !Self::contains_ci(&w.title, title) { return false; }
+
+        // Comma-separated name fields AND together, matching AO3.
+        if !Self::names_match(&c.creators, &w.authors) { return false; }
+        if !Self::names_match(&c.fandom_names, &w.fandoms) { return false; }
+        if !Self::names_match(&c.character_names, &w.characters) { return false; }
+        if !Self::names_match(&c.relationship_names, &w.relationships) { return false; }
+        if !Self::names_match(&c.freeform_names, &w.tags) { return false; }
+
+        // Rating labels OR (a work has one rating); warnings and categories
+        // AND, matching AO3's checkbox semantics.
+        if !c.ratings.is_empty()
+            && !c.ratings.iter().any(|l| Rating::from_ao3_tag(l) == w.rating) { return false; }
+        if !c.warnings.iter().all(|l| w.warnings.contains(&Warning::from_ao3_tag(l))) { return false; }
+        if !c.categories.iter()
+            .all(|l| w.categories.iter().any(|s| s.eq_ignore_ascii_case(l))) { return false; }
+
+        match c.complete.as_str() {
+            "T" if !w.complete => return false,
+            "F" if w.complete => return false,
+            _ => {}
+        }
+        // AO3 counts a work as a crossover when it's tagged with more than
+        // one fandom.
+        match c.crossover.as_str() {
+            "T" if w.fandoms.len() <= 1 => return false,
+            "F" if w.fandoms.len() > 1 => return false,
+            _ => {}
+        }
+        if c.single_chapter && w.chapter_count != 1 { return false; }
+
+        let language = c.language.trim();
+        if !language.is_empty() && !w.language.eq_ignore_ascii_case(language) { return false; }
+
+        Self::range_matches(&c.word_count, w.word_count)
+            && Self::range_matches(&c.hits, w.hits)
+            && Self::range_matches(&c.kudos_count, w.kudos as u64)
+            && Self::range_matches(&c.comments_count, w.comments as u64)
+            && Self::range_matches(&c.bookmarks_count, w.bookmarks as u64)
+            && Self::revised_matches(&c.revised_at, &w.date_updated)
+    }
+
+    fn contains_ci(hay: &str, needle: &str) -> bool {
+        hay.to_lowercase().contains(&needle.to_lowercase())
+    }
+
+    fn any_ci(list: &[String], needle: &str) -> bool {
+        list.iter().any(|s| Self::contains_ci(s, needle))
+    }
+
+    /// Comma-separated names: every entry must match a stored name
+    /// (case-insensitive substring, so exact autocomplete picks and partial
+    /// typing both work). Blank matches everything.
+    fn names_match(field: &str, stored: &[String]) -> bool {
+        field.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .all(|name| Self::any_ci(stored, name))
+    }
+
+    /// AO3 numeric range syntax: "500", ">500", "<500", ">=500", "<=500",
+    /// "100-5000". Blank or unparseable expressions don't filter.
+    fn range_matches(expr: &str, value: u64) -> bool {
+        let expr: String = expr.chars().filter(|c| *c != ',' && !c.is_whitespace()).collect();
+        if expr.is_empty() { return true; }
+        let parsed = |s: &str| s.parse::<u64>().ok();
+        if let Some(n) = expr.strip_prefix(">=").and_then(parsed) { return value >= n; }
+        if let Some(n) = expr.strip_prefix("<=").and_then(parsed) { return value <= n; }
+        if let Some(n) = expr.strip_prefix('>').and_then(parsed) { return value > n; }
+        if let Some(n) = expr.strip_prefix('<').and_then(parsed) { return value < n; }
+        if let Some((lo, hi)) = expr.split_once('-') {
+            if let (Some(lo), Some(hi)) = (parsed(lo), parsed(hi)) {
+                return value >= lo && value <= hi;
+            }
+        }
+        match parsed(&expr) {
+            Some(n) => value == n,
+            None => true,
+        }
+    }
+
+    /// AO3 "Date Updated" syntax: an ISO date or prefix ("2024", "2024-01",
+    /// "2024-01-15"), or a relative "< 2 weeks ago" / "> 3 months ago".
+    /// For relative expressions "<" means less time ago (more recent) and
+    /// ">" longer ago, matching AO3; for absolute dates they mean plain
+    /// before/after. Blank or unparseable expressions don't filter.
+    fn revised_matches(expr: &str, date_updated: &str) -> bool {
+        let expr = expr.trim();
+        if expr.is_empty() { return true; }
+        if date_updated.is_empty() { return false; }
+        let (op, rest) = match expr.as_bytes()[0] {
+            b'<' => ('<', expr[1..].trim_start_matches('=').trim()),
+            b'>' => ('>', expr[1..].trim_start_matches('=').trim()),
+            _ => ('=', expr),
+        };
+        if let Some(cutoff) = Self::relative_date(rest) {
+            let cutoff = cutoff.format("%Y-%m-%d").to_string();
+            return match op {
+                '<' => *date_updated >= *cutoff,
+                '>' => *date_updated < *cutoff,
+                _ => *date_updated == *cutoff,
+            };
+        }
+        // ISO dates compare lexicographically, prefixes included
+        // ("2025-06-01" < "2026" holds).
+        match op {
+            '<' => *date_updated < *rest,
+            '>' => *date_updated > *rest && !date_updated.starts_with(rest),
+            _ => date_updated.starts_with(rest),
+        }
+    }
+
+    /// "2 weeks ago"-style expressions to a calendar date. Months and years
+    /// use calendar arithmetic via 30/365-day approximations — fine for a
+    /// library filter.
+    fn relative_date(s: &str) -> Option<chrono::NaiveDate> {
+        let s = s.trim().to_lowercase();
+        let rest = s.strip_suffix("ago")?.trim();
+        let mut parts = rest.split_whitespace();
+        let n: i64 = parts.next()?.parse().ok()?;
+        let unit = parts.next()?;
+        let days = match unit.trim_end_matches('s') {
+            "day" => n,
+            "week" => n * 7,
+            "month" => n * 30,
+            "year" => n * 365,
+            _ => return None,
+        };
+        Some(chrono::Local::now().date_naive() - chrono::Duration::days(days))
+    }
+
+    /// AO3's sort columns applied locally. "_score" (Best Match) has no
+    /// local meaning; it and unknown columns fall back to Date Updated.
+    /// Direction defaults the way AO3 does: ascending for title, descending
+    /// for everything else.
+    fn sort_filtered(works: &mut [WorkSummary], column: &str, direction: &str) {
+        let column = column.trim();
+        works.sort_by(|a, b| match column {
+            "title_to_sort_on" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            "created_at" => a.date_published.cmp(&b.date_published),
+            "word_count" => a.word_count.cmp(&b.word_count),
+            "hits" => a.hits.cmp(&b.hits),
+            "kudos_count" => a.kudos.cmp(&b.kudos),
+            "comments_count" => a.comments.cmp(&b.comments),
+            "bookmarks_count" => a.bookmarks.cmp(&b.bookmarks),
+            _ => a.date_updated.cmp(&b.date_updated),
+        });
+        let ascending = match direction.trim() {
+            "asc" => true,
+            "desc" => false,
+            _ => column == "title_to_sort_on",
+        };
+        if !ascending {
+            works.reverse();
+        }
     }
 
     /// One-time seed of known_tags from works cached before the table existed.

@@ -98,34 +98,48 @@ impl AO3App {
         }).await
     }
 
-    // -- Library-scoped search (cached data only, no network) --
+    // -- Library-scoped search (cached data only, no network). The caller
+    // decides whether to cap results; a None limit returns every match. --
 
     /// Cached works whose title, creators, fandoms, tags, or summary match.
-    pub fn search_library_works(&self, term: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+    pub fn search_library_works(&self, term: String, limit: Option<u32>) -> Result<Vec<UWorkSummary>, AO3Error> {
         let s = self.storage.blocking_lock();
-        Ok(s.search_local_works(&term, 500).map_err(AO3Error::from)?
+        Ok(s.search_local_works(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
+            .into_iter().map(UWorkSummary::from).collect())
+    }
+
+    /// Cached works matching the full works-search form. Blank criteria
+    /// match everything, so the default form returns the whole library.
+    pub fn search_library_works_filtered(
+        &self,
+        criteria: ULibrarySearchCriteria,
+        limit: Option<u32>,
+    ) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_local_works_filtered(&criteria.into(), limit.unwrap_or(0))
+            .map_err(AO3Error::from)?
             .into_iter().map(UWorkSummary::from).collect())
     }
 
     /// Cached tag names matching, across every tag type.
-    pub fn search_library_tags(&self, term: String) -> Result<Vec<UTagHit>, AO3Error> {
+    pub fn search_library_tags(&self, term: String, limit: Option<u32>) -> Result<Vec<UTagHit>, AO3Error> {
         let s = self.storage.blocking_lock();
-        Ok(s.search_known_tags_all(&term, 500).map_err(AO3Error::from)?
+        Ok(s.search_known_tags_all(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
             .into_iter()
             .map(|(name, tag_type)| UTagHit { name, tag_type })
             .collect())
     }
 
     /// Cached AO3 usernames matching.
-    pub fn search_library_users(&self, term: String) -> Result<Vec<String>, AO3Error> {
+    pub fn search_library_users(&self, term: String, limit: Option<u32>) -> Result<Vec<String>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.search_ao3_usernames(&term, 500).map_err(AO3Error::from)
+        s.search_ao3_usernames(&term, limit.unwrap_or(0)).map_err(AO3Error::from)
     }
 
     /// Cached collection blurbs matching.
-    pub fn search_library_collections(&self, term: String) -> Result<Vec<UCollection>, AO3Error> {
+    pub fn search_library_collections(&self, term: String, limit: Option<u32>) -> Result<Vec<UCollection>, AO3Error> {
         let s = self.storage.blocking_lock();
-        Ok(s.search_collections(&term, 500).map_err(AO3Error::from)?
+        Ok(s.search_collections(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
             .into_iter().map(UCollection::from).collect())
     }
 

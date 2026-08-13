@@ -169,6 +169,40 @@ pub struct SearchParams {
     pub revised_at: String,
 }
 
+/// Criteria for searching the local works cache, mirroring AO3's works
+/// search form field-for-field. Select/checkbox choices arrive as the
+/// scraped form's option *labels* (never AO3's numeric ids), so matching
+/// compares against the names stored on cached works. Blank criteria
+/// match everything — the form's default state returns the whole library.
+#[derive(Debug, Clone, Default)]
+pub struct LocalSearchCriteria {
+    pub query: String,
+    pub title: String,
+    pub creators: String,
+    pub revised_at: String,
+    /// "" any · "T" complete only · "F" in-progress only
+    pub complete: String,
+    /// "" any · "T" crossovers only · "F" no crossovers
+    pub crossover: String,
+    pub single_chapter: bool,
+    pub word_count: String,
+    /// Language option label, e.g. "English".
+    pub language: String,
+    pub fandom_names: String,
+    pub character_names: String,
+    pub relationship_names: String,
+    pub freeform_names: String,
+    pub ratings: Vec<String>,
+    pub warnings: Vec<String>,
+    pub categories: Vec<String>,
+    pub hits: String,
+    pub kudos_count: String,
+    pub comments_count: String,
+    pub bookmarks_count: String,
+    pub sort_column: String,
+    pub sort_direction: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BookmarkListing {
     pub work_id: u64,

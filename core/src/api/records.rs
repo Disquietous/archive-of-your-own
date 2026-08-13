@@ -356,6 +356,65 @@ impl From<USearchParams> for SearchParams {
     }
 }
 
+/// The works-search form's criteria for a library-scoped search, mirroring
+/// AO3's fields. Select/checkbox choices are the scraped form's option
+/// labels (never numeric ids) — the UI owns the value→label translation,
+/// the core owns the matching. Blank fields match everything.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct ULibrarySearchCriteria {
+    pub query: String,
+    pub title: String,
+    pub creators: String,
+    pub revised_at: String,
+    pub complete: String,
+    pub crossover: String,
+    pub single_chapter: bool,
+    pub word_count: String,
+    pub language: String,
+    pub fandom_names: String,
+    pub character_names: String,
+    pub relationship_names: String,
+    pub freeform_names: String,
+    pub ratings: Vec<String>,
+    pub warnings: Vec<String>,
+    pub categories: Vec<String>,
+    pub hits: String,
+    pub kudos_count: String,
+    pub comments_count: String,
+    pub bookmarks_count: String,
+    pub sort_column: String,
+    pub sort_direction: String,
+}
+
+impl From<ULibrarySearchCriteria> for LocalSearchCriteria {
+    fn from(c: ULibrarySearchCriteria) -> Self {
+        LocalSearchCriteria {
+            query: c.query,
+            title: c.title,
+            creators: c.creators,
+            revised_at: c.revised_at,
+            complete: c.complete,
+            crossover: c.crossover,
+            single_chapter: c.single_chapter,
+            word_count: c.word_count,
+            language: c.language,
+            fandom_names: c.fandom_names,
+            character_names: c.character_names,
+            relationship_names: c.relationship_names,
+            freeform_names: c.freeform_names,
+            ratings: c.ratings,
+            warnings: c.warnings,
+            categories: c.categories,
+            hits: c.hits,
+            kudos_count: c.kudos_count,
+            comments_count: c.comments_count,
+            bookmarks_count: c.bookmarks_count,
+            sort_column: c.sort_column,
+            sort_direction: c.sort_direction,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USavedSearch {
     pub id: i64,
