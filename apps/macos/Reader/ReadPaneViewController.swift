@@ -724,6 +724,16 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .collections, let title = model.collectionWorksTitle,
            model.selectedWork == nil {
             let search = model.search
+            if search.splitCollectionName != nil {
+                // A collection with both works and bookmarked items splits
+                // the pane, same as the search flow; the close button exits
+                // the drill-in and the pagers live in the halves' headers.
+                toolbar.configure(title: title, sub: splitCollectionSubtitle(search))
+                toolbar.setLeading([collectionCloseButton()])
+                toolbar.setTrailing([])
+                show(mode: .collectionSplit)
+                return
+            }
             toolbar.configure(title: title, sub: search.resultsSubtitle)
             toolbar.setLeading([collectionCloseButton()])
             toolbar.setTrailing(search.hasSearched

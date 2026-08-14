@@ -187,13 +187,14 @@ impl AO3Client {
 
     /// One page of a collection's bookmarked items
     /// (/collections/{name}/bookmarks — li.bookmark blurbs wrapping standard
-    /// work blurbs; series/external bookmarks are skipped).
-    /// Returns (works, has_next_page, total_pages, total_found).
-    pub async fn fetch_collection_bookmarks(&self, name: &str, page: u32) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
+    /// work blurbs; series/external bookmarks are skipped). Full bookmark
+    /// listings, so the caller can cache who bookmarked what.
+    /// Returns (bookmarks, has_next_page, total_pages, total_found).
+    pub async fn fetch_collection_bookmarks(&self, name: &str, page: u32) -> Result<(Vec<BookmarkListing>, bool, u32, Option<u32>), AppError> {
         let url = format!("{BASE_URL}/collections/{}/bookmarks?page={page}", urlencoded(name));
         let html = self.fetch(&url).await?;
-        let works = parser::parse_bookmarked_works(&html)?;
-        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
+        let bookmarks = parser::parse_bookmark_listings(&html)?;
+        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
             parser::parse_results_total(&html)))
     }
 

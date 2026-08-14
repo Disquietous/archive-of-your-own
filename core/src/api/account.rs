@@ -93,7 +93,7 @@ impl AO3App {
             storage.create_account(&id, &username, "").map_err(AO3Error::from)?;
             return Ok(());
         }
-        let id = format!("account-{}", username.to_lowercase());
+        let id = crate::storage::account_id_for(&username);
         let client = self.client.blocking_read();
         let cookies = client.get_session_cookies();
         storage.create_account(&id, &username, &cookies).map_err(AO3Error::from)?;
@@ -156,7 +156,7 @@ impl AO3App {
             }
 
             let new_cookies = client.read().await.get_session_cookies();
-            let id = format!("account-{}", u.to_lowercase());
+            let id = crate::storage::account_id_for(&u);
             let s = storage.lock().await;
 
             if let Ok(Some((prev_id, _, _))) = s.get_active_account() {

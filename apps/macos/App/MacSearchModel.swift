@@ -92,6 +92,7 @@ final class MacSearchModel {
         case form(keys: [String], values: [String])
         case tag(String)
         case collection(String)
+        case collectionBookmarks(String)
         case collectionsIndex(UCollectionSearchCriteria)
     }
 
@@ -472,22 +473,51 @@ final class MacSearchModel {
     }
 
     /// A collection's works — `name` is the /collections/{name} slug.
-    /// Library mode reads the works this collection's cached listings
-    /// already recorded (no network, per the source toggle's promise);
-    /// AO3 mode fetches the live listing, paged. When the caller knows the
-    /// collection holds both works and bookmarked items, AO3 mode splits
-    /// the results view — works pane and bookmarks pane, first pages loaded
-    /// simultaneously, paged independently.
+    /// Library mode reads what this collection's cached listings already
+    /// recorded (no network, per the source toggle's promise) — split into
+    /// works and bookmarks panes when both were cached, a single pane
+    /// otherwise. AO3 mode fetches the live listing, paged. When the
+    /// caller knows the collection holds both works and bookmarked items,
+    /// AO3 mode splits the results view — works pane and bookmarks pane,
+    /// first pages loaded simultaneously, paged independently. A
+    /// bookmarks-only collection pages its /bookmarks listing in the
+    /// single results pane instead.
     @MainActor
     func startCollectionQuery(_ name: String, title: String = "",
                               workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0,
                               appState: AppState) {
         if searchLibraryOnly {
-            originScope = scope
-            scope = .works
             let works = appState.bridge.getLibraryCollectionWorks(name: name)
                 .map(AppState.workFromSummary)
-            presentLibraryWorks(works, appState: appState)
+            let bookmarks = appState.bridge.getLibraryCollectionBookmarks(name: name)
+                .map(AppState.workFromSummary)
+            if works.isEmpty || bookmarks.isEmpty {
+                originScope = scope
+                scope = .works
+                presentLibraryWorks(works.isEmpty ? bookmarks : works, appState: appState)
+                return
+            }
+            // Library split: both panes land at once from the cache, the
+            // pagers stay inert (activeQuery nil, single page each).
+            splitReturnQuery = activeQuery
+            splitCollectionName = name
+            splitCollectionTitle = title.isEmpty ? name : title
+            activeQuery = nil
+            onNewQuery?()
+            appState.searchResults = works
+            appState.searchError = nil
+            currentPage = 1
+            hasNextPage = false
+            totalPages = 1
+            totalWorks = UInt32(works.count)
+            bookmarkResults = bookmarks
+            bookmarksPage = 1
+            bookmarksHasNext = false
+            bookmarksTotalPages = 1
+            bookmarksTotal = UInt32(bookmarks.count)
+            bookmarksError = nil
+            hasSearched = true
+            showingResults = true
             return
         }
         if workCount > 0, bookmarkedCount > 0 {
@@ -519,7 +549,10 @@ final class MacSearchModel {
         } else {
             originScope = scope
             scope = .works
-            activeQuery = .collection(name)
+            // A bookmarks-only collection has an empty /works listing —
+            // its items live under /bookmarks, so page that instead.
+            activeQuery = (workCount == 0 && bookmarkedCount > 0)
+                ? .collectionBookmarks(name) : .collection(name)
             beginNewQuery(appState)
             Task { await fetch(page: 1, appState: appState) }
         }
@@ -591,6 +624,10 @@ final class MacSearchModel {
             case .collection(let name):
                 applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
                     try await appState.bridge.fetchCollectionWorks(name: name, page: page)
+                }, page: page, appState: appState)
+            case .collectionBookmarks(let name):
+                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
                 }, page: page, appState: appState)
             case .collectionsIndex(let criteria):
                 let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {

@@ -22,6 +22,17 @@ pub struct Storage {
     conn: Connection,
 }
 
+/// Account-scoped rows (bookmarks) made while signed out live under this
+/// sentinel. Brackets can't appear in an AO3 username, so it can never
+/// collide with a real account id.
+pub const LOGGED_OUT_ACCOUNT_ID: &str = "[none]";
+
+/// The account id for an AO3 username: the username itself, lowercased —
+/// every account is an AO3 account, so the identity needs no other shape.
+pub fn account_id_for(username: &str) -> String {
+    username.to_lowercase()
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -92,7 +103,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 8;
+    const SCHEMA_VERSION: u32 = 10;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -138,6 +149,8 @@ impl Storage {
                 6 => self.migrate_v6(),
                 7 => self.migrate_v7(),
                 8 => self.migrate_v8(),
+                9 => self.migrate_v9(),
+                10 => self.migrate_v10(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -377,6 +390,50 @@ impl Storage {
                  ALTER TABLE works DROP COLUMN relationships_json;
                  ALTER TABLE works DROP COLUMN characters_json;
                  ALTER TABLE works DROP COLUMN tags_json;",
+            )
+            .map_err(map_sql)
+    }
+
+    /// v9 — collection bookmark caching (2026-08). `collection_bookmarks`
+    /// mirrors `collection_works`: which cached works a collection's
+    /// /bookmarks listing showed, in listing order. Also added a
+    /// `bookmarks.bookmarker` column, which v10 dropped the same day —
+    /// account identity already carries the AO3 username.
+    fn migrate_v9(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "ALTER TABLE bookmarks ADD COLUMN bookmarker TEXT NOT NULL DEFAULT '';
+                 CREATE TABLE collection_bookmarks (
+                     collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
+                     work_id         INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                     PRIMARY KEY (collection_name, work_id)
+                 );
+                 CREATE INDEX idx_collection_bookmarks_work ON collection_bookmarks(work_id);",
+            )
+            .map_err(map_sql)
+    }
+
+    /// v10 — account ids are AO3 usernames (2026-08). Every account is an
+    /// AO3 account, so the id IS the username, lowercased — no `account-`
+    /// prefix, no parallel `ao3:{username}` namespace for bookmarks seen
+    /// in fetched listings, no `bookmarker` column duplicating what the
+    /// row's account id already says. The one non-account context,
+    /// bookmarks made while signed out, moves from "" to the explicit
+    /// LOGGED_OUT_ACCOUNT_ID sentinel ("[none]" — brackets can't appear
+    /// in an AO3 username, so it can never collide with a real account).
+    /// "Mine" remains rows whose account_id matches the active account.
+    fn migrate_v10(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "ALTER TABLE bookmarks DROP COLUMN bookmarker;
+                 UPDATE accounts SET id = substr(id, 9) WHERE id LIKE 'account-%';
+                 UPDATE OR IGNORE bookmarks SET account_id = substr(account_id, 9)
+                    WHERE account_id LIKE 'account-%';
+                 DELETE FROM bookmarks WHERE account_id LIKE 'account-%';
+                 UPDATE OR IGNORE bookmarks SET account_id = substr(account_id, 5)
+                    WHERE account_id LIKE 'ao3:%';
+                 DELETE FROM bookmarks WHERE account_id LIKE 'ao3:%';
+                 UPDATE bookmarks SET account_id = '[none]' WHERE account_id = '';",
             )
             .map_err(map_sql)
     }

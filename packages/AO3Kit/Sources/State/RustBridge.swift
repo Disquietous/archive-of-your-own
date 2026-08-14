@@ -1062,6 +1062,12 @@ final class RustBridge {
         (try? app?.getLibraryCollectionWorks(name: name)) ?? []
     }
 
+    /// The cached works seen in a collection's /bookmarks listing — the
+    /// library-mode view of its bookmarked items, no network.
+    func getLibraryCollectionBookmarks(name: String) -> [UWorkSummary] {
+        (try? app?.getLibraryCollectionBookmarks(name: name)) ?? []
+    }
+
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.checkNextSubscription()

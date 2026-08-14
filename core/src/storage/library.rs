@@ -196,7 +196,7 @@ impl Storage {
             .ok()
             .flatten()
             .map(|(id, _, _)| id)
-            .unwrap_or_default()
+            .unwrap_or_else(|| super::LOGGED_OUT_ACCOUNT_ID.to_string())
     }
 
     pub fn add_bookmark(&self, work_id: u64, note: Option<&str>, sync_to_ao3: bool) -> Result<(), AppError> {
@@ -205,6 +205,35 @@ impl Storage {
             "INSERT OR REPLACE INTO bookmarks (account_id, work_id, note, sync_to_ao3) VALUES (?1, ?2, ?3, ?4)",
             params![acct, work_id as i64, note.unwrap_or(""), sync_to_ao3 as i32],
         ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Cache a bookmark seen in a fetched listing, keyed by the byline
+    /// username exactly as any account's bookmarks are keyed — whichever
+    /// account is (or later becomes) active sees precisely its own rows.
+    /// An existing row only refreshes its AO3 id: locally edited details
+    /// stay put, pull_bookmarks remains the explicit overwrite path. An
+    /// unattributed blurb (no byline) can't be keyed and isn't cached.
+    pub fn cache_fetched_bookmark(&self, bookmarker: &str, work_id: u64,
+                                  ao3_bookmark_id: u64, note: &str) -> Result<(), AppError> {
+        if bookmarker.is_empty() {
+            return Ok(());
+        }
+        let acct = super::account_id_for(bookmarker);
+        let updated = self.conn.execute(
+            "UPDATE bookmarks SET ao3_bookmark_id = ?3
+             WHERE account_id = ?1 AND work_id = ?2",
+            params![acct, work_id as i64, ao3_bookmark_id as i64],
+        ).map_err(map_sql)?;
+        if updated == 0 {
+            // sync_to_ao3 = 1: the bookmark exists on AO3 by construction.
+            self.conn.execute(
+                "INSERT INTO bookmarks
+                     (account_id, work_id, note, sync_to_ao3, ao3_bookmark_id, private)
+                 VALUES (?1, ?2, ?3, 1, ?4, 0)",
+                params![acct, work_id as i64, note, ao3_bookmark_id as i64],
+            ).map_err(map_sql)?;
+        }
         Ok(())
     }
 
@@ -758,6 +787,48 @@ impl Storage {
                  JOIN works w ON w.id = cw.work_id
                  WHERE cw.collection_name = ?1
                  ORDER BY cw.rowid", Self::work_select("w.")))
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map(params![name], |row| Ok(Self::work_from_row(row)))
+            .map_err(map_sql)?;
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        self.attach_work_tags(&mut works)?;
+        Ok(works)
+    }
+
+    /// Record works seen in a collection's /bookmarks listing. Accumulates
+    /// across pages like add_collection_works; join rows cascade away with
+    /// the work or collection.
+    pub fn add_collection_bookmarks(&self, name: &str, work_ids: &[u64]) -> Result<(), AppError> {
+        // Same deep-link stub as add_collection_works — the listing can
+        // arrive before any blurb or profile cached the collection row.
+        self.conn
+            .execute("INSERT OR IGNORE INTO collections (name, title) VALUES (?1, ?1)",
+                     params![name])
+            .map_err(map_sql)?;
+        let mut stmt = self.conn
+            .prepare_cached("INSERT OR IGNORE INTO collection_bookmarks
+                             (collection_name, work_id) VALUES (?1, ?2)")
+            .map_err(map_sql)?;
+        for id in work_ids {
+            stmt.execute(params![name, *id as i64]).map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// The cached works seen in a collection's /bookmarks listing, in
+    /// listing order — the library-mode view of a collection's bookmarked
+    /// items. No network; only what fetches already recorded.
+    pub fn get_collection_bookmarks(&self, name: &str) -> Result<Vec<crate::models::WorkSummary>, AppError> {
+        let mut stmt = self.conn
+            .prepare_cached(&format!(
+                "SELECT {} FROM collection_bookmarks cb
+                 JOIN works w ON w.id = cb.work_id
+                 WHERE cb.collection_name = ?1
+                 ORDER BY cb.rowid", Self::work_select("w.")))
             .map_err(map_sql)?;
         let rows = stmt
             .query_map(params![name], |row| Ok(Self::work_from_row(row)))

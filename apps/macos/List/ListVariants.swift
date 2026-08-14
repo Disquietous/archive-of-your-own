@@ -482,7 +482,9 @@ struct CollectionsListView: View {
         let selected = model.collectionWorksName == collection.name
         let title = collection.title.isEmpty ? collection.name : collection.title
         return Button {
-            model.openCollectionWorks(slug: collection.name, title: title)
+            model.openCollectionWorks(slug: collection.name, title: title,
+                                      workCount: collection.workCount,
+                                      bookmarkedCount: collection.bookmarkedCount)
         } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {

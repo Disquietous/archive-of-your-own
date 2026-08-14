@@ -162,6 +162,15 @@ impl AO3App {
             .into_iter().map(UWorkSummary::from).collect())
     }
 
+    /// The cached works seen in a collection's /bookmarks listing, in
+    /// listing order — the library-mode view of a collection's bookmarked
+    /// items, no network.
+    pub fn get_library_collection_bookmarks(&self, name: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_collection_bookmarks(&name).map_err(AO3Error::from)?
+            .into_iter().map(UWorkSummary::from).collect())
+    }
+
     /// Cached collections matching the full collections sort/filter form —
     /// the same criteria AO3's index accepts, evaluated against the cached
     /// rows. Blank criteria match everything.
@@ -206,11 +215,16 @@ impl AO3App {
         }).await
     }
 
-    /// One page of a collection's bookmarked items, works cached like every
-    /// other listing (series/external bookmarks are skipped by the parser).
+    /// One page of a collection's bookmarked items (series/external
+    /// bookmarks are skipped by the parser). Everything the listing showed
+    /// is cached: the works like every other listing, the bookmark rows
+    /// themselves (scoped to whoever made them — only the active user's
+    /// own land in the Bookmarks view), and the collection↔work rows in
+    /// collection_bookmarks, so library mode can replay the listing.
     pub async fn fetch_collection_bookmarks(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+        let slug = name.clone();
         self.run_on_runtime(move |client, storage| async move {
-            let (works, has_next, total, found) = with_recovery(
+            let (listings, has_next, total, found) = with_recovery(
                 client, storage.clone(),
                 OpKind::Fetch { label: "collection_bookmarks".to_string() }, RetrySafety::Idempotent,
                 move |client| {
@@ -221,7 +235,16 @@ impl AO3App {
                 }).await?;
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            for w in &works { log_db("save_work", s.save_work(w)); }
+            let mut works = Vec::new();
+            for l in listings {
+                let Some(w) = l.work_summary else { continue };
+                log_db("save_work", s.save_work(&w));
+                log_db("cache_fetched_bookmark",
+                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id, &l.note));
+                works.push(w);
+            }
+            let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
+            log_db("save_collection_bookmarks", s.add_collection_bookmarks(&slug, &ids));
             log_db("commit listing save", tx.commit());
             Ok(UPagedWorks {
                 works: works.into_iter().map(UWorkSummary::from).collect(),

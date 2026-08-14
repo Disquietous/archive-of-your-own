@@ -255,30 +255,11 @@ pub(super) fn parse_chapters(s: &str) -> (u32, Option<u32>) {
     }
 }
 
-/// The works behind a bookmark listing (e.g. /collections/{name}/bookmarks):
-/// each li.bookmark.blurb wraps a standard work blurb, so the work parser
-/// applies as-is. Series and external-work bookmarks carry no /works/ link
-/// and are skipped.
-pub fn parse_bookmarked_works(html: &str) -> Result<Vec<WorkSummary>, AppError> {
-    let doc = Html::parse_document(html);
-    let blurb_sel = sel("li.bookmark.blurb");
-    let mut works = Vec::new();
-
-    for blurb in doc.select(&blurb_sel) {
-        match parse_single_blurb(&blurb) {
-            Ok(w) => works.push(w),
-            Err(_) => continue,
-        }
-    }
-
-    if works.is_empty() {
-        verify_empty_listing(&doc, "bookmarked works listing")?;
-    }
-    Ok(works)
-}
-
 // ---------------------------------------------------------------------------
-// Bookmark listing parser (/users/{username}/bookmarks)
+// Bookmark listing parser (/users/{username}/bookmarks and
+// /collections/{name}/bookmarks — the same li.bookmark.blurb markup, each
+// wrapping a standard work blurb plus the bookmarker's own module. Series
+// and external-work bookmarks carry no /works/ link and are skipped.)
 // ---------------------------------------------------------------------------
 
 pub fn parse_bookmark_listings(html: &str) -> Result<Vec<BookmarkListing>, AppError> {
@@ -333,6 +314,15 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .trim()
         .to_string();
 
+    // The bookmarker's own module carries a "Bookmarked by" byline naming
+    // the user the bookmark belongs to.
+    let byline_sel = sel("div.user h5.byline a[href*='/users/']");
+    let bookmarker = blurb
+        .select(&byline_sel)
+        .next()
+        .map(|a| text(&a).trim().to_string())
+        .unwrap_or_default();
+
     // Try to parse the work blurb data (reuse existing helpers)
     let work_summary = parse_single_blurb(blurb).ok();
 
@@ -340,6 +330,7 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         work_id,
         ao3_bookmark_id,
         note,
+        bookmarker,
         work_summary,
     })
 }

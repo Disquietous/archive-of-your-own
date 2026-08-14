@@ -597,6 +597,55 @@ fn test_collection_profile_tags_and_works() {
 }
 
 #[test]
+fn test_collection_bookmark_caching() {
+    let db = open_test_db();
+    db.save_work(&sample_work(1)).unwrap();
+    db.save_work(&sample_work(2)).unwrap();
+
+    // Signed in as "Reader": a fetched bookmark with their byline is
+    // theirs; everyone else's is keyed to its own username, outside the
+    // active account's scope.
+    db.create_account("reader", "Reader", "").unwrap();
+    db.set_active_account("reader").unwrap();
+
+    db.cache_fetched_bookmark("reader", 1, 111, "seen in a collection").unwrap();
+    db.cache_fetched_bookmark("SomeoneElse", 2, 222, "not mine").unwrap();
+    // A byline-less blurb can't be attributed — nothing cached.
+    db.cache_fetched_bookmark("", 2, 333, "").unwrap();
+
+    // The account-scoped Bookmarks view sees only the user's own row,
+    // which arrived AO3-synced with its id recorded.
+    assert_eq!(db.get_bookmarks().unwrap(), vec![1]);
+    let (note, sync, ao3_id) = db.get_bookmark_full(1).unwrap().unwrap();
+    assert_eq!((note.as_str(), sync, ao3_id), ("seen in a collection", true, Some(111)));
+
+    // A locally edited note survives re-fetch; only the AO3 id refreshes.
+    db.update_bookmark_note(1, "my edited note").unwrap();
+    db.cache_fetched_bookmark("Reader", 1, 444, "stale listing note").unwrap();
+    let (note, _, ao3_id) = db.get_bookmark_full(1).unwrap().unwrap();
+    assert_eq!((note.as_str(), ao3_id), ("my edited note", Some(444)));
+
+    // The other user's bookmark is keyed by their username.
+    let foreign: u32 = db.conn.query_row(
+        "SELECT COUNT(*) FROM bookmarks WHERE account_id = 'someoneelse'",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(foreign, 1);
+
+    // Collection↔bookmark joins accumulate across pages and replay in
+    // listing order, independent of the works-listing joins.
+    db.add_collection_bookmarks("test_fest", &[1]).unwrap();
+    db.add_collection_bookmarks("test_fest", &[1, 2]).unwrap();
+    let works = db.get_collection_bookmarks("test_fest").unwrap();
+    assert_eq!(works.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2]);
+    assert!(db.get_collection_work_ids("test_fest").unwrap().is_empty());
+
+    // Deleting a work cascades its join row.
+    db.delete_work(1).unwrap();
+    let works = db.get_collection_bookmarks("test_fest").unwrap();
+    assert_eq!(works.iter().map(|w| w.id).collect::<Vec<_>>(), vec![2]);
+}
+
+#[test]
 fn test_search_collections_filtered() {
     let db = open_test_db();
     let base = crate::models::CollectionSummary {
@@ -1103,7 +1152,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 8);
+    assert_eq!(db.schema_version().unwrap(), 10);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1151,6 +1200,26 @@ fn test_migration_v1_to_v2() {
                 PRIMARY KEY (sub_type, sub_id)
             );
             CREATE TABLE subscription_snapshots_old (sub_type TEXT);
+            CREATE TABLE bookmarks (
+                account_id TEXT NOT NULL DEFAULT '',
+                work_id    INTEGER NOT NULL,
+                note       TEXT DEFAULT '',
+                sync_to_ao3 INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (account_id, work_id)
+            );
+            CREATE TABLE accounts (
+                id          TEXT PRIMARY KEY,
+                username    TEXT NOT NULL,
+                password    TEXT NOT NULL DEFAULT '',
+                cookies     TEXT NOT NULL DEFAULT '',
+                is_active   INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO accounts (id, username, is_active)
+             VALUES ('account-writer_one', 'Writer_One', 1);
+            INSERT INTO bookmarks (account_id, work_id, note)
+             VALUES ('account-writer_one', 7, 'prefixed era'), ('', 7, 'signed-out era');
             CREATE TABLE saved_searches (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -1177,7 +1246,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 8);
+    assert_eq!(db.schema_version().unwrap(), 10);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1211,6 +1280,16 @@ fn test_migration_v1_to_v2() {
         "SELECT COUNT(*) FROM sqlite_master WHERE name = 'subscription_snapshots_old'",
         [], |r| r.get(0)).unwrap();
     assert_eq!(old_count, 0);
+    // v10: account ids lose the 'account-' prefix (accounts and bookmark
+    // scoping alike), and signed-out bookmarks move to the "[none]"
+    // sentinel — the active account still sees exactly its own rows.
+    let (id, username, _) = db.get_active_account().unwrap().unwrap();
+    assert_eq!((id.as_str(), username.as_str()), ("writer_one", "Writer_One"));
+    assert_eq!(db.get_bookmarks().unwrap(), vec![7]);
+    let sentinel_note: String = db.conn.query_row(
+        "SELECT note FROM bookmarks WHERE account_id = '[none]' AND work_id = 7",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(sentinel_note, "signed-out era");
     // v4: last_checked_at exists on the migrated table and starts NULL.
     assert!(db.get_snapshot_last_checked("author", "writer_one").unwrap().is_none());
     db.set_snapshot_last_checked("author", "writer_one", "2026-08-11 03:00:00").unwrap();
@@ -1219,7 +1298,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 8);
+    assert_eq!(db.schema_version().unwrap(), 10);
     let _ = std::fs::remove_file(&path);
 }
 

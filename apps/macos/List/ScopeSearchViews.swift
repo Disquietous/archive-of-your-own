@@ -159,7 +159,14 @@ struct CollectionSplitPaneHeader: View {
         HStack(spacing: 8) {
             if isWorks {
                 Button {
-                    search.closeSplitCollection()
+                    // From the Collections section this exits the drill-in
+                    // (which dissolves the split); from search it returns
+                    // to the collections hit list behind the panes.
+                    if model.section == .collections {
+                        model.closeCollectionWorks()
+                    } else {
+                        search.closeSplitCollection()
+                    }
                 } label: {
                     Image(systemName: "arrow.left")
                         .font(.system(size: 12, weight: .semibold))

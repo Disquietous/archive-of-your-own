@@ -208,6 +208,9 @@ pub struct BookmarkListing {
     pub work_id: u64,
     pub ao3_bookmark_id: u64,
     pub note: String,
+    /// AO3 username the blurb's "Bookmarked by" byline attributes the
+    /// bookmark to; "" when the byline is absent.
+    pub bookmarker: String,
     pub work_summary: Option<WorkSummary>,
 }
 

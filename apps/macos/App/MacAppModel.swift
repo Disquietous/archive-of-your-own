@@ -696,8 +696,10 @@ final class MacAppModel {
 
     /// Collection drill-in: the collection's paged works in the reading pane
     /// without leaving the Collections section — the search-results flow
-    /// (pager and all) driven by a collection query.
-    func openCollectionWorks(slug: String, title: String) {
+    /// (pager and all) driven by a collection query. The counts steer that
+    /// query's shape (works pane, bookmarks pane, or both, side by side).
+    func openCollectionWorks(slug: String, title: String,
+                             workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0) {
         collectionWorksName = slug
         collectionWorksTitle = title
         selectedWorkID = nil
@@ -706,7 +708,10 @@ final class MacAppModel {
         // startCollectionQuery also caches the collection's profile
         // metadata + tags — one shared entry point for every path here.
         Task { @MainActor in
-            search.startCollectionQuery(slug, title: title, appState: appState)
+            search.startCollectionQuery(slug, title: title,
+                                        workCount: workCount,
+                                        bookmarkedCount: bookmarkedCount,
+                                        appState: appState)
         }
     }
 
@@ -715,6 +720,9 @@ final class MacAppModel {
         collectionWorksTitle = nil
         selectedWorkID = nil
         readerOpen = false
+        Task { @MainActor in
+            search.closeSplitCollection()
+        }
     }
 
     func followAuthor(_ name: String) {

@@ -698,13 +698,20 @@ mod comment_tests {
         // title link don't break id extraction.
         let html = fs::read_to_string("tests/fixtures/collection_bookmarks.html")
             .expect("Failed to read collection bookmarks fixture");
-        let works = parse_bookmarked_works(&html).expect("bookmarked works parse");
-        assert_eq!(works.len(), 2);
-        assert_eq!(works[0].id, 3000001);
-        assert_eq!(works[0].title, "Bookmarked Mock Work");
-        assert_eq!(works[0].word_count, 7777);
-        assert_eq!(works[1].id, 3000002);
-        assert_eq!(works[1].title, "Second Bookmarked Work");
+        let bookmarks = parse_bookmark_listings(&html).expect("bookmark listing parse");
+        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(bookmarks[0].work_id, 3000001);
+        assert_eq!(bookmarks[0].ao3_bookmark_id, 9000001);
+        assert_eq!(bookmarks[0].bookmarker, "MockReader");
+        assert_eq!(bookmarks[0].note, "A synthetic bookmarker note.");
+        let work = bookmarks[0].work_summary.as_ref().expect("work blurb");
+        assert_eq!(work.title, "Bookmarked Mock Work");
+        assert_eq!(work.word_count, 7777);
+        assert_eq!(bookmarks[1].work_id, 3000002);
+        assert_eq!(bookmarks[1].bookmarker, "OtherReader");
+        assert_eq!(bookmarks[1].note, "");
+        assert_eq!(bookmarks[1].work_summary.as_ref().expect("work blurb").title,
+                   "Second Bookmarked Work");
     }
 
     #[test]
