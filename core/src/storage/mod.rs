@@ -76,19 +76,23 @@ impl Storage {
             conn.pragma_update(None, "key", passphrase).map_err(map_sql)?;
         }
         conn.pragma_update(None, "journal_mode", "WAL").map_err(map_sql)?;
+        // SQLite leaves foreign key enforcement off by default; the join
+        // tables (work_tags, collection_tags, collection_works) rely on
+        // ON DELETE CASCADE to clean up when a work, collection, or tag
+        // row is deleted.
+        conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql)?;
 
         let storage = Self { conn };
         storage.migrate()?;
-        // One-time: seed the autocomplete tag cache from works cached before
-        // the known_tags table existed.
-        let _ = storage.backfill_known_tags();
+        // One-time: seed the tags table from works cached before it existed.
+        let _ = storage.backfill_tags();
         Ok(storage)
     }
 
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 7;
+    const SCHEMA_VERSION: u32 = 8;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -133,6 +137,7 @@ impl Storage {
                 5 => self.migrate_v5(),
                 6 => self.migrate_v6(),
                 7 => self.migrate_v7(),
+                8 => self.migrate_v8(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -293,6 +298,87 @@ impl Storage {
                 .map_err(map_sql)?;
         }
         Ok(())
+    }
+
+    /// v8 — tags become first-class rows (2026-08). The autocomplete cache
+    /// `known_tags` was already the tag table in all but name: it becomes
+    /// `tags`, gaining an id and keeping its uses/canonical/last_seen
+    /// ranking columns. Tag identity is the name alone — AO3 tag names are
+    /// globally unique across every tag type (hence the "- Freeform"
+    /// suffixes) — so duplicate (name, type) rows merge: the most-used
+    /// row's type wins, uses sum, canonical and last_seen keep their max.
+    /// "" for tag_type means "type not yet learned" (e.g. a tag first seen
+    /// on a collection profile, which doesn't state types).
+    ///
+    /// The works table's four tag JSON list columns become `work_tags` join
+    /// rows (`tag_type` records which blurb list, `position` AO3's display
+    /// order); `collection_tags` and `collection_works` cache what a
+    /// collection's /profile and works listing showed. All three join
+    /// tables declare ON DELETE CASCADE foreign keys on both sides, so
+    /// deleting a work, collection, or tag row deletes its join rows
+    /// automatically. `collections.profile_fetched_at` records that the
+    /// /profile page was cached (cache-forever guard, like everything else).
+    fn migrate_v8(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS known_tags (
+                     name      TEXT NOT NULL,
+                     tag_type  TEXT NOT NULL,
+                     uses      INTEGER NOT NULL DEFAULT 1,
+                     canonical INTEGER NOT NULL DEFAULT 0,
+                     last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                     PRIMARY KEY (name, tag_type)
+                 ); -- a database that skipped the v1 baseline may lack it
+                 CREATE TABLE tags (
+                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name      TEXT NOT NULL UNIQUE,
+                     tag_type  TEXT NOT NULL DEFAULT '',
+                     uses      INTEGER NOT NULL DEFAULT 1,
+                     canonical INTEGER NOT NULL DEFAULT 0,
+                     last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 INSERT INTO tags (name, tag_type, uses, canonical, last_seen)
+                     SELECT kt.name,
+                            (SELECT k2.tag_type FROM known_tags k2 WHERE k2.name = kt.name
+                              ORDER BY k2.uses DESC, k2.canonical DESC, k2.last_seen DESC
+                              LIMIT 1),
+                            SUM(kt.uses), MAX(kt.canonical), MAX(kt.last_seen)
+                     FROM known_tags kt GROUP BY kt.name;
+                 DROP TABLE known_tags;
+                 CREATE INDEX idx_tags_lookup ON tags(tag_type, name COLLATE NOCASE);
+                 CREATE TABLE work_tags (
+                     work_id  INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                     tag_id   INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                     tag_type TEXT NOT NULL DEFAULT '',
+                     position INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (work_id, tag_id)
+                 );
+                 CREATE INDEX idx_work_tags_tag ON work_tags(tag_id);
+                 CREATE TABLE collection_tags (
+                     collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
+                     tag_id          INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                     position        INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (collection_name, tag_id)
+                 );
+                 CREATE INDEX idx_collection_tags_tag ON collection_tags(tag_id);
+                 CREATE TABLE collection_works (
+                     collection_name TEXT NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
+                     work_id         INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                     PRIMARY KEY (collection_name, work_id)
+                 );
+                 CREATE INDEX idx_collection_works_work ON collection_works(work_id);
+                 ALTER TABLE collections ADD COLUMN profile_fetched_at TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(map_sql)?;
+        self.backfill_work_tags_v8()?;
+        self.conn
+            .execute_batch(
+                "ALTER TABLE works DROP COLUMN fandoms_json;
+                 ALTER TABLE works DROP COLUMN relationships_json;
+                 ALTER TABLE works DROP COLUMN characters_json;
+                 ALTER TABLE works DROP COLUMN tags_json;",
+            )
+            .map_err(map_sql)
     }
 
     /// A write transaction for multi-row batches. Statements executed on

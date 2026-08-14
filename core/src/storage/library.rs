@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 
@@ -520,10 +520,151 @@ impl Storage {
                 work_count: row.get(6)?,
                 bookmarked_count: row.get(7)?,
                 maintainers: serde_json::from_str(&maintainers_json).unwrap_or_default(),
+                tags: Vec::new(),
                 collection_type: row.get(9)?,
             })
         }).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let mut collections: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        for c in &mut collections {
+            c.tags = self.get_collection_tags(&c.name)?;
+        }
+        Ok(collections)
+    }
+
+    // -------------------------------------------------------------------
+    // Collection tags and works (normalized join tables)
+    // -------------------------------------------------------------------
+
+    /// Cache a collection's /profile page: upsert the metadata row, stamp
+    /// profile_fetched_at, and rewrite the collection's tag links. The
+    /// profile page carries no work/bookmark counts, so zeroes there keep
+    /// whatever the index blurb already recorded.
+    pub fn save_collection_profile(&self, c: &crate::models::CollectionSummary) -> Result<(), AppError> {
+        self.with_savepoint("save_collection_profile", || {
+            let mut merged = c.clone();
+            if let Some(existing) = self.get_collection(&c.name)? {
+                if merged.work_count == 0 { merged.work_count = existing.work_count; }
+                if merged.bookmarked_count == 0 { merged.bookmarked_count = existing.bookmarked_count; }
+                if merged.summary.is_empty() { merged.summary = existing.summary; }
+            }
+            self.save_collections(std::slice::from_ref(&merged))?;
+            self.conn
+                .execute("UPDATE collections SET profile_fetched_at = datetime('now')
+                          WHERE name = ?1", params![c.name])
+                .map_err(map_sql)?;
+            self.replace_collection_tags(&c.name, &c.tags)
+        })
+    }
+
+    /// Whether a collection's /profile page has ever been cached — the
+    /// cache-forever guard for profile fetches.
+    pub fn collection_profile_cached(&self, name: &str) -> Result<bool, AppError> {
+        let fetched: Option<String> = self.conn
+            .query_row("SELECT profile_fetched_at FROM collections WHERE name = ?1",
+                       params![name], |r| r.get(0))
+            .optional()
+            .map_err(map_sql)?;
+        Ok(fetched.is_some_and(|f| !f.is_empty()))
+    }
+
+    /// The cached collection row, tags attached; None when never seen.
+    pub fn get_collection(&self, name: &str) -> Result<Option<crate::models::CollectionSummary>, AppError> {
+        let row = self.conn
+            .query_row(
+                "SELECT name, title, summary, is_open, is_moderated, is_anonymous,
+                        work_count, bookmarked_count, maintainers_json, collection_type
+                 FROM collections WHERE name = ?1",
+                params![name],
+                |row| {
+                    let maintainers_json: String = row.get(8)?;
+                    Ok(crate::models::CollectionSummary {
+                        name: row.get(0)?,
+                        title: row.get(1)?,
+                        summary: row.get(2)?,
+                        is_open: row.get::<_, i64>(3)? != 0,
+                        is_moderated: row.get::<_, i64>(4)? != 0,
+                        is_anonymous: row.get::<_, i64>(5)? != 0,
+                        work_count: row.get(6)?,
+                        bookmarked_count: row.get(7)?,
+                        maintainers: serde_json::from_str(&maintainers_json).unwrap_or_default(),
+                        tags: Vec::new(),
+                        collection_type: row.get(9)?,
+                    })
+                })
+            .optional()
+            .map_err(map_sql)?;
+        match row {
+            Some(mut c) => {
+                c.tags = self.get_collection_tags(&c.name)?;
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Rewrite a collection's tag join rows in page order. Tags are
+    /// universal — the same tags row a work references, keyed by name.
+    fn replace_collection_tags(&self, name: &str, tags: &[String]) -> Result<(), AppError> {
+        self.conn
+            .execute("DELETE FROM collection_tags WHERE collection_name = ?1", params![name])
+            .map_err(map_sql)?;
+        let mut stmt = self.conn
+            .prepare_cached("INSERT OR IGNORE INTO collection_tags
+                             (collection_name, tag_id, position) VALUES (?1, ?2, ?3)")
+            .map_err(map_sql)?;
+        for (position, tag) in tags.iter().enumerate() {
+            // Profile pages don't state tag types — "" until a work
+            // listing teaches us.
+            let tag_id = self.tag_row_id(tag, "")?;
+            stmt.execute(params![name, tag_id, position as i64]).map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// A collection's tag names, in profile-page order.
+    pub fn get_collection_tags(&self, name: &str) -> Result<Vec<String>, AppError> {
+        let mut stmt = self.conn
+            .prepare_cached(
+                "SELECT t.name FROM collection_tags ct
+                 JOIN tags t ON t.id = ct.tag_id
+                 WHERE ct.collection_name = ?1
+                 ORDER BY ct.position")
+            .map_err(map_sql)?;
+        let rows = stmt.query_map(params![name], |r| r.get::<_, String>(0)).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    /// Record works seen in a collection's listing. Accumulates across
+    /// pages — a work stays linked until the work or collection is deleted
+    /// (the join rows' foreign keys cascade).
+    pub fn add_collection_works(&self, name: &str, work_ids: &[u64]) -> Result<(), AppError> {
+        // A listing can be fetched for a collection whose blurb was never
+        // cached (deep link) — satisfy the foreign key with a stub row the
+        // next blurb or profile save will fill in.
+        self.conn
+            .execute("INSERT OR IGNORE INTO collections (name, title) VALUES (?1, ?1)",
+                     params![name])
+            .map_err(map_sql)?;
+        let mut stmt = self.conn
+            .prepare_cached("INSERT OR IGNORE INTO collection_works
+                             (collection_name, work_id) VALUES (?1, ?2)")
+            .map_err(map_sql)?;
+        for id in work_ids {
+            stmt.execute(params![name, *id as i64]).map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// The cached work ids for a collection, in the order they were seen.
+    pub fn get_collection_work_ids(&self, name: &str) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn
+            .prepare_cached("SELECT work_id FROM collection_works
+                             WHERE collection_name = ?1 ORDER BY rowid")
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map(params![name], |r| r.get::<_, i64>(0))
+            .map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).map(|id| id as u64).collect())
     }
 
     // -------------------------------------------------------------------

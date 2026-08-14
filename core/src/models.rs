@@ -227,6 +227,9 @@ pub struct CollectionSummary {
     pub bookmarked_count: u32,
     /// Maintainer usernames from the heading's "by …" owner links.
     pub maintainers: Vec<String>,
+    /// Tag names on the collection. Only the /profile page carries these —
+    /// index blurbs leave the list empty.
+    pub tags: Vec<String>,
     /// Challenge type from the p.type line, e.g. "Gift Exchange Challenge"
     /// or "Prompt Meme Challenge"; "" for a plain (non-challenge) collection.
     pub collection_type: String,

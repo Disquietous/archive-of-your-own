@@ -370,16 +370,11 @@ impl Storage {
         // newest-first like the live listing.
         let order = if sub_type == "series" { "sw.rowid ASC" } else { "w.date_updated DESC" };
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
-                    w.warnings_json, w.categories_json, w.relationships_json,
-                    w.characters_json, w.tags_json, w.summary, w.word_count,
-                    w.chapter_count, w.total_chapters, w.kudos, w.hits,
-                    w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete,
-                    w.series_json, w.fetched_at
+            "SELECT {}
              FROM subscription_works sw
              JOIN works w ON w.id = sw.work_id
              WHERE sw.sub_type = ?1 AND sw.sub_id = ?2
-             ORDER BY {order}"
+             ORDER BY {order}", Self::work_select("w.")
         )).map_err(map_sql)?;
         let rows = stmt.query_map(params![sub_type, sub_id], |row| {
             Ok(Self::work_from_row(row))
@@ -388,6 +383,7 @@ impl Storage {
         for r in rows {
             if let Ok(Ok(w)) = r { works.push(w); }
         }
+        self.attach_work_tags(&mut works)?;
         Ok(works)
     }
 

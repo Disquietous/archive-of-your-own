@@ -143,6 +143,14 @@ impl AO3Client {
         Ok((collections, parser::has_next_page(&html), parser::total_pages(&html)))
     }
 
+    /// A collection's /profile page: full metadata plus the collection's
+    /// tag links, which the index blurbs don't carry.
+    pub async fn fetch_collection_profile(&self, name: &str) -> Result<CollectionSummary, AppError> {
+        let url = format!("{BASE_URL}/collections/{}/profile", urlencoded(name));
+        let html = self.fetch(&url).await?;
+        parser::parse_collection_profile(&html, name)
+    }
+
     /// One page of a collection's approved works
     /// (/collections/{name}/works — standard li.work.blurb markup).
     /// Returns (works, has_next_page, total_pages, total_works), as

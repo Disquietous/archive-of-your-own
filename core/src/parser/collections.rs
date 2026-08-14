@@ -51,6 +51,7 @@ fn parse_single_collection_blurb(blurb: &ElementRef) -> Result<CollectionSummary
         work_count,
         bookmarked_count,
         maintainers,
+        tags: Vec::new(),
         collection_type,
     })
 }
@@ -152,4 +153,80 @@ fn extract_collection_stat(blurb: &ElementRef, selector: &str) -> u32 {
         .next()
         .map(|el| parse_number(&text(&el)) as u32)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Collection profile parser (/collections/{name}/profile)
+// ---------------------------------------------------------------------------
+
+/// Parse a collection's /profile page: the full metadata the index blurb
+/// carries plus the collection's tag links, which only this page shows.
+/// `name` is the URL slug the caller fetched — the page itself repeats it
+/// only in link hrefs. Fails closed when the page has no collection header
+/// (login walls, error pages).
+pub fn parse_collection_profile(html: &str, name: &str) -> Result<CollectionSummary, AppError> {
+    let doc = Html::parse_document(html);
+
+    // The profile's header module carries the heading, type line, byline,
+    // and tag list; fall back to the whole document for lenient matching.
+    let header_sel = sel("div.collection .header, div.collection .primary");
+    let root: ElementRef = doc
+        .select(&header_sel)
+        .next()
+        .or_else(|| doc.select(&sel("div.collection")).next())
+        .ok_or_else(|| AppError::ElementNotFound("collection profile header".to_string()))?;
+
+    let heading_sel = sel("h2.heading");
+    let title = root
+        .select(&heading_sel)
+        .next()
+        .map(|el| text(&el))
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| AppError::ElementNotFound("collection profile title".to_string()))?;
+
+    let (is_open, is_moderated, is_anonymous, collection_type) = extract_collection_type(&root);
+
+    // Maintainers: the byline's user links.
+    let maintainer_sel = sel("a[href^='/users/']");
+    let mut maintainers: Vec<String> = Vec::new();
+    for link in root.select(&maintainer_sel) {
+        let user = text(&link);
+        if !user.is_empty() && !maintainers.contains(&user) {
+            maintainers.push(user);
+        }
+    }
+
+    // The collection's tags — AO3 renders tag links with class="tag".
+    let tag_sel = sel("a.tag");
+    let mut tags: Vec<String> = Vec::new();
+    for link in doc.select(&tag_sel) {
+        let tag = text(&link);
+        if !tag.is_empty() && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+
+    // Intro/summary block, when the collection has one.
+    let summary_sel = sel("blockquote.userstuff");
+    let summary = doc
+        .select(&summary_sel)
+        .next()
+        .map(|el| text(&el))
+        .unwrap_or_default();
+
+    Ok(CollectionSummary {
+        name: name.to_string(),
+        title,
+        summary,
+        is_open,
+        is_moderated,
+        is_anonymous,
+        // The profile page carries no work/bookmark counts; the storage
+        // upsert keeps whatever the index blurb already recorded.
+        work_count: 0,
+        bookmarked_count: 0,
+        maintainers,
+        tags,
+        collection_type,
+    })
 }

@@ -467,6 +467,13 @@ final class RustBridge {
         return try await app.fetchCollectionWorks(name: name, page: page)
     }
 
+    /// The collection's /profile metadata and tags — fetched once, answered
+    /// from the cache forever after.
+    func ensureCollectionProfile(name: String) async throws -> UCollection {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.ensureCollectionProfile(name: name)
+    }
+
     func searchWorksRaw(keys: [String], values: [String], page: UInt32 = 1) async throws -> [UWorkSummary] {
         try await searchWorksRawPaged(keys: keys, values: values, page: page).works
     }

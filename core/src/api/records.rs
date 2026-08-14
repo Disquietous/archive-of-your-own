@@ -143,6 +143,9 @@ pub struct UCollection {
     pub work_count: u32,
     pub bookmarked_count: u32,
     pub maintainers: Vec<String>,
+    /// Tag names on the collection; populated once the /profile page has
+    /// been fetched and cached.
+    pub tags: Vec<String>,
     /// Challenge type ("Gift Exchange Challenge", "Prompt Meme Challenge");
     /// "" for a plain collection.
     pub collection_type: String,
@@ -160,6 +163,7 @@ impl From<CollectionSummary> for UCollection {
             work_count: c.work_count,
             bookmarked_count: c.bookmarked_count,
             maintainers: c.maintainers,
+            tags: c.tags,
             collection_type: c.collection_type,
         }
     }

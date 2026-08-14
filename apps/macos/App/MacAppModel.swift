@@ -706,6 +706,12 @@ final class MacAppModel {
         Task { @MainActor in
             search.startCollectionQuery(slug, appState: appState)
         }
+        // Cache the collection's profile metadata + tags; the core answers
+        // from the database after the first fetch, so this is one request
+        // per collection, ever.
+        Task { @MainActor in
+            _ = try? await appState.bridge.ensureCollectionProfile(name: slug)
+        }
     }
 
     func closeCollectionWorks() {

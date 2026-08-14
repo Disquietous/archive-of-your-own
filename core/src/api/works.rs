@@ -124,7 +124,7 @@ impl AO3App {
     /// Cached tag names matching, across every tag type.
     pub fn search_library_tags(&self, term: String, limit: Option<u32>) -> Result<Vec<UTagHit>, AO3Error> {
         let s = self.storage.blocking_lock();
-        Ok(s.search_known_tags_all(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
+        Ok(s.search_tags_all(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
             .into_iter()
             .map(|(name, tag_type)| UTagHit { name, tag_type })
             .collect())
@@ -143,14 +143,65 @@ impl AO3App {
             .into_iter().map(UCollection::from).collect())
     }
 
-    /// One page of a collection's works, cached like every other listing.
-    /// `name` is the collection's URL slug from UCollection.name.
+    /// One page of a collection's works, cached like every other listing —
+    /// plus the collection↔work relationship, so the library knows which
+    /// cached works were seen in which collection.
     pub async fn fetch_collection_works(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("collection_works", move |client| {
-            let name = name.clone();
-            async move {
-                client.read().await.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
+        let slug = name.clone();
+        self.run_on_runtime(move |client, storage| async move {
+            let (works, has_next, total, found) = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "collection_works".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let name = name.clone();
+                    async move {
+                        client.read().await.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let s = storage.lock().await;
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            for w in &works { log_db("save_work", s.save_work(w)); }
+            let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
+            log_db("save_collection_works", s.add_collection_works(&slug, &ids));
+            log_db("commit listing save", tx.commit());
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_works: found,
+            })
+        }).await
+    }
+
+    /// The collection's /profile metadata and tags, fetched once and cached
+    /// forever (like everything else): a cached profile answers from the
+    /// database without touching the network.
+    pub async fn ensure_collection_profile(&self, name: String) -> Result<UCollection, AO3Error> {
+        let slug = name.clone();
+        self.run_on_runtime(move |client, storage| async move {
+            {
+                let s = storage.lock().await;
+                if s.collection_profile_cached(&slug).map_err(AO3Error::from)? {
+                    if let Some(cached) = s.get_collection(&slug).map_err(AO3Error::from)? {
+                        return Ok(UCollection::from(cached));
+                    }
+                }
             }
+            let profile = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "collection_profile".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let name = name.clone();
+                    async move {
+                        client.read().await.fetch_collection_profile(&name).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let s = storage.lock().await;
+            log_db("save_collection_profile", s.save_collection_profile(&profile));
+            // Return the merged row (profile zeroes keep the blurb's counts).
+            Ok(UCollection::from(s.get_collection(&profile.name)
+                .map_err(AO3Error::from)?
+                .unwrap_or(profile)))
         }).await
     }
 
@@ -329,7 +380,7 @@ impl AO3App {
     /// from tags harvested off every work the user has seen.
     pub fn search_local_tags(&self, tag_type: String, term: String, limit: u32) -> Result<Vec<String>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.search_known_tags(&tag_type, &term, limit).map_err(AO3Error::from)
+        s.search_tags(&tag_type, &term, limit).map_err(AO3Error::from)
     }
 
     /// Explicit AO3 autocomplete lookup (user-triggered only). Successful

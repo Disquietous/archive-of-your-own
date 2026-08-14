@@ -11,6 +11,27 @@ impl Storage {
     // Works
     // -------------------------------------------------------------------
 
+    /// The works table's scalar columns, in `work_from_row` order. The tag
+    /// vectors (fandoms, characters, relationships, freeforms) are not
+    /// columns — they hydrate from the work_tags join via attach_work_tags.
+    pub(super) const WORK_COLS: [&'static str; 20] = [
+        "id", "title", "authors_json", "rating", "warnings_json",
+        "categories_json", "summary", "word_count", "chapter_count",
+        "total_chapters", "kudos", "hits", "bookmarks", "comments",
+        "date_published", "date_updated", "language", "complete",
+        "series_json", "fetched_at",
+    ];
+
+    /// The SELECT list for `work_from_row`, with an optional table prefix
+    /// ("w.") for joined queries.
+    pub(super) fn work_select(prefix: &str) -> String {
+        Self::WORK_COLS
+            .iter()
+            .map(|c| format!("{prefix}{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Upsert a work summary plus its author-index rows, atomically (a
     /// savepoint, so it also composes inside callers' batch transactions).
     pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
@@ -23,38 +44,31 @@ impl Storage {
         self.conn
             .execute(
                 "INSERT INTO works (
-                    id, title, authors_json, fandoms_json, rating,
-                    warnings_json, categories_json, relationships_json,
-                    characters_json, tags_json, summary, word_count,
+                    id, title, authors_json, rating,
+                    warnings_json, categories_json, summary, word_count,
                     chapter_count, total_chapters, kudos, hits,
                     bookmarks, comments, date_published, date_updated, language, complete,
                     fetched_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8,
+                    ?1, ?2, ?3, ?4,
+                    ?5, ?6, ?7, ?8,
                     ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16,
-                    ?17, ?18, ?19, ?20, ?21, ?22,
-                    ?23
+                    ?13, ?14, ?15, ?16, ?17, ?18,
+                    ?19
                 )
                 ON CONFLICT(id) DO UPDATE SET
-                    title = ?2, authors_json = ?3, fandoms_json = ?4, rating = ?5,
-                    warnings_json = ?6, categories_json = ?7, relationships_json = ?8,
-                    characters_json = ?9, tags_json = ?10, summary = ?11, word_count = ?12,
-                    chapter_count = ?13, total_chapters = ?14, kudos = ?15, hits = ?16,
-                    bookmarks = ?17, comments = ?18, date_published = ?19, date_updated = ?20,
-                    language = ?21, complete = ?22, fetched_at = ?23",
+                    title = ?2, authors_json = ?3, rating = ?4,
+                    warnings_json = ?5, categories_json = ?6, summary = ?7, word_count = ?8,
+                    chapter_count = ?9, total_chapters = ?10, kudos = ?11, hits = ?12,
+                    bookmarks = ?13, comments = ?14, date_published = ?15, date_updated = ?16,
+                    language = ?17, complete = ?18, fetched_at = ?19",
                 params![
                     work.id as i64,
                     work.title,
                     serde_json::to_string(&work.authors).map_err(map_json)?,
-                    serde_json::to_string(&work.fandoms).map_err(map_json)?,
                     rating_to_str(&work.rating),
                     serde_json::to_string(&work.warnings).map_err(map_json)?,
                     serde_json::to_string(&work.categories).map_err(map_json)?,
-                    serde_json::to_string(&work.relationships).map_err(map_json)?,
-                    serde_json::to_string(&work.characters).map_err(map_json)?,
-                    serde_json::to_string(&work.tags).map_err(map_json)?,
                     work.summary,
                     work.word_count as i64,
                     work.chapter_count as i64,
@@ -72,8 +86,142 @@ impl Storage {
             )
             .map_err(map_sql)?;
         self.replace_work_authors(work.id, &work.authors)?;
+        self.replace_work_tag_rows(work.id, &work.fandoms, &work.characters,
+                                   &work.relationships, &work.tags)?;
         // Seeing a work's details anywhere feeds the autocomplete tag cache.
         let _ = self.harvest_work_tags(work);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Normalized tags (tags + work_tags/collection_tags join tables)
+    // -------------------------------------------------------------------
+
+    /// The tags-table id for a name, inserting the row if new. Tag identity
+    /// is the name alone — AO3 tag names are globally unique across every
+    /// tag type (hence the "- Freeform" suffixes), so the same tag is one
+    /// row wherever it appears: on works, on collections, anywhere.
+    /// `tag_type` fills in an existing row's type only when it hasn't been
+    /// learned yet ("" = unknown, e.g. from a collection profile).
+    pub(super) fn tag_row_id(&self, name: &str, tag_type: &str) -> Result<i64, AppError> {
+        self.conn
+            .prepare_cached(
+                "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET tag_type = excluded.tag_type
+                     WHERE tags.tag_type = '' AND excluded.tag_type <> ''")
+            .map_err(map_sql)?
+            .execute(params![name, tag_type])
+            .map_err(map_sql)?;
+        self.conn
+            .prepare_cached("SELECT id FROM tags WHERE name = ?1")
+            .map_err(map_sql)?
+            .query_row(params![name], |r| r.get(0))
+            .map_err(map_sql)
+    }
+
+    /// Rewrite a work's join rows. `tag_type` records how this work uses
+    /// the tag (which blurb list it came from); `position` runs across the
+    /// four lists in AO3's blurb order so reads reproduce the original
+    /// ordering.
+    fn replace_work_tag_rows(&self, work_id: u64, fandoms: &[String], characters: &[String],
+                             relationships: &[String], freeforms: &[String])
+        -> Result<(), AppError>
+    {
+        self.conn
+            .execute("DELETE FROM work_tags WHERE work_id = ?1", params![work_id as i64])
+            .map_err(map_sql)?;
+        let mut stmt = self.conn
+            .prepare_cached("INSERT OR IGNORE INTO work_tags (work_id, tag_id, tag_type, position)
+                             VALUES (?1, ?2, ?3, ?4)")
+            .map_err(map_sql)?;
+        let mut position = 0i64;
+        for (list, tag_type) in [(fandoms, "fandom"), (characters, "character"),
+                                 (relationships, "relationship"), (freeforms, "freeform")] {
+            for name in list {
+                let tag_id = self.tag_row_id(name, tag_type)?;
+                stmt.execute(params![work_id as i64, tag_id, tag_type, position])
+                    .map_err(map_sql)?;
+                position += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hydrate the tag vectors on loaded rows from the join tables — the
+    /// works SELECTs only carry scalar columns.
+    pub(super) fn attach_work_tags(&self, works: &mut [WorkSummary]) -> Result<(), AppError> {
+        let mut stmt = self.conn
+            .prepare_cached(
+                "SELECT t.name, wt.tag_type FROM work_tags wt
+                 JOIN tags t ON t.id = wt.tag_id
+                 WHERE wt.work_id = ?1
+                 ORDER BY wt.position")
+            .map_err(map_sql)?;
+        for work in works.iter_mut() {
+            let rows = stmt
+                .query_map(params![work.id as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(map_sql)?;
+            for row in rows {
+                let (name, tag_type) = row.map_err(map_sql)?;
+                match tag_type.as_str() {
+                    "fandom" => work.fandoms.push(name),
+                    "character" => work.characters.push(name),
+                    "relationship" => work.relationships.push(name),
+                    _ => work.tags.push(name),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Seed work_tags join rows from the pre-v8 JSON list columns, adding
+    /// any tag names the known_tags harvest never saw. Version-frozen
+    /// against the v8 table shapes (inline SQL, no live helpers) so future
+    /// migrations can't silently change what this step replays. Runs inside
+    /// the v8 step, while the JSON columns still exist.
+    pub(super) fn backfill_work_tags_v8(&self) -> Result<(), AppError> {
+        let rows: Vec<(i64, String, String, String, String)> = {
+            let mut stmt = self.conn
+                .prepare("SELECT id, fandoms_json, characters_json,
+                                 relationships_json, tags_json FROM works")
+                .map_err(map_sql)?;
+            let mapped = stmt
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map_err(map_sql)?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(map_sql)?
+        };
+        let parse = |s: &str| serde_json::from_str::<Vec<String>>(s).unwrap_or_default();
+        let mut insert_tag = self.conn
+            .prepare("INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
+                      ON CONFLICT(name) DO UPDATE SET tag_type = excluded.tag_type
+                          WHERE tags.tag_type = ''")
+            .map_err(map_sql)?;
+        let mut select_tag = self.conn
+            .prepare("SELECT id FROM tags WHERE name = ?1")
+            .map_err(map_sql)?;
+        let mut insert_link = self.conn
+            .prepare("INSERT OR IGNORE INTO work_tags (work_id, tag_id, tag_type, position)
+                      VALUES (?1, ?2, ?3, ?4)")
+            .map_err(map_sql)?;
+        for (id, fandoms, characters, relationships, freeforms) in rows {
+            let mut position = 0i64;
+            for (list, tag_type) in [(parse(&fandoms), "fandom"), (parse(&characters), "character"),
+                                     (parse(&relationships), "relationship"),
+                                     (parse(&freeforms), "freeform")] {
+                for name in &list {
+                    insert_tag.execute(params![name, tag_type]).map_err(map_sql)?;
+                    let tag_id: i64 = select_tag
+                        .query_row(params![name], |r| r.get(0))
+                        .map_err(map_sql)?;
+                    insert_link.execute(params![id, tag_id, tag_type, position]).map_err(map_sql)?;
+                    position += 1;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -180,11 +328,11 @@ impl Storage {
     }
 
     // -------------------------------------------------------------------
-    // Known tags (autocomplete cache — harvested from every viewed work)
+    // Tag rows (autocomplete ranking — harvested from every viewed work)
     // -------------------------------------------------------------------
 
-    /// Cache every tag on a work for autocomplete. Idempotent: new tags
-    /// insert, known tags bump their use count and freshness.
+    /// Bump the ranking columns of every tag on a work for autocomplete.
+    /// Idempotent: new tags insert, known tags bump use count and freshness.
     pub fn harvest_work_tags(&self, work: &WorkSummary) -> Result<(), AppError> {
         let mut tags: Vec<(&str, &str)> = Vec::new();
         for f in &work.fandoms { tags.push((f, "fandom")); }
@@ -192,19 +340,21 @@ impl Storage {
         for r in &work.relationships { tags.push((r, "relationship")); }
         for t in &work.tags { tags.push((t, "freeform")); }
         for a in &work.authors { tags.push((a, "creator")); }
-        self.upsert_known_tags(&tags)
+        self.upsert_tags(&tags)
     }
 
-    pub fn upsert_known_tags(&self, tags: &[(&str, &str)]) -> Result<(), AppError> {
+    pub fn upsert_tags(&self, tags: &[(&str, &str)]) -> Result<(), AppError> {
         if tags.is_empty() {
             return Ok(());
         }
-        self.with_savepoint("known_tags", || {
+        self.with_savepoint("upsert_tags", || {
             let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO known_tags (name, tag_type) VALUES (?1, ?2)
-                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET
                      uses = uses + 1,
-                     last_seen = datetime('now')"
+                     last_seen = datetime('now'),
+                     tag_type = CASE WHEN tags.tag_type = '' THEN excluded.tag_type
+                                     ELSE tags.tag_type END"
             ).map_err(map_sql)?;
             for (name, tag_type) in tags {
                 let trimmed = name.trim();
@@ -215,17 +365,19 @@ impl Storage {
         })
     }
 
-    /// Record names confirmed by AO3's autocomplete as canonical.
+    /// Record names confirmed by AO3's autocomplete as canonical. AO3's
+    /// answer is authoritative for the type, too.
     pub fn mark_tags_canonical(&self, tag_type: &str, names: &[String]) -> Result<(), AppError> {
         if names.is_empty() {
             return Ok(());
         }
         self.with_savepoint("canonical_tags", || {
             let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO known_tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
-                 ON CONFLICT(name, tag_type) DO UPDATE SET
+                "INSERT INTO tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
+                 ON CONFLICT(name) DO UPDATE SET
                      canonical = 1,
-                     last_seen = datetime('now')"
+                     last_seen = datetime('now'),
+                     tag_type = excluded.tag_type"
             ).map_err(map_sql)?;
             for name in names {
                 let trimmed = name.trim();
@@ -253,7 +405,7 @@ impl Storage {
 
     /// Local autocomplete: substring match, ranked starts-with first, then
     /// AO3-confirmed canonical names, then by how often the tag was seen.
-    pub fn search_known_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+    pub fn search_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());
@@ -261,7 +413,7 @@ impl Storage {
         let contains = format!("%{escaped}%");
         let prefix = format!("{escaped}%");
         let mut stmt = self.conn.prepare(
-            "SELECT name FROM known_tags
+            "SELECT name FROM tags
              WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
              ORDER BY (name LIKE ?3 ESCAPE '\\') DESC,
                       canonical DESC, uses DESC, name COLLATE NOCASE
@@ -273,10 +425,10 @@ impl Storage {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// Library-scope tag search: like `search_known_tags` but across every
+    /// Library-scope tag search: like `search_tags` but across every
     /// tag type. Returns (name, tag_type) so rows can say what kind of tag
     /// each hit is.
-    pub fn search_known_tags_all(&self, term: &str, limit: u32) -> Result<Vec<(String, String)>, AppError> {
+    pub fn search_tags_all(&self, term: &str, limit: u32) -> Result<Vec<(String, String)>, AppError> {
         let limit = Self::sql_limit(limit);
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
@@ -285,7 +437,7 @@ impl Storage {
         let contains = format!("%{escaped}%");
         let prefix = format!("{escaped}%");
         let mut stmt = self.conn.prepare(
-            "SELECT name, tag_type FROM known_tags
+            "SELECT name, tag_type FROM tags
              WHERE name LIKE ?1 ESCAPE '\\'
              ORDER BY (name LIKE ?2 ESCAPE '\\') DESC,
                       canonical DESC, uses DESC, name COLLATE NOCASE
@@ -306,16 +458,10 @@ impl Storage {
         if escaped.is_empty() {
             // An empty query means "my whole library", not "nothing" — the
             // search form's default state runs it with no criteria.
-            let mut stmt = self.conn.prepare(
-                "SELECT id, title, authors_json, fandoms_json, rating,
-                        warnings_json, categories_json, relationships_json,
-                        characters_json, tags_json, summary, word_count,
-                        chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_published, date_updated, language, complete,
-                        series_json, fetched_at
-                 FROM works
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {} FROM works
                  ORDER BY date_updated DESC
-                 LIMIT ?1"
+                 LIMIT ?1", Self::work_select(""))
             ).map_err(map_sql)?;
             let rows = stmt.query_map(params![limit], |row| {
                 Ok(Self::work_from_row(row))
@@ -324,27 +470,24 @@ impl Storage {
             for row in rows {
                 out.push(row.map_err(map_sql)?.map_err(map_sql)?);
             }
+            self.attach_work_tags(&mut out)?;
             return Ok(out);
         }
         let contains = format!("%{escaped}%");
         let title_prefix = format!("{escaped}%");
-        let mut stmt = self.conn.prepare(
-            "SELECT id, title, authors_json, fandoms_json, rating,
-                    warnings_json, categories_json, relationships_json,
-                    characters_json, tags_json, summary, word_count,
-                    chapter_count, total_chapters, kudos, hits,
-                    bookmarks, comments, date_published, date_updated, language, complete,
-                    series_json, fetched_at
-             FROM works
+        // Tag names live in the join tables now — one EXISTS covers what
+        // the four dropped JSON columns used to.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM works
              WHERE title LIKE ?1 ESCAPE '\\'
                 OR authors_json LIKE ?1 ESCAPE '\\'
-                OR fandoms_json LIKE ?1 ESCAPE '\\'
-                OR relationships_json LIKE ?1 ESCAPE '\\'
-                OR characters_json LIKE ?1 ESCAPE '\\'
-                OR tags_json LIKE ?1 ESCAPE '\\'
                 OR summary LIKE ?1 ESCAPE '\\'
+                OR EXISTS (SELECT 1 FROM work_tags wt
+                           JOIN tags t ON t.id = wt.tag_id
+                           WHERE wt.work_id = works.id
+                             AND t.name LIKE ?1 ESCAPE '\\')
              ORDER BY (title LIKE ?2 ESCAPE '\\') DESC, date_updated DESC
-             LIMIT ?3"
+             LIMIT ?3", Self::work_select(""))
         ).map_err(map_sql)?;
         let rows = stmt.query_map(params![contains, title_prefix, limit], |row| {
             Ok(Self::work_from_row(row))
@@ -353,6 +496,7 @@ impl Storage {
         for row in rows {
             out.push(row.map_err(map_sql)?.map_err(map_sql)?);
         }
+        self.attach_work_tags(&mut out)?;
         Ok(out)
     }
 
@@ -546,8 +690,10 @@ impl Storage {
         }
     }
 
-    /// One-time seed of known_tags from works cached before the table existed.
-    pub(super) fn backfill_known_tags(&self) -> Result<(), AppError> {
+    /// One-time seed of the tags table from works cached before it existed.
+    /// (The state key keeps its historical name so already-seeded databases
+    /// don't re-run it.)
+    pub(super) fn backfill_tags(&self) -> Result<(), AppError> {
         if self.get_state("known_tags_backfilled")?.is_some() {
             return Ok(());
         }
@@ -561,15 +707,8 @@ impl Storage {
     pub fn get_work(&self, work_id: u64) -> Result<Option<WorkSummary>, AppError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, title, authors_json, fandoms_json, rating,
-                        warnings_json, categories_json, relationships_json,
-                        characters_json, tags_json, summary, word_count,
-                        chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_published, date_updated, language, complete,
-                        series_json, fetched_at
-                 FROM works WHERE id = ?1",
-            )
+            .prepare(&format!(
+                "SELECT {} FROM works WHERE id = ?1", Self::work_select("")))
             .map_err(map_sql)?;
 
         let mut rows = stmt
@@ -579,7 +718,12 @@ impl Storage {
             .map_err(map_sql)?;
 
         match rows.next() {
-            Some(Ok(inner)) => Ok(Some(inner.map_err(map_sql)?)),
+            Some(Ok(inner)) => {
+                let mut works = [inner.map_err(map_sql)?];
+                self.attach_work_tags(&mut works)?;
+                let [work] = works;
+                Ok(Some(work))
+            }
             Some(Err(e)) => Err(map_sql(e)),
             None => Ok(None),
         }
@@ -601,15 +745,7 @@ impl Storage {
     pub fn get_all_works(&self) -> Result<Vec<WorkSummary>, AppError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT id, title, authors_json, fandoms_json, rating,
-                        warnings_json, categories_json, relationships_json,
-                        characters_json, tags_json, summary, word_count,
-                        chapter_count, total_chapters, kudos, hits,
-                        bookmarks, comments, date_published, date_updated, language, complete,
-                        series_json, fetched_at
-                 FROM works",
-            )
+            .prepare(&format!("SELECT {} FROM works", Self::work_select("")))
             .map_err(map_sql)?;
 
         let rows = stmt
@@ -620,6 +756,7 @@ impl Storage {
         for row in rows {
             works.push(row.map_err(map_sql)?.map_err(map_sql)?);
         }
+        self.attach_work_tags(&mut works)?;
         Ok(works)
     }
 
@@ -627,17 +764,10 @@ impl Storage {
     pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
         let mut stmt = self
             .conn
-            .prepare(
-                "SELECT w.id, w.title, w.authors_json, w.fandoms_json, w.rating,
-                        w.warnings_json, w.categories_json, w.relationships_json,
-                        w.characters_json, w.tags_json, w.summary, w.word_count,
-                        w.chapter_count, w.total_chapters, w.kudos, w.hits,
-                        w.bookmarks, w.comments, w.date_published, w.date_updated, w.language, w.complete,
-                        w.series_json, w.fetched_at
-                 FROM works w JOIN work_authors a ON a.work_id = w.id
+            .prepare(&format!(
+                "SELECT {} FROM works w JOIN work_authors a ON a.work_id = w.id
                  WHERE a.author = ?1
-                 ORDER BY w.date_updated DESC",
-            )
+                 ORDER BY w.date_updated DESC", Self::work_select("w.")))
             .map_err(map_sql)?;
 
         let rows = stmt
@@ -648,10 +778,12 @@ impl Storage {
         for row in rows {
             works.push(row.map_err(map_sql)?.map_err(map_sql)?);
         }
+        self.attach_work_tags(&mut works)?;
         Ok(works)
     }
 
-    /// Delete a work (and its chapters, progress, bookmark, and history).
+    /// Delete a work (and its chapters, progress, bookmark, and history;
+    /// work_tags and collection_works rows cascade via their foreign keys).
     pub fn delete_work(&self, work_id: u64) -> Result<(), AppError> {
         let id = work_id as i64;
         self.conn
@@ -800,51 +932,39 @@ impl Storage {
         Ok(())
     }
 
-    /// Map a row from the `works` SELECT into a `WorkSummary`.
-    /// Column order must match the SELECT used by get_work / get_all_works.
+    /// Map a row from the `WORK_COLS` SELECT into a `WorkSummary`. The tag
+    /// vectors come back empty — callers hydrate them with attach_work_tags.
     pub(super) fn work_from_row(row: &rusqlite::Row<'_>) -> Result<WorkSummary, rusqlite::Error> {
         let id: i64 = row.get(0)?;
         let title: String = row.get(1)?;
         let authors_json: String = row.get(2)?;
-        let fandoms_json: String = row.get(3)?;
-        let rating_str: String = row.get(4)?;
-        let warnings_json: String = row.get(5)?;
-        let categories_json: String = row.get(6)?;
-        let relationships_json: String = row.get(7)?;
-        let characters_json: String = row.get(8)?;
-        let tags_json: String = row.get(9)?;
-        let summary: String = row.get(10)?;
-        let word_count: i64 = row.get(11)?;
-        let chapter_count: i64 = row.get(12)?;
-        let total_chapters: Option<i64> = row.get(13)?;
-        let kudos: i64 = row.get(14)?;
-        let hits: i64 = row.get(15)?;
-        let bookmarks: i64 = row.get(16)?;
-        let comments: i64 = row.get(17)?;
-        let date_published: String = row.get(18)?;
-        let date_updated: String = row.get(19)?;
-        let language: String = row.get(20)?;
-        let complete: i32 = row.get(21)?;
-        let series_json: String = row.get(22)?;
-        let fetched_at: String = row.get(23)?;
+        let rating_str: String = row.get(3)?;
+        let warnings_json: String = row.get(4)?;
+        let categories_json: String = row.get(5)?;
+        let summary: String = row.get(6)?;
+        let word_count: i64 = row.get(7)?;
+        let chapter_count: i64 = row.get(8)?;
+        let total_chapters: Option<i64> = row.get(9)?;
+        let kudos: i64 = row.get(10)?;
+        let hits: i64 = row.get(11)?;
+        let bookmarks: i64 = row.get(12)?;
+        let comments: i64 = row.get(13)?;
+        let date_published: String = row.get(14)?;
+        let date_updated: String = row.get(15)?;
+        let language: String = row.get(16)?;
+        let complete: i32 = row.get(17)?;
+        let series_json: String = row.get(18)?;
+        let fetched_at: String = row.get(19)?;
 
         // Deserialize JSON columns — use unwrap_or_default so a corrupted
         // row doesn't crash the whole query; the caller can still surface the
         // remaining intact fields.
         let authors: Vec<String> =
             serde_json::from_str(&authors_json).unwrap_or_default();
-        let fandoms: Vec<String> =
-            serde_json::from_str(&fandoms_json).unwrap_or_default();
         let warnings: Vec<Warning> =
             serde_json::from_str(&warnings_json).unwrap_or_default();
         let categories: Vec<String> =
             serde_json::from_str(&categories_json).unwrap_or_default();
-        let relationships: Vec<String> =
-            serde_json::from_str(&relationships_json).unwrap_or_default();
-        let characters: Vec<String> =
-            serde_json::from_str(&characters_json).unwrap_or_default();
-        let tags: Vec<String> =
-            serde_json::from_str(&tags_json).unwrap_or_default();
         let series: Vec<SeriesMembership> =
             serde_json::from_str(&series_json).unwrap_or_default();
 
@@ -852,13 +972,13 @@ impl Storage {
             id: id as u64,
             title,
             authors,
-            fandoms,
+            fandoms: Vec::new(),
             rating: str_to_rating(&rating_str),
             warnings,
             categories,
-            relationships,
-            characters,
-            tags,
+            relationships: Vec::new(),
+            characters: Vec::new(),
+            tags: Vec::new(),
             summary,
             word_count: word_count as u64,
             chapter_count: chapter_count as u32,

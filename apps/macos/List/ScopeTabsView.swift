@@ -2,7 +2,9 @@ import AppKit
 
 /// The search title bar's scope tabs: one text button per SearchScope in a
 /// segmented-control track (surface2 behind, surface fill on the active
-/// segment) — the same visual grammar as the settings segment controls.
+/// segment, hairline dividers between segments) — the same visual grammar
+/// as the settings segment controls. Each tab is its title plus the same
+/// padding, so the gaps between tabs are equal.
 /// Exactly one tab is active; clicking reports the scope to `onSelect`,
 /// and the owning render calls `configure(selected:)` back with model
 /// state, so the highlight always reflects the model (never local state).
@@ -30,7 +32,15 @@ final class ScopeTabsView: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        for scope in MacSearchModel.SearchScope.allCases {
+        for (index, scope) in MacSearchModel.SearchScope.allCases.enumerated() {
+            if index > 0 {
+                let divider = NSView()
+                divider.wantsLayer = true
+                divider.layer?.backgroundColor = theme.nsLine.cgColor
+                stack.addArrangedSubview(divider)
+                divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
+                divider.heightAnchor.constraint(equalToConstant: 12).isActive = true
+            }
             let button = NSButton(title: scope.rawValue, target: self, action: #selector(segmentClicked(_:)))
             button.isBordered = false
             button.setButtonType(.momentaryChange)
@@ -40,7 +50,10 @@ final class ScopeTabsView: NSView {
             button.tag = segments.count
             segments.append((scope, button))
             stack.addArrangedSubview(button)
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 74).isActive = true
+            // Identical padding around every title, whatever its length, so
+            // the empty space between neighboring tabs stays uniform.
+            button.widthAnchor.constraint(
+                equalToConstant: ceil(button.intrinsicContentSize.width) + 24).isActive = true
             button.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
         applyTheme(selected: .works)

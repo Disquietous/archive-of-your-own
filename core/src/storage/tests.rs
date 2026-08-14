@@ -59,42 +59,42 @@ fn open_test_db() -> Storage {
 }
 
 #[test]
-fn test_known_tags_harvested_on_save_work() {
+fn test_tags_harvested_on_save_work() {
     let db = open_test_db();
     db.save_work(&sample_work(42)).unwrap();
 
     // sample_work carries authors Author1/Author2 — harvested as creators.
-    let creators = db.search_known_tags("creator", "Author", 10).unwrap();
+    let creators = db.search_tags("creator", "Author", 10).unwrap();
     assert!(creators.contains(&"Author1".to_string()));
     assert!(creators.contains(&"Author2".to_string()));
     // Wrong type finds nothing.
-    assert!(db.search_known_tags("fandom", "Author", 10).unwrap().is_empty());
+    assert!(db.search_tags("fandom", "Author", 10).unwrap().is_empty());
 }
 
 #[test]
-fn test_known_tags_ranking() {
+fn test_tags_ranking() {
     let db = open_test_db();
     // "Steve" seen 3 times, "Ever Steve" once, canonical "Steve Rogers".
-    for _ in 0..3 { db.upsert_known_tags(&[("Steve Harrington", "character")]).unwrap(); }
-    db.upsert_known_tags(&[("Ever Steve", "character")]).unwrap();
+    for _ in 0..3 { db.upsert_tags(&[("Steve Harrington", "character")]).unwrap(); }
+    db.upsert_tags(&[("Ever Steve", "character")]).unwrap();
     db.mark_tags_canonical("character", &["Steve Rogers".to_string()]).unwrap();
 
-    let results = db.search_known_tags("character", "steve", 10).unwrap();
+    let results = db.search_tags("character", "steve", 10).unwrap();
     // Starts-with beats substring; canonical beats use-count within starts-with.
     assert_eq!(results[0], "Steve Rogers");
     assert_eq!(results[1], "Steve Harrington");
     assert_eq!(results[2], "Ever Steve");
 
     // LIKE metacharacters are escaped, not wildcards.
-    assert!(db.search_known_tags("character", "%", 10).unwrap().is_empty());
+    assert!(db.search_tags("character", "%", 10).unwrap().is_empty());
 }
 
 #[test]
-fn test_known_tags_canonical_upsert_preserves_uses() {
+fn test_tags_canonical_upsert_preserves_uses() {
     let db = open_test_db();
-    for _ in 0..5 { db.upsert_known_tags(&[("Fluff", "freeform")]).unwrap(); }
+    for _ in 0..5 { db.upsert_tags(&[("Fluff", "freeform")]).unwrap(); }
     db.mark_tags_canonical("freeform", &["Fluff".to_string()]).unwrap();
-    let results = db.search_known_tags("freeform", "Fluff", 10).unwrap();
+    let results = db.search_tags("freeform", "Fluff", 10).unwrap();
     assert_eq!(results, vec!["Fluff".to_string()]);
 }
 
@@ -455,6 +455,7 @@ fn test_collections_cache_and_library_search() {
         work_count: 12,
         bookmarked_count: 3,
         maintainers: vec!["mod_one".into()],
+        tags: Vec::new(),
         collection_type: "Prompt Meme Challenge".into(),
     };
     db.save_collections(std::slice::from_ref(&c)).unwrap();
@@ -494,9 +495,9 @@ fn test_library_scoped_searches() {
     assert_eq!(db.search_local_works("", 0).unwrap().len(), 1);
 
     // Tags across every type, with the type reported.
-    let hits = db.search_known_tags_all("fluff", 10).unwrap();
+    let hits = db.search_tags_all("fluff", 10).unwrap();
     assert!(hits.iter().any(|(n, t)| n == "Fluff" && t == "freeform"), "hits = {hits:?}");
-    let creators = db.search_known_tags_all("Author1", 10).unwrap();
+    let creators = db.search_tags_all("Author1", 10).unwrap();
     assert!(creators.iter().any(|(_, t)| t == "creator"));
 
     // Users come from the harvested ao3_users rows.
@@ -506,6 +507,76 @@ fn test_library_scoped_searches() {
     }).unwrap();
     assert_eq!(db.search_ao3_usernames("some", 10).unwrap(), vec!["someuser".to_string()]);
     assert!(db.search_ao3_usernames("other", 10).unwrap().is_empty());
+}
+
+#[test]
+fn test_collection_profile_tags_and_works() {
+    let db = open_test_db();
+    // Blurb lands first with counts; the profile brings tags but no counts.
+    let blurb = crate::models::CollectionSummary {
+        name: "test_fest".into(),
+        title: "Test Fest".into(),
+        summary: "From the blurb".into(),
+        is_open: true,
+        is_moderated: false,
+        is_anonymous: false,
+        work_count: 42,
+        bookmarked_count: 7,
+        maintainers: vec!["mod_one".into()],
+        tags: Vec::new(),
+        collection_type: String::new(),
+    };
+    db.save_collections(std::slice::from_ref(&blurb)).unwrap();
+    assert!(!db.collection_profile_cached("test_fest").unwrap());
+
+    let mut profile = blurb.clone();
+    profile.work_count = 0;
+    profile.bookmarked_count = 0;
+    profile.summary = String::new();
+    profile.tags = vec!["Fandom A".into(), "Brand New Tag".into()];
+    // "Fandom A" is already in tags via a saved work — tags are universal,
+    // so the collection references the very same row.
+    db.save_work(&sample_work(1)).unwrap();
+    db.save_collection_profile(&profile).unwrap();
+
+    assert!(db.collection_profile_cached("test_fest").unwrap());
+    let cached = db.get_collection("test_fest").unwrap().unwrap();
+    assert_eq!(cached.tags, vec!["Fandom A".to_string(), "Brand New Tag".to_string()]);
+    // Profile zeroes kept the blurb's counts and summary.
+    assert_eq!(cached.work_count, 42);
+    assert_eq!(cached.summary, "From the blurb");
+    let tag_rows: u32 = db.conn.query_row(
+        "SELECT COUNT(*) FROM tags WHERE name = 'Fandom A'", [], |r| r.get(0)).unwrap();
+    assert_eq!(tag_rows, 1, "one universal tags row per name");
+
+    // Deleting the tags row cascades the relationship out of every join
+    // table that references it.
+    db.conn.execute("DELETE FROM tags WHERE name = 'Fandom A'", []).unwrap();
+    let cached = db.get_collection("test_fest").unwrap().unwrap();
+    assert_eq!(cached.tags, vec!["Brand New Tag".to_string()]);
+    assert_eq!(db.get_work(1).unwrap().unwrap().fandoms, Vec::<String>::new());
+
+    // Works seen in the collection accumulate across saves.
+    db.save_work(&sample_work(2)).unwrap();
+    db.add_collection_works("test_fest", &[1]).unwrap();
+    db.add_collection_works("test_fest", &[1, 2]).unwrap();
+    assert_eq!(db.get_collection_work_ids("test_fest").unwrap(), vec![1, 2]);
+    // Deleting a work cascades its work_tags and collection_works rows.
+    db.delete_work(1).unwrap();
+    assert_eq!(db.get_collection_work_ids("test_fest").unwrap(), vec![2]);
+    let orphans: u32 = db.conn.query_row(
+        "SELECT COUNT(*) FROM work_tags WHERE work_id = 1", [], |r| r.get(0)).unwrap();
+    assert_eq!(orphans, 0);
+
+    // Deleting a collection cascades its tag and work links; the tags and
+    // works themselves stay.
+    db.conn.execute("DELETE FROM collections WHERE name = 'test_fest'", []).unwrap();
+    let (ct, cw): (u32, u32) = db.conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM collection_tags WHERE collection_name = 'test_fest'),
+                (SELECT COUNT(*) FROM collection_works WHERE collection_name = 'test_fest')",
+        [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((ct, cw), (0, 0));
+    assert!(db.get_work(2).unwrap().is_some());
 }
 
 #[test]
@@ -894,7 +965,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 7);
+    assert_eq!(db.schema_version().unwrap(), 8);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -968,7 +1039,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 7);
+    assert_eq!(db.schema_version().unwrap(), 8);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -983,6 +1054,15 @@ fn test_migration_v1_to_v2() {
     assert_eq!(fluff.2, "{\"a\":3}");
     // Author index backfilled from authors_json.
     assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
+    // v8: tags backfilled into the join tables from the JSON columns
+    // (which are gone), and reads hydrate from work_tags.
+    let legacy = db.get_work(7).unwrap().unwrap();
+    assert_eq!(legacy.fandoms, vec!["F"]);
+    let json_cols: u32 = db.conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('works')
+         WHERE name IN ('fandoms_json','relationships_json','characters_json','tags_json')",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(json_cols, 0);
     // Epoch strings converted to the one datetime encoding.
     assert_eq!(db.get_works_crawled_at("author", "writer_one").unwrap().as_deref(),
                Some("2024-08-02 00:00:00"));
@@ -1001,7 +1081,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 7);
+    assert_eq!(db.schema_version().unwrap(), 8);
     let _ = std::fs::remove_file(&path);
 }
 

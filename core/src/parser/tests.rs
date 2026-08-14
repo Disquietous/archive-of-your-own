@@ -675,6 +675,27 @@ mod comment_tests {
     }
 
     #[test]
+    fn test_parse_collection_profile_fixture() {
+        let html = fs::read_to_string("tests/fixtures/collection_profile.html")
+            .expect("Failed to read collection profile fixture");
+        let c = parse_collection_profile(&html, "test_fest_2026").expect("profile parse");
+        assert_eq!(c.name, "test_fest_2026");
+        assert_eq!(c.title, "Test Fest 2026");
+        assert!(c.is_open);
+        assert!(c.is_moderated);
+        assert!(c.is_anonymous);
+        assert_eq!(c.collection_type, "Gift Exchange Challenge");
+        assert_eq!(c.maintainers, vec!["mod_one".to_string(), "mod_two".to_string()]);
+        assert_eq!(c.tags, vec!["Fandom A".to_string(), "Synthetic Tag".to_string()]);
+        assert_eq!(c.summary, "A synthetic collection profile for parser tests.");
+        // Profile pages carry no counts — zero means "keep the cached value".
+        assert_eq!(c.work_count, 0);
+
+        // Fails closed on a page with no collection header.
+        assert!(parse_collection_profile("<html><body><p>login</p></body></html>", "x").is_err());
+    }
+
+    #[test]
     fn test_parse_collections_fixture() {
         let html = fs::read_to_string("tests/fixtures/collections.html")
             .expect("Failed to read collections fixture");
