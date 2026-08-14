@@ -1,9 +1,11 @@
 import SwiftUI
 
 /// The criteria form for the non-works search scopes (Collections,
-/// Bookmarks, Tags, Users): one query field — these scopes search by name,
-/// not by the works form's many criteria. Return runs the search; the
-/// footer explains what the source toggle means for this scope.
+/// Bookmarks, Tags, Users): one query field — Bookmarks/Tags/Users search
+/// by name, while Collections adds the full sort/filter criteria AO3's
+/// /collections index accepts (tags, multifandom/closed/moderated,
+/// challenge type, sort). Return runs the search; the footer explains what
+/// the source toggle means for this scope.
 struct ScopeSearchFormView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
@@ -14,7 +16,7 @@ struct ScopeSearchFormView: View {
     private var placeholder: String {
         switch model.search.scope {
         case .works: ""
-        case .collections: "Collection name, maintainer, or summary…"
+        case .collections: "Filter by title…"
         case .bookmarks: "Title, author, tag, or summary…"
         case .tags: "Tag name…"
         case .users: "Username…"
@@ -42,6 +44,10 @@ struct ScopeSearchFormView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9)
                     .stroke(focused ? theme.accent : theme.line, lineWidth: 1))
+
+                if search.scope == .collections {
+                    collectionsCriteria(search)
+                }
 
                 if let notice = search.scopeNotice {
                     HStack(spacing: 8) {
@@ -71,6 +77,71 @@ struct ScopeSearchFormView: View {
         }
         .onAppear { focused = true }
     }
+
+    // MARK: - Collections criteria (mirrors AO3's /collections filter form)
+
+    private static let triState: [(value: String, label: String)] =
+        [("", "Either"), ("true", "Yes"), ("false", "No")]
+
+    @ViewBuilder
+    private func collectionsCriteria(_ search: MacSearchModel) -> some View {
+        // Any-type tag tokens ("" tagType): suggestions come from the whole
+        // library tag cache, like every other tag field in the app.
+        TagTokenField(theme: theme, appState: appState,
+                      label: "Tags", tagType: "",
+                      value: Bindable(search).collectionTags)
+        pillRow("Multifandom", options: Self.triState,
+                selection: Bindable(search).collectionMultifandom)
+        pillRow("Closed", options: Self.triState,
+                selection: Bindable(search).collectionClosed)
+        pillRow("Moderated", options: Self.triState,
+                selection: Bindable(search).collectionModerated)
+        pillRow("Collection type",
+                options: [("", "Any"), ("GiftExchange", "Gift Exchange"),
+                          ("PromptMeme", "Prompt Meme"), ("no_challenge", "No Challenge")],
+                selection: Bindable(search).collectionChallengeType)
+        pillRow("Sort by",
+                options: [("created_at", "Date Created"), ("title.keyword", "Title"),
+                          ("bookmarked_items_count", "Bookmarked Items"), ("works_count", "Works")],
+                selection: Bindable(search).collectionSortColumn)
+        pillRow("Sort direction",
+                options: [("desc", "Descending"), ("asc", "Ascending")],
+                selection: Bindable(search).collectionSortDirection)
+    }
+
+    private func criteriaLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(Font(MacFont.ui(10.5, weight: .bold)))
+            .kerning(0.6)
+            .foregroundStyle(theme.ink3)
+    }
+
+    /// A single-choice capsule row (the works form's checkbox-pill grammar,
+    /// radio semantics): exactly one option is active; pills wrap instead
+    /// of scrolling.
+    private func pillRow(_ title: String, options: [(value: String, label: String)],
+                         selection: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            criteriaLabel(title)
+            FlowLayout(spacing: 6) {
+                ForEach(options, id: \.value) { option in
+                    let on = selection.wrappedValue == option.value
+                    Button {
+                        selection.wrappedValue = option.value
+                    } label: {
+                        Text(option.label)
+                            .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                            .foregroundStyle(on ? theme.onAccent : theme.ink2)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(on ? theme.accent : theme.surface2)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
 }
 
 /// Results list for the scopes that don't produce works: tag, user, and
@@ -86,37 +157,52 @@ struct ScopeResultsView: View {
         let search = model.search
         ScrollView {
             VStack(spacing: 0) {
-                switch search.scope {
-                case .tags:
-                    if search.tagHits.isEmpty { emptyState }
-                    ForEach(Array(search.tagHits.enumerated()), id: \.offset) { _, hit in
-                        row(icon: "tag", title: hit.name, sub: Self.tagTypeLabel(hit.tagType)) {
-                            search.startTagQuery(hit.name, appState: appState)
-                        }
-                    }
-                case .users:
-                    if search.userHits.isEmpty { emptyState }
-                    ForEach(search.userHits, id: \.self) { username in
-                        row(icon: "person", title: username, sub: "AO3 user") {
-                            model.openAuthor(username)
-                        }
-                    }
-                case .collections:
-                    if search.collectionHits.isEmpty { emptyState }
-                    ForEach(search.collectionHits, id: \.name) { collection in
-                        collectionRow(collection)
-                    }
-                case .works, .bookmarks:
-                    EmptyView() // works results render in the works table, not here
+                if appState.isSearching {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, minHeight: 240)
+                } else {
+                    resultRows(search)
                 }
             }
         }
     }
 
+    @ViewBuilder
+    private func resultRows(_ search: MacSearchModel) -> some View {
+        switch search.scope {
+        case .tags:
+            if search.tagHits.isEmpty { emptyState }
+            ForEach(Array(search.tagHits.enumerated()), id: \.offset) { _, hit in
+                row(icon: "tag", title: hit.name, sub: Self.tagTypeLabel(hit.tagType)) {
+                    search.startTagQuery(hit.name, appState: appState)
+                }
+            }
+        case .users:
+            if search.userHits.isEmpty { emptyState }
+            ForEach(search.userHits, id: \.self) { username in
+                row(icon: "person", title: username, sub: "AO3 user") {
+                    model.openAuthor(username)
+                }
+            }
+        case .collections:
+            if search.collectionHits.isEmpty { emptyState }
+            ForEach(search.collectionHits, id: \.name) { collection in
+                collectionRow(collection)
+            }
+        case .works, .bookmarks:
+            EmptyView() // works results render in the works table, not here
+        }
+    }
+
     private var emptyState: some View {
-        EmptyStateMac(theme: theme, icon: "magnifyingglass",
-                      title: "No matches in your library",
-                      message: "Only what the app has already cached is searched. Browse or fetch more to grow the library.")
+        let library = model.search.searchLibraryOnly
+        return EmptyStateMac(
+            theme: theme, icon: "magnifyingglass",
+            title: library ? "No matches in your library" : "No matches on AO3",
+            message: library
+                ? "Only what the app has already cached is searched. Browse or fetch more to grow the library."
+                : "Nothing on AO3 matched these criteria.")
             .frame(minHeight: 240)
     }
 

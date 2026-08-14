@@ -503,8 +503,13 @@ final class ReadPaneViewController: NSViewController {
         case .users:
             return search.userHits.count == 1 ? "1 user" : "\(search.userHits.count) users"
         case .collections:
-            return search.collectionHits.count == 1
+            let count = search.collectionHits.count == 1
                 ? "1 collection" : "\(search.collectionHits.count) collections"
+            // Paged AO3 results carry the page position; library hits don't.
+            if case .collectionsIndex = search.activeQuery, let sub = search.resultsSubtitle {
+                return "\(sub) · \(count)"
+            }
+            return count
         }
     }
 
@@ -767,7 +772,13 @@ final class ReadPaneViewController: NSViewController {
                     toolbar.setTrailing(trailing)
                     show(mode: .searchResults)
                 } else {
-                    toolbar.setTrailing([searchSourceButton()])
+                    // AO3 collections results are paged like works results.
+                    var trailing: [NSView] = []
+                    if case .collectionsIndex = search.activeQuery {
+                        trailing.append(makePagerHost())
+                    }
+                    trailing.append(searchSourceButton())
+                    toolbar.setTrailing(trailing)
                     show(mode: .scopeResults)
                 }
             } else {

@@ -177,6 +177,46 @@ pub struct UCollectionsPage {
     pub total_pages: u32,
 }
 
+/// The collections index's sort/filter criteria, mirroring AO3's
+/// collection_search[...] form. Blank fields mean "don't filter" / AO3's
+/// default, so a default record is the plain index. The same record drives
+/// the library-scoped search over cached collections.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct UCollectionSearchCriteria {
+    /// Substring title filter.
+    pub title: String,
+    /// Comma-separated tag names (AO3 allows up to 5).
+    pub tag: String,
+    /// "true", "false", or "" (either).
+    pub multifandom: String,
+    /// "true", "false", or "" (either).
+    pub closed: String,
+    /// "true", "false", or "" (either).
+    pub moderated: String,
+    /// "GiftExchange", "PromptMeme", "no_challenge", or "" (any).
+    pub challenge_type: String,
+    /// "created_at" (AO3 default), "title.keyword", "bookmarked_items_count",
+    /// or "works_count".
+    pub sort_column: String,
+    /// "asc" or "desc" (AO3 defaults to desc).
+    pub sort_direction: String,
+}
+
+impl From<UCollectionSearchCriteria> for CollectionSearchCriteria {
+    fn from(c: UCollectionSearchCriteria) -> Self {
+        CollectionSearchCriteria {
+            title: c.title,
+            tag: c.tag,
+            multifandom: c.multifandom,
+            closed: c.closed,
+            moderated: c.moderated,
+            challenge_type: c.challenge_type,
+            sort_column: c.sort_column,
+            sort_direction: c.sort_direction,
+        }
+    }
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UPagedWorks {
     pub works: Vec<UWorkSummary>,

@@ -455,10 +455,12 @@ final class RustBridge {
         return try await app.searchByTag(tag: tag, page: page)
     }
 
-    /// One page of the AO3 /collections index.
-    func browseCollections(page: UInt32 = 1) async throws -> UCollectionsPage {
+    /// One page of the AO3 /collections index, optionally sorted/filtered
+    /// with the index's collection_search criteria (nil = the plain index).
+    func browseCollections(criteria: UCollectionSearchCriteria? = nil,
+                           page: UInt32 = 1) async throws -> UCollectionsPage {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.browseCollections(page: page)
+        return try await app.browseCollections(criteria: criteria, page: page)
     }
 
     /// One page of a collection's works. `name` is the collection's URL slug.
@@ -1038,6 +1040,13 @@ final class RustBridge {
 
     func searchLibraryCollections(_ term: String, limit: UInt32? = nil) -> [UCollection] {
         (try? app?.searchLibraryCollections(term: term, limit: limit)) ?? []
+    }
+
+    /// The collections sort/filter form evaluated against the cached
+    /// collections — blank criteria return the whole cache.
+    func searchLibraryCollectionsFiltered(_ criteria: UCollectionSearchCriteria,
+                                          limit: UInt32? = nil) -> [UCollection] {
+        (try? app?.searchLibraryCollectionsFiltered(criteria: criteria, limit: limit)) ?? []
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

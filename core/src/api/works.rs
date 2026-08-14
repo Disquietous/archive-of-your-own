@@ -76,15 +76,26 @@ impl AO3App {
         }).await
     }
 
-    /// One page of the public collections index. Every fetched page is
-    /// cached into the collections table (upsert by slug) — the library-
-    /// scoped collection search reads that cache.
-    pub async fn browse_collections(&self, page: u32) -> Result<UCollectionsPage, AO3Error> {
+    /// One page of the public collections index, optionally sorted/filtered
+    /// with the index's collection_search[...] criteria (None = the plain
+    /// index). Every fetched page is cached into the collections table
+    /// (upsert by slug) — the library-scoped collection search reads that
+    /// cache.
+    pub async fn browse_collections(
+        &self,
+        criteria: Option<UCollectionSearchCriteria>,
+        page: u32,
+    ) -> Result<UCollectionsPage, AO3Error> {
+        let criteria: Option<CollectionSearchCriteria> = criteria.map(Into::into);
         self.run_on_runtime(move |client, storage| async move {
             let (collections, has_next, total) = with_recovery(
                 client, storage.clone(), OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
-                move |client| async move {
-                    client.read().await.fetch_collections(page).await.map_err(AO3Error::from)
+                move |client| {
+                    let criteria = criteria.clone();
+                    async move {
+                        client.read().await.fetch_collections(criteria.as_ref(), page).await
+                            .map_err(AO3Error::from)
+                    }
                 }).await?;
             {
                 let s = storage.lock().await;
@@ -140,6 +151,20 @@ impl AO3App {
     pub fn search_library_collections(&self, term: String, limit: Option<u32>) -> Result<Vec<UCollection>, AO3Error> {
         let s = self.storage.blocking_lock();
         Ok(s.search_collections(&term, limit.unwrap_or(0)).map_err(AO3Error::from)?
+            .into_iter().map(UCollection::from).collect())
+    }
+
+    /// Cached collections matching the full collections sort/filter form —
+    /// the same criteria AO3's index accepts, evaluated against the cached
+    /// rows. Blank criteria match everything.
+    pub fn search_library_collections_filtered(
+        &self,
+        criteria: UCollectionSearchCriteria,
+        limit: Option<u32>,
+    ) -> Result<Vec<UCollection>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_collections_filtered(&criteria.into(), limit.unwrap_or(0))
+            .map_err(AO3Error::from)?
             .into_iter().map(UCollection::from).collect())
     }
 

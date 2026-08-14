@@ -2,13 +2,17 @@ import SwiftUI
 
 /// Token field for AO3 canonical-tag search inputs (fandoms, characters,
 /// relationships, additional tags, creators). Committed tags render as
-/// removable chips; typing suggests from the local known-tags cache
-/// instantly (never the network); a visible "Search AO3" row is the ONLY
-/// action that fires a request — its results are cached as canonical.
+/// removable chips; typing suggests from the local tags cache instantly
+/// (never the network); a visible "Search AO3" row is the ONLY action that
+/// fires a request — its results are cached as canonical.
 struct TagTokenField: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     let label: String
+    /// One of AO3's tag types (fandom, character, relationship, freeform,
+    /// creator), or "" for any-type fields like the collections tag filter:
+    /// local suggestions come from every cached tag, and the AO3 lookup
+    /// uses the generic /autocomplete/tag endpoint.
     let tagType: String
     /// The comma-separated form value AO3 expects.
     @Binding var value: String
@@ -171,9 +175,10 @@ struct TagTokenField: View {
             localSuggestions = []
             return
         }
-        localSuggestions = appState.bridge
-            .searchLocalTags(tagType: tagType, term: term)
-            .filter { !tokens.contains($0) }
+        let names = tagType.isEmpty
+            ? appState.bridge.searchLibraryTags(term, limit: 12).map(\.name)
+            : appState.bridge.searchLocalTags(tagType: tagType, term: term)
+        localSuggestions = names.filter { !tokens.contains($0) }
     }
 
     private func lookUpOnAO3() {
@@ -183,7 +188,8 @@ struct TagTokenField: View {
         lookupError = nil
         Task { @MainActor in
             do {
-                let names = try await appState.bridge.autocompleteTagsRemote(tagType: tagType, term: lookupTerm)
+                let names = try await appState.bridge.autocompleteTagsRemote(
+                    tagType: tagType.isEmpty ? "tag" : tagType, term: lookupTerm)
                 if names.isEmpty {
                     lookupError = "No matching tags on AO3."
                 } else {

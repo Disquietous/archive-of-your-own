@@ -508,25 +508,118 @@ impl Storage {
              ORDER BY (title LIKE ?2 ESCAPE '\\') DESC, work_count DESC, title COLLATE NOCASE
              LIMIT ?3"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![contains, title_prefix, limit], |row| {
-            let maintainers_json: String = row.get(8)?;
-            Ok(crate::models::CollectionSummary {
-                name: row.get(0)?,
-                title: row.get(1)?,
-                summary: row.get(2)?,
-                is_open: row.get::<_, i64>(3)? != 0,
-                is_moderated: row.get::<_, i64>(4)? != 0,
-                is_anonymous: row.get::<_, i64>(5)? != 0,
-                work_count: row.get(6)?,
-                bookmarked_count: row.get(7)?,
-                maintainers: serde_json::from_str(&maintainers_json).unwrap_or_default(),
-                tags: Vec::new(),
-                collection_type: row.get(9)?,
-            })
-        }).map_err(map_sql)?;
+        let rows = stmt.query_map(params![contains, title_prefix, limit],
+                                  Self::collection_from_row).map_err(map_sql)?;
         let mut collections: Vec<_> = rows.filter_map(|r| r.ok()).collect();
         for c in &mut collections {
             c.tags = self.get_collection_tags(&c.name)?;
+        }
+        Ok(collections)
+    }
+
+    /// Map a row from the collections SELECT (name..collection_type, the
+    /// column order every collections query here uses) into a summary.
+    /// Tags come back empty — callers hydrate them via get_collection_tags.
+    fn collection_from_row(row: &rusqlite::Row<'_>) -> Result<crate::models::CollectionSummary, rusqlite::Error> {
+        let maintainers_json: String = row.get(8)?;
+        Ok(crate::models::CollectionSummary {
+            name: row.get(0)?,
+            title: row.get(1)?,
+            summary: row.get(2)?,
+            is_open: row.get::<_, i64>(3)? != 0,
+            is_moderated: row.get::<_, i64>(4)? != 0,
+            is_anonymous: row.get::<_, i64>(5)? != 0,
+            work_count: row.get(6)?,
+            bookmarked_count: row.get(7)?,
+            maintainers: serde_json::from_str(&maintainers_json).unwrap_or_default(),
+            tags: Vec::new(),
+            collection_type: row.get(9)?,
+        })
+    }
+
+    /// The collections sort/filter form evaluated against the cached rows —
+    /// the library-scoped twin of AO3's /collections criteria. Blank criteria
+    /// match everything (the form's default state is the whole cache).
+    ///
+    /// Local mappings where the cache differs from AO3's index:
+    /// * title also matches the URL slug (slugs are how collections are
+    ///   often remembered);
+    /// * tags match the profile-page tag links, so only collections whose
+    ///   /profile has been cached can match a tag filter;
+    /// * multifandom counts the collection's fandom-typed tags (>1 = yes) —
+    ///   a tag's type is learned from work blurbs, so it's an approximation;
+    /// * "Date Created" isn't in the blurbs — the local stand-in is
+    ///   fetched_at, when the collection was last cached.
+    pub fn search_collections_filtered(
+        &self,
+        c: &crate::models::CollectionSearchCriteria,
+        limit: u32,
+    ) -> Result<Vec<crate::models::CollectionSummary>, AppError> {
+        let mut sql = String::from(
+            "SELECT name, title, summary, is_open, is_moderated, is_anonymous,
+                    work_count, bookmarked_count, maintainers_json, collection_type
+             FROM collections WHERE 1=1");
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        let title = Self::escape_like(&c.title);
+        if !title.is_empty() {
+            sql.push_str(" AND (title LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')");
+            let contains = format!("%{title}%");
+            args.push(Box::new(contains.clone()));
+            args.push(Box::new(contains));
+        }
+        for tag in c.tag.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM collection_tags ct
+                              JOIN tags t ON t.id = ct.tag_id
+                              WHERE ct.collection_name = collections.name
+                                AND t.name = ? COLLATE NOCASE)");
+            args.push(Box::new(tag.to_string()));
+        }
+        const FANDOM_TAG_COUNT: &str =
+            "(SELECT COUNT(*) FROM collection_tags ct
+              JOIN tags t ON t.id = ct.tag_id
+              WHERE ct.collection_name = collections.name AND t.tag_type = 'fandom')";
+        match c.multifandom.as_str() {
+            "true" => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} > 1")),
+            "false" => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} <= 1")),
+            _ => {}
+        }
+        match c.closed.as_str() {
+            "true" => sql.push_str(" AND is_open = 0"),
+            "false" => sql.push_str(" AND is_open = 1"),
+            _ => {}
+        }
+        match c.moderated.as_str() {
+            "true" => sql.push_str(" AND is_moderated = 1"),
+            "false" => sql.push_str(" AND is_moderated = 0"),
+            _ => {}
+        }
+        match c.challenge_type.as_str() {
+            "GiftExchange" => sql.push_str(" AND collection_type = 'Gift Exchange Challenge'"),
+            "PromptMeme" => sql.push_str(" AND collection_type = 'Prompt Meme Challenge'"),
+            "no_challenge" => sql.push_str(" AND collection_type = ''"),
+            _ => {}
+        }
+
+        let column = match c.sort_column.as_str() {
+            "title.keyword" => "title COLLATE NOCASE",
+            "bookmarked_items_count" => "bookmarked_count",
+            "works_count" => "work_count",
+            _ => "fetched_at", // AO3's created_at default; see doc above
+        };
+        let direction = if c.sort_direction == "asc" { "ASC" } else { "DESC" };
+        sql.push_str(&format!(" ORDER BY {column} {direction}, title COLLATE NOCASE LIMIT ?"));
+        args.push(Box::new(Self::sql_limit(limit)));
+
+        let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())),
+                       Self::collection_from_row)
+            .map_err(map_sql)?;
+        let mut collections: Vec<_> = rows.filter_map(|r| r.ok()).collect();
+        for coll in &mut collections {
+            coll.tags = self.get_collection_tags(&coll.name)?;
         }
         Ok(collections)
     }

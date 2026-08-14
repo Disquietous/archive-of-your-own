@@ -133,11 +133,33 @@ impl AO3Client {
             parser::parse_results_total(&html)))
     }
 
-    /// Browse the public collections index (/collections?page=N).
+    /// Browse the public collections index (/collections?page=N), optionally
+    /// sorted/filtered via the index's collection_search[...] GET params —
+    /// the same query string AO3's own "Sort and Filter" form submits.
     /// Returns (collections, has_next_page, total_pages) — pagination read
     /// from the page itself.
-    pub async fn fetch_collections(&self, page: u32) -> Result<(Vec<CollectionSummary>, bool, u32), AppError> {
-        let url = format!("{BASE_URL}/collections?page={page}");
+    pub async fn fetch_collections(
+        &self,
+        criteria: Option<&CollectionSearchCriteria>,
+        page: u32,
+    ) -> Result<(Vec<CollectionSummary>, bool, u32), AppError> {
+        let mut url = format!("{BASE_URL}/collections?page={page}");
+        if let Some(c) = criteria {
+            for (key, value) in [
+                ("sort_column", c.sort_column.as_str()),
+                ("sort_direction", c.sort_direction.as_str()),
+                ("title", c.title.as_str()),
+                ("tag", c.tag.as_str()),
+                ("multifandom", c.multifandom.as_str()),
+                ("closed", c.closed.as_str()),
+                ("moderated", c.moderated.as_str()),
+                ("challenge_type", c.challenge_type.as_str()),
+            ] {
+                if !value.is_empty() {
+                    url.push_str(&format!("&collection_search%5B{key}%5D={}", urlencoded(value)));
+                }
+            }
+        }
         let html = self.fetch(&url).await?;
         let collections = parser::parse_collections_page(&html)?;
         Ok((collections, parser::has_next_page(&html), parser::total_pages(&html)))

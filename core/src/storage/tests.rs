@@ -96,6 +96,19 @@ fn test_tags_canonical_upsert_preserves_uses() {
     db.mark_tags_canonical("freeform", &["Fluff".to_string()]).unwrap();
     let results = db.search_tags("freeform", "Fluff", 10).unwrap();
     assert_eq!(results, vec!["Fluff".to_string()]);
+
+    // The any-type "tag" endpoint confirms canonicity without clobbering a
+    // learned type, and leaves a brand-new name's type unknown.
+    db.mark_tags_canonical("tag", &["Fluff".to_string(), "Brand New".to_string()]).unwrap();
+    assert_eq!(db.search_tags("freeform", "Fluff", 10).unwrap(),
+               vec!["Fluff".to_string()]);
+    let new_type: String = db.conn.query_row(
+        "SELECT tag_type FROM tags WHERE name = 'Brand New'", [], |r| r.get(0)).unwrap();
+    assert_eq!(new_type, "");
+    // A later per-type confirm fills the unknown type in.
+    db.mark_tags_canonical("fandom", &["Brand New".to_string()]).unwrap();
+    assert_eq!(db.search_tags("fandom", "Brand New", 10).unwrap(),
+               vec!["Brand New".to_string()]);
 }
 
 #[test]
@@ -577,6 +590,127 @@ fn test_collection_profile_tags_and_works() {
         [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!((ct, cw), (0, 0));
     assert!(db.get_work(2).unwrap().is_some());
+}
+
+#[test]
+fn test_search_collections_filtered() {
+    let db = open_test_db();
+    let base = crate::models::CollectionSummary {
+        name: String::new(),
+        title: String::new(),
+        summary: String::new(),
+        is_open: true,
+        is_moderated: false,
+        is_anonymous: false,
+        work_count: 0,
+        bookmarked_count: 0,
+        maintainers: Vec::new(),
+        tags: Vec::new(),
+        collection_type: String::new(),
+    };
+    let mut exchange = base.clone();
+    exchange.name = "winter_exchange".into();
+    exchange.title = "Winter Exchange".into();
+    exchange.is_open = false;
+    exchange.is_moderated = true;
+    exchange.work_count = 50;
+    exchange.bookmarked_count = 5;
+    exchange.collection_type = "Gift Exchange Challenge".into();
+    let mut meme = base.clone();
+    meme.name = "prompt_pile".into();
+    meme.title = "Prompt Pile".into();
+    meme.work_count = 10;
+    meme.bookmarked_count = 30;
+    meme.collection_type = "Prompt Meme Challenge".into();
+    let mut plain = base.clone();
+    plain.name = "just_fics".into();
+    plain.title = "Just Fics".into();
+    plain.work_count = 25;
+    db.save_collections(&[exchange, meme, plain]).unwrap();
+
+    // Teach tag types via a work (fandoms), then attach profile tags.
+    let mut w = sample_work(1);
+    w.fandoms = vec!["Fandom A".into(), "Fandom B".into()];
+    db.save_work(&w).unwrap();
+    // The profile carries the same flags the blurb did (the real parser
+    // reads them off the page), plus the tag links only it has.
+    let mut profile = base.clone();
+    profile.name = "winter_exchange".into();
+    profile.title = "Winter Exchange".into();
+    profile.is_open = false;
+    profile.is_moderated = true;
+    profile.collection_type = "Gift Exchange Challenge".into();
+    profile.tags = vec!["Fandom A".into(), "Fandom B".into()];
+    db.save_collection_profile(&profile).unwrap();
+
+    let all = db.search_collections_filtered(&Default::default(), 0).unwrap();
+    assert_eq!(all.len(), 3, "blank criteria = whole cache");
+
+    let mut c = crate::models::CollectionSearchCriteria::default();
+    c.title = "winter".into();
+    let hits = db.search_collections_filtered(&c, 0).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "winter_exchange");
+    // Slug text matches too.
+    c.title = "prompt_pile".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap().len(), 1);
+
+    // Tag filter: profile-cached tags, exact name, case-insensitive; every
+    // listed tag must be present.
+    c = Default::default();
+    c.tag = "fandom a, Fandom B".into();
+    let hits = db.search_collections_filtered(&c, 0).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "winter_exchange");
+    c.tag = "Fandom A, Missing".into();
+    assert!(db.search_collections_filtered(&c, 0).unwrap().is_empty());
+
+    // Multifandom: >1 fandom-typed tag.
+    c = Default::default();
+    c.multifandom = "true".into();
+    let hits = db.search_collections_filtered(&c, 0).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "winter_exchange");
+    c.multifandom = "false".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap().len(), 2);
+
+    // Closed / moderated tri-states.
+    c = Default::default();
+    c.closed = "true".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap()[0].name, "winter_exchange");
+    c.closed = "false".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap().len(), 2);
+    c = Default::default();
+    c.moderated = "true".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap().len(), 1);
+
+    // Challenge type, including "no challenge".
+    c = Default::default();
+    c.challenge_type = "GiftExchange".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap()[0].name, "winter_exchange");
+    c.challenge_type = "PromptMeme".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap()[0].name, "prompt_pile");
+    c.challenge_type = "no_challenge".into();
+    assert_eq!(db.search_collections_filtered(&c, 0).unwrap()[0].name, "just_fics");
+
+    // Sorts: works count desc, bookmarked asc, title asc.
+    c = Default::default();
+    c.sort_column = "works_count".into();
+    let names: Vec<_> = db.search_collections_filtered(&c, 0).unwrap()
+        .into_iter().map(|x| x.name).collect();
+    assert_eq!(names, vec!["winter_exchange", "just_fics", "prompt_pile"]);
+    c.sort_column = "bookmarked_items_count".into();
+    c.sort_direction = "asc".into();
+    let names: Vec<_> = db.search_collections_filtered(&c, 0).unwrap()
+        .into_iter().map(|x| x.name).collect();
+    assert_eq!(names, vec!["just_fics", "winter_exchange", "prompt_pile"]);
+    c.sort_column = "title.keyword".into();
+    let names: Vec<_> = db.search_collections_filtered(&c, 0).unwrap()
+        .into_iter().map(|x| x.name).collect();
+    assert_eq!(names, vec!["just_fics", "prompt_pile", "winter_exchange"]);
+
+    // Limit caps the result set (0 = everything, per sql_limit).
+    assert_eq!(db.search_collections_filtered(&Default::default(), 2).unwrap().len(), 2);
 }
 
 #[test]

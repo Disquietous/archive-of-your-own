@@ -53,13 +53,44 @@ final class MacSearchModel {
         showingResults = false
     }
 
+    // MARK: - Collections scope criteria (mirrors AO3's /collections
+    // sort/filter form; scopeQuery doubles as the title filter)
+
+    /// Comma-separated tag names (AO3 allows up to 5).
+    var collectionTags = ""
+    /// Tri-states: "" (either), "true", "false".
+    var collectionMultifandom = ""
+    var collectionClosed = ""
+    var collectionModerated = ""
+    /// "" (any), "GiftExchange", "PromptMeme", "no_challenge".
+    var collectionChallengeType = ""
+    var collectionSortColumn = "created_at"
+    var collectionSortDirection = "desc"
+
+    /// The collections form state as criteria for either source: sent to
+    /// AO3 as collection_search[...] params, or evaluated against the
+    /// cached collections by the core.
+    func collectionCriteria() -> UCollectionSearchCriteria {
+        UCollectionSearchCriteria(
+            title: scopeQuery.trimmingCharacters(in: .whitespaces),
+            tag: collectionTags.trimmingCharacters(in: .whitespaces),
+            multifandom: collectionMultifandom,
+            closed: collectionClosed,
+            moderated: collectionModerated,
+            challengeType: collectionChallengeType,
+            sortColumn: collectionSortColumn,
+            sortDirection: collectionSortDirection)
+    }
+
     /// What the current results represent — the form's criteria, a tag
-    /// (fandom card / tag pill), or a collection's works (by URL slug).
+    /// (fandom card / tag pill), a collection's works (by URL slug), or
+    /// the collections index under the collections form's criteria.
     /// Pagination re-runs whichever is active.
     enum ActiveQuery {
         case form(keys: [String], values: [String])
         case tag(String)
         case collection(String)
+        case collectionsIndex(UCollectionSearchCriteria)
     }
 
     var activeQuery: ActiveQuery?
@@ -209,6 +240,9 @@ final class MacSearchModel {
         appState.searchResults = []
         appState.searchError = nil
         appState.isSearching = true
+        tagHits = []
+        userHits = []
+        collectionHits = []
         currentPage = 1
         hasNextPage = false
         totalPages = 1
@@ -219,8 +253,8 @@ final class MacSearchModel {
     /// The Go button and every form's Return key land here: dispatch by
     /// scope tab and library/AO3 toggle. Library scopes are synchronous
     /// reads of the encrypted database — no network, per the toggle's
-    /// promise. AO3-side search exists for Works only so far; the other
-    /// scopes surface a notice instead of failing silently.
+    /// promise. AO3-side search exists for Works and Collections so far;
+    /// the other scopes surface a notice instead of failing silently.
     @MainActor
     func performScopedSearch(_ appState: AppState) {
         scopeNotice = nil
@@ -241,8 +275,14 @@ final class MacSearchModel {
             userHits = appState.bridge.searchLibraryUsers(scopeQuery)
         case (.collections, true):
             beginLibraryScopeResults(appState)
-            collectionHits = appState.bridge.searchLibraryCollections(scopeQuery)
-        case (.collections, false), (.bookmarks, false), (.tags, false), (.users, false):
+            collectionHits = appState.bridge.searchLibraryCollectionsFiltered(collectionCriteria())
+        case (.collections, false):
+            // The collections index under the form's criteria — paged, so
+            // it runs through activeQuery like the works queries.
+            activeQuery = .collectionsIndex(collectionCriteria())
+            beginNewQuery(appState)
+            Task { await fetch(page: 1, appState: appState) }
+        case (.bookmarks, false), (.tags, false), (.users, false):
             scopeNotice = "Searching AO3 for \(scope.rawValue.lowercased()) isn't available yet — switch the source toggle to search your library."
         }
     }
@@ -332,6 +372,9 @@ final class MacSearchModel {
     @MainActor
     private func beginLibraryScopeResults(_ appState: AppState) {
         onNewQuery?()
+        // Library reads aren't paged — a stale AO3 query must not leave
+        // the pager live over library results.
+        activeQuery = nil
         tagHits = []
         userHits = []
         collectionHits = []
@@ -390,30 +433,49 @@ final class MacSearchModel {
         appState.isSearching = true
         appState.searchError = nil
         do {
-            let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                switch query {
-                case .form(let keys, let values):
-                    return try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page)
-                case .tag(let tag):
-                    return try await appState.bridge.searchByTagPaged(tag, page: page)
-                case .collection(let name):
-                    return try await appState.bridge.fetchCollectionWorks(name: name, page: page)
+            switch query {
+            case .form(let keys, let values):
+                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page)
+                }, page: page, appState: appState)
+            case .tag(let tag):
+                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.searchByTagPaged(tag, page: page)
+                }, page: page, appState: appState)
+            case .collection(let name):
+                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.fetchCollectionWorks(name: name, page: page)
+                }, page: page, appState: appState)
+            case .collectionsIndex(let criteria):
+                let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.browseCollections(criteria: criteria, page: page)
                 }
+                collectionHits = result.collections
+                totalWorks = nil
+                currentPage = page
+                hasNextPage = result.hasNextPage
+                totalPages = max(result.totalPages, page)
             }
-            appState.searchResults = result.works.map(AppState.workFromSummary)
-            currentPage = page
-            hasNextPage = result.hasNextPage
-            totalPages = max(result.totalPages, page)
-            totalWorks = result.totalWorks
-            // Results are persisted by the Rust layer as they're fetched —
-            // refresh the library snapshot so they join local lists at once.
-            appState.reloadCachedWorks()
         } catch {
             if !appState.searchTask.isCancelled && !error.isCancellation {
                 appState.searchError = error.localizedDescription
             }
         }
         appState.isSearching = false
+    }
+
+    /// Land one page of works-style results (Works form, tag listing, a
+    /// collection's works) in the shared works results pane.
+    @MainActor
+    private func applyWorksPage(_ result: UPagedWorks, page: UInt32, appState: AppState) {
+        appState.searchResults = result.works.map(AppState.workFromSummary)
+        totalWorks = result.totalWorks
+        currentPage = page
+        hasNextPage = result.hasNextPage
+        totalPages = max(result.totalPages, page)
+        // Results are persisted by the Rust layer as they're fetched —
+        // refresh the library snapshot so they join local lists at once.
+        appState.reloadCachedWorks()
     }
 
     func clearFilters() {

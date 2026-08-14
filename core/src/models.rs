@@ -235,6 +235,41 @@ pub struct CollectionSummary {
     pub collection_type: String,
 }
 
+/// The collections index's sort/filter form (/collections,
+/// collection_search[...] GET params). Every field is optional — "" means
+/// "don't filter" / "AO3's default" — so a blank record is the plain index.
+/// The same record drives the library-scoped search over cached collections.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CollectionSearchCriteria {
+    /// collection_search[title] — substring title filter.
+    pub title: String,
+    /// collection_search[tag] — comma-separated tag names (AO3's token
+    /// field allows up to 5).
+    pub tag: String,
+    /// collection_search[multifandom] — "true", "false", or "" (either).
+    pub multifandom: String,
+    /// collection_search[closed] — "true", "false", or "" (either).
+    pub closed: String,
+    /// collection_search[moderated] — "true", "false", or "" (either).
+    pub moderated: String,
+    /// collection_search[challenge_type] — "GiftExchange", "PromptMeme",
+    /// "no_challenge", or "" (any).
+    pub challenge_type: String,
+    /// collection_search[sort_column] — "created_at" (AO3's default),
+    /// "title.keyword", "bookmarked_items_count", or "works_count".
+    pub sort_column: String,
+    /// collection_search[sort_direction] — "asc" or "desc" (AO3 defaults
+    /// to desc).
+    pub sort_direction: String,
+}
+
+impl CollectionSearchCriteria {
+    /// True when every field is blank — the plain unfiltered index.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A subscription entry from AO3's subscriptions page.
 #[derive(Debug, Clone)]
 pub struct Subscription {

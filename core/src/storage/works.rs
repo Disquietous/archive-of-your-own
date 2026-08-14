@@ -365,24 +365,28 @@ impl Storage {
         })
     }
 
-    /// Record names confirmed by AO3's autocomplete as canonical. AO3's
-    /// answer is authoritative for the type, too.
+    /// Record names confirmed by AO3's autocomplete as canonical. A
+    /// per-type endpoint's answer is authoritative for the type, too; the
+    /// any-type "tag" endpoint confirms the name without teaching a type,
+    /// so it never touches one already learned.
     pub fn mark_tags_canonical(&self, tag_type: &str, names: &[String]) -> Result<(), AppError> {
         if names.is_empty() {
             return Ok(());
         }
+        let learned_type = if tag_type == "tag" { "" } else { tag_type };
         self.with_savepoint("canonical_tags", || {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT INTO tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
                  ON CONFLICT(name) DO UPDATE SET
                      canonical = 1,
                      last_seen = datetime('now'),
-                     tag_type = excluded.tag_type"
+                     tag_type = CASE WHEN excluded.tag_type <> '' THEN excluded.tag_type
+                                     ELSE tags.tag_type END"
             ).map_err(map_sql)?;
             for name in names {
                 let trimmed = name.trim();
                 if trimmed.is_empty() { continue; }
-                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+                stmt.execute(params![trimmed, learned_type]).map_err(map_sql)?;
             }
             Ok(())
         })
