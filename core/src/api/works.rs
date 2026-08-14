@@ -154,6 +154,14 @@ impl AO3App {
             .into_iter().map(UCollection::from).collect())
     }
 
+    /// The cached works seen in a collection's listing, in listing order —
+    /// the library-mode view of a collection's works, no network.
+    pub fn get_library_collection_works(&self, name: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_collection_works(&name).map_err(AO3Error::from)?
+            .into_iter().map(UWorkSummary::from).collect())
+    }
+
     /// Cached collections matching the full collections sort/filter form —
     /// the same criteria AO3's index accepts, evaluated against the cached
     /// rows. Blank criteria match everything.
@@ -188,6 +196,32 @@ impl AO3App {
             for w in &works { log_db("save_work", s.save_work(w)); }
             let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
             log_db("save_collection_works", s.add_collection_works(&slug, &ids));
+            log_db("commit listing save", tx.commit());
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_works: found,
+            })
+        }).await
+    }
+
+    /// One page of a collection's bookmarked items, works cached like every
+    /// other listing (series/external bookmarks are skipped by the parser).
+    pub async fn fetch_collection_bookmarks(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let (works, has_next, total, found) = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "collection_bookmarks".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let name = name.clone();
+                    async move {
+                        client.read().await.fetch_collection_bookmarks(&name, page).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let s = storage.lock().await;
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            for w in &works { log_db("save_work", s.save_work(w)); }
             log_db("commit listing save", tx.commit());
             Ok(UPagedWorks {
                 works: works.into_iter().map(UWorkSummary::from).collect(),

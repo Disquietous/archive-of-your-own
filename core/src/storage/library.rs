@@ -748,6 +748,28 @@ impl Storage {
         Ok(())
     }
 
+    /// The cached works seen in a collection's listing, in listing order —
+    /// the library-mode view of a collection's works. No network; only
+    /// what fetches already recorded in collection_works.
+    pub fn get_collection_works(&self, name: &str) -> Result<Vec<crate::models::WorkSummary>, AppError> {
+        let mut stmt = self.conn
+            .prepare_cached(&format!(
+                "SELECT {} FROM collection_works cw
+                 JOIN works w ON w.id = cw.work_id
+                 WHERE cw.collection_name = ?1
+                 ORDER BY cw.rowid", Self::work_select("w.")))
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map(params![name], |row| Ok(Self::work_from_row(row)))
+            .map_err(map_sql)?;
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
+        }
+        self.attach_work_tags(&mut works)?;
+        Ok(works)
+    }
+
     /// The cached work ids for a collection, in the order they were seen.
     pub fn get_collection_work_ids(&self, name: &str) -> Result<Vec<u64>, AppError> {
         let mut stmt = self.conn

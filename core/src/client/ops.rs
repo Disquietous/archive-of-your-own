@@ -185,6 +185,18 @@ impl AO3Client {
             parser::parse_results_total(&html)))
     }
 
+    /// One page of a collection's bookmarked items
+    /// (/collections/{name}/bookmarks — li.bookmark blurbs wrapping standard
+    /// work blurbs; series/external bookmarks are skipped).
+    /// Returns (works, has_next_page, total_pages, total_found).
+    pub async fn fetch_collection_bookmarks(&self, name: &str, page: u32) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
+        let url = format!("{BASE_URL}/collections/{}/bookmarks?page={page}", urlencoded(name));
+        let html = self.fetch(&url).await?;
+        let works = parser::parse_bookmarked_works(&html)?;
+        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
+            parser::parse_results_total(&html)))
+    }
+
     /// Fetch a single work's metadata and all its chapters.
     /// Returns the parsed work plus the usernames visible in the page's
     /// kudos list — the caller checks the signed-in user against them to

@@ -703,14 +703,10 @@ final class MacAppModel {
         selectedWorkID = nil
         readerOpen = false
         immersive = false
+        // startCollectionQuery also caches the collection's profile
+        // metadata + tags — one shared entry point for every path here.
         Task { @MainActor in
-            search.startCollectionQuery(slug, appState: appState)
-        }
-        // Cache the collection's profile metadata + tags; the core answers
-        // from the database after the first fetch, so this is one request
-        // per collection, ever.
-        Task { @MainActor in
-            _ = try? await appState.bridge.ensureCollectionProfile(name: slug)
+            search.startCollectionQuery(slug, title: title, appState: appState)
         }
     }
 

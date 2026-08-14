@@ -120,10 +120,11 @@ fn extract_work_id(blurb: &ElementRef) -> Result<u64, AppError> {
     }
 
     // Try from the title link href
-    let link_sel = sel("h4.heading a[href^='/works/']");
-    if let Some(link) = blurb.select(&link_sel).next() {
-        if let Some(href) = link.value().attr("href") {
-            let id_str = href.trim_start_matches("/works/");
+    if let Some(link) = title_link(blurb) {
+        if let Some(id_str) = link.value().attr("href")
+            .and_then(|href| href.split("/works/").nth(1))
+            .and_then(|s| s.split('/').next())
+            .and_then(|s| s.split('?').next()) {
             if let Ok(id) = id_str.parse::<u64>() {
                 return Ok(id);
             }
@@ -133,13 +134,17 @@ fn extract_work_id(blurb: &ElementRef) -> Result<u64, AppError> {
     Err(AppError::ElementNotFound("work id".to_string()))
 }
 
+/// The blurb heading's work link. Plain listings link "/works/{id}", but
+/// collection listings nest it — "/collections/{name}/works/{id}" — so
+/// match on the path segment, not the prefix. The author links beside it
+/// point at /users/, so they can't false-match.
+fn title_link<'a>(blurb: &'a ElementRef) -> Option<ElementRef<'a>> {
+    let link_sel = sel("h4.heading a[href*='/works/']");
+    blurb.select(&link_sel).next()
+}
+
 fn extract_blurb_title(blurb: &ElementRef) -> String {
-    let sel = sel("h4.heading a[href^='/works/']");
-    blurb
-        .select(&sel)
-        .next()
-        .map(|el| text(&el))
-        .unwrap_or_default()
+    title_link(blurb).map(|el| text(&el)).unwrap_or_default()
 }
 
 fn extract_blurb_authors(blurb: &ElementRef) -> Vec<String> {
@@ -248,6 +253,28 @@ pub(super) fn parse_chapters(s: &str) -> (u32, Option<u32>) {
     } else {
         (1, Some(1))
     }
+}
+
+/// The works behind a bookmark listing (e.g. /collections/{name}/bookmarks):
+/// each li.bookmark.blurb wraps a standard work blurb, so the work parser
+/// applies as-is. Series and external-work bookmarks carry no /works/ link
+/// and are skipped.
+pub fn parse_bookmarked_works(html: &str) -> Result<Vec<WorkSummary>, AppError> {
+    let doc = Html::parse_document(html);
+    let blurb_sel = sel("li.bookmark.blurb");
+    let mut works = Vec::new();
+
+    for blurb in doc.select(&blurb_sel) {
+        match parse_single_blurb(&blurb) {
+            Ok(w) => works.push(w),
+            Err(_) => continue,
+        }
+    }
+
+    if works.is_empty() {
+        verify_empty_listing(&doc, "bookmarked works listing")?;
+    }
+    Ok(works)
 }
 
 // ---------------------------------------------------------------------------

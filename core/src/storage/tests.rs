@@ -574,6 +574,10 @@ fn test_collection_profile_tags_and_works() {
     db.add_collection_works("test_fest", &[1]).unwrap();
     db.add_collection_works("test_fest", &[1, 2]).unwrap();
     assert_eq!(db.get_collection_work_ids("test_fest").unwrap(), vec![1, 2]);
+    // The library-mode works view: full summaries, listing order.
+    let works = db.get_collection_works("test_fest").unwrap();
+    assert_eq!(works.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(works[1].title, "Test Work 2");
     // Deleting a work cascades its work_tags and collection_works rows.
     db.delete_work(1).unwrap();
     assert_eq!(db.get_collection_work_ids("test_fest").unwrap(), vec![2]);

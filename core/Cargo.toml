@@ -10,9 +10,14 @@ crate-type = ["lib", "staticlib"]
 [features]
 default = []
 tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip", "tor-proto"]
+# The uniffi-bindgen helper binary only. Keeping uniffi/cli behind a
+# feature keeps the 70s+ code-generator (uniffi_bindgen, goblin, askama,
+# clap, …) out of the library's dependency graph — measured as the bulk
+# of every cross-target release build before this was gated.
+bindgen-cli = ["uniffi/cli"]
 
 [dependencies]
-uniffi = { version = "0.31", features = ["cli"] }
+uniffi = { version = "0.31" }
 async-trait = "0.1"
 scraper = "0.22"
 ego-tree = "0.10"
@@ -38,6 +43,7 @@ tor-proto = { version = "0.42", optional = true, features = ["stream-ctrl"] }
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/uniffi_bindgen.rs"
+required-features = ["bindgen-cli"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -51,3 +57,10 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = "line-tables-only"
+
+# Cargo defaults release to incremental = false, so every one-line change
+# recompiled the whole ao3_core crate per target (~2min each, measured).
+# Incremental release rebuilds only what changed; dependencies are
+# unaffected (they were already cached between builds).
+[profile.release]
+incremental = true

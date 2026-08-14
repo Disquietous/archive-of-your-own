@@ -144,6 +144,56 @@ struct ScopeSearchFormView: View {
     }
 }
 
+/// Header bar for one half of the split collection view (works |
+/// bookmarked items). The works half carries the back arrow that returns
+/// to the collections results list; each half carries its own pager, so
+/// the two listings page independently.
+struct CollectionSplitPaneHeader: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
+    let isWorks: Bool
+
+    var body: some View {
+        let search = model.search
+        HStack(spacing: 8) {
+            if isWorks {
+                Button {
+                    search.closeSplitCollection()
+                } label: {
+                    Image(systemName: "arrow.left")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(theme.ink2)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Back to collection results")
+            }
+            Text(isWorks ? "WORKS" : "BOOKMARKED ITEMS")
+                .font(Font(MacFont.ui(10.5, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+            if let total = isWorks ? search.totalWorks : search.bookmarksTotal {
+                Text("\(total)")
+                    .font(Font(MacFont.ui(10.5, weight: .semibold)))
+                    .foregroundStyle(theme.ink3)
+            }
+            Spacer(minLength: 8)
+            if isWorks {
+                SearchPagerView(theme: theme, appState: appState, model: model)
+            } else {
+                CollectionBookmarksPagerView(theme: theme, appState: appState, model: model)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .frame(maxWidth: .infinity)
+        .background(theme.surface)
+        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+    }
+}
+
 /// Results list for the scopes that don't produce works: tag, user, and
 /// collection hits from the library search. Rows navigate — a tag or
 /// collection opens its works (flipping to the Works tab's results), a
@@ -247,7 +297,11 @@ struct ScopeResultsView: View {
 
     private func collectionRow(_ collection: UCollection) -> some View {
         Button {
-            model.search.startCollectionQuery(collection.name, appState: appState)
+            model.search.startCollectionQuery(collection.name,
+                                              title: collection.title,
+                                              workCount: collection.workCount,
+                                              bookmarkedCount: collection.bookmarkedCount,
+                                              appState: appState)
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "square.grid.2x2")
@@ -284,6 +338,10 @@ struct ScopeResultsView: View {
 
     private func collectionMeta(_ collection: UCollection) -> String {
         var parts = [collection.workCount == 1 ? "1 work" : "\(collection.workCount) works"]
+        if collection.bookmarkedCount > 0 {
+            parts.append(collection.bookmarkedCount == 1
+                ? "1 bookmarked item" : "\(collection.bookmarkedCount) bookmarked items")
+        }
         if !collection.collectionType.isEmpty { parts.append(collection.collectionType) }
         if !collection.maintainers.isEmpty {
             parts.append("by \(collection.maintainers.joined(separator: ", "))")

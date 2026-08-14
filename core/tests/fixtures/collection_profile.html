@@ -1,30 +1,56 @@
 <!DOCTYPE html>
+<!--
+  Fully synthetic AO3 collection profile page for parser tests, mirroring
+  the /collections/{name}/profile structure: a primary header module with
+  the heading, description blockquote, and "(Open, Moderated, ...)" type
+  line, then an About dl.meta block carrying the "Collection tags:" list
+  and "Maintainers:" list. Entirely fabricated — no real data; do not
+  replace with saved pages.
+-->
 <html>
 <head><title>Test Fest 2026 | Archive of Our Own</title></head>
 <body>
-<div id="main" class="collections-show region">
+<div id="main" class="collection_profile-show dashboard region" role="main">
   <div class="collection home profile">
     <div class="primary header module">
-      <h2 class="heading">Test Fest 2026</h2>
-      <p class="type">(Open, Moderated, Anonymous, Gift Exchange Challenge)</p>
-      <h3 class="byline heading">
-        Maintainers:
-        <a rel="author" href="/users/mod_one/pseuds/mod_one">mod_one</a>,
-        <a rel="author" href="/users/mod_two/pseuds/mod_two">mod_two</a>
-      </h3>
-      <ul class="tags commas">
-        <li><a class="tag" href="/tags/Fandom%20A/works">Fandom A</a></li>
-        <li><a class="tag" href="/tags/Synthetic%20Tag/works">Synthetic Tag</a></li>
+      <h2 class="heading"><a href="/collections/test_fest_2026">Test Fest 2026</a></h2>
+      <ul class="navigation actions" role="navigation">
+        <li><span class="current">Profile</span></li>
       </ul>
+      <blockquote class="userstuff"><p>A synthetic collection profile for parser tests.</p></blockquote>
+      <p class="type">
+        (Open, Moderated, Anonymous, Gift Exchange Challenge)
+      </p>
     </div>
+    <h3 class="heading">
+      About
+      <span class="title">Test Fest 2026</span>
+      <span class="name">(test_fest_2026)</span>
+    </h3>
     <div class="wrapper">
       <dl class="meta group">
-        <dt class="active">Active since:</dt>
-        <dd class="active">2026-01-01</dd>
+        <dt>Active since:</dt>
+        <dd>2026-01-01</dd>
+        <dt>Collection tags:</dt>
+        <dd>
+          <ul class="tags commas">
+            <li><a class="tag" href="/tags/Fandom%20A/works">Fandom A</a></li>
+            <li><a class="tag" href="/tags/Synthetic%20Tag/works">Synthetic Tag</a></li>
+          </ul>
+        </dd>
+        <dt class="maintainers">Maintainers:</dt>
+        <dd class="maintainers">
+          <ul class="commas">
+            <li class="owner"><a href="/users/mod_one">mod_one</a></li>
+            <li><a href="/users/mod_two">mod_two</a></li>
+          </ul>
+        </dd>
       </dl>
-      <div class="intro module">
-        <h3 class="heading">Intro</h3>
-        <blockquote class="userstuff"><p>A synthetic collection profile for parser tests.</p></blockquote>
+    </div>
+    <div class="preface group">
+      <div id="intro" class="module">
+        <h3 class="heading">Intro:</h3>
+        <blockquote class="userstuff"><p>A synthetic intro for the fake fest.</p></blockquote>
       </div>
     </div>
   </div>

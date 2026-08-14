@@ -186,24 +186,19 @@ pub fn parse_collection_profile(html: &str, name: &str) -> Result<CollectionSumm
 
     let (is_open, is_moderated, is_anonymous, collection_type) = extract_collection_type(&root);
 
-    // Maintainers: the byline's user links.
-    let maintainer_sel = sel("a[href^='/users/']");
-    let mut maintainers: Vec<String> = Vec::new();
-    for link in root.select(&maintainer_sel) {
-        let user = text(&link);
-        if !user.is_empty() && !maintainers.contains(&user) {
-            maintainers.push(user);
-        }
+    // Maintainers: the About block's "Maintainers:" list (dd.maintainers),
+    // falling back to any user links in the header module.
+    let mut maintainers = collect_texts(&doc.root_element(), "dd.maintainers a[href^='/users/']");
+    if maintainers.is_empty() {
+        maintainers = collect_texts(&root, "a[href^='/users/']");
     }
 
-    // The collection's tags — AO3 renders tag links with class="tag".
-    let tag_sel = sel("a.tag");
-    let mut tags: Vec<String> = Vec::new();
-    for link in doc.select(&tag_sel) {
-        let tag = text(&link);
-        if !tag.is_empty() && !tags.contains(&tag) {
-            tags.push(tag);
-        }
+    // The collection's tags: the About block's "Collection tags:" list
+    // (a.tag links inside dl.meta), falling back to any tag links on the
+    // page if that block moves.
+    let mut tags = collect_texts(&doc.root_element(), "dl.meta a.tag");
+    if tags.is_empty() {
+        tags = collect_texts(&doc.root_element(), "a.tag");
     }
 
     // Intro/summary block, when the collection has one.
@@ -229,4 +224,17 @@ pub fn parse_collection_profile(html: &str, name: &str) -> Result<CollectionSumm
         tags,
         collection_type,
     })
+}
+
+/// The trimmed, deduplicated texts of every element matching `selector`.
+fn collect_texts(scope: &ElementRef, selector: &str) -> Vec<String> {
+    let s = sel(selector);
+    let mut out: Vec<String> = Vec::new();
+    for el in scope.select(&s) {
+        let t = text(&el);
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
 }

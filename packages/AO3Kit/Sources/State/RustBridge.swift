@@ -469,6 +469,13 @@ final class RustBridge {
         return try await app.fetchCollectionWorks(name: name, page: page)
     }
 
+    /// One page of a collection's bookmarked items (works only — series and
+    /// external bookmarks are skipped).
+    func fetchCollectionBookmarks(name: String, page: UInt32 = 1) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchCollectionBookmarks(name: name, page: page)
+    }
+
     /// The collection's /profile metadata and tags — fetched once, answered
     /// from the cache forever after.
     func ensureCollectionProfile(name: String) async throws -> UCollection {
@@ -1047,6 +1054,12 @@ final class RustBridge {
     func searchLibraryCollectionsFiltered(_ criteria: UCollectionSearchCriteria,
                                           limit: UInt32? = nil) -> [UCollection] {
         (try? app?.searchLibraryCollectionsFiltered(criteria: criteria, limit: limit)) ?? []
+    }
+
+    /// The cached works seen in a collection's listing — the library-mode
+    /// view of a collection's works, no network.
+    func getLibraryCollectionWorks(name: String) -> [UWorkSummary] {
+        (try? app?.getLibraryCollectionWorks(name: name)) ?? []
     }
 
     func checkNextSubscription() async throws -> USubscriptionCheckResult? {

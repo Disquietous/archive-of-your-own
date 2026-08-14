@@ -44,13 +44,15 @@ final class MacSearchModel {
     /// (AO3-side search for the non-works scopes).
     var scopeNotice: String?
 
-    /// Switch tabs: back to that scope's form, stale notice cleared.
+    /// Switch tabs: back to that scope's form, stale notice cleared, any
+    /// split collection view dissolved.
     @MainActor
     func setScope(_ s: SearchScope) {
         guard s != scope else { return }
         scope = s
         scopeNotice = nil
         showingResults = false
+        closeSplitCollection()
     }
 
     // MARK: - Collections scope criteria (mirrors AO3's /collections
@@ -94,6 +96,53 @@ final class MacSearchModel {
     }
 
     var activeQuery: ActiveQuery?
+    /// The tab that was current when the active query was started. Tag and
+    /// collection drill-ins flip the visible scope to Works so the works
+    /// table renders; the back arrow restores this, returning to the form
+    /// of the tab that initiated the search.
+    private var originScope: SearchScope?
+
+    // MARK: - Split collection results (works | bookmarks, side by side)
+
+    /// Non-nil while a collection with both works and bookmarked items is
+    /// open from the search results: the results area splits into a works
+    /// pane (the shared works-results state) and a bookmarks pane (the
+    /// bookmark* state below), each paged independently.
+    var splitCollectionName: String?
+    var splitCollectionTitle: String?
+    /// What the collections results list was showing, restored when the
+    /// split closes so its pager keeps working.
+    private var splitReturnQuery: ActiveQuery?
+
+    var bookmarkResults: [Work] = []
+    var bookmarksPage: UInt32 = 1
+    var bookmarksHasNext = false
+    var bookmarksTotalPages: UInt32 = 1
+    var bookmarksTotal: UInt32?
+    var isFetchingBookmarks = false
+    var bookmarksError: String?
+
+    /// The split's back arrow: dissolve both panes and return to the
+    /// collections results list (still held in collectionHits).
+    @MainActor
+    func closeSplitCollection() {
+        guard splitCollectionName != nil else { return }
+        splitCollectionName = nil
+        splitCollectionTitle = nil
+        activeQuery = splitReturnQuery
+        splitReturnQuery = nil
+        bookmarkResults = []
+        bookmarksError = nil
+    }
+
+    /// The results header's back arrow: back to the initiating tab's form.
+    @MainActor
+    func returnToForm() {
+        if let originScope { scope = originScope }
+        showingResults = false
+        closeSplitCollection()
+    }
+
     var currentPage: UInt32 = 1
     /// From the results page's own pagination — a page-size heuristic showed
     /// a false next arrow whenever a final page held exactly 20 works.
@@ -258,6 +307,7 @@ final class MacSearchModel {
     @MainActor
     func performScopedSearch(_ appState: AppState) {
         scopeNotice = nil
+        originScope = scope
         switch (scope, searchLibraryOnly) {
         case (.works, false):
             performSearch(appState)
@@ -353,13 +403,21 @@ final class MacSearchModel {
     private func runLibraryWorksSearch(_ appState: AppState,
                                        criteria: ULibrarySearchCriteria,
                                        bookmarkedOnly: Bool) {
-        onNewQuery?()
-        activeQuery = nil
-        appState.searchError = nil
         var works = appState.bridge.searchLibraryWorksFiltered(criteria).map(AppState.workFromSummary)
         if bookmarkedOnly {
             works = works.filter { appState.bookmarkedWorkIDs.contains($0.id) }
         }
+        presentLibraryWorks(works, appState: appState)
+    }
+
+    /// Land a library (no-network) result set in the works results pane.
+    /// activeQuery stays nil so the pager stays inert — library reads
+    /// return everything at once.
+    @MainActor
+    private func presentLibraryWorks(_ works: [Work], appState: AppState) {
+        onNewQuery?()
+        activeQuery = nil
+        appState.searchError = nil
         appState.searchResults = works
         currentPage = 1
         hasNextPage = false
@@ -404,20 +462,108 @@ final class MacSearchModel {
     @MainActor
     func startTagQuery(_ tag: String, appState: AppState) {
         // Tag/collection listings are works results — land on the Works tab
-        // whatever scope the search section was left on.
+        // whatever scope the search section was left on. The pre-flip scope
+        // is where the back arrow returns.
+        originScope = scope
         scope = .works
         activeQuery = .tag(tag)
         beginNewQuery(appState)
         Task { await fetch(page: 1, appState: appState) }
     }
 
-    /// A collection's paged works — `name` is the /collections/{name} slug.
+    /// A collection's works — `name` is the /collections/{name} slug.
+    /// Library mode reads the works this collection's cached listings
+    /// already recorded (no network, per the source toggle's promise);
+    /// AO3 mode fetches the live listing, paged. When the caller knows the
+    /// collection holds both works and bookmarked items, AO3 mode splits
+    /// the results view — works pane and bookmarks pane, first pages loaded
+    /// simultaneously, paged independently.
     @MainActor
-    func startCollectionQuery(_ name: String, appState: AppState) {
-        scope = .works
-        activeQuery = .collection(name)
-        beginNewQuery(appState)
-        Task { await fetch(page: 1, appState: appState) }
+    func startCollectionQuery(_ name: String, title: String = "",
+                              workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0,
+                              appState: AppState) {
+        if searchLibraryOnly {
+            originScope = scope
+            scope = .works
+            let works = appState.bridge.getLibraryCollectionWorks(name: name)
+                .map(AppState.workFromSummary)
+            presentLibraryWorks(works, appState: appState)
+            return
+        }
+        if workCount > 0, bookmarkedCount > 0 {
+            // Split mode: the scope stays on Collections and the hit list
+            // survives untouched behind the panes — the works pane's back
+            // arrow returns straight to it.
+            splitReturnQuery = activeQuery
+            splitCollectionName = name
+            splitCollectionTitle = title.isEmpty ? name : title
+            activeQuery = .collection(name)
+            onNewQuery?()
+            appState.searchResults = []
+            appState.searchError = nil
+            appState.isSearching = true
+            currentPage = 1
+            hasNextPage = false
+            totalPages = 1
+            totalWorks = nil
+            bookmarkResults = []
+            bookmarksPage = 1
+            bookmarksHasNext = false
+            bookmarksTotalPages = 1
+            bookmarksTotal = nil
+            bookmarksError = nil
+            hasSearched = true
+            showingResults = true
+            Task { await fetch(page: 1, appState: appState) }
+            Task { await fetchBookmarksPage(1, appState: appState) }
+        } else {
+            originScope = scope
+            scope = .works
+            activeQuery = .collection(name)
+            beginNewQuery(appState)
+            Task { await fetch(page: 1, appState: appState) }
+        }
+        // Cache the collection's profile metadata + tags. This is the one
+        // shared entry point for opening a collection (browse list and
+        // search results both land here); the core answers from the
+        // database after the first fetch, so it's one request per
+        // collection, ever. AO3 mode only — the profile fetch is a
+        // network op.
+        Task { @MainActor in
+            _ = try? await appState.bridge.ensureCollectionProfile(name: name)
+        }
+    }
+
+    /// The bookmarks pane's pager.
+    @MainActor
+    func goToBookmarksPage(_ page: UInt32, appState: AppState) {
+        guard page >= 1, splitCollectionName != nil, !isFetchingBookmarks else { return }
+        Task { await fetchBookmarksPage(page, appState: appState) }
+    }
+
+    @MainActor
+    private func fetchBookmarksPage(_ page: UInt32, appState: AppState) async {
+        guard let name = splitCollectionName else { return }
+        isFetchingBookmarks = true
+        bookmarksError = nil
+        do {
+            let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
+            }
+            bookmarkResults = result.works.map(AppState.workFromSummary)
+            bookmarksPage = page
+            bookmarksHasNext = result.hasNextPage
+            bookmarksTotalPages = max(result.totalPages, page)
+            bookmarksTotal = result.totalWorks
+            // Fetched works are persisted by the Rust layer — refresh the
+            // library snapshot so they join local lists at once.
+            appState.reloadCachedWorks()
+        } catch {
+            if !appState.searchTask.isCancelled && !error.isCancellation {
+                bookmarksError = error.localizedDescription
+            }
+        }
+        isFetchingBookmarks = false
     }
 
     @MainActor

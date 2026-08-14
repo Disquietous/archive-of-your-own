@@ -6,14 +6,18 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks, authorWorks, fandomWorks, readingListWorks
+        case search, subscriptionWorks, authorWorks, fandomWorks, readingListWorks,
+             collectionBookmarks
     }
 
     /// What this listing shows. Derived from observable model state inside
     /// render() so a section change re-renders — a stored var assigned from
     /// outside would neither trigger nor be seen by observation tracking,
     /// leaving the pane showing the previous context's (possibly empty) list.
+    /// A fixedContext pins it instead, for panes that always show one thing
+    /// (the split collection view's works and bookmarks halves).
     private var context: Context {
+        if let fixedContext { return fixedContext }
         switch model.section {
         case .authors, .authorWorks: return .authorWorks
         case .subscriptions: return .subscriptionWorks
@@ -26,6 +30,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private let theme: AppTheme
     private let appState: AppState
     private let model: MacAppModel
+    private let fixedContext: Context?
 
     private let scrollView = NSScrollView()
     private let tableView = KeyNavTableView()
@@ -46,10 +51,12 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         return self.works[row]
     }
 
-    init(theme: AppTheme, appState: AppState, model: MacAppModel) {
+    init(theme: AppTheme, appState: AppState, model: MacAppModel,
+         fixedContext: Context? = nil) {
         self.theme = theme
         self.appState = appState
         self.model = model
+        self.fixedContext = fixedContext
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -128,6 +135,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .authorWorks: works = model.filteredAuthorWorks
         case .fandomWorks: works = model.fandomLibraryWorks
         case .readingListWorks: works = model.filteredReadingListWorks
+        case .collectionBookmarks: works = model.search.bookmarkResults
         }
 
         overlayHost?.removeFromSuperview()
@@ -203,6 +211,21 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
                                                 title: "Empty list",
                                                 message: "Right-click any work and choose Add to Reading List."))
+            } else {
+                overlay = nil
+            }
+        case .collectionBookmarks:
+            if model.search.isFetchingBookmarks && works.isEmpty {
+                overlay = AnyView(LoadingStateMac(theme: theme, message: "Fetching bookmarked items…",
+                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  otherActivity: otherActivity(excluding: "Fetching bookmarked items")))
+            } else if let error = model.search.bookmarksError, works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                                title: "Couldn’t reach the archive", message: error))
+            } else if works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
+                                                title: "No bookmarked works",
+                                                message: "This collection’s bookmarked items include no works the app can show."))
             } else {
                 overlay = nil
             }
@@ -369,29 +392,68 @@ extension SearchResultsViewController: NSMenuDelegate {
     }
 }
 
-/// Numbered pagination + prev/next for the results pane toolbar, with a
-/// jump-to-page field when the listing spans more pages than the ±2 window.
+/// Numbered pagination + prev/next for the works results state in the pane
+/// toolbar — a PagerControl bound to the shared search paging.
 struct SearchPagerView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
+    var body: some View {
+        let search = model.search
+        PagerControl(theme: theme,
+                     current: Int(search.currentPage),
+                     total: Int(search.totalPages),
+                     hasNext: search.hasNextPage,
+                     busy: appState.isSearching) { page in
+            search.goToPage(page, appState: appState)
+        }
+    }
+}
+
+/// The split collection view's bookmarks-pane pager — independent of the
+/// works pane's paging.
+struct CollectionBookmarksPagerView: View {
+    @Bindable var theme: AppTheme
+    @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
+
+    var body: some View {
+        let search = model.search
+        PagerControl(theme: theme,
+                     current: Int(search.bookmarksPage),
+                     total: Int(search.bookmarksTotalPages),
+                     hasNext: search.bookmarksHasNext,
+                     busy: search.isFetchingBookmarks) { page in
+            search.goToBookmarksPage(page, appState: appState)
+        }
+    }
+}
+
+/// Numbered pagination + prev/next, with a jump-to-page field when the
+/// listing spans more pages than the ±2 window. State comes from the
+/// caller, so any independently paged listing can host one.
+struct PagerControl: View {
+    @Bindable var theme: AppTheme
+    let current: Int
+    let total: Int
+    let hasNext: Bool
+    let busy: Bool
+    let onGo: (UInt32) -> Void
+
     @State private var jumpText = ""
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
-        let search = model.search
-        let current = Int(search.currentPage)
-        let total = Int(search.totalPages)
         let lower = max(1, current - 2)
-        let upper = search.hasNextPage ? min(current + 2, max(total, current + 2)) : current
+        let upper = hasNext ? min(current + 2, max(total, current + 2)) : current
         HStack(spacing: 3) {
             pagerButton(symbol: "chevron.left", enabled: current > 1) {
-                search.goToPage(UInt32(current - 1), appState: appState)
+                onGo(UInt32(current - 1))
             }
             ForEach(lower...max(lower, upper), id: \.self) { page in
                 Button {
-                    search.goToPage(UInt32(page), appState: appState)
+                    onGo(UInt32(page))
                 } label: {
                     Text("\(page)")
                         .font(Font(MacFont.ui(12, weight: page == current ? .bold : .semibold)))
@@ -402,10 +464,10 @@ struct SearchPagerView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(appState.isSearching)
+                .disabled(busy)
             }
-            pagerButton(symbol: "chevron.right", enabled: search.hasNextPage) {
-                search.goToPage(UInt32(current + 1), appState: appState)
+            pagerButton(symbol: "chevron.right", enabled: hasNext) {
+                onGo(UInt32(current + 1))
             }
             // Jump-to-page, once the real total says the window can't reach
             // everything: "· ⟨field⟩ of 42".
@@ -424,11 +486,11 @@ struct SearchPagerView: View {
                     .onSubmit {
                         if let page = Int(jumpText.trimmingCharacters(in: .whitespaces)),
                            page >= 1 {
-                            search.goToPage(UInt32(min(page, total)), appState: appState)
+                            onGo(UInt32(min(page, total)))
                         }
                         jumpText = ""
                     }
-                    .disabled(appState.isSearching)
+                    .disabled(busy)
                     .help("Jump to page")
                 Text("of \(total)")
                     .font(Font(MacFont.ui(12)))
@@ -446,6 +508,6 @@ struct SearchPagerView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!enabled || appState.isSearching)
+        .disabled(!enabled || busy)
     }
 }

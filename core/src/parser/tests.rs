@@ -675,6 +675,39 @@ mod comment_tests {
     }
 
     #[test]
+    fn test_parse_collection_works_fixture() {
+        // Collection listings nest the title link under the collection path
+        // ("/collections/{name}/works/{id}") — titles and ids must parse
+        // from both that and the plain "/works/{id}" form.
+        let html = fs::read_to_string("tests/fixtures/collection_works.html")
+            .expect("Failed to read collection works fixture");
+        let works = parse_work_listings(&html).expect("collection works parse");
+        assert_eq!(works.len(), 2);
+        assert_eq!(works[0].id, 2000001);
+        assert_eq!(works[0].title, "Nested Link Work");
+        assert_eq!(works[0].authors, vec!["MockAuthor".to_string()]);
+        assert_eq!(works[0].word_count, 5000);
+        assert_eq!(works[1].id, 2000002);
+        assert_eq!(works[1].title, "Plain Link Work");
+    }
+
+    #[test]
+    fn test_parse_collection_bookmarks_fixture() {
+        // Bookmark blurbs wrap standard work blurbs; series/external
+        // bookmarks (no /works/ link) are skipped, and query strings on the
+        // title link don't break id extraction.
+        let html = fs::read_to_string("tests/fixtures/collection_bookmarks.html")
+            .expect("Failed to read collection bookmarks fixture");
+        let works = parse_bookmarked_works(&html).expect("bookmarked works parse");
+        assert_eq!(works.len(), 2);
+        assert_eq!(works[0].id, 3000001);
+        assert_eq!(works[0].title, "Bookmarked Mock Work");
+        assert_eq!(works[0].word_count, 7777);
+        assert_eq!(works[1].id, 3000002);
+        assert_eq!(works[1].title, "Second Bookmarked Work");
+    }
+
+    #[test]
     fn test_parse_collection_profile_fixture() {
         let html = fs::read_to_string("tests/fixtures/collection_profile.html")
             .expect("Failed to read collection profile fixture");

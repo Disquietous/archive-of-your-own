@@ -34,6 +34,7 @@ final class ReadPaneViewController: NSViewController {
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
+    private var collectionSplitController: NSSplitViewController?
     private var profileController: AuthorProfileViewController?
     private var pagerHost: NSHostingView<SearchPagerView>?
     private var resultsBackButton: ToolButton!
@@ -43,7 +44,7 @@ final class ReadPaneViewController: NSViewController {
     private enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
              detail(String), reading(String, Int), inboxThread(UInt64), settings,
-             scopeForm, scopeResults
+             scopeForm, scopeResults, collectionSplit
     }
 
     private var renderedMode: Mode?
@@ -491,6 +492,18 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    /// Split collection subtitle: the two listings' own totals, once known.
+    private func splitCollectionSubtitle(_ search: MacSearchModel) -> String? {
+        var parts: [String] = []
+        if let works = search.totalWorks {
+            parts.append(works == 1 ? "1 work" : "\(works) works")
+        }
+        if let items = search.bookmarksTotal {
+            parts.append(items == 1 ? "1 bookmarked item" : "\(items) bookmarked items")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     /// Results subtitle per scope: works-style results reuse the pager
     /// subtitle; the others report their own hit counts.
     private func scopeResultsSubtitle(_ search: MacSearchModel) -> String? {
@@ -516,7 +529,7 @@ final class ReadPaneViewController: NSViewController {
     private func searchFormBackButton() -> ToolButton {
         let button = searchBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left",
                                                  tooltip: "Back to search criteria") { [weak self] in
-            self?.model.search.showingResults = false
+            self?.model.search.returnToForm()
         }
         searchBackBtn = button
         return button
@@ -753,9 +766,17 @@ final class ReadPaneViewController: NSViewController {
         // Tags/Users/Collections render their own hit lists.
         if model.section == .search, model.selectedWork == nil {
             let search = model.search
-            let tabs = scopeTabsView()
-            tabs.configure(selected: search.scope)
-            toolbar.setAfterTitle([tabs])
+            if search.showingResults, search.splitCollectionName != nil {
+                // Split collection view: the pane toolbar names the
+                // collection; the back arrow and both pagers live in the
+                // halves' own header bars.
+                toolbar.configure(title: search.splitCollectionTitle ?? "Collection",
+                                  sub: splitCollectionSubtitle(search))
+                toolbar.setLeading([])
+                toolbar.setTrailing([searchSourceButton()])
+                show(mode: .collectionSplit)
+                return
+            }
             if search.showingResults {
                 let worksStyle = search.scope == .works || search.scope == .bookmarks
                 toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
@@ -782,6 +803,11 @@ final class ReadPaneViewController: NSViewController {
                     show(mode: .scopeResults)
                 }
             } else {
+                // The scope tabs live where the title would be — only while
+                // the form is showing; results keep a plain header.
+                let tabs = scopeTabsView()
+                tabs.configure(selected: search.scope)
+                toolbar.setAfterTitle([tabs])
                 toolbar.configure(title: "", sub: nil)
                 toolbar.setLeading([])
                 if search.scope == .works {
@@ -854,7 +880,21 @@ final class ReadPaneViewController: NSViewController {
     private func show(mode: Mode) {
         guard mode != renderedMode else { return }
 
+        // The split collection view only appears in its own mode; every
+        // other mode clears it here rather than case by case.
+        if mode != .collectionSplit {
+            collectionSplitController?.view.removeFromSuperview()
+        }
+
         switch mode {
+        case .collectionSplit:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            profileController?.view.removeFromSuperview()
+            detailHost?.removeFromSuperview()
+            detailHost = nil
+            emptyHost?.removeFromSuperview()
+            pin(collectionSplit().view)
         case .searchResults, .subscriptionWorks:
             readerController.view.removeFromSuperview()
             detailHost?.removeFromSuperview()
@@ -971,6 +1011,54 @@ final class ReadPaneViewController: NSViewController {
             pin(host)
         }
         renderedMode = mode
+    }
+
+    /// The split collection view: works half (back arrow + its own pager)
+    /// and bookmarked-items half (its own pager), independently paged,
+    /// divided by a draggable thin divider.
+    private func collectionSplit() -> NSSplitViewController {
+        if let collectionSplitController { return collectionSplitController }
+        let split = NSSplitViewController()
+        split.splitView.dividerStyle = .thin
+        let worksItem = NSSplitViewItem(viewController: splitHalf(isWorks: true))
+        worksItem.minimumThickness = 320
+        split.addSplitViewItem(worksItem)
+        let bookmarksItem = NSSplitViewItem(viewController: splitHalf(isWorks: false))
+        bookmarksItem.minimumThickness = 320
+        split.addSplitViewItem(bookmarksItem)
+        addChild(split)
+        collectionSplitController = split
+        return split
+    }
+
+    /// One half of the split: a compact header bar over a works table.
+    private func splitHalf(isWorks: Bool) -> NSViewController {
+        let controller = NSViewController()
+        let root = NSView()
+        root.wantsLayer = true
+        controller.view = root
+
+        let header = NSHostingView(rootView: CollectionSplitPaneHeader(
+            theme: theme, appState: appState, model: model, isWorks: isWorks))
+        header.translatesAutoresizingMaskIntoConstraints = false
+        let results = SearchResultsViewController(
+            theme: theme, appState: appState, model: model,
+            fixedContext: isWorks ? .search : .collectionBookmarks)
+        controller.addChild(results)
+        let table = results.view
+        table.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(header)
+        root.addSubview(table)
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: root.topAnchor),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            table.topAnchor.constraint(equalTo: header.bottomAnchor),
+            table.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            table.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+        ])
+        return controller
     }
 
     private func pin(_ subview: NSView) {
