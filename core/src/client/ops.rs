@@ -198,6 +198,46 @@ impl AO3Client {
             parser::parse_results_total(&html)))
     }
 
+    /// One page of AO3's bookmark search (/bookmarks/search,
+    /// bookmark_search[...] GET params — the same query string the site's
+    /// own form submits). Results are the standard li.bookmark blurbs;
+    /// series/external bookmarks are skipped by the parser.
+    /// Returns (bookmarks, has_next_page, total_pages, total_found).
+    pub async fn search_bookmarks(&self, c: &BookmarkSearchCriteria, page: u32)
+        -> Result<(Vec<BookmarkListing>, bool, u32, Option<u32>), AppError>
+    {
+        let mut parts: Vec<String> = vec![format!("page={page}"), "commit=Search+Bookmarks".to_string()];
+        for (key, value) in [
+            ("bookmarkable_query", c.bookmarkable_query.as_str()),
+            ("other_tag_names", c.other_tag_names.as_str()),
+            ("bookmarkable_type", c.bookmarkable_type.as_str()),
+            ("word_count", c.word_count.as_str()),
+            ("language_id", c.language_id.as_str()),
+            ("bookmarkable_date", c.bookmarkable_date.as_str()),
+            ("bookmark_query", c.bookmark_query.as_str()),
+            ("other_bookmark_tag_names", c.other_bookmark_tag_names.as_str()),
+            ("bookmarker", c.bookmarker.as_str()),
+            ("bookmark_notes", c.bookmark_notes.as_str()),
+            ("date", c.date.as_str()),
+            ("sort_column", c.sort_column.as_str()),
+        ] {
+            if !value.is_empty() {
+                parts.push(format!("bookmark_search%5B{key}%5D={}", urlencoded(value)));
+            }
+        }
+        if c.rec {
+            parts.push("bookmark_search%5Brec%5D=1".to_string());
+        }
+        if c.with_notes {
+            parts.push("bookmark_search%5Bwith_notes%5D=1".to_string());
+        }
+        let url = format!("{BASE_URL}/bookmarks/search?{}", parts.join("&"));
+        let html = self.fetch(&url).await?;
+        let bookmarks = parser::parse_bookmark_listings(&html)?;
+        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
+            parser::parse_results_total(&html)))
+    }
+
     /// Fetch a single work's metadata and all its chapters.
     /// Returns the parsed work plus the usernames visible in the page's
     /// kudos list — the caller checks the signed-in user against them to

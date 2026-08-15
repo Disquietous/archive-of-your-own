@@ -215,7 +215,8 @@ impl Storage {
     /// stay put, pull_bookmarks remains the explicit overwrite path. An
     /// unattributed blurb (no byline) can't be keyed and isn't cached.
     pub fn cache_fetched_bookmark(&self, bookmarker: &str, work_id: u64,
-                                  ao3_bookmark_id: u64, note: &str) -> Result<(), AppError> {
+                                  ao3_bookmark_id: u64, note: &str,
+                                  tag_string: &str, rec: bool) -> Result<(), AppError> {
         if bookmarker.is_empty() {
             return Ok(());
         }
@@ -229,9 +230,11 @@ impl Storage {
             // sync_to_ao3 = 1: the bookmark exists on AO3 by construction.
             self.conn.execute(
                 "INSERT INTO bookmarks
-                     (account_id, work_id, note, sync_to_ao3, ao3_bookmark_id, private)
-                 VALUES (?1, ?2, ?3, 1, ?4, 0)",
-                params![acct, work_id as i64, note, ao3_bookmark_id as i64],
+                     (account_id, work_id, note, sync_to_ao3, ao3_bookmark_id, private,
+                      tag_string, rec)
+                 VALUES (?1, ?2, ?3, 1, ?4, 0, ?5, ?6)",
+                params![acct, work_id as i64, note, ao3_bookmark_id as i64,
+                        tag_string, rec as i32],
             ).map_err(map_sql)?;
         }
         Ok(())
@@ -671,6 +674,116 @@ impl Storage {
             coll.tags = self.get_collection_tags(&coll.name)?;
         }
         Ok(collections)
+    }
+
+    /// The bookmark-search form evaluated against the cached bookmark rows —
+    /// the library-scoped twin of AO3's /bookmarks/search. Every cached
+    /// bookmark is searched (the active account's own plus any seen in
+    /// fetched listings); each hit carries the bookmark's own fields plus
+    /// its cached work blurb. Blank criteria match everything. `limit` of 0
+    /// means no limit.
+    ///
+    /// Local mappings where the cache differs from AO3:
+    /// * only work bookmarks are cached, so a Series / External Work type
+    ///   filter matches nothing;
+    /// * the bookmarker (filter and hit field) is the row's account key —
+    ///   the lowercased username;
+    /// * language compares against the work's language *name* — callers
+    ///   pass the display label ("English"), not AO3's code;
+    /// * Date Bookmarked is the row's created_at — for bookmarks seen in
+    ///   fetched listings that's when the app first cached them, not AO3's
+    ///   own date.
+    pub fn search_local_bookmarks_filtered(
+        &self,
+        c: &crate::models::BookmarkSearchCriteria,
+        limit: u32,
+    ) -> Result<Vec<crate::models::BookmarkHit>, AppError> {
+        if !c.bookmarkable_type.is_empty() && c.bookmarkable_type != "Work" {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT account_id, work_id, note, tag_string, rec, created_at
+             FROM bookmarks ORDER BY created_at DESC"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i32>(4)? != 0,
+                row.get::<_, String>(5)?,
+            ))
+        }).map_err(map_sql)?;
+
+        let mut hits: Vec<(crate::models::BookmarkHit, String)> = Vec::new();
+        for row in rows {
+            let (bookmarker, work_id, note, tag_string, rec, created_at) = row.map_err(map_sql)?;
+            // Bookmark-side criteria first — they need no work lookup.
+            if c.rec && !rec { continue; }
+            if c.with_notes && note.trim().is_empty() { continue; }
+            let notes_q = c.bookmark_notes.trim();
+            if !notes_q.is_empty() && !Self::contains_ci(&note, notes_q) { continue; }
+            let who = c.bookmarker.trim();
+            if !who.is_empty() && !Self::contains_ci(&bookmarker, who) { continue; }
+            let own_tags: Vec<String> = tag_string.split(',')
+                .map(str::trim).filter(|t| !t.is_empty())
+                .map(str::to_string).collect();
+            if !Self::names_match(&c.other_bookmark_tag_names, &own_tags) { continue; }
+            let bq = c.bookmark_query.trim();
+            if !bq.is_empty()
+                && !Self::contains_ci(&note, bq)
+                && !Self::any_ci(&own_tags, bq)
+                && !Self::contains_ci(&bookmarker, bq) { continue; }
+            if !Self::revised_matches(&c.date, &created_at) { continue; }
+
+            let Some(w) = self.get_work(work_id)? else { continue };
+            // Work-side criteria, mirroring the works-form matcher.
+            let wq = c.bookmarkable_query.trim();
+            if !wq.is_empty() {
+                let hit = Self::contains_ci(&w.title, wq)
+                    || Self::any_ci(&w.authors, wq)
+                    || Self::any_ci(&w.fandoms, wq)
+                    || Self::any_ci(&w.relationships, wq)
+                    || Self::any_ci(&w.characters, wq)
+                    || Self::any_ci(&w.tags, wq)
+                    || Self::contains_ci(&w.summary, wq);
+                if !hit { continue; }
+            }
+            // "Work tags" spans every tag category on the work.
+            let all_tags: Vec<String> = w.fandoms.iter()
+                .chain(&w.characters).chain(&w.relationships).chain(&w.tags)
+                .cloned().collect();
+            if !Self::names_match(&c.other_tag_names, &all_tags) { continue; }
+            if !Self::range_matches(&c.word_count, w.word_count) { continue; }
+            let language = c.language_id.trim();
+            if !language.is_empty() && !w.language.eq_ignore_ascii_case(language) { continue; }
+            if !Self::revised_matches(&c.bookmarkable_date, &w.date_updated) { continue; }
+
+            let hit = crate::models::BookmarkHit {
+                bookmarker,
+                note,
+                tags: own_tags,
+                rec,
+                // Date part only — the timestamp is display noise.
+                date_bookmarked: created_at.chars().take(10).collect(),
+                work: w,
+            };
+            hits.push((hit, created_at));
+        }
+
+        // "Best Match" has no local meaning — it and unknown columns fall
+        // back to Date Bookmarked, descending like AO3's default.
+        match c.sort_column.as_str() {
+            "bookmarkable_date" => hits.sort_by(|a, b| b.0.work.date_updated.cmp(&a.0.work.date_updated)),
+            "word_count" => hits.sort_by(|a, b| b.0.work.word_count.cmp(&a.0.work.word_count)),
+            _ => hits.sort_by(|a, b| b.1.cmp(&a.1)),
+        }
+        let mut out: Vec<_> = hits.into_iter().map(|(hit, _)| hit).collect();
+        if limit > 0 {
+            out.truncate(limit as usize);
+        }
+        Ok(out)
     }
 
     // -------------------------------------------------------------------

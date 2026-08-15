@@ -315,12 +315,31 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .to_string();
 
     // The bookmarker's own module carries a "Bookmarked by" byline naming
-    // the user the bookmark belongs to.
+    // the user the bookmark belongs to, plus the bookmark's date, the
+    // bookmarker's own tags, and the Rec symbol — all scoped under
+    // div.user so the work blurb's tags/datetime aren't picked up.
     let byline_sel = sel("div.user h5.byline a[href*='/users/']");
     let bookmarker = blurb
         .select(&byline_sel)
         .next()
         .map(|a| text(&a).trim().to_string())
+        .unwrap_or_default();
+
+    let tags_sel = sel("div.user ul.tags a.tag");
+    let tags: Vec<String> = blurb
+        .select(&tags_sel)
+        .map(|a| text(&a).trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let rec_sel = sel("div.user .rec");
+    let rec = blurb.select(&rec_sel).next().is_some();
+
+    let date_sel = sel("div.user p.datetime");
+    let date_bookmarked = blurb
+        .select(&date_sel)
+        .next()
+        .map(|el| text(&el).trim().to_string())
         .unwrap_or_default();
 
     // Try to parse the work blurb data (reuse existing helpers)
@@ -331,6 +350,9 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         ao3_bookmark_id,
         note,
         bookmarker,
+        tags,
+        rec,
+        date_bookmarked,
         work_summary,
     })
 }

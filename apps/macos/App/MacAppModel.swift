@@ -32,7 +32,13 @@ final class MacAppModel {
         self.search = MacSearchModel()
         // A new query throws away the previous results, so the filter that
         // targeted them goes too — the same rule every other list follows.
-        search.onNewQuery = { [weak self] in self?.listEmptied(.search) }
+        search.onNewQuery = { [weak self] in
+            guard let self else { return }
+            listEmptied(.search)
+            if !retainListFilters {
+                search.bookmarkListFilter = MacSearchModel.BookmarkListFilter()
+            }
+        }
     }
 
     var selectedWork: Work? {

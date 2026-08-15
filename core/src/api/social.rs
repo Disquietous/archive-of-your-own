@@ -316,7 +316,8 @@ impl AO3App {
                 let Some(w) = l.work_summary else { continue };
                 log_db("save_work", s.save_work(&w));
                 log_db("cache_fetched_bookmark",
-                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id, &l.note));
+                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
+                                                &l.note, &l.tags.join(", "), l.rec));
                 works.push(w);
             }
             log_db("commit listing save", tx.commit());

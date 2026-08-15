@@ -439,7 +439,7 @@ private struct SavedSearchSuggestionRow: View {
 
 /// Themed dropdown: a plain SwiftUI Button (whole control is clickable,
 /// custom chrome survives) that pops a native NSMenu anchored to itself.
-private struct DropdownControl: View {
+struct DropdownControl: View {
     @Bindable var theme: AppTheme
     let title: String
     let options: [(label: String, value: String, checked: Bool)]

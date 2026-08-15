@@ -211,7 +211,71 @@ pub struct BookmarkListing {
     /// AO3 username the blurb's "Bookmarked by" byline attributes the
     /// bookmark to; "" when the byline is absent.
     pub bookmarker: String,
+    /// The bookmarker's own tags on the bookmark (the user module's tag
+    /// links, distinct from the work's tags).
+    pub tags: Vec<String>,
+    /// True when the blurb carries the Rec symbol.
+    pub rec: bool,
+    /// The user module's datetime text ("10 Aug 2026"); "" when absent.
+    pub date_bookmarked: String,
     pub work_summary: Option<WorkSummary>,
+}
+
+/// One bookmark search hit: the bookmark's own fields plus the bookmarked
+/// work's blurb — what a bookmark listing row displays.
+#[derive(Debug, Clone)]
+pub struct BookmarkHit {
+    pub bookmarker: String,
+    pub note: String,
+    /// The bookmarker's own tags.
+    pub tags: Vec<String>,
+    pub rec: bool,
+    /// AO3's blurb date for remote hits ("10 Aug 2026"); the local row's
+    /// creation date ("YYYY-MM-DD") for library hits.
+    pub date_bookmarked: String,
+    pub work: WorkSummary,
+}
+
+/// AO3's /bookmarks/search form (bookmark_search[...] GET params). Every
+/// field is optional — "" / false means "don't filter" — so a blank record
+/// is an unfiltered search. The same record drives the library-scoped
+/// search over cached bookmark rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BookmarkSearchCriteria {
+    /// bookmark_search[bookmarkable_query] — any field on the work.
+    pub bookmarkable_query: String,
+    /// bookmark_search[other_tag_names] — comma-separated work tag names.
+    pub other_tag_names: String,
+    /// bookmark_search[bookmarkable_type] — "Work", "Series",
+    /// "External Work", or "" (any). Only work bookmarks are cached, so a
+    /// Series/External filter matches nothing locally.
+    pub bookmarkable_type: String,
+    /// bookmark_search[word_count] — AO3 numeric range syntax.
+    pub word_count: String,
+    /// bookmark_search[language_id] — AO3's language value for the remote
+    /// search (e.g. "en"); the library matcher compares it (and callers may
+    /// pass the display name instead) against the work's language name.
+    pub language_id: String,
+    /// bookmark_search[bookmarkable_date] — work's Date Updated expression.
+    pub bookmarkable_date: String,
+    /// bookmark_search[bookmark_query] — any field on the bookmark itself.
+    pub bookmark_query: String,
+    /// bookmark_search[other_bookmark_tag_names] — comma-separated
+    /// bookmarker's tag names.
+    pub other_bookmark_tag_names: String,
+    /// bookmark_search[bookmarker] — bookmarker username filter.
+    pub bookmarker: String,
+    /// bookmark_search[bookmark_notes] — text filter on the notes.
+    pub bookmark_notes: String,
+    /// bookmark_search[rec] — recs only.
+    pub rec: bool,
+    /// bookmark_search[with_notes] — bookmarks with notes only.
+    pub with_notes: bool,
+    /// bookmark_search[date] — Date Bookmarked expression.
+    pub date: String,
+    /// bookmark_search[sort_column] — "" (Best Match), "created_at" (Date
+    /// Bookmarked), "bookmarkable_date" (Date Updated), or "word_count".
+    pub sort_column: String,
 }
 
 /// One collection blurb from the /collections index (li.collection.blurb).

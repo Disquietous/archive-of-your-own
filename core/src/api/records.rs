@@ -217,6 +217,104 @@ impl From<UCollectionSearchCriteria> for CollectionSearchCriteria {
     }
 }
 
+/// AO3's /bookmarks/search criteria, mirroring the bookmark_search[...]
+/// form. Blank fields mean "don't filter", so a default record is an
+/// unfiltered search. The same record drives the library-scoped search
+/// over cached bookmarks — there, language carries the display name
+/// ("English") instead of AO3's code.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct UBookmarkSearchCriteria {
+    /// Any field on the work.
+    pub bookmarkable_query: String,
+    /// Comma-separated work tag names.
+    pub other_tag_names: String,
+    /// "Work", "Series", "External Work", or "" (any).
+    pub bookmarkable_type: String,
+    /// AO3 numeric range syntax.
+    pub word_count: String,
+    /// Language value ("en") for AO3 search; display name for library search.
+    pub language_id: String,
+    /// Work's Date Updated expression.
+    pub bookmarkable_date: String,
+    /// Any field on the bookmark itself.
+    pub bookmark_query: String,
+    /// Comma-separated bookmarker's tag names.
+    pub other_bookmark_tag_names: String,
+    /// Bookmarker username filter.
+    pub bookmarker: String,
+    /// Text filter on the bookmarker's notes.
+    pub bookmark_notes: String,
+    /// Recs only.
+    pub rec: bool,
+    /// Bookmarks with notes only.
+    pub with_notes: bool,
+    /// Date Bookmarked expression.
+    pub date: String,
+    /// "" (Best Match), "created_at", "bookmarkable_date", or "word_count".
+    pub sort_column: String,
+}
+
+impl From<UBookmarkSearchCriteria> for BookmarkSearchCriteria {
+    fn from(c: UBookmarkSearchCriteria) -> Self {
+        BookmarkSearchCriteria {
+            bookmarkable_query: c.bookmarkable_query,
+            other_tag_names: c.other_tag_names,
+            bookmarkable_type: c.bookmarkable_type,
+            word_count: c.word_count,
+            language_id: c.language_id,
+            bookmarkable_date: c.bookmarkable_date,
+            bookmark_query: c.bookmark_query,
+            other_bookmark_tag_names: c.other_bookmark_tag_names,
+            bookmarker: c.bookmarker,
+            bookmark_notes: c.bookmark_notes,
+            rec: c.rec,
+            with_notes: c.with_notes,
+            date: c.date,
+            sort_column: c.sort_column,
+        }
+    }
+}
+
+/// One bookmark search hit: the bookmark's own fields plus the bookmarked
+/// work's blurb.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UBookmarkHit {
+    /// Username the bookmark is attributed to (the library search reports
+    /// the lowercased account key).
+    pub bookmarker: String,
+    pub note: String,
+    /// The bookmarker's own tags.
+    pub tags: Vec<String>,
+    pub rec: bool,
+    /// AO3's blurb date for remote hits ("10 Aug 2026"); "YYYY-MM-DD" for
+    /// library hits.
+    pub date_bookmarked: String,
+    pub work: UWorkSummary,
+}
+
+impl From<BookmarkHit> for UBookmarkHit {
+    fn from(h: BookmarkHit) -> Self {
+        UBookmarkHit {
+            bookmarker: h.bookmarker,
+            note: h.note,
+            tags: h.tags,
+            rec: h.rec,
+            date_bookmarked: h.date_bookmarked,
+            work: UWorkSummary::from(h.work),
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UPagedBookmarks {
+    pub bookmarks: Vec<UBookmarkHit>,
+    pub has_next_page: bool,
+    /// Highest page number shown in the pagination bar (1 = no pagination).
+    pub total_pages: u32,
+    /// The listing's own total result count; None = unknown, never zero.
+    pub total_found: Option<u32>,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UPagedWorks {
     pub works: Vec<UWorkSummary>,

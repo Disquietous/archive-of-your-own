@@ -218,6 +218,90 @@ fn test_bookmarks() {
 }
 
 #[test]
+fn test_search_local_bookmarks_filtered() {
+    let db = open_test_db();
+    // Work 1: sample defaults — English, 12,345 words, tags Fluff/Angst,
+    // updated 2025-01-15. Work 2: German long-fic variant.
+    db.save_work(&sample_work(1)).unwrap();
+    let mut b = sample_work(2);
+    b.title = "Another Story".into();
+    b.tags = vec!["Slow Burn".into()];
+    b.word_count = 100_000;
+    b.language = "Deutsch".into();
+    b.date_updated = "2026-08-01".into();
+    db.save_work(&b).unwrap();
+
+    // Own bookmark on work 1 (rec, own tag); a fetched listing's bookmark
+    // by another user on work 2; a fetched bookmark whose work was never
+    // cached (must be skipped, not error).
+    db.add_bookmark(1, Some("great fic"), false).unwrap();
+    db.update_bookmark_details(1, "great fic", "Comfort Read", "", false, true).unwrap();
+    db.cache_fetched_bookmark("OtherUser", 2, 999, "note from a friend", "Favorite", false).unwrap();
+    db.cache_fetched_bookmark("OtherUser", 3, 1000, "work not cached", "", false).unwrap();
+
+    let ids = |c: &crate::models::BookmarkSearchCriteria| -> Vec<u64> {
+        db.search_local_bookmarks_filtered(c, 0).unwrap().iter().map(|h| h.work.id).collect()
+    };
+    type C = crate::models::BookmarkSearchCriteria;
+
+    // Blank criteria: every cached bookmark with a cached work.
+    let mut all = ids(&C::default());
+    all.sort();
+    assert_eq!(all, vec![1, 2]);
+
+    // Work-side criteria.
+    let mut c = C::default();
+    c.bookmarkable_query = "Another".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = C::default();
+    c.other_tag_names = "Fluff".into();
+    assert_eq!(ids(&c), vec![1]);
+    let mut c = C::default();
+    c.word_count = ">50000".into();
+    assert_eq!(ids(&c), vec![2]);
+    // Library language matching is by display name, case-insensitive.
+    let mut c = C::default();
+    c.language_id = "english".into();
+    assert_eq!(ids(&c), vec![1]);
+
+    // Bookmark-side criteria.
+    let mut c = C::default();
+    c.rec = true;
+    assert_eq!(ids(&c), vec![1]);
+    let mut c = C::default();
+    c.bookmark_notes = "friend".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = C::default();
+    c.bookmarker = "OtherUser".into();
+    assert_eq!(ids(&c), vec![2]);
+    let mut c = C::default();
+    c.other_bookmark_tag_names = "Comfort Read".into();
+    assert_eq!(ids(&c), vec![1]);
+    c.other_bookmark_tag_names = "Favorite".into();
+    assert_eq!(ids(&c), vec![2]);
+
+    // Hits carry the bookmark's own fields alongside the work blurb.
+    let mut c = C::default();
+    c.bookmarker = "OtherUser".into();
+    let hit = &db.search_local_bookmarks_filtered(&c, 0).unwrap()[0];
+    assert_eq!(hit.bookmarker, "otheruser");
+    assert_eq!(hit.note, "note from a friend");
+    assert_eq!(hit.tags, vec!["Favorite".to_string()]);
+    assert!(!hit.rec);
+    assert_eq!(hit.work.title, "Another Story");
+
+    // Only work bookmarks are cached — a Series filter matches nothing.
+    let mut c = C::default();
+    c.bookmarkable_type = "Series".into();
+    assert!(ids(&c).is_empty());
+
+    // Sort by word count, AO3-style descending.
+    let mut c = C::default();
+    c.sort_column = "word_count".into();
+    assert_eq!(ids(&c), vec![2, 1]);
+}
+
+#[test]
 fn test_reading_progress() {
     let db = open_test_db();
 
@@ -618,10 +702,10 @@ fn test_collection_bookmark_caching() {
     db.create_account("reader", "Reader", "").unwrap();
     db.set_active_account("reader").unwrap();
 
-    db.cache_fetched_bookmark("reader", 1, 111, "seen in a collection").unwrap();
-    db.cache_fetched_bookmark("SomeoneElse", 2, 222, "not mine").unwrap();
+    db.cache_fetched_bookmark("reader", 1, 111, "seen in a collection", "", false).unwrap();
+    db.cache_fetched_bookmark("SomeoneElse", 2, 222, "not mine", "", false).unwrap();
     // A byline-less blurb can't be attributed — nothing cached.
-    db.cache_fetched_bookmark("", 2, 333, "").unwrap();
+    db.cache_fetched_bookmark("", 2, 333, "", "", false).unwrap();
 
     // The account-scoped Bookmarks view sees only the user's own row,
     // which arrived AO3-synced with its id recorded.
@@ -631,7 +715,7 @@ fn test_collection_bookmark_caching() {
 
     // A locally edited note survives re-fetch; only the AO3 id refreshes.
     db.update_bookmark_note(1, "my edited note").unwrap();
-    db.cache_fetched_bookmark("Reader", 1, 444, "stale listing note").unwrap();
+    db.cache_fetched_bookmark("Reader", 1, 444, "stale listing note", "", false).unwrap();
     let (note, _, ao3_id) = db.get_bookmark_full(1).unwrap().unwrap();
     assert_eq!((note.as_str(), ao3_id), ("my edited note", Some(444)));
 

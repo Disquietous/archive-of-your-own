@@ -247,6 +247,19 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    /// Header filter for the bookmark search results — the work-list
+    /// fields plus the bookmark's own (bookmarked by, note, date).
+    private func bookmarksFilterButton() -> ToolButton {
+        let button = filterButton(key: "bookmark-search",
+                                  active: model.search.bookmarkListFilter.isActive) { [theme, model] in
+            AnyView(BookmarkListFilterView(theme: theme, model: model))
+        }
+        // A client-side sieve over the fetched rows — make sure it can't be
+        // mistaken for a server-side search refinement.
+        button.toolTip = "Filter the fetched results (this page only)"
+        return button
+    }
+
     private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
         let button = filterButton(key: "works-\(section)",
                                   active: model.workListFilter(for: section).isActive) { [theme, model] in
@@ -497,9 +510,24 @@ final class ReadPaneViewController: NSViewController {
     /// subtitle; the others report their own hit counts.
     private func scopeResultsSubtitle(_ search: MacSearchModel) -> String? {
         switch search.scope {
-        case .works, .bookmarks:
+        case .works:
             let parts = [model.searchDisplayTitle, search.resultsSubtitle].compactMap { $0 }
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case .bookmarks:
+            var parts: [String] = []
+            // Paged AO3 results carry the page position; library hits don't.
+            if case .bookmarkSearch = search.activeQuery {
+                parts.append(search.totalPages > 1
+                    ? "Page \(search.currentPage) of \(search.totalPages)"
+                    : "Page \(search.currentPage)")
+            }
+            if search.bookmarkListFilter.isActive {
+                parts.append("\(search.filteredBookmarkHits.count) of \(search.bookmarkHits.count) bookmarks")
+            } else {
+                let total = search.totalWorks.map(Int.init) ?? search.bookmarkHits.count
+                parts.append(total == 1 ? "1 bookmark" : "\(total) bookmarks")
+            }
+            return parts.joined(separator: " · ")
         case .tags:
             return search.tagHits.count == 1 ? "1 tag" : "\(search.tagHits.count) tags"
         case .users:
@@ -798,7 +826,7 @@ final class ReadPaneViewController: NSViewController {
                 return
             }
             if search.showingResults {
-                let worksStyle = search.scope == .works || search.scope == .bookmarks
+                let worksStyle = search.scope == .works
                 toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
                 let back = searchFormBackButton()
                 // The same arrow pops one level: to the collections hit
@@ -818,10 +846,17 @@ final class ReadPaneViewController: NSViewController {
                     toolbar.setTrailing(trailing)
                     show(mode: .searchResults)
                 } else {
-                    // AO3 collections results are paged like works results.
+                    // AO3 collections and bookmark results are paged like
+                    // works results.
                     var trailing: [NSView] = []
-                    if case .collectionsIndex = search.activeQuery {
+                    switch search.activeQuery {
+                    case .collectionsIndex, .bookmarkSearch:
                         trailing.append(makePagerHost())
+                    default:
+                        break
+                    }
+                    if search.scope == .bookmarks, search.hasSearched {
+                        trailing.append(bookmarksFilterButton())
                     }
                     trailing.append(searchSourceButton())
                     toolbar.setTrailing(trailing)

@@ -41,6 +41,63 @@ struct WorkListFilterView: View {
     }
 }
 
+/// Filter popover for the bookmark search results: the work-list fields
+/// (text, kudos/words, fandom and tag chips — tags match the work's or the
+/// bookmarker's) plus the bookmark's own fields: bookmarked by, note text,
+/// and date bookmarked.
+struct BookmarkListFilterView: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+
+    private var filter: Binding<MacSearchModel.BookmarkListFilter> {
+        Binding(get: { model.search.bookmarkListFilter },
+                set: { model.search.bookmarkListFilter = $0 })
+    }
+
+    var body: some View {
+        let _ = theme.uiFontScale  // track app text size so fonts refresh live
+        VStack(alignment: .leading, spacing: 10) {
+            ListFilterHeader(theme: theme, title: "Filter Bookmarks",
+                             clearEnabled: filter.wrappedValue.isActive) {
+                model.search.bookmarkListFilter = MacSearchModel.BookmarkListFilter()
+            }
+            FilterTextField(theme: theme, placeholder: "Title, author, or summary",
+                            text: filter.text)
+            HStack(spacing: 8) {
+                FilterTextField(theme: theme, placeholder: "Kudos (e.g. >1000)",
+                                text: filter.kudos)
+                FilterTextField(theme: theme, placeholder: "Words (e.g. <50000)",
+                                text: filter.words)
+            }
+
+            TokenFilterSection(theme: theme, label: "FANDOM",
+                               placeholder: "Type to add a fandom…",
+                               selected: filter.fandoms,
+                               allOptions: model.search.bookmarkFilterFandomPool)
+            TokenFilterSection(theme: theme, label: "TAGS (WORK OR BOOKMARK)",
+                               placeholder: "Type to add a tag…",
+                               selected: filter.tags,
+                               allOptions: model.search.bookmarkFilterTagPool)
+
+            Text("BOOKMARK")
+                .font(Font(MacFont.ui(10, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+                .padding(.top, 2)
+            FilterTextField(theme: theme, placeholder: "Bookmarked by",
+                            text: filter.bookmarker)
+            FilterTextField(theme: theme, placeholder: "Note text",
+                            text: filter.note)
+            FilterTextField(theme: theme, placeholder: "Date bookmarked (e.g. Aug 2026)",
+                            text: filter.date)
+            FilterRetentionToggle(theme: theme, model: model)
+        }
+        .padding(14)
+        .frame(width: 320)
+        .background(theme.surface)
+    }
+}
+
 /// The app-wide filter-retention switch, offered in every filter popover so
 /// the choice is at hand wherever a filter is set. Off, a filter is scoped
 /// to the list it was set on and clears when that list closes or changes to

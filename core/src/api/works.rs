@@ -247,7 +247,8 @@ impl AO3App {
                 let Some(w) = l.work_summary else { continue };
                 log_db("save_work", s.save_work(&w));
                 log_db("cache_fetched_bookmark",
-                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id, &l.note));
+                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
+                                                &l.note, &l.tags.join(", "), l.rec));
                 works.push(w);
             }
             log_debug!("collections",
@@ -263,6 +264,71 @@ impl AO3App {
                 total_works: found,
             })
         }).await
+    }
+
+    /// One page of AO3's /bookmarks/search under the bookmark_search[...]
+    /// criteria — full bookmark hits (bookmarker, their tags, note, rec,
+    /// date) with the work blurb embedded. Everything the listing showed is
+    /// cached like every other listing: the works, and the bookmark rows
+    /// attributed to whoever made them (series/external bookmarks are
+    /// skipped by the parser).
+    pub async fn search_bookmarks(&self, criteria: UBookmarkSearchCriteria, page: u32) -> Result<UPagedBookmarks, AO3Error> {
+        let criteria: BookmarkSearchCriteria = criteria.into();
+        self.run_on_runtime(move |client, storage| async move {
+            let (listings, has_next, total, found) = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "bookmark_search".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let criteria = criteria.clone();
+                    async move {
+                        client.read().await.search_bookmarks(&criteria, page).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let listing_count = listings.len();
+            let s = storage.lock().await;
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            let mut hits = Vec::new();
+            for l in listings {
+                let Some(w) = l.work_summary else { continue };
+                log_db("save_work", s.save_work(&w));
+                log_db("cache_fetched_bookmark",
+                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
+                                                &l.note, &l.tags.join(", "), l.rec));
+                hits.push(BookmarkHit {
+                    bookmarker: l.bookmarker,
+                    note: l.note,
+                    tags: l.tags,
+                    rec: l.rec,
+                    date_bookmarked: l.date_bookmarked,
+                    work: w,
+                });
+            }
+            log_debug!("search",
+                "search_bookmarks page {page}: parsed {listing_count} listing(s), {} with a work blurb ({} skipped: series/external/deleted) (has_next={has_next}, total_pages={total}) — saving works + bookmark rows",
+                hits.len(), listing_count - hits.len());
+            log_db("commit listing save", tx.commit());
+            Ok(UPagedBookmarks {
+                bookmarks: hits.into_iter().map(UBookmarkHit::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_found: found,
+            })
+        }).await
+    }
+
+    /// Cached bookmarks matching the full bookmark-search form — every
+    /// bookmark row the app has cached, each hit carrying the bookmark's
+    /// own fields plus its work's blurb. Blank criteria match everything.
+    /// No network.
+    pub fn search_library_bookmarks_filtered(
+        &self,
+        criteria: UBookmarkSearchCriteria,
+        limit: Option<u32>,
+    ) -> Result<Vec<UBookmarkHit>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.search_local_bookmarks_filtered(&criteria.into(), limit.unwrap_or(0))
+            .map_err(AO3Error::from)?
+            .into_iter().map(UBookmarkHit::from).collect())
     }
 
     /// The collection's /profile metadata and tags, fetched once and cached

@@ -704,12 +704,20 @@ mod comment_tests {
         assert_eq!(bookmarks[0].ao3_bookmark_id, 9000001);
         assert_eq!(bookmarks[0].bookmarker, "MockReader");
         assert_eq!(bookmarks[0].note, "A synthetic bookmarker note.");
+        // The bookmarker's own module: tags, rec symbol, and the bookmark's
+        // date — never the work blurb's tags or datetime.
+        assert_eq!(bookmarks[0].tags,
+                   vec!["Comfort Read".to_string(), "Reread".to_string()]);
+        assert!(bookmarks[0].rec);
+        assert_eq!(bookmarks[0].date_bookmarked, "10 Aug 2026");
         let work = bookmarks[0].work_summary.as_ref().expect("work blurb");
         assert_eq!(work.title, "Bookmarked Mock Work");
         assert_eq!(work.word_count, 7777);
         assert_eq!(bookmarks[1].work_id, 3000002);
         assert_eq!(bookmarks[1].bookmarker, "OtherReader");
         assert_eq!(bookmarks[1].note, "");
+        assert!(bookmarks[1].tags.is_empty());
+        assert!(!bookmarks[1].rec);
         assert_eq!(bookmarks[1].work_summary.as_ref().expect("work blurb").title,
                    "Second Bookmarked Work");
     }

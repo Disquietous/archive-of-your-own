@@ -579,18 +579,18 @@ impl Storage {
             && Self::revised_matches(&c.revised_at, &w.date_updated)
     }
 
-    fn contains_ci(hay: &str, needle: &str) -> bool {
+    pub(super) fn contains_ci(hay: &str, needle: &str) -> bool {
         hay.to_lowercase().contains(&needle.to_lowercase())
     }
 
-    fn any_ci(list: &[String], needle: &str) -> bool {
+    pub(super) fn any_ci(list: &[String], needle: &str) -> bool {
         list.iter().any(|s| Self::contains_ci(s, needle))
     }
 
     /// Comma-separated names: every entry must match a stored name
     /// (case-insensitive substring, so exact autocomplete picks and partial
     /// typing both work). Blank matches everything.
-    fn names_match(field: &str, stored: &[String]) -> bool {
+    pub(super) fn names_match(field: &str, stored: &[String]) -> bool {
         field.split(',')
             .map(str::trim)
             .filter(|name| !name.is_empty())
@@ -599,7 +599,7 @@ impl Storage {
 
     /// AO3 numeric range syntax: "500", ">500", "<500", ">=500", "<=500",
     /// "100-5000". Blank or unparseable expressions don't filter.
-    fn range_matches(expr: &str, value: u64) -> bool {
+    pub(super) fn range_matches(expr: &str, value: u64) -> bool {
         let expr: String = expr.chars().filter(|c| *c != ',' && !c.is_whitespace()).collect();
         if expr.is_empty() { return true; }
         let parsed = |s: &str| s.parse::<u64>().ok();
@@ -623,7 +623,7 @@ impl Storage {
     /// For relative expressions "<" means less time ago (more recent) and
     /// ">" longer ago, matching AO3; for absolute dates they mean plain
     /// before/after. Blank or unparseable expressions don't filter.
-    fn revised_matches(expr: &str, date_updated: &str) -> bool {
+    pub(super) fn revised_matches(expr: &str, date_updated: &str) -> bool {
         let expr = expr.trim();
         if expr.is_empty() { return true; }
         if date_updated.is_empty() { return false; }

@@ -469,6 +469,15 @@ final class RustBridge {
         return try await app.searchByTag(tag: tag, page: page)
     }
 
+    /// One page of AO3's /bookmarks/search under the form's criteria —
+    /// full bookmark hits (bookmarker, tags, note, rec, date) with the
+    /// work blurb embedded. Results are cached like every listing (works +
+    /// bookmark rows).
+    func searchBookmarks(criteria: UBookmarkSearchCriteria, page: UInt32 = 1) async throws -> UPagedBookmarks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.searchBookmarks(criteria: criteria, page: page)
+    }
+
     /// One page of the AO3 /collections index, optionally sorted/filtered
     /// with the index's collection_search criteria (nil = the plain index).
     func browseCollections(criteria: UCollectionSearchCriteria? = nil,
@@ -1061,6 +1070,14 @@ final class RustBridge {
 
     func searchLibraryCollections(_ term: String, limit: UInt32? = nil) -> [UCollection] {
         (try? app?.searchLibraryCollections(term: term, limit: limit)) ?? []
+    }
+
+    /// The bookmark-search form evaluated against every cached bookmark
+    /// row — full bookmark hits with the work blurb embedded; blank
+    /// criteria return the whole cache.
+    func searchLibraryBookmarksFiltered(_ criteria: UBookmarkSearchCriteria,
+                                        limit: UInt32? = nil) -> [UBookmarkHit] {
+        (try? app?.searchLibraryBookmarksFiltered(criteria: criteria, limit: limit)) ?? []
     }
 
     /// The collections sort/filter form evaluated against the cached

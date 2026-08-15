@@ -35,11 +35,14 @@ final class MacSearchModel {
     /// Query text for the non-works scopes (Works keeps the criteria form).
     var scopeQuery = ""
 
-    // Library-scope results. Works and Bookmarks reuse the works results
-    // list (appState.searchResults); these hold the other scopes' hits.
+    // Library-scope results. Works reuses the works results list
+    // (appState.searchResults); these hold the other scopes' hits.
     var tagHits: [UTagHit] = []
     var userHits: [String] = []
     var collectionHits: [UCollection] = []
+    /// Bookmark search hits (both sources): the bookmark's own fields plus
+    /// the work blurb, rendered as bookmark rows.
+    var bookmarkHits: [UBookmarkHit] = []
     /// Shown in the form when the scope+source combination can't run yet
     /// (AO3-side search for the non-works scopes).
     var scopeNotice: String?
@@ -86,6 +89,155 @@ final class MacSearchModel {
             sortDirection: collectionSortDirection)
     }
 
+    // MARK: - Bookmarks scope criteria (mirrors AO3's /bookmarks/search
+    // form; scopeQuery doubles as the "any field on work" query)
+
+    /// Comma-separated work tag names.
+    var bookmarkWorkTags = ""
+    /// "" (any), "Work", "Series", "External Work".
+    var bookmarkType = ""
+    /// AO3 numeric range syntax, e.g. ">10000".
+    var bookmarkWordCount = ""
+    /// AO3 language value ("en"); "" = any. Options come from the scraped
+    /// works form's language select.
+    var bookmarkLanguage = ""
+    /// Work's Date Updated expression.
+    var bookmarkDateUpdated = ""
+    /// Any field on the bookmark itself.
+    var bookmarkQuery = ""
+    /// Comma-separated bookmarker's tag names.
+    var bookmarkerTags = ""
+    var bookmarkBookmarker = ""
+    var bookmarkNotes = ""
+    var bookmarkRecOnly = false
+    var bookmarkWithNotesOnly = false
+    /// Date Bookmarked expression.
+    var bookmarkDate = ""
+    /// "" (Best Match), "created_at", "bookmarkable_date", "word_count".
+    var bookmarkSortColumn = "created_at"
+
+    /// The bookmarks form state as criteria for either source. AO3 wants
+    /// its language value ("en"); the library matches the language *name*
+    /// on cached works, so library mode translates the selected value to
+    /// its label via the scraped form's options.
+    func bookmarkCriteria(forLibrary: Bool) -> UBookmarkSearchCriteria {
+        var language = bookmarkLanguage
+        if forLibrary, !language.isEmpty {
+            language = formFields.first { $0.name.contains("[language_id]") }?
+                .options.first { $0.value == language }?
+                .label.trimmingCharacters(in: .whitespaces) ?? language
+        }
+        return UBookmarkSearchCriteria(
+            bookmarkableQuery: scopeQuery.trimmingCharacters(in: .whitespaces),
+            otherTagNames: bookmarkWorkTags.trimmingCharacters(in: .whitespaces),
+            bookmarkableType: bookmarkType,
+            wordCount: bookmarkWordCount.trimmingCharacters(in: .whitespaces),
+            languageId: language,
+            bookmarkableDate: bookmarkDateUpdated.trimmingCharacters(in: .whitespaces),
+            bookmarkQuery: bookmarkQuery.trimmingCharacters(in: .whitespaces),
+            otherBookmarkTagNames: bookmarkerTags.trimmingCharacters(in: .whitespaces),
+            bookmarker: bookmarkBookmarker.trimmingCharacters(in: .whitespaces),
+            bookmarkNotes: bookmarkNotes.trimmingCharacters(in: .whitespaces),
+            rec: bookmarkRecOnly,
+            withNotes: bookmarkWithNotesOnly,
+            date: bookmarkDate.trimmingCharacters(in: .whitespaces),
+            sortColumn: bookmarkSortColumn)
+    }
+
+    // MARK: - Bookmark results list filter (client-side sieve over the
+    // hits, the bookmark-results twin of the works lists' header filter)
+
+    struct BookmarkListFilter {
+        var text = ""
+        /// Numeric filters accepting ">" / "<" prefixes (plain number = at least).
+        var kudos = ""
+        var words = ""
+        /// Matches the work's tags or the bookmarker's own tags.
+        var tags: Set<String> = []
+        var fandoms: Set<String> = []
+        var bookmarker = ""
+        var note = ""
+        /// Substring over the displayed date ("10 Aug 2026" / "2026-08-10").
+        var date = ""
+        var isActive: Bool {
+            ![text, kudos, words, bookmarker, note, date]
+                .allSatisfy { $0.trimmingCharacters(in: .whitespaces).isEmpty }
+                || !tags.isEmpty || !fandoms.isEmpty
+        }
+    }
+
+    var bookmarkListFilter = BookmarkListFilter()
+
+    /// The hits after the header filter — what the results view renders.
+    var filteredBookmarkHits: [UBookmarkHit] {
+        let f = bookmarkListFilter
+        guard f.isActive else { return bookmarkHits }
+        return bookmarkHits.filter { Self.matches(f, $0) }
+    }
+
+    private static func matches(_ f: BookmarkListFilter, _ hit: UBookmarkHit) -> Bool {
+        func ci(_ hay: String, _ needle: String) -> Bool {
+            hay.localizedCaseInsensitiveContains(needle)
+        }
+        let text = f.text.trimmingCharacters(in: .whitespaces)
+        if !text.isEmpty {
+            let w = hit.work
+            if !(ci(w.title, text) || w.authors.contains { ci($0, text) } || ci(w.summary, text)) {
+                return false
+            }
+        }
+        if !Self.numberMatches(f.kudos, value: UInt64(hit.work.kudos)) { return false }
+        if !Self.numberMatches(f.words, value: hit.work.wordCount) { return false }
+        if !f.tags.isEmpty {
+            let all = hit.work.relationships + hit.work.characters + hit.work.tags + hit.tags
+            for tag in f.tags
+            where !all.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
+                return false
+            }
+        }
+        for fandom in f.fandoms
+        where !hit.work.fandoms.contains(where: { $0.caseInsensitiveCompare(fandom) == .orderedSame }) {
+            return false
+        }
+        let who = f.bookmarker.trimmingCharacters(in: .whitespaces)
+        if !who.isEmpty && !ci(hit.bookmarker, who) { return false }
+        let note = f.note.trimmingCharacters(in: .whitespaces)
+        if !note.isEmpty && !ci(hit.note, note) { return false }
+        let date = f.date.trimmingCharacters(in: .whitespaces)
+        if !date.isEmpty && !ci(hit.dateBookmarked, date) { return false }
+        return true
+    }
+
+    /// ">" / "<"-prefixed numeric expressions, plain number = at least —
+    /// the work-list filter grammar. Unparseable expressions don't filter.
+    private static func numberMatches(_ expr: String, value: UInt64) -> Bool {
+        let e = expr.filter { $0 != "," && !$0.isWhitespace }
+        guard !e.isEmpty else { return true }
+        if e.hasPrefix(">") {
+            guard let n = UInt64(e.dropFirst()) else { return true }
+            return value > n
+        }
+        if e.hasPrefix("<") {
+            guard let n = UInt64(e.dropFirst()) else { return true }
+            return value < n
+        }
+        guard let n = UInt64(e) else { return true }
+        return value >= n
+    }
+
+    /// Suggestion pools for the filter popover, drawn from the current
+    /// (pre-filter) hits — work tags of every category plus the
+    /// bookmarkers' own tags.
+    var bookmarkFilterTagPool: [String] {
+        Set(bookmarkHits.flatMap { $0.work.relationships + $0.work.characters + $0.work.tags + $0.tags })
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    var bookmarkFilterFandomPool: [String] {
+        Set(bookmarkHits.flatMap(\.work.fandoms))
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
     /// What the current results represent — the form's criteria, a tag
     /// (fandom card / tag pill), a collection's works (by URL slug), or
     /// the collections index under the collections form's criteria.
@@ -96,6 +248,7 @@ final class MacSearchModel {
         case collection(String)
         case collectionBookmarks(String)
         case collectionsIndex(UCollectionSearchCriteria)
+        case bookmarkSearch(UBookmarkSearchCriteria)
     }
 
     var activeQuery: ActiveQuery?
@@ -228,13 +381,22 @@ final class MacSearchModel {
     @MainActor
     func loadFormIfNeeded(_ appState: AppState) async {
         guard formFields.isEmpty else { return }
-        if let json = appState.bridge.getSessionCache(key: Self.dbFormKey, sessionId: Self.dbSessionID),
-           let fields = Self.decodeForm(json), !fields.isEmpty {
-            formFields = fields
-            applyDefaultLanguageIfUnset()
-            return
-        }
+        if loadCachedFormIfAvailable(appState) { return }
         await scrapeForm(appState)
+    }
+
+    /// Cache-only form load — no network, ever. The bookmarks form uses
+    /// this so its language options appear whenever the works form has
+    /// been scraped before, without triggering a fetch of its own.
+    @MainActor
+    @discardableResult
+    func loadCachedFormIfAvailable(_ appState: AppState) -> Bool {
+        guard formFields.isEmpty else { return true }
+        guard let json = appState.bridge.getSessionCache(key: Self.dbFormKey, sessionId: Self.dbSessionID),
+              let fields = Self.decodeForm(json), !fields.isEmpty else { return false }
+        formFields = fields
+        applyDefaultLanguageIfUnset()
+        return true
     }
 
     /// Default the language filter to the device's language. AO3's language
@@ -315,6 +477,7 @@ final class MacSearchModel {
         tagHits = []
         userHits = []
         collectionHits = []
+        bookmarkHits = []
         currentPage = 1
         hasNextPage = false
         totalPages = 1
@@ -335,11 +498,19 @@ final class MacSearchModel {
         case (.works, false):
             performSearch(appState)
         case (.works, true):
-            runLibraryWorksSearch(appState, criteria: libraryCriteria(), bookmarkedOnly: false)
+            runLibraryWorksSearch(appState, criteria: libraryCriteria())
         case (.bookmarks, true):
-            var criteria = Self.emptyLibraryCriteria()
-            criteria.query = scopeQuery
-            runLibraryWorksSearch(appState, criteria: criteria, bookmarkedOnly: true)
+            // The full bookmark-search form against the cached bookmark
+            // rows — hits render as bookmark rows, not plain works.
+            beginLibraryScopeResults(appState)
+            bookmarkHits = appState.bridge.searchLibraryBookmarksFiltered(bookmarkCriteria(forLibrary: true))
+            totalWorks = UInt32(bookmarkHits.count)
+        case (.bookmarks, false):
+            // AO3's /bookmarks/search under the same form — paged, so it
+            // runs through activeQuery like the works queries.
+            activeQuery = .bookmarkSearch(bookmarkCriteria(forLibrary: false))
+            beginNewQuery(appState)
+            Task { await fetch(page: 1, appState: appState) }
         case (.tags, true):
             beginLibraryScopeResults(appState)
             tagHits = appState.bridge.searchLibraryTags(scopeQuery)
@@ -355,7 +526,7 @@ final class MacSearchModel {
             activeQuery = .collectionsIndex(collectionCriteria())
             beginNewQuery(appState)
             Task { await fetch(page: 1, appState: appState) }
-        case (.bookmarks, false), (.tags, false), (.users, false):
+        case (.tags, false), (.users, false):
             scopeNotice = "Searching AO3 for \(scope.rawValue.lowercased()) isn't available yet — switch the source toggle to search your library."
         }
     }
@@ -418,19 +589,15 @@ final class MacSearchModel {
         return c
     }
 
-    /// Library mode for Works and Bookmarks: evaluate the form's criteria
-    /// against the cached works and reuse the works results pane. No
-    /// pagination — the library returns everything at once (activeQuery
-    /// stays nil so the pager stays inert).
+    /// Library mode for Works: evaluate the form's criteria against the
+    /// cached works and reuse the works results pane. No pagination — the
+    /// library returns everything at once (activeQuery stays nil so the
+    /// pager stays inert).
     @MainActor
-    private func runLibraryWorksSearch(_ appState: AppState,
-                                       criteria: ULibrarySearchCriteria,
-                                       bookmarkedOnly: Bool) {
-        var works = appState.bridge.searchLibraryWorksFiltered(criteria).map(AppState.workFromSummary)
-        if bookmarkedOnly {
-            works = works.filter { appState.bookmarkedWorkIDs.contains($0.id) }
-        }
-        presentLibraryWorks(works, appState: appState)
+    private func runLibraryWorksSearch(_ appState: AppState, criteria: ULibrarySearchCriteria) {
+        presentLibraryWorks(
+            appState.bridge.searchLibraryWorksFiltered(criteria).map(AppState.workFromSummary),
+            appState: appState)
     }
 
     /// Land a library (no-network) result set in the works results pane.
@@ -461,6 +628,11 @@ final class MacSearchModel {
         tagHits = []
         userHits = []
         collectionHits = []
+        bookmarkHits = []
+        currentPage = 1
+        hasNextPage = false
+        totalPages = 1
+        totalWorks = nil
         hasSearched = true
         showingResults = true
     }
@@ -669,6 +841,18 @@ final class MacSearchModel {
                 applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
                     try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
                 }, page: page, appState: appState)
+            case .bookmarkSearch(let criteria):
+                let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                    try await appState.bridge.searchBookmarks(criteria: criteria, page: page)
+                }
+                bookmarkHits = result.bookmarks
+                totalWorks = result.totalFound
+                currentPage = page
+                hasNextPage = result.hasNextPage
+                totalPages = max(result.totalPages, page)
+                // Fetched works are persisted by the Rust layer — refresh
+                // the library snapshot so they join local lists at once.
+                appState.reloadCachedWorks()
             case .collectionsIndex(let criteria):
                 let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
                     try await appState.bridge.browseCollections(criteria: criteria, page: page)

@@ -49,6 +49,10 @@ struct ScopeSearchFormView: View {
                     collectionsCriteria(search)
                 }
 
+                if search.scope == .bookmarks {
+                    bookmarksCriteria(search)
+                }
+
                 if let notice = search.scopeNotice {
                     HStack(spacing: 8) {
                         Image(systemName: "info.circle")
@@ -76,6 +80,13 @@ struct ScopeSearchFormView: View {
             .frame(maxWidth: .infinity)
         }
         .onAppear { focused = true }
+        .task(id: search.scope) {
+            // The bookmarks form borrows the works form's language options —
+            // cache-only, never a fetch of its own.
+            if search.scope == .bookmarks {
+                search.loadCachedFormIfAvailable(appState)
+            }
+        }
     }
 
     // MARK: - Collections criteria (mirrors AO3's /collections filter form)
@@ -107,6 +118,128 @@ struct ScopeSearchFormView: View {
         pillRow("Sort direction",
                 options: [("desc", "Descending"), ("asc", "Ascending")],
                 selection: Bindable(search).collectionSortDirection)
+    }
+
+    // MARK: - Bookmarks criteria (mirrors AO3's /bookmarks/search form)
+
+    /// The query field above doubles as the form's "any field on work"
+    /// query; everything else follows the site's three fieldsets —
+    /// bookmarked item, the bookmark itself, and sort.
+    @ViewBuilder
+    private func bookmarksCriteria(_ search: MacSearchModel) -> some View {
+        TagTokenField(theme: theme, appState: appState,
+                      label: "Work tags", tagType: "",
+                      value: Bindable(search).bookmarkWorkTags)
+        pillRow("Type", options: [("", "Any"), ("Work", "Work"), ("Series", "Series"),
+                                  ("External Work", "External Work")],
+                selection: Bindable(search).bookmarkType)
+        textRow("Word count", placeholder: "e.g. >10000 or 1000-5000",
+                text: Bindable(search).bookmarkWordCount)
+        languageRow(search)
+        textRow("Date updated", placeholder: "e.g. < 2 weeks ago or 2025",
+                text: Bindable(search).bookmarkDateUpdated)
+
+        sectionHeader("Bookmark")
+        textRow("Any field on bookmark", placeholder: "Notes, tags…",
+                text: Bindable(search).bookmarkQuery)
+        TagTokenField(theme: theme, appState: appState,
+                      label: "Bookmarker's tags", tagType: "",
+                      value: Bindable(search).bookmarkerTags)
+        textRow("Bookmarker", placeholder: "Username…",
+                text: Bindable(search).bookmarkBookmarker)
+        textRow("Notes", placeholder: "Text in the bookmarker's notes…",
+                text: Bindable(search).bookmarkNotes)
+        togglePillRow("Bookmark type", toggles: [
+            ("Rec", Bindable(search).bookmarkRecOnly),
+            ("With notes", Bindable(search).bookmarkWithNotesOnly)])
+        textRow("Date bookmarked", placeholder: "e.g. < 1 month ago",
+                text: Bindable(search).bookmarkDate)
+
+        sectionHeader("Search")
+        pillRow("Sort by",
+                options: [("", "Best Match"), ("created_at", "Date Bookmarked"),
+                          ("bookmarkable_date", "Date Updated"), ("word_count", "Word Count")],
+                selection: Bindable(search).bookmarkSortColumn)
+    }
+
+    /// The work-language dropdown, populated from the scraped works form's
+    /// language select (the two forms share AO3's language list). Hidden
+    /// until the works criteria have been scraped at least once.
+    @ViewBuilder
+    private func languageRow(_ search: MacSearchModel) -> some View {
+        if let field = search.formFields.first(where: { $0.name.contains("[language_id]") }) {
+            let current = search.bookmarkLanguage
+            let title = field.options.first { $0.value == current }
+                .map { $0.label.trimmingCharacters(in: .whitespaces) }
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "Any"
+            VStack(alignment: .leading, spacing: 5) {
+                criteriaLabel("Work language")
+                DropdownControl(
+                    theme: theme, title: title,
+                    options: field.options.map { option in
+                        let label = option.label.trimmingCharacters(in: .whitespaces)
+                        return (label: label.isEmpty ? "Any" : label,
+                                value: option.value,
+                                checked: option.value == current)
+                    },
+                    onPick: { search.bookmarkLanguage = $0 })
+            }
+        }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider().padding(.top, 4)
+            Text(title.uppercased())
+                .font(Font(MacFont.ui(10.5, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink2)
+        }
+    }
+
+    /// A labeled single-line text criterion; Return runs the search like
+    /// the query field.
+    private func textRow(_ title: String, placeholder: String,
+                         text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            criteriaLabel(title)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(Font(MacFont.ui(12.5)))
+                .foregroundStyle(theme.ink)
+                .onSubmit { model.search.performScopedSearch(appState) }
+                .padding(.horizontal, 10)
+                .frame(height: 30)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+        }
+    }
+
+    /// Independent on/off pills (checkbox semantics) in the capsule grammar
+    /// pillRow uses for its radio semantics.
+    private func togglePillRow(_ title: String,
+                               toggles: [(label: String, isOn: Binding<Bool>)]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            criteriaLabel(title)
+            FlowLayout(spacing: 6) {
+                ForEach(Array(toggles.enumerated()), id: \.offset) { _, toggle in
+                    let on = toggle.isOn.wrappedValue
+                    Button {
+                        toggle.isOn.wrappedValue.toggle()
+                    } label: {
+                        Text(toggle.label)
+                            .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                            .foregroundStyle(on ? theme.onAccent : theme.ink2)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(on ? theme.accent : theme.surface2)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     private func criteriaLabel(_ text: String) -> some View {
@@ -241,7 +374,23 @@ struct ScopeResultsView: View {
             ForEach(search.collectionHits, id: \.name) { collection in
                 collectionRow(collection)
             }
-        case .works, .bookmarks:
+        case .bookmarks:
+            let hits = search.filteredBookmarkHits
+            if hits.isEmpty {
+                if search.bookmarkListFilter.isActive && !search.bookmarkHits.isEmpty {
+                    EmptyStateMac(
+                        theme: theme, icon: "line.3.horizontal.decrease.circle",
+                        title: "No bookmarks match the filter",
+                        message: "Adjust or clear the header filter to see the results again.")
+                        .frame(minHeight: 240)
+                } else {
+                    emptyState
+                }
+            }
+            ForEach(Array(hits.enumerated()), id: \.offset) { _, hit in
+                bookmarkRow(hit)
+            }
+        case .works:
             EmptyView() // works results render in the works table, not here
         }
     }
@@ -336,6 +485,122 @@ struct ScopeResultsView: View {
         }
         .buttonStyle(.plain)
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+    }
+
+    /// A bookmark hit laid out like a work list item: bookmarked-by/date in
+    /// the top-right corner, tag pill lists (work tags, then the
+    /// bookmarker's accented tags), kudos/words/chapters meta at the
+    /// bottom. Clicking opens the work; clicking a tag block expands it.
+    private func bookmarkRow(_ hit: UBookmarkHit) -> some View {
+        Button {
+            model.openWorkByID(String(hit.work.id))
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "bookmark")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18)
+                    .foregroundStyle(theme.accent)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 4) {
+                    // Top-right corner (the work row's dates slot) splits
+                    // across the first two lines so it never grows taller
+                    // than the title+byline block: bookmarked-by rides the
+                    // title line, the date rides the author line.
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(hit.work.title)
+                            .font(Font(MacFont.ui(14, weight: .semibold)))
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(2)
+                        Spacer(minLength: 8)
+                        HStack(spacing: 5) {
+                            if hit.rec {
+                                Text("REC")
+                                    .font(Font(MacFont.ui(9.5, weight: .bold)))
+                                    .kerning(0.5)
+                                    .foregroundStyle(theme.onAccent)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .background(theme.accent)
+                                    .clipShape(Capsule())
+                            }
+                            Text(hit.bookmarker.isEmpty
+                                ? "Bookmarked" : "Bookmarked by \(hit.bookmarker)")
+                                .lineLimit(1)
+                        }
+                        .font(Font(MacFont.ui(10, weight: .medium)))
+                        .foregroundStyle(theme.ink3)
+                        .padding(.top, 2)
+                    }
+                    if !authorLine(hit.work).isEmpty || !hit.dateBookmarked.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(authorLine(hit.work))
+                                .font(Font(MacFont.ui(12)))
+                                .foregroundStyle(theme.ink3)
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            if !hit.dateBookmarked.isEmpty {
+                                Text(hit.dateBookmarked)
+                                    .font(Font(MacFont.ui(10, weight: .medium)))
+                                    .foregroundStyle(theme.ink3)
+                            }
+                        }
+                    }
+                    if !fandomLine(hit.work).isEmpty {
+                        Text(fandomLine(hit.work))
+                            .font(Font(MacFont.ui(12)))
+                            .foregroundStyle(theme.ink3)
+                            .lineLimit(1)
+                    }
+                    let workTags = Self.sortedTags(
+                        hit.work.relationships + hit.work.characters + hit.work.tags)
+                    if !workTags.isEmpty {
+                        CollapsibleTagPills(theme: theme, tags: workTags)
+                    }
+                    if !hit.tags.isEmpty {
+                        CollapsibleTagPills(theme: theme, tags: Self.sortedTags(hit.tags),
+                                            accented: true)
+                    }
+                    if !hit.note.isEmpty {
+                        Text(hit.note)
+                            .font(Font(MacFont.ui(12)))
+                            .foregroundStyle(theme.ink2)
+                            .lineLimit(3)
+                    }
+                    Text(bookmarkWorkMeta(hit.work))
+                        .font(Font(MacFont.ui(11, weight: .medium)))
+                        .foregroundStyle(theme.ink3)
+                        .lineLimit(1)
+                        .padding(.top, 2)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.ink3)
+                    .padding(.top, 2)
+            }
+            .padding(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
+    }
+
+    /// Alphabetical, like the work list item's tag block.
+    private static func sortedTags(_ tags: [String]) -> [String] {
+        tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    private func authorLine(_ work: UWorkSummary) -> String {
+        work.authors.isEmpty ? "" : "by \(work.authors.joined(separator: ", "))"
+    }
+
+    private func fandomLine(_ work: UWorkSummary) -> String {
+        work.fandoms.prefix(2).joined(separator: ", ")
+    }
+
+    /// The work row's bottom meta line: kudos, words, chapter progress.
+    private func bookmarkWorkMeta(_ work: UWorkSummary) -> String {
+        let total = work.complete ? String(work.totalChapters) : "?"
+        return "♥ \(Fmt.k(Int(work.kudos)))   \(Fmt.k(Int(work.wordCount))) words   \(work.chapterCount)/\(total)"
     }
 
     private func collectionMeta(_ collection: UCollection) -> String {
