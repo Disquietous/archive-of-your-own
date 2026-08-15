@@ -14,15 +14,6 @@ extension ListPaneViewController {
         return eye
     }
 
-    func browseRefreshButton() -> ToolButton {
-        let button = refreshButton ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Refresh") { [weak self] in
-            guard let self else { return }
-            Task { await self.appState.browseLatestWorks(force: true) }
-        }
-        refreshButton = button
-        return button
-    }
-
     func searchGoButton() -> ToolButton {
         let button = searchButton ?? ToolButton(theme: theme, symbol: "magnifyingglass", tooltip: "Search") { [weak self] in
             guard let self else { return }
@@ -47,6 +38,48 @@ extension ListPaneViewController {
             self?.confirmRemoveAllReading()
         }
         removeAllButton = button
+        return button
+    }
+
+    /// Author view: back to whatever the author was opened from — the
+    /// Authors list, a work detail, search results, or Following.
+    func authorBackButton() -> ToolButton {
+        let button = authorBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back") { [weak self] in
+            self?.model.closeAuthorWorks()
+        }
+        authorBackBtn = button
+        return button
+    }
+
+    /// Author view: refetch the user's profile from AO3, bypassing the
+    /// cached copy's freshness window.
+    func authorProfileRefreshButton(username: String) -> ToolButton {
+        let button = authorProfileRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                           tooltip: "Refresh profile from AO3") { [weak self] in
+            guard let self, let user = model.authorUsername else { return }
+            Task { @MainActor in await self.appState.loadUserProfile(user, forceRefresh: true) }
+        }
+        authorProfileRefreshBtn = button
+        button.isEnabled = !appState.isLoadingUserProfile(username)
+        return button
+    }
+
+    /// Author view: the same follow bell as the work detail's byline —
+    /// toggles the device-local follow that lists the author under Authors.
+    func authorFollowButton(username: String) -> ToolButton {
+        let button = authorFollowBtn ?? ToolButton(theme: theme, symbol: "bell", tooltip: "Follow") { [weak self] in
+            guard let self, let user = model.authorUsername else { return }
+            if model.followedAuthorNames.contains(user) {
+                model.unfollowAuthor(user)
+            } else {
+                model.followAuthor(user)
+            }
+        }
+        authorFollowBtn = button
+        let following = model.followedAuthorNames.contains(username)
+        button.setSymbol(following ? "bell.fill" : "bell")
+        button.tintOverride = following ? theme.nsAccent : nil
+        button.toolTip = following ? "Unfollow" : "Follow"
         return button
     }
 

@@ -97,6 +97,9 @@ impl AO3App {
                             .map_err(AO3Error::from)
                     }
                 }).await?;
+            log_debug!("collections",
+                "browse_collections page {page}: parsed {} blurb(s) (has_next={has_next}, total_pages={total}) — saving",
+                collections.len());
             {
                 let s = storage.lock().await;
                 log_db("save_collections", s.save_collections(&collections));
@@ -200,6 +203,9 @@ impl AO3App {
                         client.read().await.fetch_collection_works(&name, page).await.map_err(AO3Error::from)
                     }
                 }).await?;
+            log_debug!("collections",
+                "fetch_collection_works '{slug}' page {page}: parsed {} work(s) (has_next={has_next}, total_pages={total}) — saving works + collection_works links",
+                works.len());
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             for w in &works { log_db("save_work", s.save_work(w)); }
@@ -233,6 +239,7 @@ impl AO3App {
                         client.read().await.fetch_collection_bookmarks(&name, page).await.map_err(AO3Error::from)
                     }
                 }).await?;
+            let listing_count = listings.len();
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             let mut works = Vec::new();
@@ -243,6 +250,9 @@ impl AO3App {
                        s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id, &l.note));
                 works.push(w);
             }
+            log_debug!("collections",
+                "fetch_collection_bookmarks '{slug}' page {page}: parsed {listing_count} listing(s), {} with a work blurb ({} skipped: series/external/deleted) (has_next={has_next}, total_pages={total}) — saving works + bookmark rows + collection_bookmarks links",
+                works.len(), listing_count - works.len());
             let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
             log_db("save_collection_bookmarks", s.add_collection_bookmarks(&slug, &ids));
             log_db("commit listing save", tx.commit());
@@ -265,8 +275,16 @@ impl AO3App {
                 let s = storage.lock().await;
                 if s.collection_profile_cached(&slug).map_err(AO3Error::from)? {
                     if let Some(cached) = s.get_collection(&slug).map_err(AO3Error::from)? {
+                        log_debug!("collections",
+                            "ensure_collection_profile '{slug}': cache hit ({} tag(s), works={}, bookmarks={}) — no fetch",
+                            cached.tags.len(), cached.work_count, cached.bookmarked_count);
                         return Ok(UCollection::from(cached));
                     }
+                    log_error!("collections",
+                        "ensure_collection_profile '{slug}': profile_fetched_at is stamped but the row failed to read back — re-fetching");
+                } else {
+                    log_debug!("collections",
+                        "ensure_collection_profile '{slug}': no cached profile — fetching /profile");
                 }
             }
             let profile = with_recovery(
@@ -278,6 +296,9 @@ impl AO3App {
                         client.read().await.fetch_collection_profile(&name).await.map_err(AO3Error::from)
                     }
                 }).await?;
+            log_debug!("collections",
+                "ensure_collection_profile '{}': fetched profile (title='{}', {} tag(s), type='{}') — saving",
+                profile.name, profile.title, profile.tags.len(), profile.collection_type);
             let s = storage.lock().await;
             log_db("save_collection_profile", s.save_collection_profile(&profile));
             // Return the merged row (profile zeroes keep the blurb's counts).

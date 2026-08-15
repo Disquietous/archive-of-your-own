@@ -428,6 +428,20 @@ final class RustBridge {
         return try await app.fetchAuthorWorks(username: username, pseud: pseud, page: page)
     }
 
+    /// One page of a user's public bookmarks — works and bookmarker-scoped
+    /// bookmark rows are cached by the core.
+    func fetchUserBookmarksPage(username: String, page: UInt32 = 1) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchUserBookmarksPage(username: username, page: page)
+    }
+
+    /// One page of a user's collections — blurbs (tags included) are cached
+    /// by the core like the public index.
+    func fetchUserCollections(username: String, page: UInt32 = 1) async throws -> UCollectionsPage {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchUserCollections(username: username, page: page)
+    }
+
     func fetchSeriesWorksPaged(seriesId: UInt64, page: UInt32 = 1) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchSeriesWorksPaged(seriesId: seriesId, page: page)

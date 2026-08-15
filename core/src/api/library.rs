@@ -208,7 +208,7 @@ impl AO3App {
             let mut page = 1u32;
             loop {
                 let username_for_fetch = username.clone();
-                let (listings, has_more) = with_recovery(
+                let (listings, has_more, _, _) = with_recovery(
                     client.clone(), storage.clone(), OpKind::Fetch { label: "bookmarks".to_string() }, RetrySafety::Idempotent,
                     move |client| {
                         let username = username_for_fetch.clone();

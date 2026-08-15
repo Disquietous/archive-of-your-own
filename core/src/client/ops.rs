@@ -340,17 +340,31 @@ impl AO3Client {
     // -- Bookmark operations -------------------------------------------------
 
     /// Fetch a page of user bookmarks.
-    /// Returns (bookmarks, has_more_pages).
+    /// Returns (bookmarks, has_next_page, total_pages, total_found).
     pub async fn fetch_user_bookmarks(
         &self,
         username: &str,
         page: u32,
-    ) -> Result<(Vec<crate::models::BookmarkListing>, bool), AppError> {
+    ) -> Result<(Vec<crate::models::BookmarkListing>, bool, u32, Option<u32>), AppError> {
         let url = format!("{BASE_URL}/users/{username}/bookmarks?page={page}");
         let html = self.fetch(&url).await?;
         let bookmarks = parser::parse_bookmark_listings(&html)?;
-        let has_more = parser::has_next_page(&html);
-        Ok((bookmarks, has_more))
+        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
+            parser::parse_results_total(&html)))
+    }
+
+    /// One page of a user's collections (/users/{name}/collections — the
+    /// same blurb markup as the public /collections index).
+    /// Returns (collections, has_next_page, total_pages).
+    pub async fn fetch_user_collections(
+        &self,
+        username: &str,
+        page: u32,
+    ) -> Result<(Vec<CollectionSummary>, bool, u32), AppError> {
+        let url = format!("{BASE_URL}/users/{}/collections?page={page}", urlencoded(username));
+        let html = self.fetch(&url).await?;
+        let collections = parser::parse_collections_page(&html)?;
+        Ok((collections, parser::has_next_page(&html), parser::total_pages(&html)))
     }
 
     /// Create a bookmark on AO3, mirroring the site's form exactly

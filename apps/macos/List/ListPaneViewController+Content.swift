@@ -8,7 +8,7 @@ extension ListPaneViewController {
         variantHost?.removeFromSuperview()
         variantHost = nil
 
-        // Swap the pane header (tag chips for browse).
+        // Swap the pane header (tag chips).
         if chipsHost !== header {
             chipsHost?.removeFromSuperview()
         }
@@ -208,13 +208,41 @@ extension ListPaneViewController {
         }
     }
 
+    /// The drilled-in author's profile card in this pane (the reading pane
+    /// shows their works / bookmarks / collections beside it). The AppKit
+    /// controller is kept for the pane's lifetime and re-pointed; its view
+    /// rides the variantHost slot so every other content path tears it down.
+    func showAuthorProfileContent(username: String, activePane: MacAppModel.AuthorPane) {
+        chipsHost?.removeFromSuperview()
+        scrollView.removeFromSuperview()
+        overlayHost?.removeFromSuperview()
+        overlayHost = nil
+        let controller = authorProfileController ?? {
+            let controller = AuthorProfileViewController(theme: theme, appState: appState)
+            controller.onOpenList = { [weak self] username, pane in
+                self?.model.showAuthorPane(username, pane)
+            }
+            addChild(controller)
+            return controller
+        }()
+        authorProfileController = controller
+        if variantHost !== controller.view {
+            variantHost?.removeFromSuperview()
+            contentStack.addArrangedSubview(controller.view)
+            controller.view.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+            variantHost = controller.view
+        }
+        controller.configure(username: username, activePane: activePane)
+    }
+
     func showVariant(_ content: some View, section: MacAppModel.Section) {
         chipsHost?.removeFromSuperview()
         scrollView.removeFromSuperview()
         overlayHost?.removeFromSuperview()
         overlayHost = nil
-        // Rebuild the host when the section changes; re-render otherwise.
-        if renderedSection != section || variantHost == nil {
+        // Rebuild the host when the section changes or when the slot holds
+        // something that isn't a hosting view (the author profile card).
+        if renderedSection != section || !(variantHost is NSHostingView<AnyView>) {
             variantHost?.removeFromSuperview()
             let host = NSHostingView(rootView: AnyView(content))
             contentStack.addArrangedSubview(host)

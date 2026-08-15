@@ -52,6 +52,8 @@ final class MacSearchModel {
         scope = s
         scopeNotice = nil
         showingResults = false
+        canReturnToCollectionHits = false
+        collectionReturnQuery = nil
         closeSplitCollection()
     }
 
@@ -115,6 +117,15 @@ final class MacSearchModel {
     /// split closes so its pager keeps working.
     private var splitReturnQuery: ActiveQuery?
 
+    /// Set while a single-pane collection drill-in was opened from the
+    /// collections hit list: the results back arrow pops back to that
+    /// list (splitReturnQuery's counterpart for the no-split case) before
+    /// a second press reaches the form.
+    private(set) var canReturnToCollectionHits = false
+    /// The hit list's query, restored on that pop so its pager keeps
+    /// working (nil for library hit lists, whose pager is inert).
+    private var collectionReturnQuery: ActiveQuery?
+
     var bookmarkResults: [Work] = []
     var bookmarksPage: UInt32 = 1
     var bookmarksHasNext = false
@@ -136,9 +147,18 @@ final class MacSearchModel {
         bookmarksError = nil
     }
 
-    /// The results header's back arrow: back to the initiating tab's form.
+    /// The results header's back arrow: one level out — back to the
+    /// collections hit list when a drill-in came from one, back to the
+    /// initiating tab's form otherwise.
     @MainActor
     func returnToForm() {
+        if canReturnToCollectionHits {
+            canReturnToCollectionHits = false
+            activeQuery = collectionReturnQuery
+            collectionReturnQuery = nil
+            if let originScope { scope = originScope }
+            return
+        }
         if let originScope { scope = originScope }
         showingResults = false
         closeSplitCollection()
@@ -287,6 +307,8 @@ final class MacSearchModel {
     @MainActor
     private func beginNewQuery(_ appState: AppState) {
         onNewQuery?()
+        canReturnToCollectionHits = false
+        collectionReturnQuery = nil
         appState.searchResults = []
         appState.searchError = nil
         appState.isSearching = true
@@ -417,6 +439,8 @@ final class MacSearchModel {
     @MainActor
     private func presentLibraryWorks(_ works: [Work], appState: AppState) {
         onNewQuery?()
+        canReturnToCollectionHits = false
+        collectionReturnQuery = nil
         activeQuery = nil
         appState.searchError = nil
         appState.searchResults = works
@@ -481,11 +505,17 @@ final class MacSearchModel {
     /// AO3 mode splits the results view — works pane and bookmarks pane,
     /// first pages loaded simultaneously, paged independently. A
     /// bookmarks-only collection pages its /bookmarks listing in the
-    /// single results pane instead.
+    /// single results pane instead. `fromHitList` marks a drill-in from
+    /// the collections hit list: the single-pane paths then keep the hit
+    /// list behind the results so the back arrow pops to it (the split
+    /// paths already do, via splitReturnQuery).
     @MainActor
     func startCollectionQuery(_ name: String, title: String = "",
                               workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0,
+                              fromHitList: Bool = false,
                               appState: AppState) {
+        let hitListQuery = activeQuery
+        let hits = collectionHits
         if searchLibraryOnly {
             let works = appState.bridge.getLibraryCollectionWorks(name: name)
                 .map(AppState.workFromSummary)
@@ -495,6 +525,11 @@ final class MacSearchModel {
                 originScope = scope
                 scope = .works
                 presentLibraryWorks(works.isEmpty ? bookmarks : works, appState: appState)
+                if fromHitList {
+                    collectionHits = hits
+                    collectionReturnQuery = hitListQuery
+                    canReturnToCollectionHits = true
+                }
                 return
             }
             // Library split: both panes land at once from the cache, the
@@ -554,6 +589,11 @@ final class MacSearchModel {
             activeQuery = (workCount == 0 && bookmarkedCount > 0)
                 ? .collectionBookmarks(name) : .collection(name)
             beginNewQuery(appState)
+            if fromHitList {
+                collectionHits = hits
+                collectionReturnQuery = hitListQuery
+                canReturnToCollectionHits = true
+            }
             Task { await fetch(page: 1, appState: appState) }
         }
         // Cache the collection's profile metadata + tags. This is the one

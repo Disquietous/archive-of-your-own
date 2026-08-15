@@ -46,6 +46,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(nil)
         mainWindowController = controller
 
+        // Closing the main window quits the app. The log viewers are
+        // accessories to it — close them here so they can't hold the app
+        // open past the last-window-closed termination rule.
+        if let mainWindow = controller.window {
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: mainWindow, queue: .main
+            ) { [weak self] _ in
+                self?.requestLogWindowController?.close()
+                self?.debugLogWindowController?.close()
+            }
+        }
+
         setupAutoLock()
         setupScrollShortcuts()
     }
@@ -200,7 +212,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("History", .history, "3"),
         ("Fandoms", .fandoms, "4"),
         ("Authors", .authors, "5"),
-        ("Browse", .browse, "6"),
         ("What\u{2019}s New", .whatsNew, "7"),
         ("Subscriptions", .subscriptions, ""),
         ("Inbox", .inbox, "8"),

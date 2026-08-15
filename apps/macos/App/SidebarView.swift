@@ -31,10 +31,8 @@ struct SidebarView: View {
                     topGroup
                     group("Discover") {
                         item(.fandoms, "flame", "Fandoms", count: model.followedFandoms.count)
-                        item(.collections, "square.grid.2x2", "Collections")
                         item(.authors, "person", "Authors",
                              count: model.followedAuthorNames.count + model.followedAuthors.count)
-                        item(.browse, "safari", "Browse")
                     }
                     group("Following") {
                         item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)

@@ -6,8 +6,8 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks, authorWorks, fandomWorks, readingListWorks,
-             collectionBookmarks
+        case search, subscriptionWorks, authorWorks, authorBookmarks, fandomWorks,
+             readingListWorks, collectionBookmarks
     }
 
     /// What this listing shows. Derived from observable model state inside
@@ -19,7 +19,8 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private var context: Context {
         if let fixedContext { return fixedContext }
         switch model.section {
-        case .authors, .authorWorks: return .authorWorks
+        case .authors, .authorWorks:
+            return model.authorPane == .bookmarks ? .authorBookmarks : .authorWorks
         case .subscriptions: return .subscriptionWorks
         case .fandoms: return model.fandomSearchActive ? .search : .fandomWorks
         case .readingLists: return .readingListWorks
@@ -133,6 +134,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .search: works = model.works(for: .search)
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
         case .authorWorks: works = model.filteredAuthorWorks
+        case .authorBookmarks: works = model.authorBookmarksList
         case .fandomWorks: works = model.fandomLibraryWorks
         case .readingListWorks: works = model.filteredReadingListWorks
         case .collectionBookmarks: works = model.search.bookmarkResults
@@ -194,6 +196,23 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
                                                 title: "No works stored",
                                                 message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
+            } else {
+                overlay = nil
+            }
+        case .authorBookmarks:
+            let who = model.authorUsername ?? "this user"
+            if model.isLoadingAuthorBookmarks && works.isEmpty {
+                overlay = AnyView(LoadingStateMac(theme: theme,
+                                                  message: "Fetching \(who)’s bookmarks…",
+                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  otherActivity: otherActivity(excluding: "bookmarks")))
+            } else if let error = model.authorBookmarksError, works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                                title: "Couldn’t load bookmarks", message: error))
+            } else if works.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
+                                                title: "No bookmarks in your library",
+                                                message: "Press ↻ above to fetch \(who)’s public bookmarks from AO3."))
             } else {
                 overlay = nil
             }

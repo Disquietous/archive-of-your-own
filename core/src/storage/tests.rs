@@ -536,11 +536,21 @@ fn test_collection_profile_tags_and_works() {
         work_count: 42,
         bookmarked_count: 7,
         maintainers: vec!["mod_one".into()],
-        tags: Vec::new(),
+        tags: vec!["Blurb Tag".into()],
         collection_type: String::new(),
     };
     db.save_collections(std::slice::from_ref(&blurb)).unwrap();
     assert!(!db.collection_profile_cached("test_fest").unwrap());
+    // Blurb tags are cached immediately — no profile fetch required.
+    assert_eq!(db.get_collection("test_fest").unwrap().unwrap().tags,
+               vec!["Blurb Tag".to_string()]);
+    // A tagless re-save (e.g. a differently rendered listing) must not
+    // wipe the tags already learned.
+    let mut tagless = blurb.clone();
+    tagless.tags.clear();
+    db.save_collections(std::slice::from_ref(&tagless)).unwrap();
+    assert_eq!(db.get_collection("test_fest").unwrap().unwrap().tags,
+               vec!["Blurb Tag".to_string()]);
 
     let mut profile = blurb.clone();
     profile.work_count = 0;

@@ -1,15 +1,17 @@
 import AppKit
 
-/// The drilled-in author's full profile, shown in the reading pane in
-/// place of their works list (toggled by the header's person button).
-/// Pure AppKit: a scrolling centered column with the identity header,
-/// counts, bio (TextKit via ContentBlockRenderer), and the AO3
-/// relationship actions. Re-renders through ObservationRelay whenever
-/// the profile cache, subscription list, or theme changes.
+/// The drilled-in author's full profile, shown in the list pane beside
+/// whichever of their lists the reading pane has (works / bookmarks /
+/// collections). Pure AppKit: a scrolling centered column with the
+/// identity header, counts, bio (TextKit via ContentBlockRenderer), and
+/// the AO3 relationship actions. Re-renders through ObservationRelay
+/// whenever the profile cache, subscription list, or theme changes.
 final class AuthorProfileViewController: NSViewController {
     private let theme: AppTheme
     private let appState: AppState
     private var username = ""
+    /// The list the reading pane is showing — its button gets the accent.
+    private var activePane: MacAppModel.AuthorPane = .works
 
     private let scrollView = NSScrollView()
     private let documentView = FlippedView()
@@ -26,7 +28,16 @@ final class AuthorProfileViewController: NSViewController {
     private let blockButton = NSButton(title: "Block…", target: nil, action: nil)
     private let muteButton = NSButton(title: "Mute…", target: nil, action: nil)
     private let actionsRow = NSStackView()
+    private let worksButton = NSButton(title: "Works", target: nil, action: nil)
+    private let bookmarksButton = NSButton(title: "Bookmarks", target: nil, action: nil)
+    private let collectionsButton = NSButton(title: "Collections", target: nil, action: nil)
+    private let listsRow = NSStackView()
+    private let actionsSeparator = NSBox()
     private let spinner = NSProgressIndicator()
+
+    /// Set by the hosting pane: swap the reading pane to one of the user's
+    /// lists (works / bookmarks / collections).
+    var onOpenList: ((String, MacAppModel.AuthorPane) -> Void)?
 
     private var loadedAvatarFor: String?
     private var renderedBioKey: String?
@@ -136,15 +147,31 @@ final class AuthorProfileViewController: NSViewController {
         actionsRow.spacing = 8
         actionsRow.setViews([subscribeButton, blockButton, muteButton], in: .leading)
 
-        let separator = NSBox()
-        separator.boxType = .separator
+        worksButton.target = self
+        worksButton.action = #selector(worksTapped)
+        worksButton.bezelStyle = .rounded
+        worksButton.toolTip = "Show this user’s works"
+        bookmarksButton.target = self
+        bookmarksButton.action = #selector(bookmarksTapped)
+        bookmarksButton.bezelStyle = .rounded
+        bookmarksButton.toolTip = "Show this user’s public bookmarks"
+        collectionsButton.target = self
+        collectionsButton.action = #selector(collectionsTapped)
+        collectionsButton.bezelStyle = .rounded
+        collectionsButton.toolTip = "Show the collections this user maintains"
 
-        for view in [headerRow, statsLabel, statusRow, bioView, separator, actionsRow] {
+        listsRow.orientation = .horizontal
+        listsRow.spacing = 8
+        listsRow.setViews([worksButton, bookmarksButton, collectionsButton], in: .leading)
+
+        actionsSeparator.boxType = .separator
+
+        for view in [headerRow, statsLabel, listsRow, statusRow, actionsRow, actionsSeparator, bioView] {
             column.addArrangedSubview(view)
         }
         NSLayoutConstraint.activate([
             bioView.widthAnchor.constraint(equalTo: column.widthAnchor),
-            separator.widthAnchor.constraint(equalTo: column.widthAnchor),
+            actionsSeparator.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])
 
         view = root
@@ -156,7 +183,8 @@ final class AuthorProfileViewController: NSViewController {
 
     /// Point the pane at an author. Kicks the cached-then-network profile
     /// load; re-invocation with the same author is free.
-    func configure(username: String) {
+    func configure(username: String, activePane: MacAppModel.AuthorPane) {
+        self.activePane = activePane
         let canonical = AppState.canonicalAuthorUsername(username)
         if self.username != canonical {
             self.username = canonical
@@ -192,14 +220,14 @@ final class AuthorProfileViewController: NSViewController {
 
         metaLabel.font = MacFont.ui(12)
         metaLabel.textColor = theme.nsInk3
-        if let profile, !profile.joined.isEmpty {
-            metaLabel.stringValue = profile.location.isEmpty
-                ? "Joined \(profile.joined)"
-                : "Joined \(profile.joined) · \(profile.location)"
-            metaLabel.isHidden = false
-        } else {
-            metaLabel.isHidden = true
+        var metaParts: [String] = []
+        if let profile {
+            if !profile.joined.isEmpty { metaParts.append("Joined \(profile.joined)") }
+            if !profile.location.isEmpty { metaParts.append(profile.location) }
+            if let id = profile.numericId, !id.isEmpty { metaParts.append("User #\(id)") }
         }
+        metaLabel.stringValue = metaParts.joined(separator: " · ")
+        metaLabel.isHidden = metaParts.isEmpty
 
         pseudsLabel.font = MacFont.ui(12)
         pseudsLabel.textColor = theme.nsInk3
@@ -249,6 +277,15 @@ final class AuthorProfileViewController: NSViewController {
 
         renderBio(profile)
         renderActions(profile)
+
+        // The list the reading pane is showing gets a filled accent bezel.
+        let panes: [(NSButton, MacAppModel.AuthorPane)] =
+            [(worksButton, .works), (bookmarksButton, .bookmarks), (collectionsButton, .collections)]
+        for (button, pane) in panes {
+            let active = pane == activePane
+            button.bezelColor = active ? theme.nsAccent : nil
+            button.contentTintColor = active ? theme.nsOnAccent : nil
+        }
     }
 
     private func renderBio(_ profile: UUserProfile?) {
@@ -270,6 +307,7 @@ final class AuthorProfileViewController: NSViewController {
     private func renderActions(_ profile: UUserProfile?) {
         let signedIn = appState.ao3Username != nil
         actionsRow.isHidden = !signedIn
+        actionsSeparator.isHidden = !signedIn
         guard signedIn else { return }
 
         let subscribed = appState.isSubscribedToAuthor(username)
@@ -288,6 +326,18 @@ final class AuthorProfileViewController: NSViewController {
     }
 
     // MARK: - Actions
+
+    @objc private func worksTapped() {
+        onOpenList?(username, .works)
+    }
+
+    @objc private func bookmarksTapped() {
+        onOpenList?(username, .bookmarks)
+    }
+
+    @objc private func collectionsTapped() {
+        onOpenList?(username, .collections)
+    }
 
     @objc private func subscribeTapped() {
         appState.toggleAuthorSubscription(username)

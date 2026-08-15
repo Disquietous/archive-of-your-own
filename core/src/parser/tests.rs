@@ -755,6 +755,8 @@ mod comment_tests {
         assert_eq!(first.maintainers,
                    vec!["quillwright".to_string(), "inkfeather".to_string()]);
         assert_eq!(first.collection_type, "Gift Exchange Challenge");
+        // The blurb header's "Collection Tags:" list rides along.
+        assert_eq!(first.tags, vec!["Imaginary Teahouse Stories".to_string()]);
 
         let second = &collections[1];
         assert_eq!(second.name, "paper_lantern_drabbles");
@@ -767,6 +769,7 @@ mod comment_tests {
         assert_eq!(second.bookmarked_count, 2);
         assert_eq!(second.maintainers, vec!["lanternkeeper".to_string()]);
         assert!(second.collection_type.is_empty());
+        assert!(second.tags.is_empty());
 
         // Pagination markup uses the shared helpers.
         assert!(has_next_page(&html));

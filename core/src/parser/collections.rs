@@ -40,6 +40,9 @@ fn parse_single_collection_blurb(blurb: &ElementRef) -> Result<CollectionSummary
     let (is_open, is_moderated, is_anonymous, collection_type) = extract_collection_type(blurb);
     let work_count = extract_collection_stat(blurb, "dd.works");
     let bookmarked_count = extract_collection_stat(blurb, "dd.bookmarks");
+    // The blurb header's "Collection Tags:" list (h5.tags) — the index
+    // carries the same tags the /profile page shows.
+    let tags = collect_texts(blurb, "h5.tags a.tag");
 
     Ok(CollectionSummary {
         name,
@@ -51,7 +54,7 @@ fn parse_single_collection_blurb(blurb: &ElementRef) -> Result<CollectionSummary
         work_count,
         bookmarked_count,
         maintainers,
-        tags: Vec::new(),
+        tags,
         collection_type,
     })
 }

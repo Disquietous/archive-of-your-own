@@ -20,11 +20,16 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var variantHost: NSView?
     var overlayHost: NSView?
     var eyeButton: ToolButton?
-    var refreshButton: ToolButton?
     var loadMoreButton: ToolButton?
     var searchButton: ToolButton?
     var removeAllButton: ToolButton?
     var clearHistoryBtn: ToolButton?
+    /// Author view: the drilled-in author's profile card, hosted in this
+    /// pane while the reading pane shows their lists.
+    var authorProfileController: AuthorProfileViewController?
+    var authorBackBtn: ToolButton?
+    var authorFollowBtn: ToolButton?
+    var authorProfileRefreshBtn: ToolButton?
     /// Memoized per key: render() rebuilds the toolbar constantly, and a
     /// recreated button would yank the popover's anchor out of the view
     /// hierarchy — dismissing the dialog the moment it opens (or on the

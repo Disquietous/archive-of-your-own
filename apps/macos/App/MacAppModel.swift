@@ -7,8 +7,8 @@ import Observation
 @Observable
 final class MacAppModel {
     enum Section: String, CaseIterable {
-        case browse, reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
-             bookmarks, downloads, stats, search, authorWorks, readingLists, collections,
+        case reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
+             bookmarks, downloads, stats, search, authorWorks, readingLists,
              settings
     }
 
@@ -46,7 +46,6 @@ final class MacAppModel {
         if let recovery = appState.currentRecovery { ops.append(Self.recoveryStatusText(recovery)) }
         if appState.isTestingCircuit { ops.append("Testing Tor circuit \(appState.circuitAttempt)") }
         if appState.isResolvingCloudflare { ops.append("Clearing archive challenge") }
-        if appState.isBrowsing { ops.append("Loading newest works") }
         if appState.isSearching { ops.append("Searching the archive") }
         if appState.isLoadingSubscriptions { ops.append("Loading your subscription list") }
         if appState.isCheckingSubscriptions {
@@ -59,7 +58,6 @@ final class MacAppModel {
         }
         if isLoadingSubscriptionWorks { ops.append("Fetching \(subscriptionWorksTitle ?? "author")’s works") }
         if isLoadingAuthor { ops.append("Fetching \(authorUsername ?? "author")’s works") }
-        if isLoadingCollections { ops.append("Loading collections") }
         if search.isLoadingForm { ops.append("Loading search criteria") }
         if let sync = appState.bookmarkSyncTask.statusMessage { ops.append(sync) }
         return ops
@@ -277,10 +275,6 @@ final class MacAppModel {
         section = s
         restorePane(for: s)
         switch s {
-        case .browse:
-            if appState.browseResults.isEmpty {
-                Task { await appState.browseLatestWorks() }
-            }
         case .search:
             Task { await search.loadFormIfNeeded(appState) }
         case .subscriptions:
@@ -290,10 +284,6 @@ final class MacAppModel {
         case .inbox:
             appState.loadCachedInbox()
             Task { await appState.checkInbox() }
-        case .collections:
-            if collections.isEmpty {
-                loadMoreCollections()
-            }
         default:
             break
         }
@@ -406,10 +396,6 @@ final class MacAppModel {
         }
         if section == .fandoms && fandomWorksTag != nil {
             closeFandomWorks()
-            return true
-        }
-        if section == .collections && collectionWorksName != nil {
-            closeCollectionWorks()
             return true
         }
         return false
@@ -639,92 +625,6 @@ final class MacAppModel {
         appState.bridge.removeFollowed(kind: "fandom", name: name)
     }
 
-    // MARK: - Collections browsing (AO3 /collections index)
-
-    /// Loaded /collections index pages, accumulated. A discovery surface —
-    /// never persisted, refetched per session.
-    var collections: [UCollection] = []
-    var collectionsPage: UInt32 = 0
-    var collectionsHasNext = false
-    var isLoadingCollections = false
-    var collectionsError: String?
-    /// Collections list: title/slug filter (session-scoped, like fandoms).
-    var collectionsListFilter = ""
-    private(set) var collectionsTask = NetworkTask()
-    /// Collection drill-in: URL slug + display title of the open collection,
-    /// whose works show in the reading pane via the search-results flow.
-    var collectionWorksName: String?
-    var collectionWorksTitle: String?
-
-    var filteredCollections: [UCollection] {
-        let needle = collectionsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return collections }
-        return collections.filter {
-            $0.title.lowercased().contains(needle) || $0.name.lowercased().contains(needle)
-        }
-    }
-
-    /// Fetch the next /collections index page (page 1 when nothing is loaded).
-    func loadMoreCollections() {
-        guard !isLoadingCollections else { return }
-        isLoadingCollections = true
-        collectionsError = nil
-        let page = collectionsPage + 1
-        let task = NetworkTask()
-        collectionsTask = task
-        Task { @MainActor in
-            do {
-                let result = try await appState.retryOnTimeout(task: task, using: appState.bridge) {
-                    try await self.appState.bridge.browseCollections(page: page)
-                }
-                let existing = Set(collections.map(\.name))
-                collections.append(contentsOf: result.collections.filter { !existing.contains($0.name) })
-                collectionsPage = page
-                collectionsHasNext = result.hasNextPage
-            } catch {
-                if !task.isCancelled && !error.isCancellation {
-                    collectionsError = error.localizedDescription
-                }
-            }
-            isLoadingCollections = false
-        }
-    }
-
-    func cancelCollectionsLoad() {
-        collectionsTask.cancel()
-    }
-
-    /// Collection drill-in: the collection's paged works in the reading pane
-    /// without leaving the Collections section — the search-results flow
-    /// (pager and all) driven by a collection query. The counts steer that
-    /// query's shape (works pane, bookmarks pane, or both, side by side).
-    func openCollectionWorks(slug: String, title: String,
-                             workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0) {
-        collectionWorksName = slug
-        collectionWorksTitle = title
-        selectedWorkID = nil
-        readerOpen = false
-        immersive = false
-        // startCollectionQuery also caches the collection's profile
-        // metadata + tags — one shared entry point for every path here.
-        Task { @MainActor in
-            search.startCollectionQuery(slug, title: title,
-                                        workCount: workCount,
-                                        bookmarkedCount: bookmarkedCount,
-                                        appState: appState)
-        }
-    }
-
-    func closeCollectionWorks() {
-        collectionWorksName = nil
-        collectionWorksTitle = nil
-        selectedWorkID = nil
-        readerOpen = false
-        Task { @MainActor in
-            search.closeSplitCollection()
-        }
-    }
-
     func followAuthor(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !followedAuthorNames.contains(trimmed) else { return }
@@ -803,14 +703,9 @@ final class MacAppModel {
     /// fetches — a complete, current list comes from Refresh Works.
     /// `subscriptionID` is the parsed AO3 username (author) or series ID;
     /// `author` is only the display name and may differ from it.
-    /// Whether the reading pane shows the drilled-in author's profile
-    /// instead of their works list. Toggled by the header's person button.
-    var showingAuthorProfile = false
-
     func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
         authorTask.cancel()
         if subscriptionWorksSubId != subscriptionID { listEmptied(.subscriptions) }
-        showingAuthorProfile = false
         subscriptionWorksTitle = author
         subscriptionWorksError = nil
         subscriptionWorksFetchStatus = nil
@@ -888,7 +783,6 @@ final class MacAppModel {
     func closeSubscriptionWorks() {
         authorTask.cancel()
         listEmptied(.subscriptions)
-        showingAuthorProfile = false
         subscriptionWorksTitle = nil
         subscriptionWorksList = []
         subscriptionWorksError = nil
@@ -915,12 +809,18 @@ final class MacAppModel {
     /// cancelling one can never be undone by a later crawl's retry reset.
     private(set) var authorTask = NetworkTask()
 
-    /// Show an author's locally stored works. Never fetches — a complete,
-    /// current list comes from the user pressing Refresh Works.
+    /// Open the two-pane author view on an author: their profile in the
+    /// list pane, one of their lists (works / bookmarks / collections) in
+    /// the reading pane. Works never fetch here — a complete, current list
+    /// comes from the user pressing Refresh Works.
     func openAuthor(_ username: String) {
         authorTask.cancel()
-        if authorUsername != username { listEmptied(.authors, .authorWorks) }
-        showingAuthorProfile = false
+        authorDetailReturnSection = nil
+        if authorUsername != username {
+            listEmptied(.authors, .authorWorks)
+            resetAuthorPanes()
+            authorPaneAutoSelect = true
+        }
         authorUsername = username
         authorError = nil
         authorFetchStatus = nil
@@ -933,6 +833,29 @@ final class MacAppModel {
         let works = cached.map(AppState.workFromSummary)
         for work in works { appState.fetchedWorks[work.id] = work }
         authorWorksList = works
+
+        // Local-first, like the works list: bookmarks and collections show
+        // whatever earlier fetches cached; AO3 is only touched by each
+        // pane's explicit Refresh button.
+        if authorBookmarksList.isEmpty {
+            let cachedBookmarks = appState.bridge.getSubscriptionWorks(subType: "author-bookmarks",
+                                                                       subId: username)
+            let bookmarkWorks = cachedBookmarks.map(AppState.workFromSummary)
+            for work in bookmarkWorks { appState.fetchedWorks[work.id] = work }
+            authorBookmarksList = bookmarkWorks
+        }
+        if authorCollections.isEmpty {
+            authorCollections = appState.bridge.searchLibraryCollections(username).filter { collection in
+                collection.maintainers.contains { $0.caseInsensitiveCompare(username) == .orderedSame }
+            }
+        }
+
+        // The profile feeds the list pane's author card and, once its
+        // counts are known, picks which list the reading pane opens on.
+        Task { @MainActor in
+            await appState.loadUserProfile(username)
+            applyDefaultAuthorPane(username)
+        }
     }
 
     /// Fetch the author's complete works list — every page on AO3.
@@ -985,12 +908,183 @@ final class MacAppModel {
     func closeAuthorWorks() {
         authorTask.cancel()
         listEmptied(.authors, .authorWorks)
-        showingAuthorProfile = false
         authorUsername = nil
         authorWorksList = []
         authorError = nil
         authorFetchStatus = nil
         selectedWorkID = nil
+        resetAuthorPanes()
+        // Back returns to wherever the author was opened from (a work
+        // detail, search results, the Following drill-in) — the Authors
+        // list when they were opened from there.
+        if let origin = authorDetailReturnSection {
+            authorDetailReturnSection = nil
+            goSection(origin)
+        }
+    }
+
+    // MARK: - Author profile panes (works / bookmarks / collections)
+
+    enum AuthorPane { case works, bookmarks, collections }
+    /// Which of the drilled-in author's lists the reading pane shows beside
+    /// their profile: works, public bookmarks, or collections — driven by
+    /// the profile view's buttons.
+    var authorPane: AuthorPane = .works
+
+    /// Where the author view was entered from when it wasn't the Authors
+    /// list (a work detail's byline, search results, the Following
+    /// drill-in) — the profile's back button returns there.
+    private var authorDetailReturnSection: Section?
+
+    /// Until the user picks a list by hand, the reading pane lands on the
+    /// author's first non-empty one once the profile's counts arrive.
+    private var authorPaneAutoSelect = false
+
+    /// The author's public bookmarks, accumulated page by page.
+    var authorBookmarksList: [Work] = []
+    var authorBookmarksPage: UInt32 = 0
+    var authorBookmarksHasNext = false
+    var isLoadingAuthorBookmarks = false
+    var authorBookmarksError: String?
+
+    /// The author's collections, accumulated page by page.
+    var authorCollections: [UCollection] = []
+    var authorCollectionsPage: UInt32 = 0
+    var authorCollectionsHasNext = false
+    var isLoadingAuthorCollections = false
+    var authorCollectionsError: String?
+
+    /// Clicking an author anywhere outside the Authors list (a work
+    /// detail's byline, a search user hit, the Following drill-in's person
+    /// button) lands here: open the two-pane author view, remembering the
+    /// origin so the profile's back button can return to it.
+    func openAuthorProfile(_ author: String) {
+        let origin = section
+        let username = AppState.canonicalAuthorUsername(author)
+        goSection(.authors)
+        openAuthor(username)
+        authorDetailReturnSection = origin == .authors ? nil : origin
+    }
+
+    /// Profile buttons land here: swap the reading pane to one of the
+    /// user's lists. Local-first — the pane shows what's cached, and its
+    /// toolbar's Refresh button is the only path to AO3.
+    func showAuthorPane(_ username: String, _ pane: AuthorPane) {
+        if section != .authors || authorUsername != username {
+            openAuthorProfile(username)
+        }
+        selectedWorkID = nil
+        readerOpen = false
+        authorPaneAutoSelect = false
+        authorPane = pane
+    }
+
+    /// The reading pane's default list for a freshly opened author: the
+    /// first of works / bookmarks / collections whose profile count is
+    /// non-zero. No-op once the user has picked a list themselves.
+    private func applyDefaultAuthorPane(_ username: String) {
+        guard authorPaneAutoSelect, authorUsername == username,
+              let profile = appState.userProfile(username) else { return }
+        authorPaneAutoSelect = false
+        guard profile.worksCount == 0 else { return } // already on .works
+        if profile.bookmarksCount > 0 {
+            authorPane = .bookmarks
+        } else if profile.collectionsCount > 0 {
+            authorPane = .collections
+        }
+    }
+
+    /// Refetch the bookmarks from AO3, starting over at page 1 — the only
+    /// network trigger for the pane (Load More continues from there).
+    func refreshAuthorBookmarks() {
+        guard !isLoadingAuthorBookmarks else { return }
+        authorBookmarksList = []
+        authorBookmarksPage = 0
+        authorBookmarksHasNext = false
+        authorBookmarksError = nil
+        loadMoreAuthorBookmarks()
+    }
+
+    /// Fetch the next page of the author's public bookmarks (page 1 when
+    /// nothing is loaded).
+    func loadMoreAuthorBookmarks() {
+        guard let username = authorUsername, !isLoadingAuthorBookmarks else { return }
+        isLoadingAuthorBookmarks = true
+        authorBookmarksError = nil
+        let page = authorBookmarksPage + 1
+        Task { @MainActor in
+            do {
+                let result = try await appState.bridge.fetchUserBookmarksPage(username: username, page: page)
+                guard authorUsername == username else { return }
+                let works = result.works.map(AppState.workFromSummary)
+                for work in works { appState.fetchedWorks[work.id] = work }
+                let existing = Set(authorBookmarksList.map(\.id))
+                authorBookmarksList.append(contentsOf: works.filter { !existing.contains($0.id) })
+                authorBookmarksPage = page
+                authorBookmarksHasNext = result.hasNextPage
+                // Persist the list membership so reopening the author shows
+                // these bookmarks without touching AO3.
+                appState.bridge.saveSubscriptionWorks(
+                    subType: "author-bookmarks", subId: username,
+                    workIds: authorBookmarksList.compactMap { UInt64($0.id) })
+            } catch {
+                if authorUsername == username, !error.isCancellation {
+                    authorBookmarksError = error.localizedDescription
+                }
+            }
+            if authorUsername == username { isLoadingAuthorBookmarks = false }
+        }
+    }
+
+    /// Refetch the collections from AO3, starting over at page 1 — the only
+    /// network trigger for the pane. Fetched pages land in the collections
+    /// cache, so the local-first open finds them next time.
+    func refreshAuthorCollections() {
+        guard !isLoadingAuthorCollections else { return }
+        authorCollections = []
+        authorCollectionsPage = 0
+        authorCollectionsHasNext = false
+        authorCollectionsError = nil
+        loadMoreAuthorCollections()
+    }
+
+    /// Fetch the next page of the author's collections (page 1 when nothing
+    /// is loaded).
+    func loadMoreAuthorCollections() {
+        guard let username = authorUsername, !isLoadingAuthorCollections else { return }
+        isLoadingAuthorCollections = true
+        authorCollectionsError = nil
+        let page = authorCollectionsPage + 1
+        Task { @MainActor in
+            do {
+                let result = try await appState.bridge.fetchUserCollections(username: username, page: page)
+                guard authorUsername == username else { return }
+                let existing = Set(authorCollections.map(\.name))
+                authorCollections.append(contentsOf: result.collections.filter { !existing.contains($0.name) })
+                authorCollectionsPage = page
+                authorCollectionsHasNext = result.hasNextPage
+            } catch {
+                if authorUsername == username, !error.isCancellation {
+                    authorCollectionsError = error.localizedDescription
+                }
+            }
+            if authorUsername == username { isLoadingAuthorCollections = false }
+        }
+    }
+
+    private func resetAuthorPanes() {
+        authorPane = .works
+        authorPaneAutoSelect = false
+        authorBookmarksList = []
+        authorBookmarksPage = 0
+        authorBookmarksHasNext = false
+        isLoadingAuthorBookmarks = false
+        authorBookmarksError = nil
+        authorCollections = []
+        authorCollectionsPage = 0
+        authorCollectionsHasNext = false
+        isLoadingAuthorCollections = false
+        authorCollectionsError = nil
     }
 
     /// Walk every page of a works listing on AO3 (author or series),
@@ -1060,8 +1154,6 @@ final class MacAppModel {
 
     private func rawWorks(for section: Section) -> [Work] {
         switch section {
-        case .browse:
-            appState.browseResults
         case .search:
             appState.searchResults
         case .reading:

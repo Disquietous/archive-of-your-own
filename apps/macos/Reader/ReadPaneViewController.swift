@@ -35,16 +35,15 @@ final class ReadPaneViewController: NSViewController {
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
     private var collectionSplitController: NSSplitViewController?
-    private var profileController: AuthorProfileViewController?
     private var pagerHost: NSHostingView<SearchPagerView>?
     private var resultsBackButton: ToolButton!
     private var detailHost: NSHostingView<AnyView>?
     private var emptyHost: NSHostingView<AnyView>?
 
     private enum Mode: Equatable {
-        case empty, searchForm, searchResults, subscriptionWorks(String), authorProfile(String),
-             detail(String), reading(String, Int), inboxThread(UInt64), settings,
-             scopeForm, scopeResults, collectionSplit
+        case empty, searchForm, searchResults, subscriptionWorks(String),
+             authorCollections(String), detail(String), reading(String, Int), inboxThread(UInt64),
+             settings, scopeForm, scopeResults, collectionSplit
     }
 
     private var renderedMode: Mode?
@@ -210,9 +209,7 @@ final class ReadPaneViewController: NSViewController {
     private var toolbarTop: NSLayoutConstraint!
     private var subscriptionCloseBtn: ToolButton?
     private var readingListCloseBtn: ToolButton?
-    private var authorCloseBtn: ToolButton?
     private var fandomCloseBtn: ToolButton?
-    private var collectionCloseBtn: ToolButton?
     private var fandomSearchBtn: ToolButton?
     private var fandomLibraryBackBtn: ToolButton?
     private var filterButtons: [String: ToolButton] = [:]
@@ -389,16 +386,9 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    private func authorCloseButton() -> ToolButton {
-        let button = authorCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
-            self?.model.closeAuthorWorks()
-        }
-        authorCloseBtn = button
-        return button
-    }
-
     private var authorProfileBtn: ToolButton?
     private var authorSubscribeBtn: ToolButton?
+
     /// The author the drill-in toolbar buttons act on — set on every render
     /// pass so the cached buttons' closures always target the current author.
     private var drillInAuthorUsername: String?
@@ -422,16 +412,15 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    /// Person button for the author drill-ins: swaps the reading pane
-    /// between the author's works list (default) and their profile.
+    /// Person button for the subscriptions drill-in: opens the two-pane
+    /// author view (profile in the list pane, their lists here).
     private func authorProfileButton() -> ToolButton {
         let button = authorProfileBtn ?? ToolButton(theme: theme, symbol: "person.crop.circle",
                                                     tooltip: "Show author profile") { [weak self] in
-            self?.model.showingAuthorProfile.toggle()
+            guard let self, let user = drillInAuthorUsername else { return }
+            model.openAuthorProfile(user)
         }
         authorProfileBtn = button
-        button.isOn = model.showingAuthorProfile
-        button.toolTip = model.showingAuthorProfile ? "Show works list" : "Show author profile"
         return button
     }
 
@@ -567,11 +556,35 @@ final class ReadPaneViewController: NSViewController {
         return eye
     }
 
-    private func collectionCloseButton() -> ToolButton {
-        let button = collectionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
-            self?.model.closeCollectionWorks()
+    private var authorBookmarksMoreBtn: ToolButton?
+    private func authorBookmarksMoreButton() -> ToolButton {
+        let button = authorBookmarksMoreBtn ?? ToolButton(theme: theme, symbol: "arrow.down.circle",
+                                                          tooltip: "Load more bookmarks") { [weak self] in
+            self?.model.loadMoreAuthorBookmarks()
         }
-        collectionCloseBtn = button
+        authorBookmarksMoreBtn = button
+        return button
+    }
+
+    // The bookmarks/collections panes are local-first: these buttons are
+    // their only network trigger.
+    private var authorBookmarksRefreshBtn: ToolButton?
+    private func authorBookmarksRefreshButton() -> ToolButton {
+        let button = authorBookmarksRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                             tooltip: "Refresh bookmarks from AO3") { [weak self] in
+            self?.model.refreshAuthorBookmarks()
+        }
+        authorBookmarksRefreshBtn = button
+        return button
+    }
+
+    private var authorCollectionsRefreshBtn: ToolButton?
+    private func authorCollectionsRefreshButton() -> ToolButton {
+        let button = authorCollectionsRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                               tooltip: "Refresh collections from AO3") { [weak self] in
+            self?.model.refreshAuthorCollections()
+        }
+        authorCollectionsRefreshBtn = button
         return button
     }
 
@@ -658,42 +671,63 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
             let isAuthor = model.subscriptionWorksSubType == "author"
             let author = model.subscriptionWorksSubId ?? title
-            let showProfile = isAuthor && model.showingAuthorProfile
-            let sub = showProfile ? "Author profile"
-                : model.isLoadingSubscriptionWorks
-                    ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
-                    : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
-                                          crawledAt: model.subscriptionWorksCrawledAt)
+            let sub = model.isLoadingSubscriptionWorks
+                ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
+                : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
+                                      crawledAt: model.subscriptionWorksCrawledAt)
             toolbar.configure(title: title, sub: sub)
             toolbar.setLeading([subscriptionCloseButton()])
-            var trailing: [NSView] = showProfile ? []
-                : [sortFilterMenu.makeButton(for: .subscriptions),
-                   worksFilterButton(for: .subscriptions),
-                   refreshWorksButton(forAuthor: false)]
+            var trailing: [NSView] = [sortFilterMenu.makeButton(for: .subscriptions),
+                                      worksFilterButton(for: .subscriptions),
+                                      refreshWorksButton(forAuthor: false)]
             if isAuthor {
                 trailing = authorHeaderButtons(username: author) + trailing
             }
             toolbar.setTrailing(trailing)
-            show(mode: showProfile ? .authorProfile(author) : .subscriptionWorks(title))
+            show(mode: .subscriptionWorks(title))
             return
         }
 
-        // Authors drill-in: an author's works shown in the reading pane.
+        // Authors drill-in: one of the author's lists (works, bookmarks,
+        // or collections) in this pane — their profile sits in the list
+        // pane, and its buttons pick which list shows here.
         if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
-            let showProfile = model.showingAuthorProfile
-            let sub = showProfile ? "Author profile"
-                : model.isLoadingAuthor
+            switch model.authorPane {
+            case .works:
+                let sub = model.isLoadingAuthor
                     ? (model.authorFetchStatus ?? "Fetching works from AO3…")
                     : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
                                           crawledAt: model.authorWorksCrawledAt)
-            toolbar.configure(title: author, sub: sub)
-            toolbar.setLeading([authorCloseButton()])
-            toolbar.setTrailing(authorHeaderButtons(username: author)
-                                + (showProfile ? []
-                                   : [sortFilterMenu.makeButton(for: .authors),
-                                      worksFilterButton(for: .authors),
-                                      refreshWorksButton(forAuthor: true)]))
-            show(mode: showProfile ? .authorProfile(author) : .subscriptionWorks(author))
+                toolbar.configure(title: "Works", sub: sub)
+                toolbar.setLeading([])
+                toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
+                                     worksFilterButton(for: .authors),
+                                     refreshWorksButton(forAuthor: true)])
+                show(mode: .subscriptionWorks(author))
+            case .bookmarks:
+                let count = model.authorBookmarksList.count
+                let sub = model.isLoadingAuthorBookmarks
+                    ? "Fetching bookmarks from AO3…"
+                    : count == 1 ? "1 bookmark" : "\(count) bookmarks"
+                toolbar.configure(title: "Bookmarks", sub: sub)
+                toolbar.setLeading([])
+                var trailing: [NSView] = []
+                if model.authorBookmarksHasNext {
+                    trailing.append(authorBookmarksMoreButton())
+                }
+                trailing.append(authorBookmarksRefreshButton())
+                toolbar.setTrailing(trailing)
+                show(mode: .subscriptionWorks(author))
+            case .collections:
+                let count = model.authorCollections.count
+                let sub = model.isLoadingAuthorCollections
+                    ? "Fetching collections from AO3…"
+                    : count == 1 ? "1 collection" : "\(count) collections"
+                toolbar.configure(title: "Collections", sub: sub)
+                toolbar.setLeading([])
+                toolbar.setTrailing([authorCollectionsRefreshButton()])
+                show(mode: .authorCollections(author))
+            }
             return
         }
 
@@ -714,30 +748,6 @@ final class ReadPaneViewController: NSViewController {
                 toolbar.setLeading([fandomCloseButton()])
                 toolbar.setTrailing([fandomSearchButton(), worksFilterButton(for: .fandoms)])
             }
-            show(mode: .searchResults)
-            return
-        }
-
-        // Collections drill-in, without leaving the Collections section: the
-        // collection's paged works via the search-results flow (a collection
-        // query drives the pager exactly like a fandom's AO3 tag search).
-        if model.section == .collections, let title = model.collectionWorksTitle,
-           model.selectedWork == nil {
-            let search = model.search
-            if search.splitCollectionName != nil {
-                // A collection with both works and bookmarked items splits
-                // the pane, same as the search flow; the close button exits
-                // the drill-in and the pagers live in the halves' headers.
-                toolbar.configure(title: title, sub: splitCollectionSubtitle(search))
-                toolbar.setLeading([collectionCloseButton()])
-                toolbar.setTrailing([])
-                show(mode: .collectionSplit)
-                return
-            }
-            toolbar.configure(title: title, sub: search.resultsSubtitle)
-            toolbar.setLeading([collectionCloseButton()])
-            toolbar.setTrailing(search.hasSearched
-                ? [makePagerHost(), worksFilterButton(for: .search)] : [])
             show(mode: .searchResults)
             return
         }
@@ -790,7 +800,12 @@ final class ReadPaneViewController: NSViewController {
             if search.showingResults {
                 let worksStyle = search.scope == .works || search.scope == .bookmarks
                 toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
-                toolbar.setLeading([searchFormBackButton()])
+                let back = searchFormBackButton()
+                // The same arrow pops one level: to the collections hit
+                // list behind a drill-in, to the form otherwise.
+                back.toolTip = search.canReturnToCollectionHits
+                    ? "Back to collections results" : "Back to search criteria"
+                toolbar.setLeading([back])
                 if worksStyle {
                     var trailing: [NSView] = search.hasSearched
                         ? [makePagerHost(), worksFilterButton(for: .search)] : []
@@ -857,7 +872,6 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
             || (model.section == .authors && model.authorUsername != nil)
             || (model.section == .fandoms && model.fandomWorksTag != nil)
-            || (model.section == .collections && model.collectionWorksTitle != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
@@ -900,7 +914,6 @@ final class ReadPaneViewController: NSViewController {
         case .collectionSplit:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             detailHost?.removeFromSuperview()
             detailHost = nil
             emptyHost?.removeFromSuperview()
@@ -910,7 +923,6 @@ final class ReadPaneViewController: NSViewController {
             detailHost?.removeFromSuperview()
             detailHost = nil
             emptyHost?.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             if resultsController == nil {
                 let controller = SearchResultsViewController(theme: theme, appState: appState, model: model)
                 addChild(controller)
@@ -921,7 +933,6 @@ final class ReadPaneViewController: NSViewController {
         case .searchForm:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(SearchFormView(theme: theme, appState: appState, model: model))
@@ -931,7 +942,6 @@ final class ReadPaneViewController: NSViewController {
         case .settings:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(SettingsRootView(theme: theme, appState: appState, model: model))
@@ -941,7 +951,6 @@ final class ReadPaneViewController: NSViewController {
         case .scopeForm:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(ScopeSearchFormView(theme: theme, appState: appState, model: model))
@@ -951,31 +960,24 @@ final class ReadPaneViewController: NSViewController {
         case .scopeResults:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(ScopeResultsView(theme: theme, appState: appState, model: model))
             detailHost = host
             pin(host)
 
-        case .authorProfile(let username):
+        case .authorCollections:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            detailHost?.removeFromSuperview()
-            detailHost = nil
             emptyHost?.removeFromSuperview()
-            if profileController == nil {
-                let controller = AuthorProfileViewController(theme: theme, appState: appState)
-                addChild(controller)
-                profileController = controller
-            }
-            pin(profileController!.view)
-            profileController!.configure(username: username)
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(AuthorCollectionsView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
 
         case .empty:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             detailHost?.removeFromSuperview()
             detailHost = nil
             if emptyHost == nil {
@@ -990,7 +992,6 @@ final class ReadPaneViewController: NSViewController {
         case .detail(let workID):
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
@@ -1003,7 +1004,6 @@ final class ReadPaneViewController: NSViewController {
             detailHost?.removeFromSuperview()
             detailHost = nil
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             if let work = appState.work(byID: workID) {
                 pin(readerController.view)
@@ -1013,7 +1013,6 @@ final class ReadPaneViewController: NSViewController {
         case .inboxThread:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
-            profileController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
             host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))

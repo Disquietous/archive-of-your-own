@@ -159,14 +159,8 @@ struct CollectionSplitPaneHeader: View {
         HStack(spacing: 8) {
             if isWorks {
                 Button {
-                    // From the Collections section this exits the drill-in
-                    // (which dissolves the split); from search it returns
-                    // to the collections hit list behind the panes.
-                    if model.section == .collections {
-                        model.closeCollectionWorks()
-                    } else {
-                        search.closeSplitCollection()
-                    }
+                    // Return to the collections hit list behind the panes.
+                    search.closeSplitCollection()
                 } label: {
                     Image(systemName: "arrow.left")
                         .font(.system(size: 12, weight: .semibold))
@@ -239,7 +233,7 @@ struct ScopeResultsView: View {
             if search.userHits.isEmpty { emptyState }
             ForEach(search.userHits, id: \.self) { username in
                 row(icon: "person", title: username, sub: "AO3 user") {
-                    model.openAuthor(username)
+                    model.openAuthorProfile(username)
                 }
             }
         case .collections:
@@ -308,6 +302,7 @@ struct ScopeResultsView: View {
                                               title: collection.title,
                                               workCount: collection.workCount,
                                               bookmarkedCount: collection.bookmarkedCount,
+                                              fromHitList: true,
                                               appState: appState)
         } label: {
             HStack(spacing: 12) {

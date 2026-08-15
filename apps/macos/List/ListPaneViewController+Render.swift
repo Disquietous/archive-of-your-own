@@ -20,18 +20,6 @@ extension ListPaneViewController {
 
         let section = model.section
         switch section {
-        case .browse:
-            works = model.works(for: .browse)
-            toolbar.configure(title: "Browse", sub: subtitleForNetworkList(count: works.count, loading: appState.isBrowsing))
-            toolbar.setLeading([])
-            toolbar.setTrailing([browseRefreshButton(), sortFilterMenu.makeButton(for: .browse),
-                                 worksFilterButton(for: .browse), eyeToggleButton()])
-            showWorksContent(section: section, header: nil,
-                             overlay: networkOverlay(loading: appState.isBrowsing,
-                                                     loadingMessage: "Fetching latest works…",
-                                                     emptyIcon: "safari", emptyTitle: "Nothing here yet",
-                                                     emptyMessage: "Connect and refresh to browse the newest works on the archive."))
-
         case .search:
             toolbar.configure(title: "Search", sub: model.search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
             toolbar.setLeading([])
@@ -212,26 +200,19 @@ extension ListPaneViewController {
             }])
             showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
 
-        case .collections:
-            let sub: String
-            if model.isLoadingCollections && model.collections.isEmpty {
-                sub = "Loading…"
-            } else {
-                let count = model.filteredCollections.count
-                sub = count == 1 ? "1 collection" : "\(count) collections"
-            }
-            toolbar.configure(title: "Collections", sub: sub)
-            toolbar.setLeading([])
-            toolbar.setTrailing([filterButton(key: "collections", active: !model.collectionsListFilter.isEmpty) { [theme, model] in
-                AnyView(SingleFieldFilterView(theme: theme, model: model,
-                                              title: "Filter Collections",
-                                              placeholder: "Collection name",
-                                              text: Binding(get: { model.collectionsListFilter },
-                                                            set: { model.collectionsListFilter = $0 })))
-            }])
-            showVariant(CollectionsListView(theme: theme, model: model), section: section)
-
         case .authors:
+            // Drill-in: the author's profile replaces the list — their
+            // works/bookmarks/collections render in the reading pane.
+            if let author = model.authorUsername {
+                toolbar.configure(title: appState.userProfile(author)?.username ?? author,
+                                  sub: appState.isLoadingUserProfile(author)
+                                      ? "Fetching profile from AO3…" : "Author profile")
+                toolbar.setLeading([authorBackButton()])
+                toolbar.setTrailing([authorProfileRefreshButton(username: author),
+                                     authorFollowButton(username: author)])
+                showAuthorProfileContent(username: author, activePane: model.authorPane)
+                break
+            }
             let count = model.followedAuthorNames.count + model.followedAuthors.count
             toolbar.configure(title: "Authors", sub: "\(count) followed")
             toolbar.setLeading([])
@@ -286,11 +267,6 @@ extension ListPaneViewController {
                 active = true
             } else if let msg = appState.inboxCheckTask.statusMessage, !msg.isEmpty {
                 message = msg
-            }
-        case .browse:
-            if appState.isBrowsing {
-                message = "Fetching latest works…"
-                active = true
             }
         default:
             break

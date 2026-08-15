@@ -291,6 +291,75 @@ impl AO3App {
         }).await
     }
 
+    /// One page of a user's public bookmarks (/users/{name}/bookmarks).
+    /// Everything the listing showed is cached like collection bookmark
+    /// listings: the works, and the bookmark rows scoped to whoever made
+    /// them (only the active user's own land in the Bookmarks view).
+    /// Series/external bookmarks are skipped by the parser.
+    pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let (username, _) = split_author_byline(&username);
+            let fetch_user = username.clone();
+            let (listings, has_next, total, found) = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "user_bookmarks".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let username = fetch_user.clone();
+                    async move {
+                        client.read().await.fetch_user_bookmarks(&username, page).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            let s = storage.lock().await;
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            let mut works = Vec::new();
+            for l in listings {
+                let Some(w) = l.work_summary else { continue };
+                log_db("save_work", s.save_work(&w));
+                log_db("cache_fetched_bookmark",
+                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id, &l.note));
+                works.push(w);
+            }
+            log_db("commit listing save", tx.commit());
+            Ok(UPagedWorks {
+                works: works.into_iter().map(UWorkSummary::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+                total_works: found,
+            })
+        }).await
+    }
+
+    /// One page of a user's collections (/users/{name}/collections). Every
+    /// fetched blurb lands in the collections cache exactly like the public
+    /// index pages, tags included.
+    pub async fn fetch_user_collections(&self, username: String, page: u32) -> Result<UCollectionsPage, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let (username, _) = split_author_byline(&username);
+            let fetch_user = username.clone();
+            let (collections, has_next, total) = with_recovery(
+                client, storage.clone(),
+                OpKind::Fetch { label: "user_collections".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let username = fetch_user.clone();
+                    async move {
+                        client.read().await.fetch_user_collections(&username, page).await.map_err(AO3Error::from)
+                    }
+                }).await?;
+            log_debug!("collections",
+                "fetch_user_collections '{username}' page {page}: parsed {} blurb(s) (has_next={has_next}, total_pages={total}) — saving",
+                collections.len());
+            {
+                let s = storage.lock().await;
+                log_db("save_collections", s.save_collections(&collections));
+            }
+            Ok(UCollectionsPage {
+                collections: collections.into_iter().map(UCollection::from).collect(),
+                has_next_page: has_next,
+                total_pages: total,
+            })
+        }).await
+    }
+
     /// Toggle the AO3 subscription for a user and mirror the result into
     /// the local subscriptions table (sub_type "author", so it shows under
     /// Subscriptions → Following immediately). Prefers the direct one-POST

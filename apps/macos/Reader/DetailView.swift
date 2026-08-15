@@ -28,7 +28,16 @@ struct DetailView: View {
                     .foregroundStyle(theme.ink)
                     .lineSpacing(2)
                     .padding(.bottom, 10)
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Button {
+                        model.openAuthorProfile(work.author)
+                    } label: {
+                        (Text("by ").foregroundStyle(theme.ink2)
+                            + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
+                            .font(Font(MacFont.ui(16)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("View \(work.author)’s profile")
                     Button {
                         if followingAuthor {
                             model.unfollowAuthor(work.author)
@@ -36,27 +45,16 @@ struct DetailView: View {
                             model.followAuthor(work.author)
                         }
                     } label: {
-                        (Text("by ").foregroundStyle(theme.ink2)
-                            + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
-                            .font(Font(MacFont.ui(16)))
+                        Image(systemName: followingAuthor ? "bell.fill" : "bell")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(followingAuthor ? theme.accent : theme.ink3)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help(followingAuthor
                           ? "Unfollow \(work.author)"
                           : "Follow \(work.author) — adds them to Authors → Following")
-                    if followingAuthor {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 9, weight: .bold))
-                            Text("Following")
-                                .font(Font(MacFont.ui(11, weight: .semibold)))
-                        }
-                        .foregroundStyle(theme.sage)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(theme.sage.opacity(0.14))
-                        .clipShape(Capsule())
-                    }
                 }
                 .padding(.bottom, 10)
                 if appState.kudosFailedWorkID == work.id {

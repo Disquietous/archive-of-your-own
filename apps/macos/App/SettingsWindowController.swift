@@ -177,7 +177,7 @@ struct GeneralSettingsPane: View {
             SettingsGroup(theme: theme, label: "Content") {
                 SettingsCard(theme: theme) {
                     SettingsToggleRow(theme: theme, label: "Hide explicit works",
-                                      sublabel: "Filters Explicit-rated works from browse and search",
+                                      sublabel: "Filters Explicit-rated works from search results",
                                       isOn: $model.hideExplicit)
                 }
             }
