@@ -243,19 +243,28 @@ impl AO3App {
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             let mut works = Vec::new();
+            // Ids to link into collection_bookmarks — cached works only.
+            let mut cached_ids = Vec::new();
             for l in listings {
                 let Some(w) = l.work_summary else { continue };
+                // Mystery stubs display in the returned page but are never
+                // cached, and never linked into collection_bookmarks —
+                // there is no real work data behind them until the reveal.
+                if l.mystery {
+                    works.push(w);
+                    continue;
+                }
                 log_db("save_work", s.save_work(&w));
                 log_db("cache_fetched_bookmark",
                        s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
                                                 &l.note, &l.tags.join(", "), l.rec));
+                cached_ids.push(w.id);
                 works.push(w);
             }
             log_debug!("collections",
                 "fetch_collection_bookmarks '{slug}' page {page}: parsed {listing_count} listing(s), {} with a work blurb ({} skipped: series/external/deleted) (has_next={has_next}, total_pages={total}) — saving works + bookmark rows + collection_bookmarks links",
                 works.len(), listing_count - works.len());
-            let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
-            log_db("save_collection_bookmarks", s.add_collection_bookmarks(&slug, &ids));
+            log_db("save_collection_bookmarks", s.add_collection_bookmarks(&slug, &cached_ids));
             log_db("commit listing save", tx.commit());
             Ok(UPagedWorks {
                 works: works.into_iter().map(UWorkSummary::from).collect(),
@@ -290,16 +299,24 @@ impl AO3App {
             let mut hits = Vec::new();
             for l in listings {
                 let Some(w) = l.work_summary else { continue };
-                log_db("save_work", s.save_work(&w));
-                log_db("cache_fetched_bookmark",
-                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
-                                                &l.note, &l.tags.join(", "), l.rec));
+                // Mystery hits display but never cache: the work stub has
+                // no real data, and cache-forever would keep showing
+                // "Mystery Work" long after the collection reveals it.
+                if !l.mystery {
+                    log_db("save_work", s.save_work(&w));
+                    log_db("cache_fetched_bookmark",
+                           s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
+                                                    &l.note, &l.tags.join(", "), l.rec));
+                }
                 hits.push(BookmarkHit {
                     bookmarker: l.bookmarker,
                     note: l.note,
                     tags: l.tags,
                     rec: l.rec,
                     date_bookmarked: l.date_bookmarked,
+                    mystery: l.mystery,
+                    mystery_collection_name: l.mystery_collection_name,
+                    mystery_collection_title: l.mystery_collection_title,
                     work: w,
                 });
             }

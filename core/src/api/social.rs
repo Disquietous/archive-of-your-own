@@ -314,6 +314,13 @@ impl AO3App {
             let mut works = Vec::new();
             for l in listings {
                 let Some(w) = l.work_summary else { continue };
+                // Mystery stubs (unrevealed challenge works) display in the
+                // returned page but are never cached — no real work data
+                // exists behind them until the reveal.
+                if l.mystery {
+                    works.push(w);
+                    continue;
+                }
                 log_db("save_work", s.save_work(&w));
                 log_db("cache_fetched_bookmark",
                        s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,

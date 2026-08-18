@@ -259,12 +259,13 @@ final class WorkRowCellView: NSTableCellView {
         tagsHeight.constant = expanded ? fullTagsHeight : collapsedTagsHeight
     }
 
-    private static let badgeSize: CGFloat = 16
+    static let badgeSize: CGFloat = 16
 
     /// Rounded-rect rating letter drawn as an image so it can ride inline at
-    /// the end of the title as a text attachment. Cached per rating.
+    /// the end of the title as a text attachment. Cached per rating. Shared
+    /// with BookmarkRowCellView so every row's badge is pixel-identical.
     private static var badgeImages: [Rating: NSImage] = [:]
-    private static func ratingBadgeImage(for rating: Rating) -> NSImage {
+    static func ratingBadgeImage(for rating: Rating) -> NSImage {
         if let cached = badgeImages[rating] { return cached }
         let size = NSSize(width: badgeSize, height: badgeSize)
         let image = NSImage(size: size, flipped: false) { rect in
@@ -286,8 +287,10 @@ final class WorkRowCellView: NSTableCellView {
     /// dates block stop short of it while every later line spans the full
     /// width. NSTextField can't vary width per line, so the wrap is computed
     /// with an exclusion-path layout and baked in as hard line breaks.
-    private static func wrappedAroundDates(_ title: NSAttributedString, width: CGFloat,
-                                           datesSize: NSSize) -> NSAttributedString {
+    /// Shared with BookmarkRowCellView, whose corner block is the
+    /// bookmarked-by/date lines instead of the dates.
+    static func wrappedAroundDates(_ title: NSAttributedString, width: CGFloat,
+                                   datesSize: NSSize) -> NSAttributedString {
         // Keep at least 60pt of title width no matter how wide the dates run.
         let exclusionWidth = min(datesSize.width, width - 60)
         guard exclusionWidth > 0, datesSize.height > 0 else { return title }

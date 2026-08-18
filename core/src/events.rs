@@ -62,10 +62,14 @@ pub enum OpPhase {
 /// the policy table's "Remedy" column at the granularity the UI needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum Remedy {
+    /// New set of nodes: an isolated sub-client on the existing bootstrap.
     Rotate,
     RotateAndReclear,
     Backoff,
     Purge,
+    /// Full new circuit: replace the whole TorClient with a freshly
+    /// bootstrapped one — the privacy hub's "New circuit" treatment.
+    Reconnect,
 }
 
 /// A sub-step within one recovery attempt.
@@ -75,6 +79,8 @@ pub enum RecoveryStep {
     EarningClearance,
     BackingOff { seconds: u32 },
     Retrying,
+    /// Rebuilding the Tor connection from scratch (full reconnect).
+    Reconnecting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]

@@ -37,7 +37,7 @@ impl AO3App {
         // the app from, so this is the only safe place to do it once.
         crate::events::init(&runtime.handle().clone());
 
-        Ok(AO3App {
+        let app = AO3App {
             client: Arc::new(tokio::sync::RwLock::new(client)),
             storage,
             state_dir,
@@ -49,7 +49,9 @@ impl AO3App {
             route_timeouts,
             _runtime: Arc::new(runtime),
             census_cycle_used: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        })
+        };
+        app.register_reconnect_context();
+        Ok(app)
     }
 
     /// Open a database while carrying over the transport — client (Tor
@@ -71,7 +73,7 @@ impl AO3App {
 
         // No events::init here: the shared runtime already registered its
         // handle when `previous` (or its ancestor) was constructed.
-        Ok(AO3App {
+        let app = AO3App {
             client: previous.client.clone(),
             storage: Arc::new(Mutex::new(storage)),
             state_dir,
@@ -85,7 +87,23 @@ impl AO3App {
             route_timeouts: previous.route_timeouts.clone(),
             _runtime: previous._runtime.clone(),
             census_cycle_used: previous.census_cycle_used.clone(),
-        })
+        };
+        app.register_reconnect_context();
+        Ok(app)
+    }
+
+    /// Hand the recovery engine what a full reconnect needs (state dir plus
+    /// the shared connection-state handles) — it can't hold an app
+    /// reference, only `client`/`storage` clones. Re-registered by every
+    /// constructor so the state_dir tracks the active database.
+    fn register_reconnect_context(&self) {
+        super::recovery::set_reconnect_context(super::recovery::ReconnectContext {
+            state_dir: self.state_dir.clone(),
+            tor_connected: self.tor_connected.clone(),
+            socks_port: self.socks_port.clone(),
+            timeout_secs: self.timeout_secs.clone(),
+            route_timeouts: self.route_timeouts.clone(),
+        });
     }
 
     /// Register the single process-wide connection-recovery event observer.

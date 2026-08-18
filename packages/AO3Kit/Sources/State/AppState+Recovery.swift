@@ -72,7 +72,7 @@ extension AppState {
         case .recoveryStep(let id, let step):
             guard id == recoveringOperationID else { return }
             currentRecovery?.step = step
-            if step == .rotatingCircuit {
+            if step == .rotatingCircuit || step == .reconnecting {
                 // Rotation happens entirely inside Rust now — Swift's old
                 // rotateCircuit() (AppState+Tor.swift) used to be the only
                 // path that ever called this, so every automatic rotation

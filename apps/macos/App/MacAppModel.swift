@@ -79,6 +79,8 @@ final class MacAppModel {
             return "Passing the archive's connection check… \(attempt)"
         case .backingOff(let seconds):
             return "Archive temporarily unavailable — waiting \(seconds)s… \(attempt)"
+        case .reconnecting:
+            return "Rebuilding the Tor connection… \(attempt)"
         case .rotatingCircuit, .retrying, nil:
             break
         }
@@ -87,6 +89,8 @@ final class MacAppModel {
             return "Archive connection failed — trying a new route… \(attempt)"
         case .backoff:
             return "Archive temporarily unavailable — retrying… \(attempt)"
+        case .reconnect:
+            return "Rebuilding the Tor connection… \(attempt)"
         case .purge:
             return "Session expired — please sign in again"
         }

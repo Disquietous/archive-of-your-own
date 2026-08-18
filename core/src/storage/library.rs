@@ -767,6 +767,11 @@ impl Storage {
                 rec,
                 // Date part only — the timestamp is display noise.
                 date_bookmarked: created_at.chars().take(10).collect(),
+                // Library hits are always real cached works — mystery
+                // stubs are never cached.
+                mystery: false,
+                mystery_collection_name: String::new(),
+                mystery_collection_title: String::new(),
                 work: w,
             };
             hits.push((hit, created_at));

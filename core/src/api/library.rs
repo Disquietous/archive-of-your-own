@@ -221,6 +221,11 @@ impl AO3App {
                 // One transaction per pulled page.
                 let tx = s.begin_tx().map_err(AO3Error::from)?;
                 for listing in &listings {
+                    // Mystery bookmarks (unrevealed challenge works) carry
+                    // only a synthetic display stub — no real work data to
+                    // cache, so a local bookmark row would render blank.
+                    // Skip; the pull picks the work up after the reveal.
+                    if listing.mystery { continue; }
                     // Upsert bookmark with sync_to_ao3=true
                     log_db("add_bookmark", s.add_bookmark(listing.work_id, Some(&listing.note), true));
                     log_db("set_ao3_bookmark_id", s.set_ao3_bookmark_id(listing.work_id, listing.ao3_bookmark_id));

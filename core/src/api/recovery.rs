@@ -53,21 +53,37 @@ struct Policy {
     retry_at_most_once: bool,
 }
 
-/// The policy table. `ResponseTimeout` isn't here — it has no circuit-level
-/// remedy at all (see `run_loop`), so it doesn't fit the `Policy` shape.
-fn policy_for(failure: FailureKind) -> Option<Policy> {
+/// The policy table, consulted once per failed attempt (`attempt` counts
+/// the attempts that have failed so far, starting at 1). Most kinds use one
+/// remedy throughout; the rate-limit schedule escalates from node rotation
+/// to a full reconnect mid-cycle. `ResponseTimeout` isn't here — it has no
+/// circuit-level remedy at all (see `run_loop`), so it doesn't fit the
+/// `Policy` shape.
+fn policy_for(failure: FailureKind, attempt: u32) -> Option<Policy> {
     match failure {
         // Provably never reached AO3 — safe to retry for any operation.
         FailureKind::EdgeTlsFailure =>
             Some(Policy { remedy: Remedy::RotateAndReclear, cap: 3, retry_at_most_once: true }),
-        FailureKind::RateLimited { .. } =>
-            Some(Policy { remedy: Remedy::Rotate, cap: 3, retry_at_most_once: true }),
+        // 429's budget is scoped to the exit IP. Escalation ladder: three
+        // retries each from a new set of nodes (isolated client on the
+        // same bootstrap), then one full reconnect (fresh TorClient — the
+        // privacy hub's New-Circuit treatment) and the node cycle starts
+        // over. Still limited after the second cycle → surface the rate
+        // limit honestly instead of hammering AO3 forever.
+        FailureKind::RateLimited { .. } => {
+            let remedy = if attempt == 4 { Remedy::Reconnect } else { Remedy::Rotate };
+            Some(Policy { remedy, cap: 8, retry_at_most_once: true })
+        }
         FailureKind::Challenged =>
             Some(Policy { remedy: Remedy::RotateAndReclear, cap: 3, retry_at_most_once: true }),
-        // Archive-wide outage — rotating changes nothing, so this never
-        // retries for an AtMostOnce op (we can't prove the write didn't land).
+        // 502/503/504. The transport layer already punched through any
+        // cached edge error with its one-shot no-cache (shift+refresh)
+        // retry, so a 503 that reaches here is real: rebuild the Tor
+        // connection outright (full reconnect, not just new nodes) and try
+        // once more. Never retries an AtMostOnce op — a 503 can't prove
+        // the write didn't land.
         FailureKind::OriginUnavailable =>
-            Some(Policy { remedy: Remedy::Backoff, cap: 3, retry_at_most_once: false }),
+            Some(Policy { remedy: Remedy::Reconnect, cap: 2, retry_at_most_once: false }),
         // Ambiguous: could be a dead circuit, or a slow one that will still
         // land the write.
         FailureKind::ConnectFailure =>
@@ -80,6 +96,29 @@ fn policy_for(failure: FailureKind) -> Option<Policy> {
 }
 
 const DEFAULT_CAP: u32 = 3;
+
+/// Everything a full reconnect needs from the app — `connect_tor`'s
+/// dependencies, registered by `AO3App`'s constructors so the engine can
+/// rebuild the transport without holding an app reference (ops only ever
+/// capture `client`/`storage` clones — see the module doc).
+pub(crate) struct ReconnectContext {
+    pub state_dir: String,
+    pub tor_connected: Arc<std::sync::atomic::AtomicBool>,
+    pub socks_port: Arc<std::sync::atomic::AtomicU32>,
+    pub timeout_secs: Arc<std::sync::atomic::AtomicU64>,
+    pub route_timeouts: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
+}
+
+static RECONNECT_CTX: std::sync::Mutex<Option<Arc<ReconnectContext>>> = std::sync::Mutex::new(None);
+
+pub(crate) fn set_reconnect_context(ctx: ReconnectContext) {
+    *RECONNECT_CTX.lock().unwrap() = Some(Arc::new(ctx));
+}
+
+#[cfg(feature = "tor")]
+fn reconnect_context() -> Option<Arc<ReconnectContext>> {
+    RECONNECT_CTX.lock().unwrap().clone()
+}
 
 /// Wrap a retryable unit of work with the recovery engine. `op` may run more
 /// than once — it must not close over anything that isn't safe to run
@@ -146,7 +185,7 @@ where
             return Err(err);
         }
 
-        let Some(policy) = policy_for(failure) else {
+        let Some(policy) = policy_for(failure, attempt) else {
             finish_failed(id, Some(failure));
             return Err(err);
         };
@@ -209,11 +248,62 @@ async fn perform_remedy(
             events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::BackingOff { seconds: secs } });
             tokio::time::sleep(Duration::from_secs(secs as u64)).await;
         }
+        Remedy::Reconnect => {
+            // Off Tor there is no circuit to rebuild — a plain backoff
+            // covers a genuine outage on a direct connection.
+            if !client.read().await.is_tor() {
+                let secs = 2u32;
+                events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::BackingOff { seconds: secs } });
+                tokio::time::sleep(Duration::from_secs(secs as u64)).await;
+                return;
+            }
+            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::Reconnecting });
+            full_reconnect(client).await;
+            // The fresh client starts with an empty cookie jar — put the
+            // persisted session back so the retry stays signed in.
+            restore_persisted_cookies(client, storage).await;
+        }
         // Not driven by the engine today — `run_on_runtime` already purges
         // dead session cookies on `AO3Error::SessionExpired` independently
         // of this loop (`SessionExpired` never reaches `policy_for`).
         Remedy::Purge => {}
     }
+}
+
+/// The privacy hub's "New circuit" treatment: replace the whole TorClient
+/// with a freshly bootstrapped one (new guards and all), not just an
+/// isolated sub-client on the old bootstrap. Mirrors `AO3App::connect_tor`,
+/// driven by the context the app constructor registers. Falls back to
+/// plain rotation when the context is missing or the bootstrap fails, so
+/// the retry never runs on the very circuit that just failed.
+async fn full_reconnect(client: &Arc<RwLock<AO3Client>>) {
+    #[cfg(feature = "tor")]
+    {
+        let Some(ctx) = reconnect_context() else {
+            log_info!("recovery", "no reconnect context registered — falling back to circuit rotation");
+            rotate(client).await;
+            return;
+        };
+        match AO3Client::new_tor_with_dir(&ctx.state_dir).await {
+            Ok(mut new_client) => {
+                new_client.share_route_timeouts(ctx.route_timeouts.clone());
+                new_client.set_timeout(ctx.timeout_secs.load(std::sync::atomic::Ordering::Relaxed));
+                let mut c = client.write().await;
+                // Stop the outgoing client's SOCKS accept loop before the
+                // swap — same leak-avoidance as connect_tor.
+                c.stop_socks_proxy();
+                *c = new_client;
+                ctx.tor_connected.store(c.is_tor(), std::sync::atomic::Ordering::Relaxed);
+                ctx.socks_port.store(c.socks_port().unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => {
+                log_error!("recovery", "full reconnect failed: {e} — falling back to circuit rotation");
+                rotate(client).await;
+            }
+        }
+    }
+    #[cfg(not(feature = "tor"))]
+    { let _ = client; }
 }
 
 async fn rotate(client: &Arc<RwLock<AO3Client>>) {

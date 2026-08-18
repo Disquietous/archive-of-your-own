@@ -3,8 +3,10 @@
   Fully synthetic AO3 collection bookmarks listing for parser tests.
   Mirrors /collections/{name}/bookmarks: li.bookmark.blurb items wrapping a
   standard work blurb plus the bookmarker's own module; one series bookmark
-  with no /works/ link (must be skipped). Entirely fabricated works,
-  authors, and tags. No real data — do not replace with saved pages.
+  with no /works/ link (must be skipped); one "Mystery Work" bookmark of an
+  unrevealed challenge work (placeholder header, work id only in the li
+  class, Rec symbol in the li-level p.status block). Entirely fabricated
+  works, authors, and tags. No real data — do not replace with saved pages.
 -->
 <html lang="en">
   <head>
@@ -120,6 +122,28 @@
               <a rel="author" href="/users/MockAuthor/pseuds/MockAuthor">MockAuthor</a>
             </h4>
             <p class="datetime">05 Aug 2026</p>
+          </div>
+        </li>
+
+        <li id="bookmark_9000004" class="bookmark blurb group work-3000004 user-777" role="article">
+          <p class="status" title="5 Bookmarks">
+            <a class="help symbol question modal" aria-label="Bookmark symbols key" href="/help/bookmark-symbols-key.html"><span class="rec" title="Rec"><span class="text">Rec</span></span></a>
+            <span class="count">5</span>
+          </p>
+          <div class="mystery header picture module">
+            <h4 class="heading">Mystery Work</h4>
+            <h5 class="heading">Part of <a href="/collections/mock_mystery_fest">Mock Mystery Fest</a></h5>
+            <div class="icon"></div>
+          </div>
+          <h6 class="landmark heading">Summary</h6>
+          <blockquote class="userstuff summary">
+            <p>This is part of an ongoing challenge and will be revealed soon!</p>
+          </blockquote>
+          <div class="user module group">
+            <h5 class="byline heading">
+              Bookmarked by <a href="/users/MockReader/pseuds/MockReader/bookmarks">MockReader</a>
+            </h5>
+            <p class="datetime">12 Aug 2026</p>
           </div>
         </li>
 

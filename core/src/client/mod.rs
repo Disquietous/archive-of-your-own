@@ -249,8 +249,9 @@ impl AO3Client {
         let fetch_start = std::time::Instant::now();
         let audit = AuditCtx::new(if ajax { "GET (ajax)" } else { "GET" }, url, None);
         log_debug!("http", " {} header_timeout={}s body_timeout={}s", url, header_timeout.as_secs(), body_timeout.as_secs());
-        // Set after a first 429: the retry goes out with shift+refresh
-        // (no-cache) headers to punch through a cached 429 at the edge.
+        // Set after a first 429 or 503: the retry goes out with
+        // shift+refresh (no-cache) headers to punch through a cached
+        // error response at the edge.
         let mut hard_reload = false;
         // Reports against the ambient operation set by `with_recovery`
         // (`events::scoped`) — a no-op outside that scope, e.g. in tests.
@@ -321,17 +322,19 @@ impl AO3Client {
             let code = status.as_u16();
 
             // Retry on transient HTTP errors before reading body
-            // 429: rate-limited. First, retry ONCE with hard-reload headers:
-            // edge caches can serve a stored 429 for the URL, in which case
-            // every client gets it regardless of exit IP (new circuits don't
-            // help) while a browser shift+refresh punches through to origin
-            // and gets a 200. Only when the no-cache retry also 429s is the
-            // limit real — then fail fast with the Retry-After value so
-            // upper layers can rotate the circuit (fresh IP = fresh budget)
-            // or surface an honest countdown.
-            if code == 429 && !hard_reload {
+            // 429/503: first, retry ONCE with hard-reload headers: edge
+            // caches can serve a stored 429/503 for the URL, in which case
+            // every client gets it regardless of exit IP (new circuits
+            // don't help) while a browser shift+refresh punches through to
+            // origin and gets a 200 — observed on bookmark fetches that
+            // 503'd in-app while Tor Browser loaded the same page every
+            // time. Only when the no-cache retry also fails is the error
+            // real — then fail fast so upper layers can back off (503) or
+            // rotate for a fresh rate budget / surface an honest countdown
+            // (429).
+            if (code == 429 || code == 503) && !hard_reload {
                 hard_reload = true;
-                log_info!("http", " 429 for {} — retrying with no-cache (shift+refresh)", url);
+                log_info!("http", " {} for {} — retrying with no-cache (shift+refresh)", code, url);
                 progress!(crate::events::OpPhase::Connecting, 0, None);
                 continue;
             }
@@ -352,8 +355,9 @@ impl AO3Client {
                     detail,
                 });
             }
-            // Retry policy (rotation on 525/429/403, backoff on 502/503/504)
-            // lives entirely in the recovery engine now — this path returns
+            // Retry policy (rotation on 525/429/403, full reconnect on
+            // 502/503/504) lives entirely in the recovery engine now —
+            // beyond the one-shot no-cache retry above, this path returns
             // the classified failure on the first non-success status.
             if !status.is_success() {
                 progress!(crate::events::OpPhase::Failed, 0, None);

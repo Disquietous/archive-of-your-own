@@ -243,11 +243,13 @@ extension ReaderViewController {
 
 extension ReaderViewController: NSTextViewDelegate {
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        guard let src = ContentBlockRenderer.imageSrc(from: link) else {
-            return false  // regular hyperlink — default handling
+        if let src = ContentBlockRenderer.imageSrc(from: link) {
+            chapterImageStatus[src] = nil  // clear a stale error before retrying
+            loadChapterImage(src)
+            return true
         }
-        chapterImageStatus[src] = nil  // clear a stale error before retrying
-        loadChapterImage(src)
+        guard let url = ExternalLinkOpener.url(from: link) else { return false }
+        ExternalLinkOpener.open(url, bridge: appState.bridge)
         return true
     }
 }

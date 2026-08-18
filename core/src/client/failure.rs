@@ -20,7 +20,11 @@ pub enum FailureKind {
     RateLimited { retry_after_secs: Option<u32> },
     /// HTTP 403 — bot/challenge protection rejected the request.
     Challenged,
-    /// HTTP 502/503/504 — an origin-wide outage, unrelated to the circuit.
+    /// HTTP 502/503/504 — the origin or its front-end proxy refused to
+    /// serve the request. Edge caches can also replay a stored 503; the
+    /// fetch layer retries once with no-cache (shift+refresh) headers
+    /// before this classification surfaces, so what reaches the recovery
+    /// engine is a real outage.
     OriginUnavailable,
     /// The transport never produced a response: SOCKS/TCP/TLS failure, or
     /// reqwest's own connect-phase timeout.

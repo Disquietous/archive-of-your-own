@@ -695,11 +695,13 @@ mod comment_tests {
     fn test_parse_collection_bookmarks_fixture() {
         // Bookmark blurbs wrap standard work blurbs; series/external
         // bookmarks (no /works/ link) are skipped, and query strings on the
-        // title link don't break id extraction.
+        // title link don't break id extraction. "Mystery Work" bookmarks
+        // (unrevealed challenge works) parse into a mystery listing with a
+        // synthetic display stub.
         let html = fs::read_to_string("tests/fixtures/collection_bookmarks.html")
             .expect("Failed to read collection bookmarks fixture");
         let bookmarks = parse_bookmark_listings(&html).expect("bookmark listing parse");
-        assert_eq!(bookmarks.len(), 2);
+        assert_eq!(bookmarks.len(), 3);
         assert_eq!(bookmarks[0].work_id, 3000001);
         assert_eq!(bookmarks[0].ao3_bookmark_id, 9000001);
         assert_eq!(bookmarks[0].bookmarker, "MockReader");
@@ -713,13 +715,36 @@ mod comment_tests {
         let work = bookmarks[0].work_summary.as_ref().expect("work blurb");
         assert_eq!(work.title, "Bookmarked Mock Work");
         assert_eq!(work.word_count, 7777);
+        assert!(!bookmarks[0].mystery);
         assert_eq!(bookmarks[1].work_id, 3000002);
         assert_eq!(bookmarks[1].bookmarker, "OtherReader");
         assert_eq!(bookmarks[1].note, "");
         assert!(bookmarks[1].tags.is_empty());
         assert!(!bookmarks[1].rec);
+        assert!(!bookmarks[1].mystery);
         assert_eq!(bookmarks[1].work_summary.as_ref().expect("work blurb").title,
                    "Second Bookmarked Work");
+
+        // The mystery bookmark: no work link — the id comes from the li's
+        // work-N class, the Rec symbol from the li-level status block, and
+        // the "Part of" collection from the placeholder header. The work
+        // stub carries only the placeholder title and reveal notice.
+        let mystery = &bookmarks[2];
+        assert!(mystery.mystery);
+        assert_eq!(mystery.work_id, 3000004);
+        assert_eq!(mystery.ao3_bookmark_id, 9000004);
+        assert_eq!(mystery.bookmarker, "MockReader");
+        assert!(mystery.rec);
+        assert_eq!(mystery.date_bookmarked, "12 Aug 2026");
+        assert_eq!(mystery.mystery_collection_name, "mock_mystery_fest");
+        assert_eq!(mystery.mystery_collection_title, "Mock Mystery Fest");
+        let stub = mystery.work_summary.as_ref().expect("mystery stub");
+        assert_eq!(stub.id, 3000004);
+        assert_eq!(stub.title, "Mystery Work");
+        assert_eq!(stub.summary,
+                   "This is part of an ongoing challenge and will be revealed soon!");
+        assert!(stub.authors.is_empty());
+        assert_eq!(stub.word_count, 0);
     }
 
     #[test]

@@ -132,6 +132,7 @@ final class AuthorProfileViewController: NSViewController {
         bioView.isHorizontallyResizable = false
         bioView.translatesAutoresizingMaskIntoConstraints = false
         bioView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bioView.delegate = self
 
         subscribeButton.target = self
         subscribeButton.action = #selector(subscribeTapped)
@@ -384,5 +385,17 @@ final class AuthorProfileViewController: NSViewController {
                 confirmed()
             }
         }
+    }
+}
+
+// MARK: - Link handling
+
+extension AuthorProfileViewController: NSTextViewDelegate {
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        // Bios have no image-loading flow; swallow tap-to-load placeholders.
+        if ContentBlockRenderer.imageSrc(from: link) != nil { return true }
+        guard let url = ExternalLinkOpener.url(from: link) else { return false }
+        ExternalLinkOpener.open(url, bridge: appState.bridge)
+        return true
     }
 }

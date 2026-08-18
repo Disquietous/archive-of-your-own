@@ -289,6 +289,13 @@ pub struct UBookmarkHit {
     /// AO3's blurb date for remote hits ("10 Aug 2026"); "YYYY-MM-DD" for
     /// library hits.
     pub date_bookmarked: String,
+    /// True when `work` is the synthetic stub for an unrevealed "Mystery
+    /// Work" (a bookmark of a work still hidden in a challenge collection).
+    pub mystery: bool,
+    /// The unrevealed collection's URL name and display title ("Part of
+    /// <title>" in the blurb); "" unless mystery.
+    pub mystery_collection_name: String,
+    pub mystery_collection_title: String,
     pub work: UWorkSummary,
 }
 
@@ -300,6 +307,9 @@ impl From<BookmarkHit> for UBookmarkHit {
             tags: h.tags,
             rec: h.rec,
             date_bookmarked: h.date_bookmarked,
+            mystery: h.mystery,
+            mystery_collection_name: h.mystery_collection_name,
+            mystery_collection_title: h.mystery_collection_title,
             work: UWorkSummary::from(h.work),
         }
     }

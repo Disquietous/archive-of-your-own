@@ -259,7 +259,11 @@ pub(super) fn parse_chapters(s: &str) -> (u32, Option<u32>) {
 // Bookmark listing parser (/users/{username}/bookmarks and
 // /collections/{name}/bookmarks — the same li.bookmark.blurb markup, each
 // wrapping a standard work blurb plus the bookmarker's own module. Series
-// and external-work bookmarks carry no /works/ link and are skipped.)
+// and external-work bookmarks carry no /works/ link or work-N class and are
+// skipped. "Mystery Work" blurbs — works still hidden in an unrevealed
+// challenge collection — have no work link either, but their id survives in
+// the li's work-N class, so they parse into a listing with a synthetic
+// display stub; see `BookmarkListing::mystery`.)
 // ---------------------------------------------------------------------------
 
 pub fn parse_bookmark_listings(html: &str) -> Result<Vec<BookmarkListing>, AppError> {
@@ -289,7 +293,17 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or_else(|| AppError::ElementNotFound("bookmark id".to_string()))?;
 
-    // Extract work_id from the heading link
+    // A "Mystery Work" blurb: the bookmarked work sits in an unrevealed
+    // challenge collection, so AO3 renders a placeholder header with no
+    // work link, author, or stats — just "Part of <collection>" and a
+    // reveal notice in the summary slot.
+    let mystery_sel = sel("div.mystery");
+    let mystery = blurb.select(&mystery_sel).next().is_some();
+
+    // Extract work_id from the heading link. Mystery blurbs have no link —
+    // their id survives only in the li's work-N class (which series and
+    // external bookmarks lack, so those still fail out here and get
+    // skipped).
     let work_link_sel = sel("h4.heading a[href*='/works/']");
     let work_id = blurb
         .select(&work_link_sel)
@@ -302,6 +316,7 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
                 .and_then(|s| s.split('?').next())
                 .and_then(|s| s.parse::<u64>().ok())
         })
+        .or_else(|| if mystery { extract_work_id(blurb).ok() } else { None })
         .ok_or_else(|| AppError::ElementNotFound("work id in bookmark".to_string()))?;
 
     // Extract bookmarker's notes (not the work summary)
@@ -332,7 +347,11 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .filter(|t| !t.is_empty())
         .collect();
 
-    let rec_sel = sel("div.user .rec");
+    // The Rec symbol lives in the blurb's top status block (the "bookmark
+    // icons" p.status, a sibling of the work blurb — never inside it, so no
+    // work markup can false-match). Some renderings also place it in the
+    // user module; accept both.
+    let rec_sel = sel("p.status .rec, div.user .rec");
     let rec = blurb.select(&rec_sel).next().is_some();
 
     let date_sel = sel("div.user p.datetime");
@@ -342,8 +361,55 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .map(|el| text(&el).trim().to_string())
         .unwrap_or_default();
 
-    // Try to parse the work blurb data (reuse existing helpers)
-    let work_summary = parse_single_blurb(blurb).ok();
+    // The collection the mystery work will be revealed from:
+    // "Part of <a href=/collections/{name}>{title}</a>" in the placeholder
+    // header.
+    let (mystery_collection_name, mystery_collection_title) = if mystery {
+        let coll_sel = sel("div.mystery h5.heading a[href*='/collections/']");
+        blurb.select(&coll_sel).next().map(|a| {
+            let name = a.value().attr("href")
+                .and_then(|href| href.split("/collections/").nth(1))
+                .map(|s| s.split(['/', '?']).next().unwrap_or("").to_string())
+                .unwrap_or_default();
+            (name, text(&a).trim().to_string())
+        }).unwrap_or_default()
+    } else {
+        Default::default()
+    };
+
+    // The work blurb data. A mystery blurb has none — synthesize a display
+    // stub carrying the only things AO3 shows: the placeholder title and
+    // the reveal notice. Callers must never cache it (see the field docs).
+    let work_summary = if mystery {
+        Some(WorkSummary {
+            id: work_id,
+            title: "Mystery Work".to_string(),
+            summary: extract_blurb_summary(blurb),
+            rating: Rating::NotRated,
+            authors: Vec::new(),
+            fandoms: Vec::new(),
+            warnings: Vec::new(),
+            categories: Vec::new(),
+            relationships: Vec::new(),
+            characters: Vec::new(),
+            tags: Vec::new(),
+            word_count: 0,
+            chapter_count: 0,
+            total_chapters: None,
+            kudos: 0,
+            hits: 0,
+            bookmarks: 0,
+            comments: 0,
+            date_published: String::new(),
+            date_updated: String::new(),
+            language: String::new(),
+            complete: false,
+            series: Vec::new(),
+            fetched_at: String::new(),
+        })
+    } else {
+        parse_single_blurb(blurb).ok()
+    };
 
     Ok(BookmarkListing {
         work_id,
@@ -353,6 +419,9 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         tags,
         rec,
         date_bookmarked,
+        mystery,
+        mystery_collection_name,
+        mystery_collection_title,
         work_summary,
     })
 }

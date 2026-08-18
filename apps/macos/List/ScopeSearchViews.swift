@@ -339,14 +339,21 @@ struct ScopeResultsView: View {
 
     var body: some View {
         let search = model.search
-        ScrollView {
-            VStack(spacing: 0) {
-                if appState.isSearching {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(maxWidth: .infinity, minHeight: 240)
-                } else {
-                    resultRows(search)
+        if search.scope == .bookmarks {
+            // Bookmark hits render in an AppKit table of BookmarkRowCellViews
+            // (the work list item treatment); the controller owns its own
+            // scrolling and loading/empty overlays.
+            BookmarkResultsPane(theme: theme, appState: appState, model: model)
+        } else {
+            ScrollView {
+                VStack(spacing: 0) {
+                    if appState.isSearching {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity, minHeight: 240)
+                    } else {
+                        resultRows(search)
+                    }
                 }
             }
         }
@@ -375,21 +382,7 @@ struct ScopeResultsView: View {
                 collectionRow(collection)
             }
         case .bookmarks:
-            let hits = search.filteredBookmarkHits
-            if hits.isEmpty {
-                if search.bookmarkListFilter.isActive && !search.bookmarkHits.isEmpty {
-                    EmptyStateMac(
-                        theme: theme, icon: "line.3.horizontal.decrease.circle",
-                        title: "No bookmarks match the filter",
-                        message: "Adjust or clear the header filter to see the results again.")
-                        .frame(minHeight: 240)
-                } else {
-                    emptyState
-                }
-            }
-            ForEach(Array(hits.enumerated()), id: \.offset) { _, hit in
-                bookmarkRow(hit)
-            }
+            EmptyView() // bookmark results render in the AppKit bookmarks table, not here
         case .works:
             EmptyView() // works results render in the works table, not here
         }
@@ -487,122 +480,6 @@ struct ScopeResultsView: View {
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }
 
-    /// A bookmark hit laid out like a work list item: bookmarked-by/date in
-    /// the top-right corner, tag pill lists (work tags, then the
-    /// bookmarker's accented tags), kudos/words/chapters meta at the
-    /// bottom. Clicking opens the work; clicking a tag block expands it.
-    private func bookmarkRow(_ hit: UBookmarkHit) -> some View {
-        Button {
-            model.openWorkByID(String(hit.work.id))
-        } label: {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "bookmark")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 18)
-                    .foregroundStyle(theme.accent)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 4) {
-                    // Top-right corner (the work row's dates slot) splits
-                    // across the first two lines so it never grows taller
-                    // than the title+byline block: bookmarked-by rides the
-                    // title line, the date rides the author line.
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(hit.work.title)
-                            .font(Font(MacFont.ui(14, weight: .semibold)))
-                            .foregroundStyle(theme.ink)
-                            .lineLimit(2)
-                        Spacer(minLength: 8)
-                        HStack(spacing: 5) {
-                            if hit.rec {
-                                Text("REC")
-                                    .font(Font(MacFont.ui(9.5, weight: .bold)))
-                                    .kerning(0.5)
-                                    .foregroundStyle(theme.onAccent)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1.5)
-                                    .background(theme.accent)
-                                    .clipShape(Capsule())
-                            }
-                            Text(hit.bookmarker.isEmpty
-                                ? "Bookmarked" : "Bookmarked by \(hit.bookmarker)")
-                                .lineLimit(1)
-                        }
-                        .font(Font(MacFont.ui(10, weight: .medium)))
-                        .foregroundStyle(theme.ink3)
-                        .padding(.top, 2)
-                    }
-                    if !authorLine(hit.work).isEmpty || !hit.dateBookmarked.isEmpty {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            Text(authorLine(hit.work))
-                                .font(Font(MacFont.ui(12)))
-                                .foregroundStyle(theme.ink3)
-                                .lineLimit(1)
-                            Spacer(minLength: 8)
-                            if !hit.dateBookmarked.isEmpty {
-                                Text(hit.dateBookmarked)
-                                    .font(Font(MacFont.ui(10, weight: .medium)))
-                                    .foregroundStyle(theme.ink3)
-                            }
-                        }
-                    }
-                    if !fandomLine(hit.work).isEmpty {
-                        Text(fandomLine(hit.work))
-                            .font(Font(MacFont.ui(12)))
-                            .foregroundStyle(theme.ink3)
-                            .lineLimit(1)
-                    }
-                    let workTags = Self.sortedTags(
-                        hit.work.relationships + hit.work.characters + hit.work.tags)
-                    if !workTags.isEmpty {
-                        CollapsibleTagPills(theme: theme, tags: workTags)
-                    }
-                    if !hit.tags.isEmpty {
-                        CollapsibleTagPills(theme: theme, tags: Self.sortedTags(hit.tags),
-                                            accented: true)
-                    }
-                    if !hit.note.isEmpty {
-                        Text(hit.note)
-                            .font(Font(MacFont.ui(12)))
-                            .foregroundStyle(theme.ink2)
-                            .lineLimit(3)
-                    }
-                    Text(bookmarkWorkMeta(hit.work))
-                        .font(Font(MacFont.ui(11, weight: .medium)))
-                        .foregroundStyle(theme.ink3)
-                        .lineLimit(1)
-                        .padding(.top, 2)
-                }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(theme.ink3)
-                    .padding(.top, 2)
-            }
-            .padding(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
-    }
-
-    /// Alphabetical, like the work list item's tag block.
-    private static func sortedTags(_ tags: [String]) -> [String] {
-        tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    }
-
-    private func authorLine(_ work: UWorkSummary) -> String {
-        work.authors.isEmpty ? "" : "by \(work.authors.joined(separator: ", "))"
-    }
-
-    private func fandomLine(_ work: UWorkSummary) -> String {
-        work.fandoms.prefix(2).joined(separator: ", ")
-    }
-
-    /// The work row's bottom meta line: kudos, words, chapter progress.
-    private func bookmarkWorkMeta(_ work: UWorkSummary) -> String {
-        let total = work.complete ? String(work.totalChapters) : "?"
-        return "♥ \(Fmt.k(Int(work.kudos)))   \(Fmt.k(Int(work.wordCount))) words   \(work.chapterCount)/\(total)"
-    }
-
     private func collectionMeta(_ collection: UCollection) -> String {
         var parts = [collection.workCount == 1 ? "1 work" : "\(collection.workCount) works"]
         if collection.bookmarkedCount > 0 {
@@ -615,4 +492,19 @@ struct ScopeResultsView: View {
         }
         return parts.joined(separator: " · ")
     }
+}
+
+/// Hosts the AppKit bookmark results table (BookmarkResultsViewController)
+/// inside the SwiftUI scope-results shell. The controller re-renders itself
+/// from observable state, so updates need no forwarding.
+private struct BookmarkResultsPane: NSViewControllerRepresentable {
+    let theme: AppTheme
+    let appState: AppState
+    let model: MacAppModel
+
+    func makeNSViewController(context: Context) -> BookmarkResultsViewController {
+        BookmarkResultsViewController(theme: theme, appState: appState, model: model)
+    }
+
+    func updateNSViewController(_ controller: BookmarkResultsViewController, context: Context) {}
 }

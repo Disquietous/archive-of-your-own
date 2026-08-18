@@ -218,6 +218,17 @@ pub struct BookmarkListing {
     pub rec: bool,
     /// The user module's datetime text ("10 Aug 2026"); "" when absent.
     pub date_bookmarked: String,
+    /// True for a "Mystery Work" blurb — a bookmark of a work still hidden
+    /// in an unrevealed challenge collection. The blurb carries no work
+    /// link, author, or stats; `work_summary` is a synthetic stub for
+    /// display and must never be cached (cache-forever would fossilize the
+    /// stub past the reveal).
+    pub mystery: bool,
+    /// Mystery blurbs name the collection the work will be revealed from
+    /// ("Part of <a href=/collections/{name}>{title}</a>"). URL name and
+    /// display title; "" unless mystery.
+    pub mystery_collection_name: String,
+    pub mystery_collection_title: String,
     pub work_summary: Option<WorkSummary>,
 }
 
@@ -233,6 +244,14 @@ pub struct BookmarkHit {
     /// AO3's blurb date for remote hits ("10 Aug 2026"); the local row's
     /// creation date ("YYYY-MM-DD") for library hits.
     pub date_bookmarked: String,
+    /// True when `work` is the synthetic stub for an unrevealed "Mystery
+    /// Work" — see BookmarkListing. Never true for library hits (mystery
+    /// stubs are never cached).
+    pub mystery: bool,
+    /// The unrevealed collection's URL name and display title; "" unless
+    /// mystery.
+    pub mystery_collection_name: String,
+    pub mystery_collection_title: String,
     pub work: WorkSummary,
 }
 

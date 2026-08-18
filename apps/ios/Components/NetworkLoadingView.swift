@@ -170,6 +170,8 @@ struct NetworkLoadingView: View {
             return "Passing the archive's connection check… \(attempt)"
         case .backingOff(let seconds):
             return "The archive is temporarily unavailable. Waiting \(seconds)s… \(attempt)"
+        case .reconnecting:
+            return "Rebuilding the Tor connection… \(attempt)"
         case .rotatingCircuit, .retrying, nil:
             break
         }
@@ -178,6 +180,8 @@ struct NetworkLoadingView: View {
             return "Archive connection failed. Trying a new route… \(attempt)"
         case .backoff:
             return "The archive is temporarily unavailable. Retrying… \(attempt)"
+        case .reconnect:
+            return "Rebuilding the Tor connection… \(attempt)"
         case .purge:
             return "Session expired. Please sign in again."
         }
