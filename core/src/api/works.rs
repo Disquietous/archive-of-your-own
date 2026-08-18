@@ -391,10 +391,15 @@ impl AO3App {
         }).await
     }
 
-    pub async fn fetch_work_full(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
+    /// `op_id`: a caller-obtained `new_operation_id` ties the fetch to the
+    /// requesting view per the request-tracking standard; None = untracked
+    /// (the core assigns an internal id).
+    pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (summary, chapters, kudos_names) = with_recovery(
-                client, storage.clone(), OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
+            let (summary, chapters, kudos_names) = super::recovery::with_recovery_as(
+                client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
+                OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
                     client.read().await.get_work(work_id).await.map_err(AO3Error::from)
                 }).await?;
@@ -410,8 +415,8 @@ impl AO3App {
         }).await
     }
 
-    pub async fn fetch_work(&self, work_id: u64) -> Result<UWorkSummary, AO3Error> {
-        self.fetch_work_full(work_id).await
+    pub async fn fetch_work(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
+        self.fetch_work_full(work_id, op_id).await
     }
 
     pub async fn fetch_chapters(&self, work_id: u64) -> Result<Vec<UChapter>, AO3Error> {

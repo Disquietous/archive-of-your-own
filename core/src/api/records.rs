@@ -43,6 +43,14 @@ pub struct UActiveRequest {
     pub method: String,
     pub url: String,
     pub elapsed_ms: i64,
+    /// The timeout governing this request (route override or global),
+    /// so progress UIs can show elapsed time against it. 0 = unknown.
+    pub timeout_secs: u32,
+    /// The operation this request belongs to — stable across the
+    /// operation's retries and matching the id on every CoreEvent it
+    /// emits, so a view holding a `new_operation_id` can pick out exactly
+    /// its own requests. None for requests outside the recovery engine.
+    pub op_id: Option<u64>,
 }
 
 // UniFFI-compatible record types (flat, no generics)

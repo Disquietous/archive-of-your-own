@@ -25,6 +25,11 @@ impl AO3App {
 
         let storage = Arc::new(Mutex::new(storage));
         crate::init_logging(&db_path, &db_passphrase);
+        {
+            let m = route_timeouts.lock().unwrap_or_else(|e| e.into_inner());
+            crate::log_info!("timeouts", "loaded {} route override(s) from DB: {:?}",
+                             m.len(), m.iter().collect::<Vec<_>>());
+        }
 
         let state_dir = std::path::Path::new(&db_path)
             .parent()
@@ -254,9 +259,11 @@ impl AO3App {
         }
         let mut m = self.route_timeouts.lock().unwrap_or_else(|e| e.into_inner());
         match timeout_secs {
-            Some(secs) => { m.insert(key, secs); }
+            Some(secs) => { m.insert(key.clone(), secs); }
             None => { m.remove(&key); }
         }
+        crate::log_info!("timeouts", "override {} = {} ({} overrides in map)",
+                         key, timeout_secs.map_or("cleared".to_string(), |s| format!("{s}s")), m.len());
         Ok(())
     }
 
@@ -361,6 +368,16 @@ impl AO3App {
         }).await
     }
 
+    /// Allocate an operation id for a UI-initiated call — the identifier
+    /// half of the request-tracking standard (see `recovery::
+    /// with_recovery_as`). Pass it to a tracking-aware API method
+    /// (e.g. `fetch_work`'s `op_id`); every request the operation makes —
+    /// including engine-driven retries after failures — and every event
+    /// it emits then carries this id back to the UI.
+    pub fn new_operation_id(&self) -> u64 {
+        crate::events::next_op_id()
+    }
+
     /// Requests currently in flight (started but not yet resolved), newest last.
     pub fn get_active_requests(&self) -> Vec<UActiveRequest> {
         let now = crate::client::now_ms();
@@ -369,6 +386,8 @@ impl AO3App {
             method: r.method,
             url: r.url,
             elapsed_ms: now.saturating_sub(r.started_at_ms) as i64,
+            timeout_secs: r.timeout_secs as u32,
+            op_id: r.op_id,
         }).collect()
     }
 }

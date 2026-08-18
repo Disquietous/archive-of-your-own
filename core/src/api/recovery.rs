@@ -134,7 +134,34 @@ where
     F: Fn(Arc<RwLock<AO3Client>>) -> Fut,
     Fut: std::future::Future<Output = Result<T, AO3Error>>,
 {
-    let id = events::next_op_id();
+    with_recovery_as(client, storage, events::next_op_id(), kind, safety, op).await
+}
+
+/// `with_recovery` under a caller-supplied operation id — the request-
+/// tracking standard's engine entry point.
+///
+/// The standard: a UI that wants to surface an operation's progress asks
+/// the core for an id up front (`AO3App::new_operation_id`), passes it to
+/// a tracking-aware API method, and that id then stamps everything the
+/// operation produces — every in-flight request registers with it
+/// (`ActiveRequestGuard` captures the ambient id, so `get_active_requests`
+/// rows carry it), every retry the engine runs after a failure happens
+/// inside the same scope and keeps the same id, and every `CoreEvent`
+/// (started / progress / recovery / finished) names it. The UI filters all
+/// of those streams by the id it already holds; no guessing by kind, URL,
+/// or timing.
+pub(crate) async fn with_recovery_as<T, F, Fut>(
+    client: Arc<RwLock<AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    id: OpId,
+    kind: OpKind,
+    safety: RetrySafety,
+    op: F,
+) -> Result<T, AO3Error>
+where
+    F: Fn(Arc<RwLock<AO3Client>>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, AO3Error>>,
+{
     events::scoped(id, run_loop(client, storage, id, kind, safety, op)).await
 }
 

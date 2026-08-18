@@ -36,6 +36,31 @@ enum ExternalLinkOpener {
         return nil
     }
 
+    // MARK: - AO3 entity URLs
+
+    static func ao3WorkURL(_ id: String) -> URL? {
+        URL(string: "https://archiveofourown.org/works/\(id)")
+    }
+
+    static func ao3UserURL(_ username: String) -> URL? {
+        URL(string: "https://archiveofourown.org/users/\(username)")
+    }
+
+    static func ao3CollectionURL(_ name: String) -> URL? {
+        URL(string: "https://archiveofourown.org/collections/\(name)")
+    }
+
+    /// AO3's tag-in-URL substitutions (mirrors the core's ao3_tag_encode),
+    /// then percent-encoding for whatever remains.
+    static func ao3TagURL(_ tag: String) -> URL? {
+        let substituted = tag
+            .replacingOccurrences(of: "/", with: "*s*")
+            .replacingOccurrences(of: "&", with: "*a*")
+            .replacingOccurrences(of: ".", with: "*d*")
+        let encoded = substituted.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? substituted
+        return URL(string: "https://archiveofourown.org/tags/\(encoded)/works")
+    }
+
     static func open(_ url: URL, bridge: RustBridge) {
         let chosen = bridge.getPref(key: prefKey) ?? ""
         guard !chosen.isEmpty,

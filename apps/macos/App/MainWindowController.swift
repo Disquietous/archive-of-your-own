@@ -71,6 +71,10 @@ final class MainWindowController: NSWindowController {
                 // kick the initial section load (iOS does this via .task).
                 appState.loadPersistedState()
                 model.loadPersistedPrefs()
+                // The global request timeout lives in UserDefaults (theme),
+                // but a fresh AO3App starts at the built-in 30s — push the
+                // user's setting into the core or it silently never applies.
+                appState.bridge.setRequestTimeout(UInt64(theme.requestTimeout))
                 model.search.loadSavedSearches(appState)
                 model.goSection(model.section)
             }

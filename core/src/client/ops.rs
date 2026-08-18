@@ -286,7 +286,7 @@ impl AO3Client {
     }
 
     pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {
-        let _active = ActiveRequestGuard::new("GET (image)", url);
+        let _active = ActiveRequestGuard::new("GET (image)", url, self.request_timeout().as_secs());
         // Every terminal outcome lands in the request log, like page fetches.
         let audit = AuditCtx::new("GET (image)", url, None);
 

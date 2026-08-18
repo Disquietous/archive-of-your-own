@@ -514,14 +514,24 @@ final class RustBridge {
         try await searchByTagPaged(tag, page: page).works
     }
 
-    func fetchWorkFull(_ workId: UInt64) async throws -> UWorkSummary {
-        guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchWorkFull(workId: workId)
+    /// Allocate an operation id for a UI-initiated call — the identifier
+    /// half of the request-tracking standard. Pass it to a tracking-aware
+    /// fetch (e.g. `fetchWork(_:opID:)`); every request the operation
+    /// makes (retries included) and every CoreEvent it emits carries the
+    /// id, so the initiating view can filter for exactly its own traffic.
+    /// 0 = database not open (nothing to track anyway).
+    func newOperationID() -> UInt64 {
+        app?.newOperationId() ?? 0
     }
 
-    func fetchWork(_ workId: UInt64) async throws -> UWorkSummary {
+    func fetchWorkFull(_ workId: UInt64, opID: UInt64? = nil) async throws -> UWorkSummary {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchWork(workId: workId)
+        return try await app.fetchWorkFull(workId: workId, opId: opID)
+    }
+
+    func fetchWork(_ workId: UInt64, opID: UInt64? = nil) async throws -> UWorkSummary {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchWork(workId: workId, opId: opID)
     }
 
     func fetchChapters(_ workId: UInt64) async throws -> [UChapter] {

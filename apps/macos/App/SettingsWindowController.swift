@@ -285,6 +285,9 @@ struct RequestsSettingsPane: View {
                     ForEach(timeouts, id: \.self) { seconds in
                         segButton("\(seconds)s", on: theme.requestTimeout == seconds) {
                             theme.requestTimeout = seconds
+                            // Mirror into the core — theme only persists the
+                            // preference; requests read the bridge's value.
+                            appState.bridge.setRequestTimeout(UInt64(seconds))
                         }
                     }
                 }

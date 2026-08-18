@@ -30,6 +30,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var authorBackBtn: ToolButton?
     var authorFollowBtn: ToolButton?
     var authorProfileRefreshBtn: ToolButton?
+    var authorAO3Btn: LabelToolButton?
     /// Memoized per key: render() rebuilds the toolbar constantly, and a
     /// recreated button would yank the popover's anchor out of the view
     /// hierarchy — dismissing the dialog the moment it opens (or on the

@@ -95,10 +95,15 @@ impl AO3Client {
     /// set, the global timeout otherwise (including unclassified URLs).
     pub fn timeout_for_url(&self, url: &str) -> u64 {
         let default = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
-        let Some(key) = routes::route_for_url(url) else { return default };
-        self.route_timeouts.lock().ok()
-            .and_then(|m| m.get(key).copied())
-            .unwrap_or(default)
+        let key = routes::route_for_url(url);
+        let (override_secs, map_len) = self.route_timeouts.lock()
+            .map(|m| (key.and_then(|k| m.get(k).copied()), m.len()))
+            .unwrap_or((None, 0));
+        log_debug!("timeouts", " {} -> route={} override={} default={}s ({} overrides in map)",
+                   url, key.unwrap_or("(unclassified)"),
+                   override_secs.map_or("none".to_string(), |s| format!("{s}s")),
+                   default, map_len);
+        override_secs.unwrap_or(default)
     }
 
     /// Adopt the app-owned override map (replacing this client's own) so a
@@ -243,7 +248,7 @@ impl AO3Client {
     }
 
     async fn fetch_with_progress_inner(&self, url: &str, timeout_secs: u64, ajax: bool) -> Result<String, AppError> {
-        let _active = ActiveRequestGuard::new(if ajax { "GET (ajax)" } else { "GET" }, url);
+        let _active = ActiveRequestGuard::new(if ajax { "GET (ajax)" } else { "GET" }, url, timeout_secs);
         let header_timeout = std::time::Duration::from_secs(timeout_secs);
         let body_timeout = std::time::Duration::from_secs(timeout_secs);
         let fetch_start = std::time::Instant::now();
@@ -707,6 +712,19 @@ mod tests {
             urlencoded("Alternate Universe - Modern Setting"),
             "Alternate+Universe+-+Modern+Setting"
         );
+    }
+
+    #[tokio::test]
+    async fn test_route_timeout_override_applies_to_author_works() {
+        let mut client = AO3Client::new_direct().await.unwrap();
+        let map = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        map.lock().unwrap().insert("author_works".to_string(), 15u64);
+        client.share_route_timeouts(map);
+        client.timeout_secs.store(30, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(client.timeout_for_url("https://archiveofourown.org/users/someone/works?page=3"), 15);
+        assert_eq!(client.timeout_for_url("https://archiveofourown.org/users/someone/pseuds/p/works?page=1"), 15);
+        // No override -> global default.
+        assert_eq!(client.timeout_for_url("https://archiveofourown.org/works/123"), 30);
     }
 
     #[test]

@@ -126,6 +126,11 @@ struct RequestLogView: View {
                     Text(elapsed(a.elapsedMs))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(theme.ink3)
+                    // The timeout governing this request (route override or
+                    // global) — makes a mis-applied override visible live.
+                    Text(a.timeoutSecs > 0 ? "of \(a.timeoutSecs)s" : "of —")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(theme.accent)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)

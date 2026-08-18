@@ -39,7 +39,7 @@ impl AO3Client {
         ];
 
         let login_url = format!("{BASE_URL}/users/login");
-        let _active = ActiveRequestGuard::new("POST", &login_url);
+        let _active = ActiveRequestGuard::new("POST", &login_url, timeout.as_secs());
         let audit = AuditCtx::new("POST", &login_url, Some(redact_payload(&params)));
 
         let result = tokio::time::timeout(timeout, async {
@@ -170,7 +170,7 @@ impl AO3Client {
 
         let timeout = self.request_timeout();
 
-        let _active = ActiveRequestGuard::new("POST", url);
+        let _active = ActiveRequestGuard::new("POST", url, timeout.as_secs());
         let audit = AuditCtx::new("POST", url, Some(redact_payload(
             &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
 
@@ -247,7 +247,7 @@ impl AO3Client {
     }
 
     async fn post_kudos_raw(&self, work_id: u64, token: &str, work_url: &str) -> Result<(u16, String), AppError> {
-        let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"));
+        let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"), self.request_timeout().as_secs());
         self.enforce_rate_limit().await;
 
         let client = self.http();

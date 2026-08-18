@@ -64,6 +64,19 @@ extension ListPaneViewController {
         return button
     }
 
+    /// Author view: open the user's AO3 profile in the configured link app.
+    func authorAO3Button(username: String) -> LabelToolButton {
+        let button = authorAO3Btn ?? LabelToolButton(theme: theme) { [weak self] in
+            guard let self, let user = model.authorUsername,
+                  let url = ExternalLinkOpener.ao3UserURL(user) else { return }
+            ExternalLinkOpener.open(url, bridge: appState.bridge)
+        }
+        authorAO3Btn = button
+        button.configure(title: "Ao3", symbol: "arrow.up.right",
+                         tooltip: "Open \(username)'s profile on AO3 in your browser")
+        return button
+    }
+
     /// Author view: the same follow bell as the work detail's byline —
     /// toggles the device-local follow that lists the author under Authors.
     func authorFollowButton(username: String) -> ToolButton {

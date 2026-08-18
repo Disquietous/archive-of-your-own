@@ -359,6 +359,50 @@ final class ReadPaneViewController: NSViewController {
         return host
     }
 
+    private var ao3Btn: LabelToolButton?
+    private var ao3ButtonURL: URL?
+
+    /// The header's "Ao3" pill: opens the shown entity's archive page in
+    /// the user's configured link app. One cached instance — only one of
+    /// the entity headers (work, collection, tag) is ever visible, and the
+    /// URL is re-set on every render pass.
+    private func ao3Button(url: URL?, tooltip: String) -> LabelToolButton {
+        let button = ao3Btn ?? LabelToolButton(theme: theme) { [weak self] in
+            guard let self, let url = ao3ButtonURL else { return }
+            ExternalLinkOpener.open(url, bridge: appState.bridge)
+        }
+        ao3Btn = button
+        ao3ButtonURL = url
+        button.configure(title: "Ao3", symbol: "arrow.up.right", tooltip: tooltip)
+        return button
+    }
+
+    private var requestProgressHost: NSHostingView<RequestProgressView>?
+
+    /// Show/hide the request-progress banner over this pane's content area,
+    /// bound to one tracked operation id (request-tracking standard). The
+    /// host is a sibling of `container` added after it, so the content
+    /// swaps `show(mode:)` performs inside the container can never cover
+    /// it. Created on show and torn down on hide so its poll timer only
+    /// runs while the tracked operation is in flight.
+    private func setRequestProgressOverlay(_ opID: UInt64?) {
+        guard let opID else {
+            requestProgressHost?.removeFromSuperview()
+            requestProgressHost = nil
+            return
+        }
+        guard requestProgressHost == nil else { return }
+        let host = NSHostingView(rootView: RequestProgressView(theme: theme, appState: appState, opID: opID))
+        host.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(host)
+        NSLayoutConstraint.activate([
+            host.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            host.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            host.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+        ])
+        requestProgressHost = host
+    }
+
     private var readerRefreshBtn: ToolButton?
 
     /// Reader header: refetch the chapters from AO3, bypassing the caches —
@@ -680,6 +724,11 @@ final class ReadPaneViewController: NSViewController {
     private func render() {
         // Track the app text-size setting so toolbar fonts refresh with it.
         _ = theme.uiFontScale
+        // Request-progress banner: hidden unless a branch below hands it a
+        // tracked operation id (only work-detail refresh so far). The defer
+        // runs on every early return, so no branch has to remember to hide it.
+        var requestOverlayOpID: UInt64?
+        defer { setRequestProgressOverlay(requestOverlayOpID) }
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
         toolbarTop.constant = model.immersive ? 20 : 0
@@ -763,18 +812,20 @@ final class ReadPaneViewController: NSViewController {
         // the library's works for the fandom, with an explicit Search AO3
         // action that swaps the pane to the archive's paged tag results.
         if model.section == .fandoms, let tag = model.fandomWorksTag, model.selectedWork == nil {
+            let tagAO3 = ao3Button(url: ExternalLinkOpener.ao3TagURL(tag),
+                                   tooltip: "Open this tag's works on AO3 in your browser")
             if model.fandomSearchActive {
                 let search = model.search
                 toolbar.configure(title: tag, sub: search.resultsSubtitle)
                 toolbar.setLeading([fandomLibraryBackButton()])
-                toolbar.setTrailing(search.hasSearched
-                    ? [makePagerHost(), worksFilterButton(for: .search)] : [])
+                toolbar.setTrailing([tagAO3] + (search.hasSearched
+                    ? [makePagerHost(), worksFilterButton(for: .search)] : []))
             } else {
                 let count = model.fandomLibraryWorks.count
                 toolbar.configure(title: tag,
                                   sub: count == 1 ? "1 work in library" : "\(count) works in library")
                 toolbar.setLeading([fandomCloseButton()])
-                toolbar.setTrailing([fandomSearchButton(), worksFilterButton(for: .fandoms)])
+                toolbar.setTrailing([tagAO3, fandomSearchButton(), worksFilterButton(for: .fandoms)])
             }
             show(mode: .searchResults)
             return
@@ -814,14 +865,16 @@ final class ReadPaneViewController: NSViewController {
         // Tags/Users/Collections render their own hit lists.
         if model.section == .search, model.selectedWork == nil {
             let search = model.search
-            if search.showingResults, search.splitCollectionName != nil {
+            if search.showingResults, let collectionName = search.splitCollectionName {
                 // Split collection view: the pane toolbar names the
                 // collection; the back arrow and both pagers live in the
                 // halves' own header bars.
                 toolbar.configure(title: search.splitCollectionTitle ?? "Collection",
                                   sub: splitCollectionSubtitle(search))
                 toolbar.setLeading([])
-                toolbar.setTrailing([searchSourceButton()])
+                toolbar.setTrailing([ao3Button(url: ExternalLinkOpener.ao3CollectionURL(collectionName),
+                                               tooltip: "Open this collection on AO3 in your browser"),
+                                     searchSourceButton()])
                 show(mode: .collectionSplit)
                 return
             }
@@ -909,6 +962,7 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
+        if !reading { requestOverlayOpID = appState.workRefreshOpID }
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
@@ -920,7 +974,9 @@ final class ReadPaneViewController: NSViewController {
         } else {
             refreshDetailActionButtons(for: work, bookmarked: bookmarked)
             toolbar.setAfterTitle([startReadingButton])
-            var trailing: [NSView] = [settingsButton, detailRefreshButton(),
+            var trailing: [NSView] = [ao3Button(url: ExternalLinkOpener.ao3WorkURL(work.id),
+                                                tooltip: "Open this work on AO3 in your browser"),
+                                      settingsButton, detailRefreshButton(),
                                       downloadButton, readingListButton, subscribeButton,
                                       kudosButton, workCommentsButton]
             if bookmarked { trailing.append(editBookmarkButton) }

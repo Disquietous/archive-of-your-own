@@ -208,7 +208,8 @@ extension ListPaneViewController {
                                   sub: appState.isLoadingUserProfile(author)
                                       ? "Fetching profile from AO3…" : "Author profile")
                 toolbar.setLeading([authorBackButton()])
-                toolbar.setTrailing([authorProfileRefreshButton(username: author),
+                toolbar.setTrailing([authorAO3Button(username: author),
+                                     authorProfileRefreshButton(username: author),
                                      authorFollowButton(username: author)])
                 showAuthorProfileContent(username: author, activePane: model.authorPane)
                 break

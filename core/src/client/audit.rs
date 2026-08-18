@@ -88,6 +88,14 @@ pub struct ActiveRequest {
     pub started_at_ms: u64,
     pub method: String,
     pub url: String,
+    /// The timeout governing this request, so progress UIs can show
+    /// elapsed time against it. 0 = unknown.
+    pub timeout_secs: u64,
+    /// The recovery-engine operation this request belongs to — the same id
+    /// across the operation's retries, and the id every CoreEvent for the
+    /// operation carries (the request-tracking standard). None for a
+    /// request made outside `with_recovery`.
+    pub op_id: Option<u64>,
 }
 
 static ACTIVE_REQUESTS: std::sync::OnceLock<std::sync::Mutex<Vec<ActiveRequest>>> =
@@ -106,7 +114,7 @@ pub struct ActiveRequestGuard {
 }
 
 impl ActiveRequestGuard {
-    pub fn new(method: &str, url: &str) -> Self {
+    pub fn new(method: &str, url: &str, timeout_secs: u64) -> Self {
         let id = NEXT_ACTIVE_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut list) = active_requests().lock() {
             list.push(ActiveRequest {
@@ -114,6 +122,10 @@ impl ActiveRequestGuard {
                 started_at_ms: now_ms(),
                 method: method.to_string(),
                 url: url.to_string(),
+                timeout_secs,
+                // Ambient: guards are created inside the engine's scoped
+                // future, so no parameter threading is needed.
+                op_id: crate::events::current_op(),
             });
         }
         Self { id }
