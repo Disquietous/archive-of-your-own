@@ -261,6 +261,12 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             overlayHost = host
         }
 
+        // Follow-bell inputs, read on every render path so the relay
+        // re-renders the moment a follow or AO3 subscription toggles
+        // (see ListPaneViewController.showWorksContent).
+        _ = model.followedAuthorNames
+        _ = appState.subscriptions
+
         // Content-aware signature — data refreshes must repaint rows even
         // when the id set is unchanged (see ListPaneViewController).
         let ids = works.map { "\($0.id)|\($0.updated)|\($0.chapterCount)|\($0.words)" }
@@ -268,8 +274,8 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             tableView.reloadData()
             tableView.scroll(.zero)
         } else {
-            // Same rows — only move the selection highlight and bookmark
-            // indicator, as in ListPaneViewController. (Reading
+            // Same rows — only move the selection highlight and the bookmark
+            // and follow indicators, as in ListPaneViewController. (Reading
             // bookmarkedWorkIDs also re-renders the moment a bookmark
             // toggles.)
             let bookmarked = appState.bookmarkedWorkIDs
@@ -279,6 +285,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
+                cell.setFollowState(model.authorFollowState(works[row].author))
             }
         }
         renderedWorkIDs = ids
@@ -313,6 +320,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
+                       followState: model.authorFollowState(work.author),
                        summaryExpanded: true,
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: max(100, tableWidth - 45))
@@ -321,6 +329,12 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         }
         cell.onToggleBookmark = { [weak self] in
             self?.appState.toggleBookmark(work.id)
+        }
+        cell.onAuthorClick = { [weak self] in
+            self?.model.openAuthorProfile(work.author)
+        }
+        cell.onToggleFollow = { [weak self] in
+            self?.model.toggleAuthorFollow(work.author)
         }
     }
 

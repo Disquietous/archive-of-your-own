@@ -13,7 +13,11 @@ final class BookmarkRowCellView: NSTableCellView {
     private let spine = NSView()
     private let fandomLabel = NSTextField(wrappingLabelWithString: "")
     private let titleLabel = NSTextField(wrappingLabelWithString: "")
-    private let authorLabel = NSTextField(labelWithString: "")
+    /// Byline: "by" + per-author clickable name + follow bell — the work
+    /// row's byline treatment, with each listed author carrying its own bell.
+    private let bylineStack = NSStackView()
+    private var bylineBells: [FollowBellButton] = []
+    private var bylineAuthors: [String] = []
     private let noteLabel = NSTextField(wrappingLabelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
     /// Top-right corner block: REC pill + bookmarked-by on the first line,
@@ -42,6 +46,10 @@ final class BookmarkRowCellView: NSTableCellView {
     /// Called when the user clicks a tag block to expand/collapse it.
     var onToggleWorkTags: (() -> Void)?
     var onToggleBookmarkerTags: (() -> Void)?
+    /// Called when the user clicks an author name — opens the author profile.
+    var onAuthorClick: ((String) -> Void)?
+    /// Called when the user clicks an author's follow bell.
+    var onToggleFollow: ((String) -> Void)?
 
     private static func verticalPad(for density: Density) -> CGFloat {
         switch density {
@@ -79,8 +87,10 @@ final class BookmarkRowCellView: NSTableCellView {
         // Selectable wrapping labels consume row clicks and drop the inline
         // rating-badge attachment — same reasoning as WorkRowCellView.
         titleLabel.isSelectable = false
-        authorLabel.font = MacFont.ui(12)
-        authorLabel.lineBreakMode = .byTruncatingTail
+        bylineStack.orientation = .horizontal
+        bylineStack.alignment = .centerY
+        bylineStack.spacing = 4
+        bylineStack.setContentHuggingPriority(.init(751), for: .vertical)
         noteLabel.font = MacFont.ui(12.5)
         noteLabel.maximumNumberOfLines = 3
         noteLabel.isSelectable = false
@@ -112,20 +122,20 @@ final class BookmarkRowCellView: NSTableCellView {
         bookmarkerTagsHeight = setUpTagClip(bookmarkerTagsClip, label: bookmarkerTagsLabel,
                                             action: #selector(bookmarkerTagsClicked))
 
-        let body = NSStackView(views: [titleLabel, authorLabel, fandomLabel,
+        let body = NSStackView(views: [titleLabel, bylineStack, fandomLabel,
                                        workTagsClip, bookmarkerTagsClip, noteLabel, metaLabel])
         bodyStack = body
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
-        body.setCustomSpacing(2, after: authorLabel)
+        body.setCustomSpacing(2, after: bylineStack)
         body.setCustomSpacing(6, after: fandomLabel)
         body.setCustomSpacing(7, after: workTagsClip)
         body.setCustomSpacing(7, after: bookmarkerTagsClip)
         body.setCustomSpacing(7, after: noteLabel)
         // Refuse vertical stretching so row-height measurement never
         // ratchets — see WorkRowCellView.
-        for label in [fandomLabel, titleLabel, authorLabel, noteLabel, metaLabel] {
+        for label in [fandomLabel, titleLabel, noteLabel, metaLabel] {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
 
@@ -169,6 +179,59 @@ final class BookmarkRowCellView: NSTableCellView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    /// Rebuild the byline for this hit's authors: each name opens the
+    /// author profile and carries its own follow bell.
+    private func rebuildByline(authors: [String],
+                               followState: (String) -> MacAppModel.AuthorFollowState) {
+        bylineStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        bylineBells = []
+        bylineAuthors = authors
+
+        func makeLabel(_ text: String, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+            let field = NSTextField(labelWithString: text)
+            field.font = MacFont.ui(12, weight: weight)
+            field.textColor = color
+            field.lineBreakMode = .byTruncatingTail
+            field.setContentHuggingPriority(.init(751), for: .vertical)
+            return field
+        }
+
+        bylineStack.addArrangedSubview(makeLabel("by", weight: .regular, color: theme.nsInk3))
+        guard !authors.isEmpty else {
+            bylineStack.addArrangedSubview(makeLabel("Unknown", weight: .semibold, color: theme.nsInk2))
+            return
+        }
+        for (index, author) in authors.enumerated() {
+            let name = makeLabel(index < authors.count - 1 ? "\(author)," : author,
+                                 weight: .semibold, color: theme.nsInk2)
+            name.tag = index
+            name.toolTip = "View \(author)’s profile"
+            name.addGestureRecognizer(NSClickGestureRecognizer(
+                target: self, action: #selector(authorNameClicked(_:))))
+            bylineStack.addArrangedSubview(name)
+            bylineStack.setCustomSpacing(2, after: name)
+            let bell = FollowBellButton(theme: theme)
+            bell.configure(author: author, state: followState(author))
+            bell.onToggle = { [weak self] author in self?.onToggleFollow?(author) }
+            bylineStack.addArrangedSubview(bell)
+            bylineBells.append(bell)
+        }
+    }
+
+    @objc private func authorNameClicked(_ gesture: NSClickGestureRecognizer) {
+        guard let index = (gesture.view as? NSTextField)?.tag,
+              index >= 0, index < bylineAuthors.count else { return }
+        onAuthorClick?(bylineAuthors[index])
+    }
+
+    /// Re-shade the byline bells in place — callable without reconfiguring
+    /// so follow toggles reflect instantly on every visible row.
+    func updateFollowBells(_ followState: (String) -> MacAppModel.AuthorFollowState) {
+        for bell in bylineBells {
+            bell.configure(author: bell.author, state: followState(bell.author))
+        }
     }
 
     @objc private func workTagsClicked() {
@@ -255,7 +318,8 @@ final class BookmarkRowCellView: NSTableCellView {
 
     func configure(with hit: UBookmarkHit,
                    workTagsExpanded: Bool, bookmarkerTagsExpanded: Bool,
-                   availableTextWidth: CGFloat) {
+                   availableTextWidth: CGFloat,
+                   followState: (String) -> MacAppModel.AuthorFollowState = { _ in .none }) {
         let work = hit.work
 
         // Chrome fonts are assigned here, not in init, so the app text-size
@@ -342,14 +406,8 @@ final class BookmarkRowCellView: NSTableCellView {
 
         // Mystery works have no byline at all; other blurbs without an
         // author link (anonymous works) keep the "Unknown" fallback.
-        authorLabel.isHidden = hit.mystery
-        let authors = work.authors.joined(separator: ", ")
-        let author = NSMutableAttributedString(
-            string: "by ", attributes: [.font: MacFont.ui(12), .foregroundColor: theme.nsInk3])
-        author.append(NSAttributedString(
-            string: authors.isEmpty ? "Unknown" : authors,
-            attributes: [.font: MacFont.ui(12, weight: .semibold), .foregroundColor: theme.nsInk2]))
-        authorLabel.attributedStringValue = author
+        bylineStack.isHidden = hit.mystery
+        rebuildByline(authors: work.authors, followState: followState)
 
         let workHeights = configureTagClip(
             work.relationships + work.characters + work.tags, accented: false,

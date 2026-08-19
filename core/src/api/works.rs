@@ -48,9 +48,10 @@ impl AO3App {
         }).await.map(|p| p.works)
     }
 
-    pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
-        self.run_listing_fetch("search", None, move |client| {
+        self.run_listing_fetch("search", op_id, move |client| {
             let pairs = pairs.clone();
             async move {
                 client.read().await.search_works_raw(&pairs, page).await.map_err(AO3Error::from)
@@ -83,15 +84,19 @@ impl AO3App {
     /// index). Every fetched page is cached into the collections table
     /// (upsert by slug) — the library-scoped collection search reads that
     /// cache.
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn browse_collections(
         &self,
         criteria: Option<UCollectionSearchCriteria>,
         page: u32,
+        op_id: Option<u64>,
     ) -> Result<UCollectionsPage, AO3Error> {
         let criteria: Option<CollectionSearchCriteria> = criteria.map(Into::into);
         self.run_on_runtime(move |client, storage| async move {
-            let (collections, has_next, total) = with_recovery(
-                client, storage.clone(), OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
+            let (collections, has_next, total) = with_recovery_as(
+                client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
+                OpKind::Fetch { label: "collections_browse".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let criteria = criteria.clone();
                     async move {
@@ -283,11 +288,13 @@ impl AO3App {
     /// cached like every other listing: the works, and the bookmark rows
     /// attributed to whoever made them (series/external bookmarks are
     /// skipped by the parser).
-    pub async fn search_bookmarks(&self, criteria: UBookmarkSearchCriteria, page: u32) -> Result<UPagedBookmarks, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn search_bookmarks(&self, criteria: UBookmarkSearchCriteria, page: u32, op_id: Option<u64>) -> Result<UPagedBookmarks, AO3Error> {
         let criteria: BookmarkSearchCriteria = criteria.into();
         self.run_on_runtime(move |client, storage| async move {
-            let (listings, has_next, total, found) = with_recovery(
+            let (listings, has_next, total, found) = with_recovery_as(
                 client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "bookmark_search".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let criteria = criteria.clone();
@@ -398,7 +405,7 @@ impl AO3App {
     /// (the core assigns an internal id).
     pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (summary, chapters, kudos_names) = super::recovery::with_recovery_as(
+            let (summary, chapters, kudos_names) = super::with_recovery_as(
                 client, storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
@@ -424,7 +431,7 @@ impl AO3App {
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (_, chapters, kudos_names) = super::recovery::with_recovery_as(
+            let (_, chapters, kudos_names) = super::with_recovery_as(
                 client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,

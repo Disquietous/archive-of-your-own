@@ -460,9 +460,10 @@ final class RustBridge {
     }
 
     /// Paged variant: real has-next/total-pages read from the results HTML.
-    func searchWorksRawPaged(keys: [String], values: [String], page: UInt32 = 1) async throws -> UPagedWorks {
+    func searchWorksRawPaged(keys: [String], values: [String], page: UInt32 = 1,
+                             opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.searchWorksRaw(keys: keys, values: values, page: page)
+        return try await app.searchWorksRaw(keys: keys, values: values, page: page, opId: opID)
     }
 
     /// Paged variant of searchByTag.
@@ -475,17 +476,18 @@ final class RustBridge {
     /// full bookmark hits (bookmarker, tags, note, rec, date) with the
     /// work blurb embedded. Results are cached like every listing (works +
     /// bookmark rows).
-    func searchBookmarks(criteria: UBookmarkSearchCriteria, page: UInt32 = 1) async throws -> UPagedBookmarks {
+    func searchBookmarks(criteria: UBookmarkSearchCriteria, page: UInt32 = 1,
+                         opID: UInt64? = nil) async throws -> UPagedBookmarks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.searchBookmarks(criteria: criteria, page: page)
+        return try await app.searchBookmarks(criteria: criteria, page: page, opId: opID)
     }
 
     /// One page of the AO3 /collections index, optionally sorted/filtered
     /// with the index's collection_search criteria (nil = the plain index).
     func browseCollections(criteria: UCollectionSearchCriteria? = nil,
-                           page: UInt32 = 1) async throws -> UCollectionsPage {
+                           page: UInt32 = 1, opID: UInt64? = nil) async throws -> UCollectionsPage {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.browseCollections(criteria: criteria, page: page)
+        return try await app.browseCollections(criteria: criteria, page: page, opId: opID)
     }
 
     /// One page of a collection's works. `name` is the collection's URL slug.

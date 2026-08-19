@@ -29,6 +29,53 @@ fn parse_number(s: &str) -> u64 {
     s.replace(',', "").trim().parse().unwrap_or(0)
 }
 
+/// AO3 sometimes injects a dismissible site-wide announcement between the
+/// page header and the content (`<div class="alert announcement group"
+/// id="admin-banner">…</div>`). Its body is a `<div class="userstuff">`,
+/// so it matches the same selectors as real page content — an unstripped
+/// banner gets parsed as, e.g., chapter text. Every fetched page runs
+/// through here before parsing so no parser ever sees the banner.
+pub fn strip_admin_banner(mut html: String) -> String {
+    while let Some(range) = admin_banner_range(&html) {
+        html.replace_range(range, "");
+    }
+    html
+}
+
+/// Byte range of the banner's whole balanced `<div>` block, or None when no
+/// banner is present (the overwhelmingly common case — one substring search).
+fn admin_banner_range(html: &str) -> Option<std::ops::Range<usize>> {
+    let id_pos = html.find("id=\"admin-banner\"")
+        .or_else(|| html.find("id='admin-banner'"))?;
+    // The <div opening tag this id belongs to. If a '>' intervenes the id
+    // text wasn't inside a div's opening tag — bail rather than mangle.
+    let start = html[..id_pos].rfind("<div")?;
+    if html[start..id_pos].contains('>') {
+        return None;
+    }
+    // Walk forward over nested <div>/</div> tags until the block closes.
+    // Byte-wise so multi-byte characters never split an index.
+    let bytes = html.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"<div")
+            && matches!(bytes.get(i + 4), Some(b' ' | b'>' | b'\t' | b'\n' | b'\r')) {
+            depth += 1;
+            i += 4;
+        } else if bytes[i..].starts_with(b"</div>") {
+            depth = depth.checked_sub(1)?;
+            i += 6;
+            if depth == 0 {
+                return Some(start..i);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 const AO3_DATE_FORMATS: &[&str] = &[
     "%d %b %Y",  // "15 Jul 2026" — blurb listings
     "%Y-%m-%d",  // "2026-07-15"  — work page stats

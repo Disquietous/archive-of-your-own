@@ -57,6 +57,7 @@ extension ListPaneViewController {
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
+                       followState: model.authorFollowState(work.author),
                        summaryExpanded: expandedSummaries.contains(work.id),
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)
@@ -68,6 +69,12 @@ extension ListPaneViewController {
         }
         cell.onToggleBookmark = { [weak self] in
             self?.appState.toggleBookmark(work.id)
+        }
+        cell.onAuthorClick = { [weak self] in
+            self?.model.openAuthorProfile(work.author)
+        }
+        cell.onToggleFollow = { [weak self] in
+            self?.model.toggleAuthorFollow(work.author)
         }
         return cell
     }

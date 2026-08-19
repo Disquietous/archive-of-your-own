@@ -372,9 +372,7 @@ struct ScopeResultsView: View {
         case .users:
             if search.userHits.isEmpty { emptyState }
             ForEach(search.userHits, id: \.self) { username in
-                row(icon: "person", title: username, sub: "AO3 user") {
-                    model.openAuthorProfile(username)
-                }
+                userRow(username)
             }
         case .collections:
             if search.collectionHits.isEmpty { emptyState }
@@ -408,6 +406,38 @@ struct ScopeResultsView: View {
         case "creator": "Creator"
         default: tagType.capitalized
         }
+    }
+
+    /// A user hit — the generic row plus the list-item follow bell.
+    private func userRow(_ username: String) -> some View {
+        Button {
+            model.openAuthorProfile(username)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "person")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18)
+                    .foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(username)
+                        .font(Font(MacFont.ui(14, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                        .lineLimit(1)
+                    Text("AO3 user")
+                        .font(Font(MacFont.ui(12)))
+                        .foregroundStyle(theme.ink3)
+                }
+                Spacer()
+                AuthorFollowBell(theme: theme, model: model, author: username)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(theme.ink3)
+            }
+            .padding(.init(top: 11, leading: 16, bottom: 11, trailing: 16))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }
 
     private func row(icon: String, title: String, sub: String, action: @escaping () -> Void) -> some View {
@@ -461,6 +491,10 @@ struct ScopeResultsView: View {
                         .font(Font(MacFont.ui(12)))
                         .foregroundStyle(theme.ink3)
                         .lineLimit(1)
+                    if !collection.maintainers.isEmpty {
+                        CollectionMaintainersLine(theme: theme, model: model,
+                                                  maintainers: collection.maintainers)
+                    }
                     if !collection.summary.isEmpty {
                         Text(collection.summary)
                             .font(Font(MacFont.ui(12)))
@@ -487,9 +521,6 @@ struct ScopeResultsView: View {
                 ? "1 bookmarked item" : "\(collection.bookmarkedCount) bookmarked items")
         }
         if !collection.collectionType.isEmpty { parts.append(collection.collectionType) }
-        if !collection.maintainers.isEmpty {
-            parts.append("by \(collection.maintainers.joined(separator: ", "))")
-        }
         return parts.joined(separator: " · ")
     }
 }

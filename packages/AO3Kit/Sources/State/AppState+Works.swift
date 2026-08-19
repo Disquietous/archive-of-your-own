@@ -7,18 +7,13 @@ extension AppState {
     /// copy (fetchWorkMetadata only fills gaps — this updates).
     func refreshWorkMetadata(_ id: String) async {
         guard let workId = UInt64(id), !isRefreshingWork else { return }
-        // Obtain the tracking id before the fetch starts so the progress
-        // banner can filter for this operation from its first request.
-        let opID = bridge.newOperationID()
-        workRefreshOpID = opID
         isRefreshingWork = true
-        defer {
-            isRefreshingWork = false
-            workRefreshOpID = nil
-        }
+        defer { isRefreshingWork = false }
         do {
-            let summary = try await retryOnTimeout(task: metadataTask, using: bridge) {
-                try await self.bridge.fetchWork(workId, opID: opID)
+            let summary = try await workRefreshOp.run(bridge) { opID in
+                try await retryOnTimeout(task: metadataTask, using: bridge) {
+                    try await self.bridge.fetchWork(workId, opID: opID)
+                }
             }
             fetchedWorks[id] = Self.workFromSummary(summary)
             // The fetched page may have revealed kudos left outside the app.

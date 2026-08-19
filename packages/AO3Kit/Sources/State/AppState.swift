@@ -151,14 +151,13 @@ final class AppState {
     let bookmarkSyncTask = NetworkTask()
 
     var isRefreshingWork = false
-    /// The operation id of the in-flight work-detail refresh (request-
-    /// tracking standard) — lets the detail pane's progress banner surface
-    /// exactly this operation's requests, retries included. nil when no
-    /// refresh is running.
-    var workRefreshOpID: UInt64?
-    /// Same, for the reading pane's in-flight chapter fetch (first open of
-    /// an uncached work, or the toolbar's Refresh) — nil when none.
-    var chapterFetchOpID: UInt64?
+    /// The in-flight work-detail refresh (request-tracking standard) — its
+    /// opID lets the detail pane's progress banner surface exactly this
+    /// operation's requests, retries included.
+    let workRefreshOp = TrackedOperation()
+    /// Same, for the reading pane's chapter fetch (first open of an
+    /// uncached work, or the toolbar's Refresh).
+    let chapterFetchOp = TrackedOperation()
 
     /// Work IDs with a subscription toggle in flight (disables the button).
     var subscriptionTogglingWorkIDs: Set<String> = []

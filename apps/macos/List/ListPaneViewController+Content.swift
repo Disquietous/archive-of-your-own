@@ -37,6 +37,13 @@ extension ListPaneViewController {
             ])
             overlayHost = host
         }
+        // Follow-bell inputs, read on every render path so the relay
+        // re-renders the moment a follow or AO3 subscription toggles (the
+        // reload path configures cells lazily outside this tracked closure —
+        // see the drill-in reads in showSubscriptionsContent).
+        _ = model.followedAuthorNames
+        _ = appState.subscriptions
+
         let sectionChanged = renderedSection != section
         // Content-aware row signature: a What's-New check or forced refresh
         // can change a work's dates/counts without changing which rows are
@@ -45,10 +52,11 @@ extension ListPaneViewController {
         if sectionChanged || ids != renderedWorkIDs {
             tableView.reloadData()
         } else {
-            // Same rows — only move the selection highlight and bookmark
-            // indicator. Reloading here replaces every cell and makes
-            // expand/collapse look like a flash. (Reading bookmarkedWorkIDs
-            // also re-renders the moment a bookmark toggles.)
+            // Same rows — only move the selection highlight and the bookmark
+            // and follow indicators. Reloading here replaces every cell and
+            // makes expand/collapse look like a flash. (Reading
+            // bookmarkedWorkIDs also re-renders the moment a bookmark
+            // toggles.)
             let bookmarked = appState.bookmarkedWorkIDs
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < works.count,
@@ -56,6 +64,7 @@ extension ListPaneViewController {
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
+                cell.setFollowState(model.authorFollowState(works[row].author))
             }
         }
         renderedWorkIDs = ids

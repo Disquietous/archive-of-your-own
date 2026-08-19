@@ -39,7 +39,7 @@ mod works;
 pub use self::capabilities::{CapabilityError, PlatformCapabilities};
 pub use self::error::*;
 pub use self::records::*;
-pub(crate) use self::recovery::with_recovery;
+pub(crate) use self::recovery::{with_recovery, with_recovery_as};
 pub use self::recovery::RetrySafety;
 pub use crate::events::OpKind;
 use self::helpers::*;

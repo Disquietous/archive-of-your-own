@@ -4,6 +4,76 @@ import SwiftUI
 // SwiftUI content for the list pane's non-table variants, hosted from the
 // AppKit ListPaneViewController. All data comes from the shared AppState.
 
+// MARK: - Author follow bell (list-item standard)
+
+/// The shaded follow bell used across list items — the work detail
+/// byline's control: filled + accent while the author is followed locally
+/// or subscribed on AO3. Clicking only toggles the device-local follow;
+/// AO3 subscribe/unsubscribe lives solely in the Subscriptions view.
+struct AuthorFollowBell: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+    let author: String
+    var size: CGFloat = 12
+
+    var body: some View {
+        let state = model.authorFollowState(author)
+        Button {
+            model.toggleAuthorFollow(author)
+        } label: {
+            Image(systemName: state.shaded ? "bell.fill" : "bell")
+                .font(.system(size: size, weight: .medium))
+                .foregroundStyle(state.shaded ? theme.accent : theme.ink3)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(helpText(for: state))
+    }
+
+    private func helpText(for state: MacAppModel.AuthorFollowState) -> String {
+        switch state {
+        case .followed:
+            "Unfollow \(author)"
+        case .subscribedOnly:
+            "Subscribed to \(author) on AO3 — click to also follow on this device"
+        case .none:
+            "Follow \(author) — adds them to Authors → Following"
+        }
+    }
+}
+
+/// Collection rows' "by maintainer" line: names open the author profile
+/// and each carries the follow bell.
+struct CollectionMaintainersLine: View {
+    @Bindable var theme: AppTheme
+    @Bindable var model: MacAppModel
+    let maintainers: [String]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("by")
+                .font(Font(MacFont.ui(12)))
+                .foregroundStyle(theme.ink3)
+            ForEach(Array(maintainers.enumerated()), id: \.offset) { index, name in
+                HStack(spacing: 1) {
+                    Button {
+                        model.openAuthorProfile(name)
+                    } label: {
+                        Text(index < maintainers.count - 1 ? "\(name)," : name)
+                            .font(Font(MacFont.ui(12, weight: .semibold)))
+                            .foregroundStyle(theme.ink2)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .help("View \(name)’s profile")
+                    AuthorFollowBell(theme: theme, model: model, author: name, size: 11)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Tag chips (browse/search)
 
 /// Simple leading-aligned wrapping layout (no horizontal scrolling).
@@ -561,6 +631,10 @@ struct AuthorCollectionsView: View {
                         .font(Font(MacFont.ui(12)))
                         .foregroundStyle(theme.ink3)
                         .lineLimit(1)
+                    if !collection.maintainers.isEmpty {
+                        CollectionMaintainersLine(theme: theme, model: model,
+                                                  maintainers: collection.maintainers)
+                    }
                     if !collection.summary.isEmpty {
                         Text(collection.summary)
                             .font(Font(MacFont.ui(12)))
@@ -749,19 +823,7 @@ struct AuthorsList: View {
                         .foregroundStyle(theme.ink3)
                 }
                 Spacer()
-                if model.followedAuthorNames.contains(name) {
-                    Button {
-                        model.unfollowAuthor(name)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(theme.ink3)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Unfollow")
-                }
+                AuthorFollowBell(theme: theme, model: model, author: name)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(theme.ink3)

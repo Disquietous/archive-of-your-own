@@ -377,31 +377,10 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    private var requestProgressHost: NSHostingView<RequestProgressView>?
-
-    /// Show/hide the request-progress banner over this pane's content area,
-    /// bound to one tracked operation id (request-tracking standard). The
-    /// host is a sibling of `container` added after it, so the content
-    /// swaps `show(mode:)` performs inside the container can never cover
-    /// it. Created on show and torn down on hide so its poll timer only
-    /// runs while the tracked operation is in flight.
-    private func setRequestProgressOverlay(_ opID: UInt64?) {
-        guard let opID else {
-            requestProgressHost?.removeFromSuperview()
-            requestProgressHost = nil
-            return
-        }
-        guard requestProgressHost == nil else { return }
-        let host = NSHostingView(rootView: RequestProgressView(theme: theme, appState: appState, opID: opID))
-        host.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(host)
-        NSLayoutConstraint.activate([
-            host.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            host.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-            host.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-        ])
-        requestProgressHost = host
-    }
+    /// The pane's request-progress banner, hosted as a sibling of
+    /// `container` added after it so the content swaps `show(mode:)`
+    /// performs inside the container can never cover it.
+    private let requestProgressOverlay = RequestProgressOverlay()
 
     private var readerRefreshBtn: ToolButton?
 
@@ -729,7 +708,8 @@ final class ReadPaneViewController: NSViewController {
         // the reader's chapter fetch). The defer runs on every early
         // return, so no branch has to remember to hide it.
         var requestOverlayOpID: UInt64?
-        defer { setRequestProgressOverlay(requestOverlayOpID) }
+        defer { requestProgressOverlay.update(opID: requestOverlayOpID, over: container, in: view,
+                                              theme: theme, appState: appState) }
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
         toolbarTop.constant = model.immersive ? 20 : 0
@@ -754,7 +734,7 @@ final class ReadPaneViewController: NSViewController {
                 : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
                                       crawledAt: model.subscriptionWorksCrawledAt)
             toolbar.configure(title: title, sub: sub)
-            requestOverlayOpID = model.subscriptionRefreshOpID
+            requestOverlayOpID = model.subscriptionRefreshOp.opID
             toolbar.setLeading([subscriptionCloseButton()])
             var trailing: [NSView] = [sortFilterMenu.makeButton(for: .subscriptions),
                                       worksFilterButton(for: .subscriptions),
@@ -778,7 +758,7 @@ final class ReadPaneViewController: NSViewController {
                     : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
                                           crawledAt: model.authorWorksCrawledAt)
                 toolbar.configure(title: "Works", sub: sub)
-                requestOverlayOpID = model.authorRefreshOpID
+                requestOverlayOpID = model.authorRefreshOp.opID
                 toolbar.setLeading([])
                 toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
                                      worksFilterButton(for: .authors),
@@ -883,6 +863,9 @@ final class ReadPaneViewController: NSViewController {
             }
             if search.showingResults {
                 let worksStyle = search.scope == .works
+                // AO3-side Works/Bookmarks/Collections queries run tracked —
+                // the banner shows while their fetch is in flight.
+                requestOverlayOpID = search.searchFetchOp.opID
                 toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
                 let back = searchFormBackButton()
                 // The same arrow pops one level: to the collections hit
@@ -965,7 +948,7 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
-        requestOverlayOpID = reading ? appState.chapterFetchOpID : appState.workRefreshOpID
+        requestOverlayOpID = reading ? appState.chapterFetchOp.opID : appState.workRefreshOp.opID
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)

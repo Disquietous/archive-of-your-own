@@ -562,6 +562,21 @@ final class MacAppModel {
 
     // MARK: - Followed fandoms & authors (device-local follows)
 
+    /// What the list-item follow bell shows for an author. The bell is
+    /// shaded for any non-none state, but its click only ever toggles the
+    /// device-local follow — AO3 subscribe/unsubscribe lives solely in the
+    /// Subscriptions view.
+    enum AuthorFollowState {
+        case none
+        /// Followed locally (possibly also subscribed) — the bell unfollows.
+        case followed
+        /// Subscribed on AO3 without a local follow — the bell is shaded as
+        /// an indicator; clicking adds a local follow.
+        case subscribedOnly
+
+        var shaded: Bool { self != .none }
+    }
+
     /// User library data — lives in the encrypted Rust DB (followed_items),
     /// mirrored here for synchronous reads. Loaded by loadPersistedPrefs().
     private(set) var followedFandoms: [String] = []
@@ -645,6 +660,35 @@ final class MacAppModel {
     func unfollowAuthor(_ name: String) {
         followedAuthorNames.removeAll { $0 == name }
         appState.bridge.removeFollowed(kind: "author", name: name)
+    }
+
+    /// Whether the author has a device-local follow. Follows are stored as
+    /// the byline string, so a "Pseud (username)" byline also matches a
+    /// follow saved under the bare username.
+    func isAuthorFollowedLocally(_ author: String) -> Bool {
+        followedAuthorNames.contains(author)
+            || followedAuthorNames.contains(AppState.canonicalAuthorUsername(author))
+    }
+
+    /// The list rows' byline bell: shaded when the author is followed
+    /// locally or subscribed on AO3.
+    func authorFollowState(_ author: String) -> AuthorFollowState {
+        if isAuthorFollowedLocally(author) { return .followed }
+        if appState.isSubscribedToAuthor(author) { return .subscribedOnly }
+        return .none
+    }
+
+    /// Toggle for that bell — device-local follow only, never an AO3
+    /// request. Subscribe/unsubscribe lives solely in the Subscriptions
+    /// view.
+    func toggleAuthorFollow(_ author: String) {
+        if followedAuthorNames.contains(author) {
+            unfollowAuthor(author)
+        } else if followedAuthorNames.contains(AppState.canonicalAuthorUsername(author)) {
+            unfollowAuthor(AppState.canonicalAuthorUsername(author))
+        } else {
+            followAuthor(author)
+        }
     }
 
     // MARK: - Sample data (testing/demo)
@@ -743,29 +787,30 @@ final class MacAppModel {
         loadingSubscriptionID = subId
         let task = NetworkTask()
         authorTask = task
-        // Request-tracking standard: one id for the whole crawl — every
-        // page's requests carry it, so the progress banner tracks the crawl.
-        let opID = appState.bridge.newOperationID()
-        subscriptionRefreshOpID = opID
-        let fetchPage: (UInt32) async throws -> UPagedWorks
-        if subType.lowercased().contains("series"), let seriesId = UInt64(subId) {
-            fetchPage = { [appState] in
-                try await appState.bridge.fetchSeriesWorksPaged(seriesId: seriesId, page: $0, opID: opID)
-            }
-        } else {
-            fetchPage = { [appState] in
-                try await appState.bridge.fetchAuthorWorks(username: subId, page: $0, opID: opID)
-            }
-        }
         Task { @MainActor in
             do {
-                let all = try await crawlAllWorks(
-                    fetchPage: fetchPage, task: task,
-                    status: { [weak self] in self?.subscriptionWorksFetchStatus = $0 },
-                    partial: { [weak self] works in
-                        guard let self, subscriptionWorksSubId == subId else { return }
-                        subscriptionWorksList = works
-                    })
+                // Request-tracking standard: one id for the whole crawl —
+                // every page's requests carry it, so the progress banner
+                // tracks the crawl.
+                let all = try await subscriptionRefreshOp.run(appState.bridge) { opID in
+                    let fetchPage: (UInt32) async throws -> UPagedWorks
+                    if subType.lowercased().contains("series"), let seriesId = UInt64(subId) {
+                        fetchPage = { [appState] in
+                            try await appState.bridge.fetchSeriesWorksPaged(seriesId: seriesId, page: $0, opID: opID)
+                        }
+                    } else {
+                        fetchPage = { [appState] in
+                            try await appState.bridge.fetchAuthorWorks(username: subId, page: $0, opID: opID)
+                        }
+                    }
+                    return try await crawlAllWorks(
+                        fetchPage: fetchPage, task: task,
+                        status: { [weak self] in self?.subscriptionWorksFetchStatus = $0 },
+                        partial: { [weak self] works in
+                            guard let self, subscriptionWorksSubId == subId else { return }
+                            subscriptionWorksList = works
+                        })
+                }
                 if subscriptionWorksSubId == subId && !task.isCancelled {
                     subscriptionWorksList = all
                     let ids = all.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
@@ -782,7 +827,6 @@ final class MacAppModel {
                     subscriptionWorksError = error.localizedDescription
                 }
             }
-            if subscriptionRefreshOpID == opID { subscriptionRefreshOpID = nil }
             if subscriptionWorksSubId == subId {
                 isLoadingSubscriptionWorks = false
                 subscriptionWorksFetchStatus = nil
@@ -820,11 +864,11 @@ final class MacAppModel {
     var authorError: String?
     /// Progress line while a full works crawl is running.
     var authorFetchStatus: String?
-    /// Operation id of the in-flight author works crawl (request-tracking
-    /// standard) — feeds the reading pane's progress banner. nil when idle.
-    var authorRefreshOpID: UInt64?
+    /// The in-flight author works crawl (request-tracking standard) — its
+    /// opID feeds the reading pane's progress banner. Idle when nil.
+    let authorRefreshOp = TrackedOperation()
     /// Same, for the Subscriptions drill-in's works crawl.
-    var subscriptionRefreshOpID: UInt64?
+    let subscriptionRefreshOp = TrackedOperation()
     /// The in-flight crawl's task. Each crawl gets its own instance so that
     /// cancelling one can never be undone by a later crawl's retry reset.
     private(set) var authorTask = NetworkTask()
@@ -885,22 +929,23 @@ final class MacAppModel {
         isLoadingAuthor = true
         let task = NetworkTask()
         authorTask = task
-        // Request-tracking standard: one id for the whole crawl — every
-        // page's requests carry it, so the progress banner tracks the crawl.
-        let opID = appState.bridge.newOperationID()
-        authorRefreshOpID = opID
         Task { @MainActor in
             do {
-                let all = try await crawlAllWorks(
-                    fetchPage: { [appState] in
-                        try await appState.bridge.fetchAuthorWorks(username: username, page: $0, opID: opID)
-                    },
-                    task: task,
-                    status: { [weak self] in self?.authorFetchStatus = $0 },
-                    partial: { [weak self] works in
-                        guard let self, authorUsername == username else { return }
-                        authorWorksList = works
-                    })
+                // Request-tracking standard: one id for the whole crawl —
+                // every page's requests carry it, so the progress banner
+                // tracks the crawl.
+                let all = try await authorRefreshOp.run(appState.bridge) { opID in
+                    try await crawlAllWorks(
+                        fetchPage: { [appState] in
+                            try await appState.bridge.fetchAuthorWorks(username: username, page: $0, opID: opID)
+                        },
+                        task: task,
+                        status: { [weak self] in self?.authorFetchStatus = $0 },
+                        partial: { [weak self] works in
+                            guard let self, authorUsername == username else { return }
+                            authorWorksList = works
+                        })
+                }
                 if authorUsername == username && !task.isCancelled {
                     appState.bridge.setWorksCrawledNow(subType: "author", subId: username)
                     authorWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
@@ -918,7 +963,6 @@ final class MacAppModel {
                     authorError = error.localizedDescription
                 }
             }
-            if authorRefreshOpID == opID { authorRefreshOpID = nil }
             if authorUsername == username {
                 isLoadingAuthor = false
                 authorFetchStatus = nil

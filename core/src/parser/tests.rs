@@ -831,4 +831,65 @@ mod comment_tests {
         let drifted = r#"<div id="main"><ol class="listing collected"><li class="item">renamed</li></ol></div>"#;
         assert!(parse_collections_page(drifted).is_err());
     }
+
+    /// The site-wide announcement banner AO3 injects between the header and
+    /// the page content. Its `div.userstuff` body is what poisons content
+    /// selectors when it isn't stripped.
+    fn mock_admin_banner() -> &'static str {
+        r#"<div class="alert announcement group" id="admin-banner">
+             <div class="userstuff">
+               <p>The archive will be down for maintenance (<a href="https://status.example.test">status</a>).</p>
+             </div>
+             <form action="/users/mockuser/end_banner" method="post">
+               <p class="submit"><button aria-label="hide banner">&times;</button></p>
+             </form>
+           </div>"#
+    }
+
+    #[test]
+    fn test_strip_admin_banner() {
+        let page = format!(
+            r#"<html><body><header id="header">site chrome</header>{}<div id="main"><div class="userstuff module" role="article"><p>Actual chapter text.</p></div></div></body></html>"#,
+            mock_admin_banner());
+        let stripped = strip_admin_banner(page);
+        assert!(!stripped.contains("admin-banner"), "banner div removed");
+        assert!(!stripped.contains("down for maintenance"), "banner text removed");
+        assert!(stripped.contains("Actual chapter text."), "page content kept");
+        assert!(stripped.contains("site chrome"), "surrounding markup kept");
+
+        // No banner — page passes through untouched.
+        let plain = "<html><body><p>hello</p></body></html>".to_string();
+        assert_eq!(strip_admin_banner(plain.clone()), plain);
+
+        // Unbalanced banner markup never loops or panics — left in place.
+        let broken = r#"<html><div id="admin-banner"><div class="userstuff"><p>x</p></html>"#.to_string();
+        assert_eq!(strip_admin_banner(broken.clone()), broken);
+    }
+
+    #[test]
+    fn test_chapter_fallback_ignores_admin_banner() {
+        // A page whose chapter body lacks role="article" — the shape the
+        // div.userstuff fallback exists for. With the banner present the
+        // fallback used to return the banner text as the chapter.
+        let html = format!(
+            r#"<html><body>{}<div id="main">
+                 <h2 class="title heading">Mock Work</h2>
+                 <div id="chapters"><div class="userstuff"><p>First line of the story.</p></div></div>
+               </div></body></html>"#,
+            mock_admin_banner());
+
+        // Even without stripping, the parser must skip the banner.
+        let (_, chapters) = parse_work_page(&html).unwrap();
+        assert_eq!(chapters.len(), 1);
+        let text = format!("{:?}", chapters[0].content);
+        assert!(text.contains("First line of the story."), "chapter text parsed: {text}");
+        assert!(!text.contains("down for maintenance"), "banner text excluded: {text}");
+
+        // And the fetch path strips the banner before parsing anyway.
+        let (_, chapters) = parse_work_page(&strip_admin_banner(html)).unwrap();
+        assert_eq!(chapters.len(), 1);
+        let text = format!("{:?}", chapters[0].content);
+        assert!(text.contains("First line of the story."));
+        assert!(!text.contains("down for maintenance"));
+    }
 }

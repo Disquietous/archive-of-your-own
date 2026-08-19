@@ -411,7 +411,11 @@ impl AO3Client {
                 .map_err(|e| AppError::Http { kind: FailureKind::Malformed, detail: format!("Invalid UTF-8: {e}") })?;
 
             self.harvest_credentials(&body);
-            return Ok(body);
+            // Site-wide announcement banners (`#admin-banner`) carry a
+            // `div.userstuff` body that content selectors mistake for page
+            // content (observed: chapters "loading" as the banner text).
+            // Strip here so every parser sees banner-free HTML.
+            return Ok(crate::parser::strip_admin_banner(body));
         }
     }
 

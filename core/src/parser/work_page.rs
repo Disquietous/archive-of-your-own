@@ -359,6 +359,11 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
     for el in doc.select(&fallback_sel) {
         let classes = el.value().attr("class").unwrap_or("");
         if classes.contains("summary") { continue; }
+        // Never mine the site-wide announcement banner — it precedes the
+        // work content in document order, so it would win this fallback.
+        // Fetches strip it (strip_admin_banner); this guards other paths.
+        if el.ancestors().filter_map(ElementRef::wrap)
+            .any(|a| a.value().id() == Some("admin-banner")) { continue; }
         if el.select(&sel("p")).next().is_none() { continue; }
         let blocks: Vec<ContentBlock> = parse_element_children(&el).into_iter().filter(|b| !is_landmark_heading(b)).collect();
         if !blocks.is_empty() {

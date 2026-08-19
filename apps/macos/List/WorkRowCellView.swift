@@ -1,5 +1,53 @@
 import AppKit
 
+/// The shaded follow bell used in list-item bylines — the work detail
+/// byline's control at row scale: filled + accent while the author is
+/// followed locally or subscribed on AO3. Shared by WorkRowCellView and
+/// BookmarkRowCellView.
+final class FollowBellButton: NSButton {
+    private let theme: AppTheme
+    private(set) var author: String = ""
+    var onToggle: ((String) -> Void)?
+
+    init(theme: AppTheme) {
+        self.theme = theme
+        super.init(frame: .zero)
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        target = self
+        action = #selector(clicked)
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 18),
+            heightAnchor.constraint(equalToConstant: 18),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    @objc private func clicked() {
+        onToggle?(author)
+    }
+
+    func configure(author: String, state: MacAppModel.AuthorFollowState) {
+        self.author = author
+        let unfollows = state == .followed
+        image = NSImage(systemSymbolName: state.shaded ? "bell.fill" : "bell",
+                        accessibilityDescription: unfollows ? "Unfollow \(author)" : "Follow \(author)")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+        contentTintColor = state.shaded ? theme.nsAccent : theme.nsInk3
+        switch state {
+        case .followed:
+            toolTip = "Unfollow \(author)"
+        case .subscribedOnly:
+            toolTip = "Subscribed to \(author) on AO3 — click to also follow on this device"
+        case .none:
+            toolTip = "Follow \(author) — adds them to Authors → Following"
+        }
+    }
+}
+
 /// One work row in the list pane, drawn per the handoff spec: fandom spine,
 /// accent fandom label, serif title with inline rating badge, byline, 2-line
 /// summary, meta row, published/updated dates in the top-right corner,
@@ -40,6 +88,11 @@ final class WorkRowCellView: NSTableCellView {
     /// straight from the list without opening its detail page.
     private let bookmarkButton = NSButton()
     private var isBookmarked = false
+    /// Byline follow bell (the work detail byline's control) plus the
+    /// clickable author name that opens the author profile.
+    private let followButton: FollowBellButton
+    private var bylineRow: NSStackView!
+    private var authorName = ""
 
     /// Density-driven metrics (Settings → Spacing). Updated in configure().
     private var bodyStack: NSStackView!
@@ -72,6 +125,10 @@ final class WorkRowCellView: NSTableCellView {
     var onToggleBookmark: (() -> Void)?
     /// Called when the user clicks the tags to expand/collapse the full list.
     var onToggleTags: (() -> Void)?
+    /// Called when the user clicks the byline — opens the author profile.
+    var onAuthorClick: (() -> Void)?
+    /// Called when the user clicks the byline's follow bell.
+    var onToggleFollow: (() -> Void)?
 
     /// Shared measuring label for summary heights.
     private static let measureLabel = NSTextField(wrappingLabelWithString: "")
@@ -81,6 +138,7 @@ final class WorkRowCellView: NSTableCellView {
 
     init(theme: AppTheme) {
         self.theme = theme
+        self.followButton = FollowBellButton(theme: theme)
         super.init(frame: .zero)
         wantsLayer = true
 
@@ -99,6 +157,13 @@ final class WorkRowCellView: NSTableCellView {
         titleLabel.isSelectable = false
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
+        authorLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(authorClicked)))
+        followButton.onToggle = { [weak self] _ in self?.onToggleFollow?() }
+        let byline = NSStackView(views: [authorLabel, followButton])
+        bylineRow = byline
+        byline.orientation = .horizontal
+        byline.alignment = .centerY
+        byline.spacing = 4
         summaryLabel.font = MacFont.ui(12.5)
         summaryClip.wantsLayer = true
         summaryClip.layer?.masksToBounds = true
@@ -137,12 +202,12 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
 
-        let body = NSStackView(views: [titleLabel, authorLabel, fandomLabel, summaryClip, tagsClip, metaLabel, progressTrack])
+        let body = NSStackView(views: [titleLabel, byline, fandomLabel, summaryClip, tagsClip, metaLabel, progressTrack])
         bodyStack = body
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 3
-        body.setCustomSpacing(2, after: authorLabel)
+        body.setCustomSpacing(2, after: byline)
         body.setCustomSpacing(6, after: fandomLabel)
         body.setCustomSpacing(7, after: summaryClip)
         body.setCustomSpacing(7, after: tagsClip)
@@ -230,6 +295,16 @@ final class WorkRowCellView: NSTableCellView {
 
     @objc private func bookmarkClicked() {
         onToggleBookmark?()
+    }
+
+    @objc private func authorClicked() {
+        onAuthorClick?()
+    }
+
+    /// Flip only the byline bell — callable without reconfiguring so follow
+    /// toggles reflect instantly on every visible row.
+    func setFollowState(_ state: MacAppModel.AuthorFollowState) {
+        followButton.configure(author: authorName, state: state)
     }
 
     /// Flip only the bookmark indicator — callable without reconfiguring so
@@ -374,9 +449,12 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
-                   bookmarked: Bool = false,
+                   bookmarked: Bool = false, followState: MacAppModel.AuthorFollowState = .none,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
+        authorName = work.author
+        authorLabel.toolTip = "View \(work.author)’s profile"
+        setFollowState(followState)
         isRowSelected = selected
         // NSTextField caches its intrinsic size, and changing the line clamp
         // doesn't flush it — a reused cell going expanded → collapsed kept

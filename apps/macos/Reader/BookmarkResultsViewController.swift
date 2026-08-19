@@ -124,6 +124,12 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
             overlayHost = host
         }
 
+        // Follow-bell inputs, read on every render path so the relay
+        // re-renders the moment a follow or AO3 subscription toggles
+        // (see ListPaneViewController.showWorksContent).
+        _ = model.followedAuthorNames
+        _ = appState.subscriptions
+
         // Content-aware signature — data refreshes must repaint rows even
         // when the hit set looks similar (see ListPaneViewController).
         let ids = hits.map(Self.hitKey)
@@ -132,6 +138,14 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
             expandedBookmarkerTags = []
             tableView.reloadData()
             tableView.scroll(.zero)
+        } else {
+            // Same rows — re-shade the visible byline bells in place.
+            tableView.enumerateAvailableRowViews { [weak self] _, row in
+                guard let self,
+                      let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? BookmarkRowCellView
+                else { return }
+                cell.updateFollowBells { self.model.authorFollowState($0) }
+            }
         }
         renderedHitIDs = ids
     }
@@ -165,12 +179,21 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         cell.configure(with: hit,
                        workTagsExpanded: expandedWorkTags.contains(key),
                        bookmarkerTagsExpanded: expandedBookmarkerTags.contains(key),
-                       availableTextWidth: max(100, tableWidth - 45))
+                       availableTextWidth: max(100, tableWidth - 45),
+                       followState: { [weak self] in
+                           self?.model.authorFollowState($0) ?? .none
+                       })
         cell.onToggleWorkTags = { [weak self] in
             self?.toggleTags(key: key, in: \.expandedWorkTags)
         }
         cell.onToggleBookmarkerTags = { [weak self] in
             self?.toggleTags(key: key, in: \.expandedBookmarkerTags)
+        }
+        cell.onAuthorClick = { [weak self] author in
+            self?.model.openAuthorProfile(author)
+        }
+        cell.onToggleFollow = { [weak self] author in
+            self?.model.toggleAuthorFollow(author)
         }
     }
 

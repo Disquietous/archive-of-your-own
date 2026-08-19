@@ -47,6 +47,12 @@ final class MacSearchModel {
     /// (AO3-side search for the non-works scopes).
     var scopeNotice: String?
 
+    /// The in-flight AO3-side query (request-tracking standard) — its opID
+    /// feeds the results pane's progress banner. The Works, Bookmarks, and
+    /// Collections scope searches run tracked; the drill-in listings (tag,
+    /// a collection's works/bookmarks) don't yet.
+    let searchFetchOp = TrackedOperation()
+
     /// Switch tabs: back to that scope's form, stale notice cleared, any
     /// split collection view dissolved.
     @MainActor
@@ -826,8 +832,10 @@ final class MacSearchModel {
         do {
             switch query {
             case .form(let keys, let values):
-                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page)
+                applyWorksPage(try await searchFetchOp.run(appState.bridge) { opID in
+                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                        try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page, opID: opID)
+                    }
                 }, page: page, appState: appState)
             case .tag(let tag):
                 applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
@@ -842,8 +850,10 @@ final class MacSearchModel {
                     try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
                 }, page: page, appState: appState)
             case .bookmarkSearch(let criteria):
-                let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.searchBookmarks(criteria: criteria, page: page)
+                let result = try await searchFetchOp.run(appState.bridge) { opID in
+                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                        try await appState.bridge.searchBookmarks(criteria: criteria, page: page, opID: opID)
+                    }
                 }
                 bookmarkHits = result.bookmarks
                 totalWorks = result.totalFound
@@ -854,8 +864,10 @@ final class MacSearchModel {
                 // the library snapshot so they join local lists at once.
                 appState.reloadCachedWorks()
             case .collectionsIndex(let criteria):
-                let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.browseCollections(criteria: criteria, page: page)
+                let result = try await searchFetchOp.run(appState.bridge) { opID in
+                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                        try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)
+                    }
                 }
                 collectionHits = result.collections
                 totalWorks = nil
