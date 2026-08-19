@@ -725,8 +725,9 @@ final class ReadPaneViewController: NSViewController {
         // Track the app text-size setting so toolbar fonts refresh with it.
         _ = theme.uiFontScale
         // Request-progress banner: hidden unless a branch below hands it a
-        // tracked operation id (only work-detail refresh so far). The defer
-        // runs on every early return, so no branch has to remember to hide it.
+        // tracked operation id (work-detail refresh, the works crawls, and
+        // the reader's chapter fetch). The defer runs on every early
+        // return, so no branch has to remember to hide it.
         var requestOverlayOpID: UInt64?
         defer { setRequestProgressOverlay(requestOverlayOpID) }
         view.layer?.backgroundColor = theme.nsBg.cgColor
@@ -753,6 +754,7 @@ final class ReadPaneViewController: NSViewController {
                 : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
                                       crawledAt: model.subscriptionWorksCrawledAt)
             toolbar.configure(title: title, sub: sub)
+            requestOverlayOpID = model.subscriptionRefreshOpID
             toolbar.setLeading([subscriptionCloseButton()])
             var trailing: [NSView] = [sortFilterMenu.makeButton(for: .subscriptions),
                                       worksFilterButton(for: .subscriptions),
@@ -776,6 +778,7 @@ final class ReadPaneViewController: NSViewController {
                     : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
                                           crawledAt: model.authorWorksCrawledAt)
                 toolbar.configure(title: "Works", sub: sub)
+                requestOverlayOpID = model.authorRefreshOpID
                 toolbar.setLeading([])
                 toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
                                      worksFilterButton(for: .authors),
@@ -962,7 +965,7 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
-        if !reading { requestOverlayOpID = appState.workRefreshOpID }
+        requestOverlayOpID = reading ? appState.chapterFetchOpID : appState.workRefreshOpID
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)

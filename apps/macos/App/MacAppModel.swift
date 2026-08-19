@@ -743,14 +743,18 @@ final class MacAppModel {
         loadingSubscriptionID = subId
         let task = NetworkTask()
         authorTask = task
+        // Request-tracking standard: one id for the whole crawl — every
+        // page's requests carry it, so the progress banner tracks the crawl.
+        let opID = appState.bridge.newOperationID()
+        subscriptionRefreshOpID = opID
         let fetchPage: (UInt32) async throws -> UPagedWorks
         if subType.lowercased().contains("series"), let seriesId = UInt64(subId) {
             fetchPage = { [appState] in
-                try await appState.bridge.fetchSeriesWorksPaged(seriesId: seriesId, page: $0)
+                try await appState.bridge.fetchSeriesWorksPaged(seriesId: seriesId, page: $0, opID: opID)
             }
         } else {
             fetchPage = { [appState] in
-                try await appState.bridge.fetchAuthorWorks(username: subId, page: $0)
+                try await appState.bridge.fetchAuthorWorks(username: subId, page: $0, opID: opID)
             }
         }
         Task { @MainActor in
@@ -778,6 +782,7 @@ final class MacAppModel {
                     subscriptionWorksError = error.localizedDescription
                 }
             }
+            if subscriptionRefreshOpID == opID { subscriptionRefreshOpID = nil }
             if subscriptionWorksSubId == subId {
                 isLoadingSubscriptionWorks = false
                 subscriptionWorksFetchStatus = nil
@@ -815,6 +820,11 @@ final class MacAppModel {
     var authorError: String?
     /// Progress line while a full works crawl is running.
     var authorFetchStatus: String?
+    /// Operation id of the in-flight author works crawl (request-tracking
+    /// standard) — feeds the reading pane's progress banner. nil when idle.
+    var authorRefreshOpID: UInt64?
+    /// Same, for the Subscriptions drill-in's works crawl.
+    var subscriptionRefreshOpID: UInt64?
     /// The in-flight crawl's task. Each crawl gets its own instance so that
     /// cancelling one can never be undone by a later crawl's retry reset.
     private(set) var authorTask = NetworkTask()
@@ -875,11 +885,15 @@ final class MacAppModel {
         isLoadingAuthor = true
         let task = NetworkTask()
         authorTask = task
+        // Request-tracking standard: one id for the whole crawl — every
+        // page's requests carry it, so the progress banner tracks the crawl.
+        let opID = appState.bridge.newOperationID()
+        authorRefreshOpID = opID
         Task { @MainActor in
             do {
                 let all = try await crawlAllWorks(
                     fetchPage: { [appState] in
-                        try await appState.bridge.fetchAuthorWorks(username: username, page: $0)
+                        try await appState.bridge.fetchAuthorWorks(username: username, page: $0, opID: opID)
                     },
                     task: task,
                     status: { [weak self] in self?.authorFetchStatus = $0 },
@@ -904,6 +918,7 @@ final class MacAppModel {
                     authorError = error.localizedDescription
                 }
             }
+            if authorRefreshOpID == opID { authorRefreshOpID = nil }
             if authorUsername == username {
                 isLoadingAuthor = false
                 authorFetchStatus = nil

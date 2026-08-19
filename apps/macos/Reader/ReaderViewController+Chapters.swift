@@ -45,9 +45,13 @@ extension ReaderViewController {
         isLoading = true
         loadError = nil
         renderChapter()
+        // Request-tracking standard: obtain the operation id up front so the
+        // pane's progress banner can filter for this fetch's requests.
+        let opID = appState.bridge.newOperationID()
+        appState.chapterFetchOpID = opID
         do {
             let fetched = try await appState.retryOnTimeout(task: chapterTask, using: appState.bridge) {
-                try await self.appState.bridge.fetchChapters(workId)
+                try await self.appState.bridge.fetchChapters(workId, opID: opID)
             }
             appState.fetchedChapters[work.id] = fetched
             chapters = fetched
@@ -62,6 +66,8 @@ extension ReaderViewController {
                 loadError = error.localizedDescription
             }
         }
+        // Only clear our own id — a newer load may already own the banner.
+        if appState.chapterFetchOpID == opID { appState.chapterFetchOpID = nil }
         isLoading = false
         renderChapter()
     }

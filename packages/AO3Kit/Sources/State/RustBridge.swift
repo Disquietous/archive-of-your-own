@@ -423,9 +423,10 @@ final class RustBridge {
         return try await app.fetchSearchForm()
     }
 
-    func fetchAuthorWorks(username: String, pseud: String? = nil, page: UInt32 = 1) async throws -> UPagedWorks {
+    func fetchAuthorWorks(username: String, pseud: String? = nil, page: UInt32 = 1,
+                          opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchAuthorWorks(username: username, pseud: pseud, page: page)
+        return try await app.fetchAuthorWorks(username: username, pseud: pseud, page: page, opId: opID)
     }
 
     /// One page of a user's public bookmarks — works and bookmarker-scoped
@@ -442,9 +443,10 @@ final class RustBridge {
         return try await app.fetchUserCollections(username: username, page: page)
     }
 
-    func fetchSeriesWorksPaged(seriesId: UInt64, page: UInt32 = 1) async throws -> UPagedWorks {
+    func fetchSeriesWorksPaged(seriesId: UInt64, page: UInt32 = 1,
+                               opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchSeriesWorksPaged(seriesId: seriesId, page: page)
+        return try await app.fetchSeriesWorksPaged(seriesId: seriesId, page: page, opId: opID)
     }
 
     func browseWorks(page: UInt32 = 1) async throws -> [UWorkSummary] {
@@ -534,9 +536,9 @@ final class RustBridge {
         return try await app.fetchWork(workId: workId, opId: opID)
     }
 
-    func fetchChapters(_ workId: UInt64) async throws -> [UChapter] {
+    func fetchChapters(_ workId: UInt64, opID: UInt64? = nil) async throws -> [UChapter] {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchChapters(workId: workId)
+        return try await app.fetchChapters(workId: workId, opId: opID)
     }
 
     // MARK: - Cache

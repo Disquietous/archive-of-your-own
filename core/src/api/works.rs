@@ -17,8 +17,10 @@ impl AO3App {
     /// One page of an author's works. `username` may be a raw byline
     /// ("Pseud (Username)") — it's split here so URLs always carry the
     /// real account name; an explicit `pseud` wins over the byline's.
-    pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("author_works", move |client| {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`); a crawl
+    /// passes the same id for every page so the whole operation reads as one.
+    pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("author_works", op_id, move |client| {
             let (username, pseud) = (username.clone(), pseud.clone());
             async move {
                 let c = client.read().await;
@@ -30,8 +32,8 @@ impl AO3App {
         }).await
     }
 
-    pub async fn fetch_series_works_paged(&self, series_id: u64, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("series_works", move |client| async move {
+    pub async fn fetch_series_works_paged(&self, series_id: u64, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("series_works", op_id, move |client| async move {
             let c = client.read().await;
             let (works, has_next, total) = c.fetch_series_works_page(series_id, page).await.map_err(AO3Error::from)?;
             Ok((works, has_next, total, None))
@@ -39,7 +41,7 @@ impl AO3App {
     }
 
     pub async fn browse_works(&self, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
-        self.run_listing_fetch("browse", move |client| async move {
+        self.run_listing_fetch("browse", None, move |client| async move {
             let c = client.read().await;
             let works = c.browse_works(page).await.map_err(AO3Error::from)?;
             Ok((works, false, 1, None))
@@ -48,7 +50,7 @@ impl AO3App {
 
     pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32) -> Result<UPagedWorks, AO3Error> {
         let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
-        self.run_listing_fetch("search", move |client| {
+        self.run_listing_fetch("search", None, move |client| {
             let pairs = pairs.clone();
             async move {
                 client.read().await.search_works_raw(&pairs, page).await.map_err(AO3Error::from)
@@ -58,7 +60,7 @@ impl AO3App {
 
     pub async fn search_works(&self, params: USearchParams, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         let search_params: SearchParams = params.into();
-        self.run_listing_fetch("search", move |client| {
+        self.run_listing_fetch("search", None, move |client| {
             let search_params = search_params.clone();
             async move {
                 let works = client.read().await.search_works(&search_params, page).await.map_err(AO3Error::from)?;
@@ -68,7 +70,7 @@ impl AO3App {
     }
 
     pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("tag_browse", move |client| {
+        self.run_listing_fetch("tag_browse", None, move |client| {
             let tag = tag.clone();
             async move {
                 client.read().await.search_by_tag(&tag, page).await.map_err(AO3Error::from)
@@ -419,10 +421,13 @@ impl AO3App {
         self.fetch_work_full(work_id, op_id).await
     }
 
-    pub async fn fetch_chapters(&self, work_id: u64) -> Result<Vec<UChapter>, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (_, chapters, kudos_names) = with_recovery(
-                client.clone(), storage.clone(), OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
+            let (_, chapters, kudos_names) = super::recovery::with_recovery_as(
+                client.clone(), storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
+                OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
                     client.read().await.get_work(work_id).await.map_err(AO3Error::from)
                 }).await?;

@@ -116,16 +116,20 @@ impl AO3App {
     /// already read their loading state by), caches every returned work
     /// (save_work also harvests tags for autocomplete). `fetch` returns
     /// (works, has_next_page, total_pages, total_works) and may run more
-    /// than once — see `with_recovery`.
-    async fn run_listing_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<UPagedWorks, AO3Error>
+    /// than once — see `with_recovery`. `op_id`: a caller-obtained
+    /// `new_operation_id` ties the fetch to the requesting view per the
+    /// request-tracking standard; None = untracked (internal id).
+    async fn run_listing_fetch<F, Fut>(&self, key: &str, op_id: Option<u64>, fetch: F) -> Result<UPagedWorks, AO3Error>
     where
         F: Fn(Arc<tokio::sync::RwLock<AO3Client>>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AO3Error>> + Send + 'static,
     {
         let kind = OpKind::Fetch { label: key.to_string() };
         self.run_on_runtime(move |client, storage| async move {
-            let (works, has_next, total, found) =
-                with_recovery(client, storage.clone(), kind, RetrySafety::Idempotent, fetch).await?;
+            let (works, has_next, total, found) = recovery::with_recovery_as(
+                client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
+                kind, RetrySafety::Idempotent, fetch).await?;
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             for w in &works { log_db("save_work", s.save_work(w)); }

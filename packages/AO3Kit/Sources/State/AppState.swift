@@ -156,6 +156,9 @@ final class AppState {
     /// exactly this operation's requests, retries included. nil when no
     /// refresh is running.
     var workRefreshOpID: UInt64?
+    /// Same, for the reading pane's in-flight chapter fetch (first open of
+    /// an uncached work, or the toolbar's Refresh) — nil when none.
+    var chapterFetchOpID: UInt64?
 
     /// Work IDs with a subscription toggle in flight (disables the button).
     var subscriptionTogglingWorkIDs: Set<String> = []
