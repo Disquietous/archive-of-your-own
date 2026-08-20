@@ -191,16 +191,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openRequestLog() {
         if requestLogWindowController == nil {
-            requestLogWindowController = RequestLogWindowController(theme: theme, appState: appState)
+            let controller = RequestLogWindowController(theme: theme, appState: appState)
+            requestLogWindowController = controller
+            releaseOnClose(controller.window) { [weak self] in
+                self?.requestLogWindowController = nil
+            }
         }
         requestLogWindowController?.show()
     }
 
     @objc private func openDebugLog() {
         if debugLogWindowController == nil {
-            debugLogWindowController = DebugLogWindowController(theme: theme, appState: appState)
+            let controller = DebugLogWindowController(theme: theme, appState: appState)
+            debugLogWindowController = controller
+            releaseOnClose(controller.window) { [weak self] in
+                self?.debugLogWindowController = nil
+            }
         }
         debugLogWindowController?.show()
+    }
+
+    /// The inspector windows poll the core on a live timer for as long as
+    /// their view hierarchy exists, and a closed NSWindowController window
+    /// is only hidden — drop our reference on close so the window, its
+    /// SwiftUI views, and their timers actually deallocate.
+    private func releaseOnClose(_ window: NSWindow?, _ release: @escaping () -> Void) {
+        guard let window else { return }
+        var token: NSObjectProtocol?
+        token = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { _ in
+            if let token { NotificationCenter.default.removeObserver(token) }
+            // Deallocating mid-close is unsafe — let the close finish first.
+            DispatchQueue.main.async(execute: release)
+        }
     }
 
     // MARK: - Go menu

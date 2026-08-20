@@ -3,6 +3,7 @@ use rusqlite::params;
 use crate::error::AppError;
 use crate::models::WorkSummary;
 
+use super::consts::*;
 use super::{map_sql, Storage};
 
 impl Storage {
@@ -51,9 +52,7 @@ impl Storage {
         }
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
         tx.execute("DELETE FROM subscriptions", []).map_err(map_sql)?;
-        let mut stmt = tx.prepare(
-            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4)"
-        ).map_err(map_sql)?;
+        let mut stmt = tx.prepare(SQL_UPSERT_SUBSCRIPTION).map_err(map_sql)?;
         for (sub_type, sub_id, name, ao3_id) in subs {
             stmt.execute(params![sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
         }
@@ -64,7 +63,7 @@ impl Storage {
     pub fn add_subscription(&self, sub_type: &str, sub_id: &str, name: &str,
                             ao3_id: Option<&str>) -> Result<(), AppError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4)",
+            SQL_UPSERT_SUBSCRIPTION,
             params![sub_type, sub_id, name, ao3_id],
         ).map_err(map_sql)?;
         Ok(())
@@ -303,7 +302,7 @@ impl Storage {
     // -------------------------------------------------------------------
 
     pub fn save_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
-        self.with_savepoint("sub_works", || {
+        self.with_savepoint(Savepoint::SubWorks, || {
             self.conn.execute(
                 "DELETE FROM subscription_works WHERE sub_type = ?1 AND sub_id = ?2",
                 params![sub_type, sub_id],
@@ -333,7 +332,7 @@ impl Storage {
     /// Mark (or clear) works as no longer listed on AO3. The cached rows are
     /// never deleted — this flag is the only record of the disappearance.
     pub fn set_works_gone(&self, work_ids: &[u64], gone: bool) -> Result<(), AppError> {
-        self.with_savepoint("works_gone", || {
+        self.with_savepoint(Savepoint::WorksGone, || {
             let mut stmt = self.conn.prepare_cached(
                 "UPDATE works SET gone_from_ao3 = ?2 WHERE id = ?1"
             ).map_err(map_sql)?;
@@ -354,7 +353,7 @@ impl Storage {
 
     /// associations (unlike save_subscription_works, which replaces the set).
     pub fn add_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
-        self.with_savepoint("add_sub_works", || {
+        self.with_savepoint(Savepoint::AddSubWorks, || {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR IGNORE INTO subscription_works (sub_type, sub_id, work_id) VALUES (?1, ?2, ?3)"
             ).map_err(map_sql)?;
@@ -368,7 +367,7 @@ impl Storage {
     pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
         // Series works keep their crawl (reading) order; author works sort
         // newest-first like the live listing.
-        let order = if sub_type == "series" { "sw.rowid ASC" } else { "w.date_updated DESC" };
+        let order = if sub_type == SUB_TYPE_SERIES { "sw.rowid ASC" } else { "w.date_updated DESC" };
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {}
              FROM subscription_works sw
@@ -392,15 +391,15 @@ impl Storage {
     // -------------------------------------------------------------------
 
     pub fn set_check_queue(&self, json: &str) -> Result<(), AppError> {
-        self.set_state("subscription_check_queue", json)
+        self.set_state(STATE_SUB_CHECK_QUEUE, json)
     }
 
     pub fn get_check_queue(&self) -> Result<Option<String>, AppError> {
-        self.get_state("subscription_check_queue")
+        self.get_state(STATE_SUB_CHECK_QUEUE)
     }
 
     pub fn clear_check_queue(&self) -> Result<(), AppError> {
-        self.set_state("subscription_check_queue", "[]")
+        self.set_state(STATE_SUB_CHECK_QUEUE, "[]")
     }
 
     // -------------------------------------------------------------------
@@ -408,7 +407,7 @@ impl Storage {
     // -------------------------------------------------------------------
 
     pub fn add_new_work_ids(&self, ids: &[u64]) -> Result<(), AppError> {
-        self.with_savepoint("new_work_ids", || {
+        self.with_savepoint(Savepoint::NewWorkIds, || {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT OR IGNORE INTO subscription_new_works (work_id) VALUES (?1)"
             ).map_err(map_sql)?;
@@ -447,11 +446,11 @@ impl Storage {
 
     /// Get the last time subscriptions were checked, using the app_state table.
     pub fn get_last_check_time(&self) -> Result<Option<String>, AppError> {
-        self.get_state("last_subscription_check")
+        self.get_state(STATE_LAST_SUB_CHECK)
     }
 
     /// Set the last subscription check time.
     pub fn set_last_check_time(&self, time: &str) -> Result<(), AppError> {
-        self.set_state("last_subscription_check", time)
+        self.set_state(STATE_LAST_SUB_CHECK, time)
     }
 }

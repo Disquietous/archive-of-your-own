@@ -630,7 +630,8 @@ final class MacAppModel {
         // completion/rating filters or a sort.
         filterAndSort(fandomLibraryWorksRaw,
                       query: query(for: .fandoms, sectionFilters: false, listFilter: true,
-                                   sort: .natural))
+                                   sort: .natural),
+                      section: .fandoms)
     }
 
     private var fandomLibraryWorksRaw: [Work] {
@@ -898,21 +899,10 @@ final class MacAppModel {
         for work in works { appState.fetchedWorks[work.id] = work }
         authorWorksList = works
 
-        // Local-first, like the works list: bookmarks and collections show
-        // whatever earlier fetches cached; AO3 is only touched by each
-        // pane's explicit Refresh button.
-        if authorBookmarksList.isEmpty {
-            let cachedBookmarks = appState.bridge.getSubscriptionWorks(subType: "author-bookmarks",
-                                                                       subId: username)
-            let bookmarkWorks = cachedBookmarks.map(AppState.workFromSummary)
-            for work in bookmarkWorks { appState.fetchedWorks[work.id] = work }
-            authorBookmarksList = bookmarkWorks
-        }
-        if authorCollections.isEmpty {
-            authorCollections = appState.bridge.searchLibraryCollections(username).filter { collection in
-                collection.maintainers.contains { $0.caseInsensitiveCompare(username) == .orderedSame }
-            }
-        }
+        // Bookmarks and collections hydrate lazily when their pane is
+        // picked (loadAuthorPaneContent) — loading them here would query
+        // the DB for panes that may never be shown.
+        loadAuthorPaneContent(authorPane, username: username)
 
         // The profile feeds the list pane's author card and, once its
         // counts are known, picks which list the reading pane opens on.
@@ -1046,6 +1036,34 @@ final class MacAppModel {
         readerOpen = false
         authorPaneAutoSelect = false
         authorPane = pane
+        if let username = authorUsername {
+            loadAuthorPaneContent(pane, username: username)
+        }
+    }
+
+    /// Local-first, like the works list: bookmarks and collections show
+    /// whatever earlier fetches cached; AO3 is only touched by each
+    /// pane's explicit Refresh button. Works load in openAuthor — they
+    /// are the landing pane; the others hydrate on first selection.
+    private func loadAuthorPaneContent(_ pane: AuthorPane, username: String) {
+        switch pane {
+        case .works:
+            break
+        case .bookmarks:
+            if authorBookmarksList.isEmpty {
+                let cachedBookmarks = appState.bridge.getSubscriptionWorks(subType: "author-bookmarks",
+                                                                           subId: username)
+                let bookmarkWorks = cachedBookmarks.map(AppState.workFromSummary)
+                for work in bookmarkWorks { appState.fetchedWorks[work.id] = work }
+                authorBookmarksList = bookmarkWorks
+            }
+        case .collections:
+            if authorCollections.isEmpty {
+                authorCollections = appState.bridge.searchLibraryCollections(username).filter { collection in
+                    collection.maintainers.contains { $0.caseInsensitiveCompare(username) == .orderedSame }
+                }
+            }
+        }
     }
 
     /// The reading pane's default list for a freshly opened author: the
@@ -1061,6 +1079,7 @@ final class MacAppModel {
         } else if profile.collectionsCount > 0 {
             authorPane = .collections
         }
+        loadAuthorPaneContent(authorPane, username: username)
     }
 
     /// Refetch the bookmarks from AO3, starting over at page 1 — the only
@@ -1218,7 +1237,8 @@ final class MacAppModel {
     func works(for section: Section) -> [Work] {
         filterAndSort(rawWorks(for: section),
                       query: query(for: section, sectionFilters: true, listFilter: true,
-                                   sort: workSort(for: section)))
+                                   sort: workSort(for: section)),
+                      section: section)
     }
 
     private func rawWorks(for section: Section) -> [Work] {
@@ -1278,10 +1298,32 @@ final class MacAppModel {
     /// works use slug ids and exist only in Swift memory — they can't
     /// round-trip through the works cache, so sample-mode lists pass through
     /// unmodified.
-    private func filterAndSort(_ works: [Work], query: UWorkListQuery) -> [Work] {
+    ///
+    /// One render pass evaluates the same list from several controllers
+    /// (the toolbar's count, the table's rows), and the engine re-reads the
+    /// works from the DB on every call — so the ordering is memoized for
+    /// the current main-runloop tick. The memo drains on the next tick,
+    /// which keeps repeat evaluations free without ever serving an order
+    /// computed before a metadata refresh.
+    /// @ObservationIgnored: the memo is bookkeeping, not render state — if
+    /// observation tracked it, its own drain would re-trigger the renders
+    /// it exists to deduplicate.
+    @ObservationIgnored
+    private var filterSortMemo: [Section: (ids: [UInt64], query: UWorkListQuery, ordered: [UInt64])] = [:]
+
+    private func filterAndSort(_ works: [Work], query: UWorkListQuery, section: Section) -> [Work] {
         let ids = works.compactMap { UInt64($0.id) }
         guard ids.count == works.count else { return works }
-        let ordered = appState.bridge.filterAndSortWorks(ids: ids, query: query)
+        let ordered: [UInt64]
+        if let memo = filterSortMemo[section], memo.ids == ids, memo.query == query {
+            ordered = memo.ordered
+        } else {
+            ordered = appState.bridge.filterAndSortWorks(ids: ids, query: query)
+            if filterSortMemo.isEmpty {
+                DispatchQueue.main.async { [weak self] in self?.filterSortMemo.removeAll() }
+            }
+            filterSortMemo[section] = (ids, query, ordered)
+        }
         let byID = Dictionary(works.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ordered.compactMap { byID[String($0)] }
     }

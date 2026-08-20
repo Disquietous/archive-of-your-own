@@ -10,10 +10,13 @@ use crate::error::AppError;
 use crate::models::Rating;
 
 mod accounts;
+mod consts;
 mod library;
 mod subscriptions;
 mod works;
 mod works_search;
+
+use consts::*;
 
 /// Encrypted local storage backed by SQLCipher.
 ///
@@ -48,22 +51,26 @@ fn map_json(e: serde_json::Error) -> AppError {
 
 fn rating_to_str(r: &Rating) -> &'static str {
     match r {
-        Rating::General => "General",
-        Rating::Teen => "Teen",
-        Rating::Mature => "Mature",
-        Rating::Explicit => "Explicit",
-        Rating::NotRated => "NotRated",
+        Rating::General => RATING_GENERAL,
+        Rating::Teen => RATING_TEEN,
+        Rating::Mature => RATING_MATURE,
+        Rating::Explicit => RATING_EXPLICIT,
+        Rating::NotRated => RATING_NOT_RATED,
     }
 }
 
 fn str_to_rating(s: &str) -> Rating {
     match s {
-        "General" => Rating::General,
-        "Teen" => Rating::Teen,
-        "Mature" => Rating::Mature,
-        "Explicit" => Rating::Explicit,
+        RATING_GENERAL => Rating::General,
+        RATING_TEEN => Rating::Teen,
+        RATING_MATURE => Rating::Mature,
+        RATING_EXPLICIT => Rating::Explicit,
         _ => Rating::NotRated,
     }
+}
+
+fn migration_failed(next: impl std::fmt::Display, e: impl std::fmt::Display) -> AppError {
+    AppError::StorageError(format!("migration to v{next} failed: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +170,7 @@ impl Storage {
             // schema drift possible.
             let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
             self.baseline_schema()?;
-            tx.pragma_update(None, "user_version", 1).map_err(map_sql)?;
+            tx.pragma_update(None, PRAGMA_USER_VERSION, 1).map_err(map_sql)?;
             tx.commit().map_err(map_sql)?;
             version = 1;
         }
@@ -183,10 +190,10 @@ impl Storage {
                 11 => self.migrate_v11(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
-            step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
-            tx.pragma_update(None, "user_version", next).map_err(map_sql)?;
+            step.map_err(|e| migration_failed(next, e))?;
+            tx.pragma_update(None, PRAGMA_USER_VERSION, next).map_err(map_sql)?;
             tx.commit()
-                .map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
+                .map_err(|e| migration_failed(next, e))?;
             version = next;
         }
         Ok(())
@@ -503,21 +510,22 @@ impl Storage {
     /// begin_tx() batch (or another savepoint).
     pub(super) fn with_savepoint<T>(
         &self,
-        name: &str,
+        sp: Savepoint,
         f: impl FnOnce() -> Result<T, AppError>,
     ) -> Result<T, AppError> {
+        let name = sp.name();
         self.conn
-            .execute_batch(&format!("SAVEPOINT {name}"))
+            .execute_batch(&format!("{SQL_SAVEPOINT} {name}"))
             .map_err(map_sql)?;
         match f() {
             Ok(v) => {
-                self.conn.execute_batch(&format!("RELEASE {name}")).map_err(map_sql)?;
+                self.conn.execute_batch(&format!("{SQL_RELEASE} {name}")).map_err(map_sql)?;
                 Ok(v)
             }
             Err(e) => {
                 let _ = self
                     .conn
-                    .execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
+                    .execute_batch(&format!("{SQL_ROLLBACK_TO} {name}; {SQL_RELEASE} {name}"));
                 Err(e)
             }
         }
@@ -525,9 +533,9 @@ impl Storage {
 
     pub fn change_passphrase(&self, new_passphrase: &str) -> Result<(), AppError> {
         if new_passphrase.is_empty() {
-            self.conn.pragma_update(None, "rekey", "").map_err(map_sql)?;
+            self.conn.pragma_update(None, PRAGMA_REKEY, "").map_err(map_sql)?;
         } else {
-            self.conn.pragma_update(None, "rekey", new_passphrase).map_err(map_sql)?;
+            self.conn.pragma_update(None, PRAGMA_REKEY, new_passphrase).map_err(map_sql)?;
         }
         Ok(())
     }
@@ -785,9 +793,9 @@ impl Storage {
 
         // One-time: purge avatars cached by the unscoped icon selector (they
         // captured the signed-in user's chrome icon, not the profile owner's).
-        if self.get_state("avatar_cache_reset_1").ok().flatten().is_none() {
+        if self.get_state(STATE_AVATAR_CACHE_RESET).ok().flatten().is_none() {
             let _ = self.conn.execute("DELETE FROM image_cache WHERE key LIKE 'avatar:%'", []);
-            let _ = self.set_state("avatar_cache_reset_1", "1");
+            let _ = self.set_state(STATE_AVATAR_CACHE_RESET, "1");
         }
 
         // Migration: AO3 bookmarks are rich objects — notes, own tags,

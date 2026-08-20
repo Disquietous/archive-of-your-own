@@ -18,6 +18,7 @@ use rusqlite::types::Value;
 use crate::error::AppError;
 use crate::models::{LocalSearchCriteria, Rating, Warning};
 
+use super::consts::*;
 use super::{map_sql, rating_to_str, Storage};
 
 // ---------------------------------------------------------------------------
@@ -134,10 +135,10 @@ fn parse_criteria(c: &LocalSearchCriteria) -> Vec<Predicate> {
         preds.push(Predicate::CreatorContains(name.to_lowercase()));
     }
     for (field, tag_type) in [
-        (&c.fandom_names, "fandom"),
-        (&c.character_names, "character"),
-        (&c.relationship_names, "relationship"),
-        (&c.freeform_names, "freeform"),
+        (&c.fandom_names, TAG_TYPE_FANDOM),
+        (&c.character_names, TAG_TYPE_CHARACTER),
+        (&c.relationship_names, TAG_TYPE_RELATIONSHIP),
+        (&c.freeform_names, TAG_TYPE_FREEFORM),
     ] {
         for name in split_names(field) {
             preds.push(Predicate::TagNameContains { tag_type, needle: name.to_lowercase() });
@@ -183,11 +184,11 @@ fn parse_criteria(c: &LocalSearchCriteria) -> Vec<Predicate> {
     }
 
     for (expr, column) in [
-        (&c.word_count, "word_count"),
-        (&c.hits, "hits"),
-        (&c.kudos_count, "kudos"),
-        (&c.comments_count, "comments"),
-        (&c.bookmarks_count, "bookmarks"),
+        (&c.word_count, COL_WORD_COUNT),
+        (&c.hits, COL_HITS),
+        (&c.kudos_count, COL_KUDOS),
+        (&c.comments_count, COL_COMMENTS),
+        (&c.bookmarks_count, COL_BOOKMARKS),
     ] {
         if let Some(range) = parse_range(expr) {
             preds.push(Predicate::Number { column, range });
@@ -370,7 +371,7 @@ impl Storage {
             Predicate::RatingIn(ratings) => {
                 fragments.push(format!(
                     "works.rating IN ({})",
-                    vec!["?"; ratings.len()].join(", ")
+                    sql_placeholders(ratings.len())
                 ));
                 for r in ratings {
                     params.push(Value::Text((*r).into()));
@@ -521,11 +522,11 @@ impl Storage {
     /// `WHERE id IN`) so a page costs one query plus tag attachment.
     pub fn get_works_by_ids_ordered(&self, ids: &[u64]) -> Result<Vec<crate::models::WorkSummary>, AppError> {
         let mut by_id: HashMap<u64, crate::models::WorkSummary> = HashMap::with_capacity(ids.len());
-        for chunk in ids.chunks(500) {
+        for chunk in ids.chunks(SQL_IN_CHUNK) {
             let sql = format!(
                 "SELECT {} FROM works WHERE id IN ({})",
                 Self::work_select(""),
-                vec!["?"; chunk.len()].join(", ")
+                sql_placeholders(chunk.len())
             );
             let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
             let rows = stmt
@@ -553,19 +554,19 @@ impl Storage {
 fn sort_sql(column: &str, direction: &str) -> String {
     let column = column.trim();
     let key = match column {
-        "title_to_sort_on" => "ao3_lower(works.title)",
-        "created_at" => "works.date_published",
-        "word_count" => "works.word_count",
-        "hits" => "works.hits",
-        "kudos_count" => "works.kudos",
-        "comments_count" => "works.comments",
-        "bookmarks_count" => "works.bookmarks",
+        SORT_KEY_TITLE => "ao3_lower(works.title)",
+        SORT_KEY_CREATED_AT => "works.date_published",
+        SORT_KEY_WORD_COUNT => "works.word_count",
+        SORT_KEY_HITS => "works.hits",
+        SORT_KEY_KUDOS => "works.kudos",
+        SORT_KEY_COMMENTS => "works.comments",
+        SORT_KEY_BOOKMARKS => "works.bookmarks",
         _ => "works.date_updated",
     };
     let ascending = match direction.trim() {
-        "asc" => true,
-        "desc" => false,
-        _ => column == "title_to_sort_on",
+        SORT_ASC => true,
+        SORT_DESC => false,
+        _ => column == SORT_KEY_TITLE,
     };
     format!("{key} {}, works.id ASC", if ascending { "ASC" } else { "DESC" })
 }

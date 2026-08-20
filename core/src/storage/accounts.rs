@@ -3,6 +3,7 @@ use rusqlite::params;
 use crate::error::AppError;
 use crate::models::{AO3User, Comment, ContentBlock, UserProfile};
 
+use super::consts::*;
 use super::{map_json, map_sql, Storage};
 
 impl Storage {
@@ -487,8 +488,8 @@ impl Storage {
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
-        let contains = format!("%{escaped}%");
-        let prefix = format!("{escaped}%");
+        let contains = like_contains(&escaped);
+        let prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT username FROM ao3_users
              WHERE username LIKE ?1 ESCAPE '\\'
@@ -578,9 +579,9 @@ impl Storage {
             })
         }).map_err(map_sql)?.next();
         let Some(Ok(mut profile)) = row else { return Ok(None) };
-        profile.subscribed = self.has_subscription("author", &profile.username)?;
+        profile.subscribed = self.has_subscription(SUB_TYPE_AUTHOR, &profile.username)?;
         profile.subscription_ao3_id =
-            self.get_subscription_ao3_id("author", &profile.username)?;
+            self.get_subscription_ao3_id(SUB_TYPE_AUTHOR, &profile.username)?;
         Ok(Some(profile))
     }
 

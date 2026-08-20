@@ -4,6 +4,7 @@ use crate::error::AppError;
 use crate::models::{Chapter, ContentBlock, LocalSearchCriteria, Rating, SeriesMembership, Warning,
                     WorkSummary};
 
+use super::consts::*;
 use super::{map_json, map_sql, rating_to_str, str_to_rating, Storage};
 
 impl Storage {
@@ -16,8 +17,8 @@ impl Storage {
     /// columns — they hydrate from the work_tags join via attach_work_tags.
     pub(super) const WORK_COLS: [&'static str; 20] = [
         "id", "title", "authors_json", "rating", "warnings_json",
-        "categories_json", "summary", "word_count", "chapter_count",
-        "total_chapters", "kudos", "hits", "bookmarks", "comments",
+        "categories_json", "summary", COL_WORD_COUNT, "chapter_count",
+        "total_chapters", COL_KUDOS, COL_HITS, COL_BOOKMARKS, COL_COMMENTS,
         "date_published", "date_updated", "language", "complete",
         "series_json", "fetched_at",
     ];
@@ -35,7 +36,7 @@ impl Storage {
     /// Upsert a work summary plus its author-index rows, atomically (a
     /// savepoint, so it also composes inside callers' batch transactions).
     pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
-        self.with_savepoint("save_work", || self.save_work_inner(work))
+        self.with_savepoint(Savepoint::SaveWork, || self.save_work_inner(work))
     }
 
     fn save_work_inner(&self, work: &WorkSummary) -> Result<(), AppError> {
@@ -139,8 +140,8 @@ impl Storage {
                              VALUES (?1, ?2, ?3, ?4)")
             .map_err(map_sql)?;
         let mut position = 0i64;
-        for (list, tag_type) in [(fandoms, "fandom"), (characters, "character"),
-                                 (relationships, "relationship"), (freeforms, "freeform")] {
+        for (list, tag_type) in [(fandoms, TAG_TYPE_FANDOM), (characters, TAG_TYPE_CHARACTER),
+                                 (relationships, TAG_TYPE_RELATIONSHIP), (freeforms, TAG_TYPE_FREEFORM)] {
             for name in list {
                 let tag_id = self.tag_row_id(name, tag_type)?;
                 stmt.execute(params![work_id as i64, tag_id, tag_type, position])
@@ -152,27 +153,41 @@ impl Storage {
     }
 
     /// Hydrate the tag vectors on loaded rows from the join tables — the
-    /// works SELECTs only carry scalar columns.
+    /// works SELECTs only carry scalar columns. Batched in id chunks (one
+    /// query per chunk, not per work): per-statement overhead dominates
+    /// this path, so N works must not mean N round trips.
     pub(super) fn attach_work_tags(&self, works: &mut [WorkSummary]) -> Result<(), AppError> {
-        let mut stmt = self.conn
-            .prepare_cached(
-                "SELECT t.name, wt.tag_type FROM work_tags wt
+        if works.is_empty() {
+            return Ok(());
+        }
+        let slot_by_id: std::collections::HashMap<i64, usize> = works
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.id as i64, i))
+            .collect();
+        let ids: Vec<i64> = works.iter().map(|w| w.id as i64).collect();
+        for chunk in ids.chunks(SQL_IN_CHUNK) {
+            let sql = format!(
+                "SELECT wt.work_id, t.name, wt.tag_type FROM work_tags wt
                  JOIN tags t ON t.id = wt.tag_id
-                 WHERE wt.work_id = ?1
-                 ORDER BY wt.position")
-            .map_err(map_sql)?;
-        for work in works.iter_mut() {
+                 WHERE wt.work_id IN ({})
+                 ORDER BY wt.work_id, wt.position",
+                sql_placeholders(chunk.len())
+            );
+            let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
             let rows = stmt
-                .query_map(params![work.id as i64], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
                 })
                 .map_err(map_sql)?;
             for row in rows {
-                let (name, tag_type) = row.map_err(map_sql)?;
+                let (work_id, name, tag_type) = row.map_err(map_sql)?;
+                let Some(&slot) = slot_by_id.get(&work_id) else { continue };
+                let work = &mut works[slot];
                 match tag_type.as_str() {
-                    "fandom" => work.fandoms.push(name),
-                    "character" => work.characters.push(name),
-                    "relationship" => work.relationships.push(name),
+                    TAG_TYPE_FANDOM => work.fandoms.push(name),
+                    TAG_TYPE_CHARACTER => work.characters.push(name),
+                    TAG_TYPE_RELATIONSHIP => work.relationships.push(name),
                     _ => work.tags.push(name),
                 }
             }
@@ -339,11 +354,11 @@ impl Storage {
     /// Idempotent: new tags insert, known tags bump use count and freshness.
     pub fn harvest_work_tags(&self, work: &WorkSummary) -> Result<(), AppError> {
         let mut tags: Vec<(&str, &str)> = Vec::new();
-        for f in &work.fandoms { tags.push((f, "fandom")); }
-        for c in &work.characters { tags.push((c, "character")); }
-        for r in &work.relationships { tags.push((r, "relationship")); }
-        for t in &work.tags { tags.push((t, "freeform")); }
-        for a in &work.authors { tags.push((a, "creator")); }
+        for f in &work.fandoms { tags.push((f, TAG_TYPE_FANDOM)); }
+        for c in &work.characters { tags.push((c, TAG_TYPE_CHARACTER)); }
+        for r in &work.relationships { tags.push((r, TAG_TYPE_RELATIONSHIP)); }
+        for t in &work.tags { tags.push((t, TAG_TYPE_FREEFORM)); }
+        for a in &work.authors { tags.push((a, TAG_TYPE_CREATOR)); }
         self.upsert_tags(&tags)
     }
 
@@ -351,7 +366,7 @@ impl Storage {
         if tags.is_empty() {
             return Ok(());
         }
-        self.with_savepoint("upsert_tags", || {
+        self.with_savepoint(Savepoint::UpsertTags, || {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
                  ON CONFLICT(name) DO UPDATE SET
@@ -378,7 +393,7 @@ impl Storage {
             return Ok(());
         }
         let learned_type = if tag_type == "tag" { "" } else { tag_type };
-        self.with_savepoint("canonical_tags", || {
+        self.with_savepoint(Savepoint::CanonicalTags, || {
             let mut stmt = self.conn.prepare_cached(
                 "INSERT INTO tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
                  ON CONFLICT(name) DO UPDATE SET
@@ -418,8 +433,8 @@ impl Storage {
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
-        let contains = format!("%{escaped}%");
-        let prefix = format!("{escaped}%");
+        let contains = like_contains(&escaped);
+        let prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT name FROM tags
              WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
@@ -442,8 +457,8 @@ impl Storage {
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
-        let contains = format!("%{escaped}%");
-        let prefix = format!("{escaped}%");
+        let contains = like_contains(&escaped);
+        let prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT name, tag_type FROM tags
              WHERE name LIKE ?1 ESCAPE '\\'
@@ -481,8 +496,8 @@ impl Storage {
             self.attach_work_tags(&mut out)?;
             return Ok(out);
         }
-        let contains = format!("%{escaped}%");
-        let title_prefix = format!("{escaped}%");
+        let contains = like_contains(&escaped);
+        let title_prefix = like_prefix(&escaped);
         // Tag names live in the join tables now — one EXISTS covers what
         // the four dropped JSON columns used to.
         let mut stmt = self.conn.prepare(&format!(
@@ -679,19 +694,19 @@ impl Storage {
     fn sort_filtered(works: &mut [WorkSummary], column: &str, direction: &str) {
         let column = column.trim();
         works.sort_by(|a, b| match column {
-            "title_to_sort_on" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-            "created_at" => a.date_published.cmp(&b.date_published),
-            "word_count" => a.word_count.cmp(&b.word_count),
-            "hits" => a.hits.cmp(&b.hits),
-            "kudos_count" => a.kudos.cmp(&b.kudos),
-            "comments_count" => a.comments.cmp(&b.comments),
-            "bookmarks_count" => a.bookmarks.cmp(&b.bookmarks),
+            SORT_KEY_TITLE => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            SORT_KEY_CREATED_AT => a.date_published.cmp(&b.date_published),
+            SORT_KEY_WORD_COUNT => a.word_count.cmp(&b.word_count),
+            SORT_KEY_HITS => a.hits.cmp(&b.hits),
+            SORT_KEY_KUDOS => a.kudos.cmp(&b.kudos),
+            SORT_KEY_COMMENTS => a.comments.cmp(&b.comments),
+            SORT_KEY_BOOKMARKS => a.bookmarks.cmp(&b.bookmarks),
             _ => a.date_updated.cmp(&b.date_updated),
         });
         let ascending = match direction.trim() {
-            "asc" => true,
-            "desc" => false,
-            _ => column == "title_to_sort_on",
+            SORT_ASC => true,
+            SORT_DESC => false,
+            _ => column == SORT_KEY_TITLE,
         };
         if !ascending {
             works.reverse();
@@ -702,13 +717,13 @@ impl Storage {
     /// (The state key keeps its historical name so already-seeded databases
     /// don't re-run it.)
     pub(super) fn backfill_tags(&self) -> Result<(), AppError> {
-        if self.get_state("known_tags_backfilled")?.is_some() {
+        if self.get_state(STATE_KNOWN_TAGS_BACKFILLED)?.is_some() {
             return Ok(());
         }
         for work in self.get_all_works()? {
             let _ = self.harvest_work_tags(&work);
         }
-        self.set_state("known_tags_backfilled", "1")
+        self.set_state(STATE_KNOWN_TAGS_BACKFILLED, "1")
     }
 
     /// Retrieve a single work by its AO3 id, or `None` if not stored.
@@ -738,15 +753,9 @@ impl Storage {
     }
 
     /// The stored works for `ids`, preserving the ids' order; ids without a
-    /// cached row are skipped.
+    /// cached row are skipped. Batched — never one query per id.
     pub fn get_works_by_ids(&self, ids: &[u64]) -> Result<Vec<WorkSummary>, AppError> {
-        let mut out = Vec::with_capacity(ids.len());
-        for id in ids {
-            if let Some(w) = self.get_work(*id)? {
-                out.push(w);
-            }
-        }
-        Ok(out)
+        self.get_works_by_ids_ordered(ids)
     }
 
     /// Return every stored work (unordered).

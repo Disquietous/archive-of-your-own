@@ -2,6 +2,7 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 
+use super::consts::*;
 use super::{map_sql, Storage};
 
 impl Storage {
@@ -490,7 +491,7 @@ impl Storage {
     /// Upsert one fetched index page of collection blurbs — the cache-forever
     /// store the library-scoped collection search reads.
     pub fn save_collections(&self, collections: &[crate::models::CollectionSummary]) -> Result<(), AppError> {
-        self.with_savepoint("save_collections", || {
+        self.with_savepoint(Savepoint::SaveCollections, || {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO collections (name, title, summary, is_open, is_moderated,
                                           is_anonymous, work_count, bookmarked_count,
@@ -508,12 +509,12 @@ impl Storage {
             let mut saved: Vec<&str> = Vec::new();
             for c in collections {
                 if c.name.is_empty() {
-                    crate::log_error!("collections",
+                    crate::log_error!(LOG_TAG_COLLECTIONS,
                         "save_collections: SKIPPING blurb with empty slug (title='{}') — row would be unreachable", c.title);
                     continue;
                 }
                 if c.title.is_empty() {
-                    crate::log_error!("collections",
+                    crate::log_error!(LOG_TAG_COLLECTIONS,
                         "save_collections: blurb '{}' has an empty title — caching anyway, display will be blank", c.name);
                 }
                 let maintainers = serde_json::to_string(&c.maintainers)
@@ -531,7 +532,7 @@ impl Storage {
                 }
                 saved.push(&c.name);
             }
-            crate::log_debug!("collections",
+            crate::log_debug!(LOG_TAG_COLLECTIONS,
                 "save_collections: upserted {}/{} blurb(s): [{}]",
                 saved.len(), collections.len(), saved.join(", "));
             Ok(())
@@ -547,8 +548,8 @@ impl Storage {
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
-        let contains = format!("%{escaped}%");
-        let title_prefix = format!("{escaped}%");
+        let contains = like_contains(&escaped);
+        let title_prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT name, title, summary, is_open, is_moderated, is_anonymous,
                     work_count, bookmarked_count, maintainers_json, collection_type
@@ -616,7 +617,7 @@ impl Storage {
         let title = Self::escape_like(&c.title);
         if !title.is_empty() {
             sql.push_str(" AND (title LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')");
-            let contains = format!("%{title}%");
+            let contains = like_contains(&title);
             args.push(Box::new(contains.clone()));
             args.push(Box::new(contains));
         }
@@ -633,18 +634,18 @@ impl Storage {
               JOIN tags t ON t.id = ct.tag_id
               WHERE ct.collection_name = collections.name AND t.tag_type = 'fandom')";
         match c.multifandom.as_str() {
-            "true" => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} > 1")),
-            "false" => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} <= 1")),
+            FORM_TRUE => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} > 1")),
+            FORM_FALSE => sql.push_str(&format!(" AND {FANDOM_TAG_COUNT} <= 1")),
             _ => {}
         }
         match c.closed.as_str() {
-            "true" => sql.push_str(" AND is_open = 0"),
-            "false" => sql.push_str(" AND is_open = 1"),
+            FORM_TRUE => sql.push_str(" AND is_open = 0"),
+            FORM_FALSE => sql.push_str(" AND is_open = 1"),
             _ => {}
         }
         match c.moderated.as_str() {
-            "true" => sql.push_str(" AND is_moderated = 1"),
-            "false" => sql.push_str(" AND is_moderated = 0"),
+            FORM_TRUE => sql.push_str(" AND is_moderated = 1"),
+            FORM_FALSE => sql.push_str(" AND is_moderated = 0"),
             _ => {}
         }
         match c.challenge_type.as_str() {
@@ -660,7 +661,7 @@ impl Storage {
             "works_count" => "work_count",
             _ => "fetched_at", // AO3's created_at default; see doc above
         };
-        let direction = if c.sort_direction == "asc" { "ASC" } else { "DESC" };
+        let direction = if c.sort_direction == SORT_ASC { "ASC" } else { "DESC" };
         sql.push_str(&format!(" ORDER BY {column} {direction}, title COLLATE NOCASE LIMIT ?"));
         args.push(Box::new(Self::sql_limit(limit)));
 
@@ -716,10 +717,10 @@ impl Storage {
             ))
         }).map_err(map_sql)?;
 
-        let mut hits: Vec<(crate::models::BookmarkHit, String)> = Vec::new();
+        // Pass 1: bookmark-side criteria — they need no work lookup.
+        let mut candidates: Vec<(String, u64, String, Vec<String>, bool, String)> = Vec::new();
         for row in rows {
             let (bookmarker, work_id, note, tag_string, rec, created_at) = row.map_err(map_sql)?;
-            // Bookmark-side criteria first — they need no work lookup.
             if c.rec && !rec { continue; }
             if c.with_notes && note.trim().is_empty() { continue; }
             let notes_q = c.bookmark_notes.trim();
@@ -736,9 +737,24 @@ impl Storage {
                 && !Self::any_ci(&own_tags, bq)
                 && !Self::contains_ci(&bookmarker, bq) { continue; }
             if !Self::revised_matches(&c.date, &created_at) { continue; }
+            candidates.push((bookmarker, work_id, note, own_tags, rec, created_at));
+        }
 
-            let Some(w) = self.get_work(work_id)? else { continue };
-            // Work-side criteria, mirroring the works-form matcher.
+        // One batched hydration for every surviving work — the work-side
+        // pass must not cost one query per bookmark.
+        let mut ids: Vec<u64> = candidates.iter().map(|cand| cand.1).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let works_by_id: std::collections::HashMap<u64, crate::models::WorkSummary> = self
+            .get_works_by_ids_ordered(&ids)?
+            .into_iter()
+            .map(|w| (w.id, w))
+            .collect();
+
+        // Pass 2: work-side criteria, mirroring the works-form matcher.
+        let mut hits: Vec<(crate::models::BookmarkHit, String)> = Vec::new();
+        for (bookmarker, work_id, note, own_tags, rec, created_at) in candidates {
+            let Some(w) = works_by_id.get(&work_id) else { continue };
             let wq = c.bookmarkable_query.trim();
             if !wq.is_empty() {
                 let hit = Self::contains_ci(&w.title, wq)
@@ -772,7 +788,7 @@ impl Storage {
                 mystery: false,
                 mystery_collection_name: String::new(),
                 mystery_collection_title: String::new(),
-                work: w,
+                work: w.clone(),
             };
             hits.push((hit, created_at));
         }
@@ -781,7 +797,7 @@ impl Storage {
         // back to Date Bookmarked, descending like AO3's default.
         match c.sort_column.as_str() {
             "bookmarkable_date" => hits.sort_by(|a, b| b.0.work.date_updated.cmp(&a.0.work.date_updated)),
-            "word_count" => hits.sort_by(|a, b| b.0.work.word_count.cmp(&a.0.work.word_count)),
+            SORT_KEY_WORD_COUNT => hits.sort_by(|a, b| b.0.work.word_count.cmp(&a.0.work.word_count)),
             _ => hits.sort_by(|a, b| b.1.cmp(&a.1)),
         }
         let mut out: Vec<_> = hits.into_iter().map(|(hit, _)| hit).collect();
@@ -800,7 +816,7 @@ impl Storage {
     /// profile page carries no work/bookmark counts, so zeroes there keep
     /// whatever the index blurb already recorded.
     pub fn save_collection_profile(&self, c: &crate::models::CollectionSummary) -> Result<(), AppError> {
-        self.with_savepoint("save_collection_profile", || {
+        self.with_savepoint(Savepoint::SaveCollectionProfile, || {
             let mut merged = c.clone();
             let had_blurb = match self.get_collection(&c.name)? {
                 Some(existing) => {
@@ -816,11 +832,11 @@ impl Storage {
                 .execute("UPDATE collections SET profile_fetched_at = datetime('now')
                           WHERE name = ?1", params![c.name])
                 .map_err(map_sql)?;
-            crate::log_debug!("collections",
+            crate::log_debug!(LOG_TAG_COLLECTIONS,
                 "save_collection_profile '{}': prior blurb cached={}, profile_fetched_at stamped on {} row(s), merged counts works={} bookmarks={}, {} tag(s) incoming",
                 c.name, had_blurb, stamped, merged.work_count, merged.bookmarked_count, c.tags.len());
             if stamped == 0 {
-                crate::log_error!("collections",
+                crate::log_error!(LOG_TAG_COLLECTIONS,
                     "save_collection_profile '{}': no collections row to stamp — profile will re-fetch every time (blurb save was skipped?)", c.name);
             }
             self.replace_collection_tags(&c.name, &c.tags)
@@ -890,11 +906,11 @@ impl Storage {
             let tag_id = self.tag_row_id(tag, "")?;
             inserted += stmt.execute(params![name, tag_id, position as i64]).map_err(map_sql)?;
         }
-        crate::log_debug!("collections",
+        crate::log_debug!(LOG_TAG_COLLECTIONS,
             "replace_collection_tags '{}': removed {} old link(s), inserted {}/{} incoming tag(s)",
             name, removed, inserted, tags.len());
         if inserted < tags.len() {
-            crate::log_error!("collections",
+            crate::log_error!(LOG_TAG_COLLECTIONS,
                 "replace_collection_tags '{}': {} tag link(s) dropped by INSERT OR IGNORE (duplicate tag names on the profile page?) — tags: [{}]",
                 name, tags.len() - inserted, tags.join(", "));
         }
@@ -922,8 +938,7 @@ impl Storage {
         // cached (deep link) — satisfy the foreign key with a stub row the
         // next blurb or profile save will fill in.
         let stub = self.conn
-            .execute("INSERT OR IGNORE INTO collections (name, title) VALUES (?1, ?1)",
-                     params![name])
+            .execute(SQL_INSERT_COLLECTION_STUB, params![name])
             .map_err(map_sql)?;
         let mut stmt = self.conn
             .prepare_cached("INSERT OR IGNORE INTO collection_works
@@ -933,7 +948,7 @@ impl Storage {
         for id in work_ids {
             inserted += stmt.execute(params![name, *id as i64]).map_err(map_sql)?;
         }
-        crate::log_debug!("collections",
+        crate::log_debug!(LOG_TAG_COLLECTIONS,
             "add_collection_works '{}': {} work id(s) in, {} new link(s), {} already linked{}",
             name, work_ids.len(), inserted, work_ids.len() - inserted,
             if stub > 0 { " — collection row was missing, stub created" } else { "" });
@@ -963,10 +978,10 @@ impl Storage {
             .query_row("SELECT COUNT(*) FROM collection_works WHERE collection_name = ?1",
                        params![name], |r| r.get(0))
             .map_err(map_sql)?;
-        crate::log_debug!("collections",
+        crate::log_debug!(LOG_TAG_COLLECTIONS,
             "get_collection_works '{}': {} link row(s), {} work(s) returned", name, links, works.len());
         if links as usize != works.len() {
-            crate::log_error!("collections",
+            crate::log_error!(LOG_TAG_COLLECTIONS,
                 "get_collection_works '{}': {} link(s) have no matching works row — those works were never cached",
                 name, links as usize - works.len());
         }
@@ -980,8 +995,7 @@ impl Storage {
         // Same deep-link stub as add_collection_works — the listing can
         // arrive before any blurb or profile cached the collection row.
         let stub = self.conn
-            .execute("INSERT OR IGNORE INTO collections (name, title) VALUES (?1, ?1)",
-                     params![name])
+            .execute(SQL_INSERT_COLLECTION_STUB, params![name])
             .map_err(map_sql)?;
         let mut stmt = self.conn
             .prepare_cached("INSERT OR IGNORE INTO collection_bookmarks
@@ -991,7 +1005,7 @@ impl Storage {
         for id in work_ids {
             inserted += stmt.execute(params![name, *id as i64]).map_err(map_sql)?;
         }
-        crate::log_debug!("collections",
+        crate::log_debug!(LOG_TAG_COLLECTIONS,
             "add_collection_bookmarks '{}': {} work id(s) in, {} new link(s), {} already linked{}",
             name, work_ids.len(), inserted, work_ids.len() - inserted,
             if stub > 0 { " — collection row was missing, stub created" } else { "" });
@@ -1021,10 +1035,10 @@ impl Storage {
             .query_row("SELECT COUNT(*) FROM collection_bookmarks WHERE collection_name = ?1",
                        params![name], |r| r.get(0))
             .map_err(map_sql)?;
-        crate::log_debug!("collections",
+        crate::log_debug!(LOG_TAG_COLLECTIONS,
             "get_collection_bookmarks '{}': {} link row(s), {} work(s) returned", name, links, works.len());
         if links as usize != works.len() {
-            crate::log_error!("collections",
+            crate::log_error!(LOG_TAG_COLLECTIONS,
                 "get_collection_bookmarks '{}': {} link(s) have no matching works row — those works were never cached",
                 name, links as usize - works.len());
         }
