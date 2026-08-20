@@ -472,8 +472,23 @@ final class MacSearchModel {
     /// does not.
     var onNewQuery: (() -> Void)?
 
+    /// The core-side handle for the library works result set currently in
+    /// the results pane (run_library_search). Released whenever something
+    /// else replaces those results; the core's LRU cap backstops handles a
+    /// teardown never releases.
+    private var librarySearchHandle: UInt64?
+
+    @MainActor
+    private func releaseLibrarySearch(_ appState: AppState) {
+        if let handle = librarySearchHandle {
+            appState.bridge.dropLibrarySearch(handle)
+            librarySearchHandle = nil
+        }
+    }
+
     @MainActor
     private func beginNewQuery(_ appState: AppState) {
+        releaseLibrarySearch(appState)
         onNewQuery?()
         canReturnToCollectionHits = false
         collectionReturnQuery = nil
@@ -601,9 +616,16 @@ final class MacSearchModel {
     /// pager stays inert).
     @MainActor
     private func runLibraryWorksSearch(_ appState: AppState, criteria: ULibrarySearchCriteria) {
-        presentLibraryWorks(
-            appState.bridge.searchLibraryWorksFiltered(criteria).map(AppState.workFromSummary),
-            appState: appState)
+        guard let search = appState.bridge.runLibrarySearch(criteria) else {
+            presentLibraryWorks([], appState: appState)
+            return
+        }
+        // Show-everything presentation: hydrate the full range in one page.
+        // The handle stays live so future paging can slice for free.
+        let works = appState.bridge.getLibrarySearchPage(search.handle)
+            .map(AppState.workFromSummary)
+        presentLibraryWorks(works, appState: appState) // releases any prior handle
+        librarySearchHandle = search.handle
     }
 
     /// Land a library (no-network) result set in the works results pane.
@@ -611,6 +633,7 @@ final class MacSearchModel {
     /// return everything at once.
     @MainActor
     private func presentLibraryWorks(_ works: [Work], appState: AppState) {
+        releaseLibrarySearch(appState)
         onNewQuery?()
         canReturnToCollectionHits = false
         collectionReturnQuery = nil
@@ -627,6 +650,7 @@ final class MacSearchModel {
 
     @MainActor
     private func beginLibraryScopeResults(_ appState: AppState) {
+        releaseLibrarySearch(appState)
         onNewQuery?()
         // Library reads aren't paged — a stale AO3 query must not leave
         // the pager live over library results.

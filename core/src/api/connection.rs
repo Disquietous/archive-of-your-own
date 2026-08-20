@@ -54,6 +54,7 @@ impl AO3App {
             route_timeouts,
             _runtime: Arc::new(runtime),
             census_cycle_used: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            library_searches: Default::default(),
         };
         app.register_reconnect_context();
         Ok(app)
@@ -92,6 +93,7 @@ impl AO3App {
             route_timeouts: previous.route_timeouts.clone(),
             _runtime: previous._runtime.clone(),
             census_cycle_used: previous.census_cycle_used.clone(),
+            library_searches: Default::default(),
         };
         app.register_reconnect_context();
         Ok(app)

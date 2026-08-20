@@ -27,7 +27,7 @@ serde_json = "1"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "http2", "gzip", "brotli", "zstd", "deflate"] }
-rusqlite = { version = "0.36", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.36", features = ["bundled-sqlcipher", "functions", "trace"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 # Tor (optional — heavy deps, only for release builds)

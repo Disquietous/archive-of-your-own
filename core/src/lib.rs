@@ -60,6 +60,47 @@ pub fn dlog(level: &str, tag: &str, message: &str) {
     }
 }
 
+/// SQLite profile-hook target: one DEBUG row (tag "sql") per completed
+/// statement on a profiled connection, with the statement text and its
+/// duration. Logs the *expanded* SQL (bound parameters substituted in)
+/// except in two cases, which log the placeholder form instead:
+/// * statements touching the `accounts` table — its rows carry session
+///   cookies, which must never land in the log;
+/// * statements whose expanded text exceeds the size cap — those are big
+///   because of bound blobs (chapter content JSON), and a truncated blob
+///   is both useless and a content leak, while the placeholder form shows
+///   the whole statement shape.
+/// `expanded` is lazy so the expansion cost is skipped whenever it won't
+/// be used. No-op until `init_logging` has run (which also skips all
+/// formatting cost in tests and on the very first pre-logging open).
+pub fn log_sql(
+    sql: &str,
+    expanded: impl FnOnce() -> Option<String>,
+    duration: std::time::Duration,
+) {
+    if GLOBAL_LOG_DB.get().is_none() {
+        return;
+    }
+    const MAX_SQL_CHARS: usize = 2000;
+    let touches_accounts = sql.to_ascii_lowercase().contains("accounts");
+    let text = if touches_accounts { None } else { expanded() }
+        .filter(|e| e.len() <= MAX_SQL_CHARS)
+        .unwrap_or_else(|| sql.to_string());
+    // One line per statement: multi-line SQL collapses to single spaces,
+    // and an outsized placeholder form (giant compiled IN lists) is capped.
+    let mut text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((cut, _)) = text.char_indices().nth(MAX_SQL_CHARS) {
+        let dropped = text[cut..].chars().count();
+        text.truncate(cut);
+        text.push_str(&format!("… (+{dropped} chars)"));
+    }
+    dlog(
+        "DEBUG",
+        "sql",
+        &format!("{:.3}ms  {text}", duration.as_secs_f64() * 1000.0),
+    );
+}
+
 #[macro_export]
 macro_rules! log_debug {
     ($tag:expr, $($arg:tt)*) => {

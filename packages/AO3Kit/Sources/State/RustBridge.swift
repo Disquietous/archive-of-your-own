@@ -1074,6 +1074,25 @@ final class RustBridge {
         (try? app?.searchLibraryWorksFiltered(criteria: criteria, limit: limit)) ?? []
     }
 
+    /// Run a library works search in the core (one SQL pass) and hold the
+    /// result set there under a handle; pages hydrate via
+    /// `getLibrarySearchPage`. nil = the search failed.
+    func runLibrarySearch(_ criteria: ULibrarySearchCriteria) -> ULibrarySearch? {
+        try? app?.runLibrarySearch(criteria: criteria)
+    }
+
+    /// One slice of a held search (len nil = through the end). Empty when
+    /// the handle is gone — re-run the search for a fresh one.
+    func getLibrarySearchPage(_ handle: UInt64, offset: UInt64 = 0,
+                              len: UInt64? = nil) -> [UWorkSummary] {
+        (try? app?.getLibrarySearchPage(handle: handle, offset: offset, len: len)) ?? []
+    }
+
+    /// Release a held search; dropping an already-gone handle is a no-op.
+    func dropLibrarySearch(_ handle: UInt64) {
+        app?.dropLibrarySearch(handle: handle)
+    }
+
     func searchLibraryTags(_ term: String, limit: UInt32? = nil) -> [UTagHit] {
         (try? app?.searchLibraryTags(term: term, limit: limit)) ?? []
     }

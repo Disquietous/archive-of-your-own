@@ -1246,7 +1246,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1340,7 +1340,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1392,7 +1392,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 10);
+    assert_eq!(db.schema_version().unwrap(), 11);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1408,4 +1408,346 @@ fn test_downgrade_guard() {
     let result = Storage::open(&path_str, "");
     assert!(result.is_err(), "a newer-versioned DB must refuse to open");
     let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// SQL search parity: search_library_work_ids against the work_matches /
+// sort_filtered oracle. The fixture library is hand-authored synthetic data
+// exercising every filterable field; sort keys are unique per work so
+// orderings are deterministic on both paths.
+// ---------------------------------------------------------------------------
+
+fn parity_library() -> Vec<WorkSummary> {
+    let mut w1 = sample_work(1); // the sample defaults, see sample_work
+    w1.date_published = "2024-11-02".into();
+
+    let mut w2 = sample_work(2);
+    w2.title = "Another Story".into();
+    w2.fandoms = vec!["Fandom B".into(), "Fandom C".into()];
+    w2.rating = Rating::Explicit;
+    w2.warnings = vec![Warning::Violence];
+    w2.categories = vec!["M/M".into()];
+    w2.relationships = vec!["C/D".into()];
+    w2.characters = vec!["Character C".into()];
+    w2.tags = vec!["Slow Burn".into()];
+    w2.summary = "A long slow burn".into();
+    w2.word_count = 100_000;
+    w2.chapter_count = 1;
+    w2.complete = true;
+    w2.language = "Deutsch".into();
+    w2.date_published = "2019-01-01".into();
+    w2.date_updated = "2026-08-01".into();
+    w2.kudos = 500; w2.hits = 5000; w2.bookmarks = 50; w2.comments = 20;
+
+    // Never-updated, unrated, no fandoms/categories/tags: the empty edges.
+    let mut w3 = sample_work(3);
+    w3.title = "Blank Slate".into();
+    w3.authors = vec!["Anon".into()];
+    w3.fandoms = vec![];
+    w3.rating = Rating::NotRated;
+    w3.warnings = vec![Warning::CreatorChoseNotToWarn];
+    w3.categories = vec![];
+    w3.relationships = vec![];
+    w3.characters = vec![];
+    w3.tags = vec![];
+    w3.summary = String::new();
+    w3.word_count = 0;
+    w3.chapter_count = 2;
+    w3.date_published = String::new();
+    w3.date_updated = String::new();
+    w3.kudos = 3; w3.hits = 10; w3.bookmarks = 0; w3.comments = 0;
+
+    // Unicode everywhere ao3_lower must fold beyond ASCII.
+    let mut w4 = sample_work(4);
+    w4.title = "Höhle Ünïcode".into();
+    w4.authors = vec!["Ökonom".into()];
+    w4.fandoms = vec!["Café Fandom".into()];
+    w4.rating = Rating::Teen;
+    w4.warnings = vec![Warning::CreatorChoseNotToWarn];
+    w4.categories = vec!["F/F".into()];
+    w4.relationships = vec!["Åsa/Öther".into()];
+    w4.characters = vec!["Åsa".into()];
+    w4.tags = vec!["Café au Lait".into()];
+    w4.summary = "Kaffee und Kuchen".into();
+    w4.word_count = 4200;
+    w4.chapter_count = 2;
+    w4.language = "Français".into();
+    w4.date_published = "2021-04-04".into();
+    w4.date_updated = "2024-02-02".into();
+    w4.kudos = 15; w4.hits = 250; w4.bookmarks = 3; w4.comments = 2;
+
+    // Multiple warnings and categories — the AND semantics.
+    let mut w5 = sample_work(5);
+    w5.title = "Gen Multi Tale".into();
+    w5.warnings = vec![Warning::None, Warning::CharacterDeath];
+    w5.categories = vec!["Gen".into(), "Multi".into()];
+    w5.rating = Rating::General;
+    w5.chapter_count = 4;
+    w5.complete = true;
+    w5.word_count = 56_000;
+    w5.date_published = "2022-05-05".into();
+    w5.date_updated = "2025-06-30".into();
+    w5.kudos = 99; w5.hits = 340; w5.bookmarks = 9; w5.comments = 5;
+
+    let mut w6 = sample_work(6);
+    w6.title = "Dark Fic".into();
+    w6.fandoms = vec!["Fandom D".into()];
+    w6.rating = Rating::Mature;
+    w6.warnings = vec![Warning::Underage, Warning::Noncon];
+    w6.categories = vec!["Other".into()];
+    w6.tags = vec!["Dead Dove: Do Not Eat".into()];
+    w6.word_count = 8000;
+    w6.chapter_count = 7;
+    w6.date_published = "2018-06-06".into();
+    w6.date_updated = "2022-12-12".into();
+    w6.kudos = 200; w6.hits = 700; w6.bookmarks = 14; w6.comments = 11;
+
+    // The big-number extremes.
+    let mut w7 = sample_work(7);
+    w7.title = "Epic Saga".into();
+    w7.authors = vec!["Author1".into()];
+    w7.fandoms = vec!["Fandom B".into()];
+    w7.rating = Rating::Explicit;
+    w7.warnings = vec![Warning::Violence, Warning::CharacterDeath];
+    w7.categories = vec!["M/M".into(), "Multi".into()];
+    w7.word_count = 250_000;
+    w7.chapter_count = 100;
+    w7.complete = true;
+    w7.date_published = "2025-07-07".into();
+    w7.date_updated = "2026-01-01".into();
+    w7.kudos = 20_000; w7.hits = 999_999; w7.bookmarks = 8000; w7.comments = 3000;
+
+    let mut w8 = sample_work(8);
+    w8.title = "Tiny Drabble".into();
+    w8.authors = vec!["Writer (Pseud)".into()];
+    w8.rating = Rating::General;
+    w8.categories = vec!["Gen".into()];
+    w8.word_count = 930;
+    w8.chapter_count = 1;
+    w8.complete = true;
+    w8.date_published = "2017-08-08".into();
+    w8.date_updated = "2021-07-07".into();
+    w8.kudos = 64; w8.hits = 88; w8.bookmarks = 21; w8.comments = 9;
+
+    let mut w9 = sample_work(9);
+    w9.title = "Comma, The Title".into();
+    w9.authors = vec!["Zeta".into()];
+    w9.warnings = vec![];
+    w9.categories = vec![];
+    w9.tags = vec![];
+    w9.word_count = 777;
+    w9.chapter_count = 1;
+    w9.complete = true;
+    w9.date_published = "2020-05-05".into();
+    w9.date_updated = "2020-06-06".into();
+    w9.kudos = 7; w9.hits = 70; w9.bookmarks = 1; w9.comments = 4;
+
+    // A category label outside AO3's fixed vocabulary (mask fallback path).
+    let mut w10 = sample_work(10);
+    w10.title = "Weird Category".into();
+    w10.rating = Rating::Mature;
+    w10.categories = vec!["Weird".into()];
+    w10.word_count = 66_666;
+    w10.chapter_count = 5;
+    w10.date_published = "2016-10-10".into();
+    w10.date_updated = "2023-03-03".into();
+    w10.kudos = 150; w10.hits = 410; w10.bookmarks = 33; w10.comments = 13;
+
+    vec![w1, w2, w3, w4, w5, w6, w7, w8, w9, w10]
+}
+
+fn assert_search_parity(db: &Storage, c: &LocalSearchCriteria) {
+    let oracle: Vec<u64> = db
+        .search_local_works_filtered(c, 0)
+        .unwrap()
+        .iter()
+        .map(|w| w.id)
+        .collect();
+    let sql = db.search_library_work_ids(c).unwrap();
+    assert_eq!(sql, oracle, "SQL vs oracle diverged for criteria: {c:?}");
+}
+
+#[test]
+fn test_sql_search_parity_matrix() {
+    let db = open_test_db();
+    for w in parity_library() {
+        db.save_work(&w).unwrap();
+    }
+
+    let mut cases: Vec<LocalSearchCriteria> = Vec::new();
+    let mut push = |f: &dyn Fn(&mut LocalSearchCriteria)| {
+        let mut c = LocalSearchCriteria::default();
+        f(&mut c);
+        cases.push(c);
+    };
+
+    // Blank form — the whole library.
+    push(&|_| {});
+
+    // Free-text query across every searchable field, including Unicode
+    // case folding and a no-hit probe.
+    for q in ["fluff", "another", "author1", "slow burn", "HÖHLE", "café",
+              "pseud", "kuchen", "zzz-nothing"] {
+        push(&move |c| c.query = q.into());
+    }
+
+    // Title, ASCII and Unicode case-insensitive.
+    for t in ["story", "STORY", "höhle", "The Title", "missing title"] {
+        push(&move |c| c.title = t.into());
+    }
+
+    // Creators: single, AND pair, substring, unicode, miss.
+    for a in ["author1", "Author1, Author2", "uthor", "ökonom", "nobody"] {
+        push(&move |c| c.creators = a.into());
+    }
+
+    // Tag-name fields: exact, substring-multi, comma-AND, unicode, miss.
+    for f in ["Fandom A", "fandom", "Fandom B, Fandom C", "café", "nope"] {
+        push(&move |c| c.fandom_names = f.into());
+    }
+    for ch in ["Character A", "åsa", "no one"] {
+        push(&move |c| c.character_names = ch.into());
+    }
+    for r in ["A/B", "åsa/öther", "x/y"] {
+        push(&move |c| c.relationship_names = r.into());
+    }
+    for t in ["Fluff", "fluff, angst", "dead dove", "café au lait", "unknown tag"] {
+        push(&move |c| c.freeform_names = t.into());
+    }
+
+    // Ratings OR, including a garbage label (maps to NotRated).
+    push(&|c| c.ratings = vec!["Teen And Up Audiences".into()]);
+    push(&|c| c.ratings = vec!["Explicit".into(), "Mature".into()]);
+    push(&|c| c.ratings = vec!["Bizarre".into()]);
+
+    // Warnings AND.
+    push(&|c| c.warnings = vec!["No Archive Warnings Apply".into()]);
+    push(&|c| c.warnings = vec!["Major Character Death".into(),
+                                "No Archive Warnings Apply".into()]);
+    push(&|c| c.warnings = vec!["Rape/Non-Con".into()]);
+    push(&|c| c.warnings = vec!["Underage".into(), "Rape/Non-Con".into()]);
+    push(&|c| c.warnings = vec!["Creator Chose Not To Use Archive Warnings".into()]);
+
+    // Categories AND, case-folded, plus the outside-vocab fallback.
+    push(&|c| c.categories = vec!["Gen".into()]);
+    push(&|c| c.categories = vec!["gen".into(), "MULTI".into()]);
+    push(&|c| c.categories = vec!["F/M".into()]);
+    push(&|c| c.categories = vec!["Weird".into()]);
+    push(&|c| c.categories = vec!["weird".into()]);
+    push(&|c| c.categories = vec!["F/M".into(), "Weird".into()]);
+
+    // Tri-states and flags.
+    for v in ["T", "F"] {
+        push(&move |c| c.complete = v.into());
+        push(&move |c| c.crossover = v.into());
+    }
+    push(&|c| c.single_chapter = true);
+
+    // Language equality, ASCII-ci with non-ASCII bytes exact.
+    for l in ["english", "Deutsch", "français", "FRANÇAIS", "Klingon"] {
+        push(&move |c| c.language = l.into());
+    }
+
+    // Numeric ranges: every operator, separators, garbage, overflow.
+    for wc in [">50000", "<10000", ">=12345", "<=12345", "12345", "1,000 - 150,000",
+               "garbage", ">garbage", "100-abc", "99999999999999999999999"] {
+        push(&move |c| c.word_count = wc.into());
+    }
+    push(&|c| c.hits = ">500".into());
+    push(&|c| c.kudos_count = "10-100".into());
+    push(&|c| c.comments_count = "<=9".into());
+    push(&|c| c.bookmarks_count = ">= 14".into());
+
+    // Date updated: prefixes, absolute befores/afters, relatives, garbage.
+    for d in ["2025", "2025-01", "> 2025", "< 2025", "<= 2026-01-01", "2026-08-01",
+              "< 1 week ago", "> 1 week ago", "< 100 years ago", "> 100 years ago",
+              "garbage date"] {
+        push(&move |c| c.revised_at = d.into());
+    }
+
+    // Compound: several fields at once.
+    push(&|c| {
+        c.query = "a".into();
+        c.ratings = vec!["Explicit".into()];
+        c.complete = "T".into();
+        c.word_count = ">50000".into();
+    });
+    push(&|c| {
+        c.fandom_names = "Fandom A".into();
+        c.warnings = vec!["No Archive Warnings Apply".into()];
+        c.categories = vec!["Gen".into()];
+        c.single_chapter = true;
+    });
+
+    for c in &cases {
+        assert_search_parity(&db, c);
+    }
+}
+
+#[test]
+fn test_sql_search_sort_parity() {
+    let db = open_test_db();
+    for w in parity_library() {
+        db.save_work(&w).unwrap();
+    }
+    // Every sort column (plus unknown/_score fallbacks) in every direction
+    // (including the per-column default). All sort keys in the fixture are
+    // unique, so both paths must produce identical orderings.
+    for column in ["title_to_sort_on", "created_at", "word_count", "hits",
+                   "kudos_count", "comments_count", "bookmarks_count",
+                   "revised_at", "_score", ""] {
+        for direction in ["", "asc", "desc"] {
+            let mut c = LocalSearchCriteria::default();
+            c.sort_column = column.into();
+            c.sort_direction = direction.into();
+            assert_search_parity(&db, &c);
+        }
+    }
+}
+
+#[test]
+fn test_get_works_by_ids_ordered() {
+    let db = open_test_db();
+    for w in parity_library() {
+        db.save_work(&w).unwrap();
+    }
+    // Order preserved, unknown ids skipped, tags hydrated.
+    let works = db.get_works_by_ids_ordered(&[5, 999, 2, 8]).unwrap();
+    let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
+    assert_eq!(ids, vec![5, 2, 8]);
+    assert_eq!(works[1].tags, vec!["Slow Burn".to_string()]);
+    assert!(db.get_works_by_ids_ordered(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn test_search_masks_backfill_v11() {
+    // A pre-v11 database (masks absent) must arrive at v11 with masks and
+    // fandom_count matching what save_work would now write.
+    let db = open_test_db();
+    db.save_work(&sample_work(1)).unwrap();
+    // Simulate pre-v11 rows: zero the derived columns behind save_work's back.
+    db.conn
+        .execute_batch(
+            "UPDATE works SET warnings_mask = 0, categories_mask = 0, fandom_count = 0",
+        )
+        .unwrap();
+    db.conn
+        .execute_batch(
+            "UPDATE works SET fandom_count =
+                 (SELECT COUNT(*) FROM work_tags wt
+                   WHERE wt.work_id = works.id AND wt.tag_type = 'fandom')",
+        )
+        .unwrap();
+    db.backfill_search_masks_v11().unwrap();
+    let (wm, cm, fc): (i64, i64, i64) = db
+        .conn
+        .query_row(
+            "SELECT warnings_mask, categories_mask, fandom_count FROM works WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(wm, 1 << 0); // Warning::None
+    assert_eq!(cm, 1 << 1); // F/M
+    assert_eq!(fc, 1); // Fandom A
 }

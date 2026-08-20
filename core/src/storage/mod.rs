@@ -13,6 +13,7 @@ mod accounts;
 mod library;
 mod subscriptions;
 mod works;
+mod works_search;
 
 /// Encrypted local storage backed by SQLCipher.
 ///
@@ -93,6 +94,34 @@ impl Storage {
         // row is deleted.
         conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql)?;
 
+        // Profile every statement this connection runs into the debug log
+        // (tag "sql": statement text + duration) — migrations included.
+        // See log_sql for when the expanded (values substituted) vs
+        // placeholder form is logged. Recursion-safe: log rows go to the
+        // logging module's own separate `.log` database connection, which
+        // has no hook.
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
+            Some(|event| {
+                if let rusqlite::trace::TraceEvent::Profile(stmt, duration) = event {
+                    crate::log_sql(&stmt.sql(), || stmt.expanded_sql(), duration);
+                }
+            }),
+        );
+
+        // SQL-visible Unicode lowercasing (SQLite's own lower() is
+        // ASCII-only). The compiled library search leans on it so its
+        // case-insensitive matching is byte-identical to the Rust-side
+        // `contains_ci`/`sort_filtered` semantics it replaces.
+        conn.create_scalar_function(
+            "ao3_lower",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<String>(0)?.to_lowercase()),
+        )
+        .map_err(map_sql)?;
+
         let storage = Self { conn };
         storage.migrate()?;
         // One-time: seed the tags table from works cached before it existed.
@@ -103,7 +132,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 10;
+    const SCHEMA_VERSION: u32 = 11;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -151,6 +180,7 @@ impl Storage {
                 8 => self.migrate_v8(),
                 9 => self.migrate_v9(),
                 10 => self.migrate_v10(),
+                11 => self.migrate_v11(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| AppError::StorageError(format!("migration to v{next} failed: {e}")))?;
@@ -436,6 +466,29 @@ impl Storage {
                  UPDATE bookmarks SET account_id = '[none]' WHERE account_id = '';",
             )
             .map_err(map_sql)
+    }
+
+    /// v11 — SQL-backed library works search (2026-08): typed filter columns
+    /// so the works-search form compiles to one SQL pass instead of
+    /// hydrating every row and filtering in Rust.
+    /// * `warnings_mask` / `categories_mask`: bitmasks over the fixed AO3
+    ///   vocabularies (bit assignments in storage::works_search), backfilled
+    ///   from the JSON columns — which stay, for display hydration.
+    /// * `fandom_count`: write-time count of fandom tags (crossover = > 1).
+    /// * works(date_updated DESC): index for the default sort.
+    fn migrate_v11(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "ALTER TABLE works ADD COLUMN warnings_mask INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE works ADD COLUMN categories_mask INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE works ADD COLUMN fandom_count INTEGER NOT NULL DEFAULT 0;
+                 CREATE INDEX idx_works_date_updated ON works(date_updated DESC);
+                 UPDATE works SET fandom_count =
+                     (SELECT COUNT(*) FROM work_tags wt
+                       WHERE wt.work_id = works.id AND wt.tag_type = 'fandom');",
+            )
+            .map_err(map_sql)?;
+        self.backfill_search_masks_v11()
     }
 
     /// A write transaction for multi-row batches. Statements executed on

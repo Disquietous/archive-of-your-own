@@ -48,20 +48,21 @@ impl Storage {
                     warnings_json, categories_json, summary, word_count,
                     chapter_count, total_chapters, kudos, hits,
                     bookmarks, comments, date_published, date_updated, language, complete,
-                    fetched_at
+                    fetched_at, warnings_mask, categories_mask, fandom_count
                 ) VALUES (
                     ?1, ?2, ?3, ?4,
                     ?5, ?6, ?7, ?8,
                     ?9, ?10, ?11, ?12,
                     ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19
+                    ?19, ?20, ?21, ?22
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     title = ?2, authors_json = ?3, rating = ?4,
                     warnings_json = ?5, categories_json = ?6, summary = ?7, word_count = ?8,
                     chapter_count = ?9, total_chapters = ?10, kudos = ?11, hits = ?12,
                     bookmarks = ?13, comments = ?14, date_published = ?15, date_updated = ?16,
-                    language = ?17, complete = ?18, fetched_at = ?19",
+                    language = ?17, complete = ?18, fetched_at = ?19,
+                    warnings_mask = ?20, categories_mask = ?21, fandom_count = ?22",
                 params![
                     work.id as i64,
                     work.title,
@@ -82,6 +83,9 @@ impl Storage {
                     work.language,
                     work.complete as i32,
                     crate::timefmt::now_utc_datetime(),
+                    super::works_search::warnings_mask(&work.warnings),
+                    super::works_search::categories_mask(&work.categories),
+                    work.fandoms.len() as i64,
                 ],
             )
             .map_err(map_sql)?;
@@ -652,7 +656,7 @@ impl Storage {
     /// "2 weeks ago"-style expressions to a calendar date. Months and years
     /// use calendar arithmetic via 30/365-day approximations — fine for a
     /// library filter.
-    fn relative_date(s: &str) -> Option<chrono::NaiveDate> {
+    pub(super) fn relative_date(s: &str) -> Option<chrono::NaiveDate> {
         let s = s.trim().to_lowercase();
         let rest = s.strip_suffix("ago")?.trim();
         let mut parts = rest.split_whitespace();

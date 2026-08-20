@@ -71,6 +71,10 @@ pub struct AO3App {
     /// a long-idle app) from crawling every subscription's full listing in a
     /// single cycle. Evidence-based censuses (count mismatches) ignore this.
     census_cycle_used: Arc<std::sync::atomic::AtomicBool>,
+    /// Executed library works searches, handle-keyed: the ordered id list a
+    /// search produced, held so pages hydrate by slicing instead of
+    /// re-querying. Session state — never persisted, fresh per instance.
+    library_searches: std::sync::Mutex<works::LibrarySearchCache>,
 }
 
 impl AO3App {

@@ -575,6 +575,15 @@ impl From<ULibrarySearchCriteria> for LocalSearchCriteria {
     }
 }
 
+/// One executed library works search held by the core: pass `handle` to
+/// `get_library_search_page` to hydrate slices, and to
+/// `drop_library_search` when the view is done.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ULibrarySearch {
+    pub handle: u64,
+    pub total: u64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USavedSearch {
     pub id: i64,

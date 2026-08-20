@@ -142,6 +142,45 @@ impl AO3App {
             .into_iter().map(UWorkSummary::from).collect())
     }
 
+    /// Run a library works search entirely in SQL and hold the ordered id
+    /// list core-side under a handle. Pages then hydrate by slicing that
+    /// list (`get_library_search_page`) — the filter+sort never re-runs.
+    /// The result set reflects the library at search time by design
+    /// (cache-forever model); run a new search to refresh, and drop the
+    /// handle when the view is done with it.
+    pub fn run_library_search(&self, criteria: ULibrarySearchCriteria) -> Result<ULibrarySearch, AO3Error> {
+        let ids = {
+            let s = self.storage.blocking_lock();
+            s.search_library_work_ids(&criteria.into()).map_err(AO3Error::from)?
+        };
+        let total = ids.len() as u64;
+        let handle = self.library_searches.lock().unwrap_or_else(|e| e.into_inner()).insert(ids);
+        Ok(ULibrarySearch { handle, total })
+    }
+
+    /// Hydrate one slice of a held search: `len` of None (or 0) means
+    /// through the end, so (0, None) is the whole result set. Errors with
+    /// NotFound when the handle was dropped or LRU-evicted — re-run the
+    /// search to get a fresh one.
+    pub fn get_library_search_page(&self, handle: u64, offset: u64, len: Option<u64>)
+        -> Result<Vec<UWorkSummary>, AO3Error>
+    {
+        let slice = self
+            .library_searches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slice(handle, offset, len)
+            .ok_or(AO3Error::NotFound { message: format!("no library search with handle {handle}") })?;
+        let s = self.storage.blocking_lock();
+        Ok(s.get_works_by_ids_ordered(&slice).map_err(AO3Error::from)?
+            .into_iter().map(UWorkSummary::from).collect())
+    }
+
+    /// Release a held search. Dropping an already-gone handle is a no-op.
+    pub fn drop_library_search(&self, handle: u64) {
+        self.library_searches.lock().unwrap_or_else(|e| e.into_inner()).remove(handle);
+    }
+
     /// Cached tag names matching, across every tag type.
     pub fn search_library_tags(&self, term: String, limit: Option<u32>) -> Result<Vec<UTagHit>, AO3Error> {
         let s = self.storage.blocking_lock();
@@ -613,5 +652,67 @@ impl AO3App {
             return Err(AO3Error::Network { message: "No downloaded chapters — download the work first.".to_string() });
         }
         crate::epub::export_epub(&work, &chapters, &dest_path).map_err(AO3Error::from)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Library search result cache
+// ---------------------------------------------------------------------------
+
+/// The handle-keyed store behind `run_library_search`: each entry is the
+/// ordered id list one (criteria, sort) execution produced. Capped LRU so
+/// abandoned handles can't accumulate; two views holding independent
+/// searches is the intended use, the cap is just a leak backstop.
+#[derive(Default)]
+pub(super) struct LibrarySearchCache {
+    entries: std::collections::HashMap<u64, LibrarySearchEntry>,
+    next_handle: u64,
+    tick: u64,
+}
+
+struct LibrarySearchEntry {
+    ids: Vec<u64>,
+    last_used: u64,
+}
+
+/// Live-handle cap. Eviction is LRU by last slice/insert.
+const LIBRARY_SEARCH_CAP: usize = 8;
+
+impl LibrarySearchCache {
+    pub(super) fn insert(&mut self, ids: Vec<u64>) -> u64 {
+        if self.entries.len() >= LIBRARY_SEARCH_CAP {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(h, _)| *h)
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.next_handle += 1;
+        self.tick += 1;
+        let handle = self.next_handle;
+        self.entries.insert(handle, LibrarySearchEntry { ids, last_used: self.tick });
+        handle
+    }
+
+    /// The requested slice of a held result set, or None for an unknown
+    /// handle. `len` of None or 0 means through the end; an offset past the
+    /// end is an empty page, not an error.
+    pub(super) fn slice(&mut self, handle: u64, offset: u64, len: Option<u64>) -> Option<Vec<u64>> {
+        self.tick += 1;
+        let entry = self.entries.get_mut(&handle)?;
+        entry.last_used = self.tick;
+        let start = (offset as usize).min(entry.ids.len());
+        let end = match len {
+            Some(n) if n > 0 => (start + n as usize).min(entry.ids.len()),
+            _ => entry.ids.len(),
+        };
+        Some(entry.ids[start..end].to_vec())
+    }
+
+    pub(super) fn remove(&mut self, handle: u64) {
+        self.entries.remove(&handle);
     }
 }
