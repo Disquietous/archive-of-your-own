@@ -102,13 +102,53 @@ impl Storage {
     // Normalized tags (tags + work_tags/collection_tags join tables)
     // -------------------------------------------------------------------
 
+    /// (Re)fill the in-memory tag cache from the tags table — run once at
+    /// open, after migrations (which write tags with inline SQL, not through
+    /// the cache-coherent paths below). Anything that deletes tags rows
+    /// directly must call this again: a stale cached id would break the
+    /// join-table foreign keys.
+    pub(super) fn load_tag_cache(&self) -> Result<(), AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT id, name, tag_type FROM tags")
+            .map_err(map_sql)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(map_sql)?;
+        let mut cache = self.tag_cache.borrow_mut();
+        cache.clear();
+        for row in rows {
+            let (id, name, tag_type) = row.map_err(map_sql)?;
+            cache.insert(name, (id, !tag_type.is_empty()));
+        }
+        Ok(())
+    }
+
     /// The tags-table id for a name, inserting the row if new. Tag identity
     /// is the name alone — AO3 tag names are globally unique across every
     /// tag type (hence the "- Freeform" suffixes), so the same tag is one
     /// row wherever it appears: on works, on collections, anywhere.
     /// `tag_type` fills in an existing row's type only when it hasn't been
     /// learned yet ("" = unknown, e.g. from a collection profile).
+    /// Answered from the in-memory cache: a known tag with a known type
+    /// costs no SQL.
     pub(super) fn tag_row_id(&self, name: &str, tag_type: &str) -> Result<i64, AppError> {
+        let cached = self.tag_cache.borrow().get(name).copied();
+        if let Some((id, type_known)) = cached {
+            if type_known || tag_type.is_empty() {
+                return Ok(id);
+            }
+            // Rare: an unknown-typed row (e.g. from a collection profile)
+            // learning its real type from a work listing.
+            self.conn
+                .prepare_cached("UPDATE tags SET tag_type = ?2 WHERE id = ?1 AND tag_type = ''")
+                .map_err(map_sql)?
+                .execute(params![id, tag_type])
+                .map_err(map_sql)?;
+            self.tag_cache.borrow_mut().insert(name.to_string(), (id, true));
+            return Ok(id);
+        }
         self.conn
             .prepare_cached(
                 "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
@@ -117,11 +157,13 @@ impl Storage {
             .map_err(map_sql)?
             .execute(params![name, tag_type])
             .map_err(map_sql)?;
-        self.conn
+        let id: i64 = self.conn
             .prepare_cached("SELECT id FROM tags WHERE name = ?1")
             .map_err(map_sql)?
             .query_row(params![name], |r| r.get(0))
-            .map_err(map_sql)
+            .map_err(map_sql)?;
+        self.tag_cache.borrow_mut().insert(name.to_string(), (id, !tag_type.is_empty()));
+        Ok(id)
     }
 
     /// Rewrite a work's join rows. `tag_type` records how this work uses
@@ -363,22 +405,26 @@ impl Storage {
     }
 
     pub fn upsert_tags(&self, tags: &[(&str, &str)]) -> Result<(), AppError> {
-        if tags.is_empty() {
+        // The in-memory cache answers for names the library already knows
+        // (with their type) — re-sighting a tag costs no SQL, not even a
+        // savepoint. Only genuinely new names and the rare type upgrade
+        // reach the database.
+        let pending: Vec<(&str, &str)> = tags.iter()
+            .map(|(name, tag_type)| (name.trim(), *tag_type))
+            .filter(|(name, tag_type)| {
+                !name.is_empty()
+                    && match self.tag_cache.borrow().get(*name) {
+                        Some(&(_, type_known)) => !type_known && !tag_type.is_empty(),
+                        None => true,
+                    }
+            })
+            .collect();
+        if pending.is_empty() {
             return Ok(());
         }
         self.with_savepoint(Savepoint::UpsertTags, || {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
-                 ON CONFLICT(name) DO UPDATE SET
-                     uses = uses + 1,
-                     last_seen = datetime('now'),
-                     tag_type = CASE WHEN tags.tag_type = '' THEN excluded.tag_type
-                                     ELSE tags.tag_type END"
-            ).map_err(map_sql)?;
-            for (name, tag_type) in tags {
-                let trimmed = name.trim();
-                if trimmed.is_empty() { continue; }
-                stmt.execute(params![trimmed, tag_type]).map_err(map_sql)?;
+            for (name, tag_type) in &pending {
+                self.tag_row_id(name, tag_type)?;
             }
             Ok(())
         })
@@ -426,23 +472,20 @@ impl Storage {
         if limit == 0 { -1 } else { limit as i64 }
     }
 
-    /// Local autocomplete: substring match, ranked starts-with first, then
-    /// AO3-confirmed canonical names, then by how often the tag was seen.
+    /// Local autocomplete: substring match, alphabetical.
     pub fn search_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
         let escaped = Self::escape_like(term);
         if escaped.is_empty() {
             return Ok(Vec::new());
         }
         let contains = like_contains(&escaped);
-        let prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT name FROM tags
              WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
-             ORDER BY (name LIKE ?3 ESCAPE '\\') DESC,
-                      canonical DESC, uses DESC, name COLLATE NOCASE
-             LIMIT ?4"
+             ORDER BY name COLLATE NOCASE
+             LIMIT ?3"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![tag_type, contains, prefix, limit], |row| {
+        let rows = stmt.query_map(params![tag_type, contains, limit], |row| {
             row.get::<_, String>(0)
         }).map_err(map_sql)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -458,15 +501,13 @@ impl Storage {
             return Ok(Vec::new());
         }
         let contains = like_contains(&escaped);
-        let prefix = like_prefix(&escaped);
         let mut stmt = self.conn.prepare(
             "SELECT name, tag_type FROM tags
              WHERE name LIKE ?1 ESCAPE '\\'
-             ORDER BY (name LIKE ?2 ESCAPE '\\') DESC,
-                      canonical DESC, uses DESC, name COLLATE NOCASE
-             LIMIT ?3"
+             ORDER BY name COLLATE NOCASE
+             LIMIT ?2"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![contains, prefix, limit], |row| {
+        let rows = stmt.query_map(params![contains, limit], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }).map_err(map_sql)?;
         Ok(rows.filter_map(|r| r.ok()).collect())

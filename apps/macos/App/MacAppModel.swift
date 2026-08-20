@@ -1299,30 +1299,31 @@ final class MacAppModel {
     /// round-trip through the works cache, so sample-mode lists pass through
     /// unmodified.
     ///
-    /// One render pass evaluates the same list from several controllers
-    /// (the toolbar's count, the table's rows), and the engine re-reads the
-    /// works from the DB on every call — so the ordering is memoized for
-    /// the current main-runloop tick. The memo drains on the next tick,
-    /// which keeps repeat evaluations free without ever serving an order
-    /// computed before a metadata refresh.
+    /// Several controllers evaluate the same list per render pass (the
+    /// toolbar's count, the table's rows), and the engine re-reads the
+    /// works from the DB on every call — so the ordering is memoized per
+    /// section. An entry stays valid until the section's ids or query
+    /// change or work metadata lands (worksGeneration): the engine's
+    /// inputs are exactly (membership, criteria, cached metadata), so
+    /// nothing else — reading-progress writes included — can change its
+    /// answer.
     /// @ObservationIgnored: the memo is bookkeeping, not render state — if
-    /// observation tracked it, its own drain would re-trigger the renders
-    /// it exists to deduplicate.
+    /// observation tracked it, each store would re-trigger the renders it
+    /// exists to deduplicate.
     @ObservationIgnored
-    private var filterSortMemo: [Section: (ids: [UInt64], query: UWorkListQuery, ordered: [UInt64])] = [:]
+    private var filterSortMemo: [Section: (ids: [UInt64], query: UWorkListQuery,
+                                           generation: UInt64, ordered: [UInt64])] = [:]
 
     private func filterAndSort(_ works: [Work], query: UWorkListQuery, section: Section) -> [Work] {
         let ids = works.compactMap { UInt64($0.id) }
         guard ids.count == works.count else { return works }
         let ordered: [UInt64]
-        if let memo = filterSortMemo[section], memo.ids == ids, memo.query == query {
+        if let memo = filterSortMemo[section], memo.ids == ids, memo.query == query,
+           memo.generation == appState.worksGeneration {
             ordered = memo.ordered
         } else {
             ordered = appState.bridge.filterAndSortWorks(ids: ids, query: query)
-            if filterSortMemo.isEmpty {
-                DispatchQueue.main.async { [weak self] in self?.filterSortMemo.removeAll() }
-            }
-            filterSortMemo[section] = (ids, query, ordered)
+            filterSortMemo[section] = (ids, query, appState.worksGeneration, ordered)
         }
         let byID = Dictionary(works.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return ordered.compactMap { byID[String($0)] }

@@ -258,6 +258,10 @@ final class ReaderViewController: NSViewController {
     /// Last persisted pct that was logged — keeps the diagnostic trail from
     /// recording every scroll tick.
     var lastPersistLogPct: Double = -1
+    /// Debounce for scroll-driven progress persists: scroll ticks arrive
+    /// continuously, so the write waits until the reader has been still
+    /// for a second (see schedulePersist).
+    var pendingPersist: DispatchWorkItem?
 
     /// Diagnostic trail readable outside Xcode. Mirrors the [ReaderPos] NSLogs.
     func posLog(_ message: String) {
@@ -265,6 +269,9 @@ final class ReaderViewController: NSViewController {
     }
 
     func show(work: Work, chapterIndex: Int) {
+        // The debounced persist rides on state about to be repointed —
+        // write the outgoing position now rather than lose it.
+        flushPendingPersist()
         // Bound memory: decoded images don't outlive their work.
         if work.id != self.work?.id {
             loadedChapterImages = [:]

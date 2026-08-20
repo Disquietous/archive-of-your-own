@@ -47,12 +47,16 @@ final class AppState {
     }
 
     // Live search results from Rust backend
-    var searchResults: [Work] = []
+    var searchResults: [Work] = [] {
+        didSet { worksGeneration &+= 1 }
+    }
     var isSearching = false
     var searchError: String?
 
     // Cached works from SQLCipher (previously browsed/fetched)
-    var cachedWorks: [Work] = []
+    var cachedWorks: [Work] = [] {
+        didSet { worksGeneration &+= 1 }
+    }
     var readingLists: [UReadingList] = []
 
     // Account tracking for per-account data freshness
@@ -141,8 +145,18 @@ final class AppState {
     @ObservationIgnored var progressOperationID: UInt64?
     @ObservationIgnored var operationKinds: [UInt64: OpKind] = [:]
 
+    /// Bumped whenever work metadata lands Swift-side (fetches, crawls,
+    /// cache reloads) — every path that saves works to the DB also mirrors
+    /// into one of the observed collections below. Lets per-section
+    /// filter/sort memos outlive a runloop tick without serving an order
+    /// computed before a metadata refresh. Deliberately not observable:
+    /// it's an invalidation stamp, not render state.
+    @ObservationIgnored private(set) var worksGeneration: UInt64 = 0
+
     // Fetched work details from live data
-    var fetchedWorks: [String: Work] = [:]
+    var fetchedWorks: [String: Work] = [:] {
+        didSet { worksGeneration &+= 1 }
+    }
     var fetchedChapters: [String: [UChapter]] = [:]
     let browseTask = NetworkTask()
     let searchTask = NetworkTask()

@@ -74,16 +74,14 @@ fn test_tags_harvested_on_save_work() {
 #[test]
 fn test_tags_ranking() {
     let db = open_test_db();
-    // "Steve" seen 3 times, "Ever Steve" once, canonical "Steve Rogers".
+    // Repeat sightings and canonical status must not affect ordering —
+    // autocomplete is plain alphabetical.
     for _ in 0..3 { db.upsert_tags(&[("Steve Harrington", "character")]).unwrap(); }
     db.upsert_tags(&[("Ever Steve", "character")]).unwrap();
     db.mark_tags_canonical("character", &["Steve Rogers".to_string()]).unwrap();
 
     let results = db.search_tags("character", "steve", 10).unwrap();
-    // Starts-with beats substring; canonical beats use-count within starts-with.
-    assert_eq!(results[0], "Steve Rogers");
-    assert_eq!(results[1], "Steve Harrington");
-    assert_eq!(results[2], "Ever Steve");
+    assert_eq!(results, vec!["Ever Steve", "Steve Harrington", "Steve Rogers"]);
 
     // LIKE metacharacters are escaped, not wildcards.
     assert!(db.search_tags("character", "%", 10).unwrap().is_empty());
@@ -657,8 +655,10 @@ fn test_collection_profile_tags_and_works() {
     assert_eq!(tag_rows, 1, "one universal tags row per name");
 
     // Deleting the tags row cascades the relationship out of every join
-    // table that references it.
+    // table that references it. Direct deletion bypasses the in-memory tag
+    // cache, so it must be resynced or later saves would reuse the dead id.
     db.conn.execute("DELETE FROM tags WHERE name = 'Fandom A'", []).unwrap();
+    db.load_tag_cache().unwrap();
     let cached = db.get_collection("test_fest").unwrap().unwrap();
     assert_eq!(cached.tags, vec!["Brand New Tag".to_string()]);
     assert_eq!(db.get_work(1).unwrap().unwrap().fandoms, Vec::<String>::new());

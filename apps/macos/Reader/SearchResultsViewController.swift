@@ -6,8 +6,8 @@ import SwiftUI
 /// only) lives in the pane toolbar.
 final class SearchResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     enum Context {
-        case search, subscriptionWorks, authorWorks, authorBookmarks, fandomWorks,
-             readingListWorks, collectionBookmarks
+        case search, subscriptionWorks, authorWorks, authorBookmarks, authorCollections,
+             fandomWorks, readingListWorks, collectionBookmarks
     }
 
     /// What this listing shows. Derived from observable model state inside
@@ -20,7 +20,15 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         if let fixedContext { return fixedContext }
         switch model.section {
         case .authors, .authorWorks:
-            return model.authorPane == .bookmarks ? .authorBookmarks : .authorWorks
+            switch model.authorPane {
+            case .works: return .authorWorks
+            case .bookmarks: return .authorBookmarks
+            // The collections pane replaces this table with its own view,
+            // but this controller stays observation-tracked — mapping to
+            // .authorWorks here made every render run the author-works
+            // filter/sort SQL for a table that isn't showing.
+            case .collections: return .authorCollections
+            }
         case .subscriptions: return .subscriptionWorks
         case .fandoms: return model.fandomSearchActive ? .search : .fandomWorks
         case .readingLists: return .readingListWorks
@@ -135,6 +143,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
         case .authorWorks: works = model.filteredAuthorWorks
         case .authorBookmarks: works = model.authorBookmarksList
+        case .authorCollections: works = []
         case .fandomWorks: works = model.fandomLibraryWorks
         case .readingListWorks: works = model.filteredReadingListWorks
         case .collectionBookmarks: works = model.search.bookmarkResults
@@ -216,6 +225,9 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             } else {
                 overlay = nil
             }
+        case .authorCollections:
+            // Not shown in this context — the pane hosts AuthorCollectionsView.
+            overlay = nil
         case .fandomWorks:
             if works.isEmpty {
                 let tag = model.fandomWorksTag ?? "this fandom"

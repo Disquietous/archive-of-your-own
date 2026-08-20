@@ -114,6 +114,10 @@ extension ReaderViewController {
         // Remember the position being left so the footer's return control
         // can take the reader back (in-memory only).
         model.stashReturnPoint(chapter: chapterIndex, pos: anchorOffset ?? 0)
+        // Progress follows the chapter being entered (recorded below) — a
+        // debounced persist from the old chapter is obsolete.
+        pendingPersist?.cancel()
+        pendingPersist = nil
         chapterIndex = target
         chapterPct = 0
         anchorOffset = nil
@@ -148,21 +152,55 @@ extension ReaderViewController {
         updateProgress()
         // Persist only when the geometry is trustworthy: a pending or
         // in-flight restore means the viewport is mid-churn and a captured
-        // offset could be layout noise, not the reader's place.
-        if persist, let work, currentChapterContent != nil,
+        // offset could be layout noise, not the reader's place. Debounced —
+        // scroll ticks arrive continuously, so the write waits until the
+        // reader has been still for a second.
+        if persist, work != nil, currentChapterContent != nil,
            pendingRestorePos == nil, !restorePending, !suppressTracking {
-            // 1-based chapter; the position is the settled text anchor (nil
-            // while the header above the body shows — that IS the chapter
-            // top). The rendered document's length rides along so the
-            // position reads back as a chapter fraction.
-            let pos = anchorOffset ?? 0
-            appState.setProgress(work.id, chapter: chapterIndex + 1, pos: pos,
-                                 chapterLen: textView.textStorage?.length ?? 0)
-            if abs(chapterPct - lastPersistLogPct) > 0.05 {
-                lastPersistLogPct = chapterPct
-                posLog("persist work=\(work.id) ch=\(chapterIndex + 1) pos=\(pos) stored=\(appState.progressMap[work.id].map { "ch\($0.chapter)@\($0.pos)" } ?? "nil")")
-            }
+            schedulePersist()
         }
+    }
+
+    /// Each qualifying scroll tick pushes the deadline out; the write
+    /// happens once the reader has been still for a second. The fired item
+    /// reads the state current at fire time, so it always persists the
+    /// settled position.
+    private func schedulePersist() {
+        pendingPersist?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            pendingPersist = nil
+            persistProgressNow()
+        }
+        pendingPersist = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: item)
+    }
+
+    /// Write the reader's current position through to storage, re-checking
+    /// the geometry guards — churn may have started during the debounce.
+    private func persistProgressNow() {
+        guard let work, currentChapterContent != nil,
+              pendingRestorePos == nil, !restorePending, !suppressTracking else { return }
+        // 1-based chapter; the position is the settled text anchor (nil
+        // while the header above the body shows — that IS the chapter
+        // top). The rendered document's length rides along so the
+        // position reads back as a chapter fraction.
+        let pos = anchorOffset ?? 0
+        appState.setProgress(work.id, chapter: chapterIndex + 1, pos: pos,
+                             chapterLen: textView.textStorage?.length ?? 0)
+        if abs(chapterPct - lastPersistLogPct) > 0.05 {
+            lastPersistLogPct = chapterPct
+            posLog("persist work=\(work.id) ch=\(chapterIndex + 1) pos=\(pos) stored=\(appState.progressMap[work.id].map { "ch\($0.chapter)@\($0.pos)" } ?? "nil")")
+        }
+    }
+
+    /// Run any pending debounced persist immediately — called before the
+    /// reader is repointed at another work so the last position isn't lost.
+    func flushPendingPersist() {
+        guard pendingPersist != nil else { return }
+        pendingPersist?.cancel()
+        pendingPersist = nil
+        persistProgressNow()
     }
 
     func updateProgress() {

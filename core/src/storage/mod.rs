@@ -24,6 +24,11 @@ use consts::*;
 /// ContentBlock trees are stored as JSON in the `chapters.content_json` column.
 pub struct Storage {
     conn: Connection,
+    /// Every cached tag, name → (rowid, type-known). Loaded once at open and
+    /// kept coherent by the tag write paths, so a tag the library already
+    /// knows (with its type) costs no SQL to re-encounter — only genuinely
+    /// new tags and the rare type upgrade ('' learning a real type) write.
+    tag_cache: std::cell::RefCell<std::collections::HashMap<String, (i64, bool)>>,
 }
 
 /// Account-scoped rows (bookmarks) made while signed out live under this
@@ -129,8 +134,11 @@ impl Storage {
         )
         .map_err(map_sql)?;
 
-        let storage = Self { conn };
+        let storage = Self { conn, tag_cache: Default::default() };
         storage.migrate()?;
+        // Prime the in-memory tag cache before anything harvests tags, so
+        // even the backfill below takes the no-SQL path for known names.
+        storage.load_tag_cache()?;
         // One-time: seed the tags table from works cached before it existed.
         let _ = storage.backfill_tags();
         Ok(storage)

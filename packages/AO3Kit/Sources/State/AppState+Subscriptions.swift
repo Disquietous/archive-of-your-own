@@ -179,7 +179,9 @@ extension AppState {
 
     func loadNotifications() {
         notifications = bridge.getNotifications()
-        unreadNotificationCount = Int(bridge.getUnreadNotificationCount())
+        // The rows carry the read flag — counting here avoids a second
+        // COUNT(read = 0) query on every load.
+        unreadNotificationCount = notifications.filter { !$0.read }.count
     }
 
     func markNotificationRead(_ id: Int64) {
