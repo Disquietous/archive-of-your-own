@@ -296,12 +296,15 @@ impl AO3App {
     /// listings: the works, and the bookmark rows scoped to whoever made
     /// them (only the active user's own land in the Bookmarks view).
     /// Series/external bookmarks are skipped by the parser.
-    pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`); a crawl
+    /// passes the same id for every page so the whole operation reads as one.
+    pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let (username, _) = split_author_byline(&username);
             let fetch_user = username.clone();
-            let (listings, has_next, total, found) = with_recovery(
+            let (listings, has_next, total, found) = recovery::with_recovery_as(
                 client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "user_bookmarks".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let username = fetch_user.clone();

@@ -870,6 +870,8 @@ final class MacAppModel {
     let authorRefreshOp = TrackedOperation()
     /// Same, for the Subscriptions drill-in's works crawl.
     let subscriptionRefreshOp = TrackedOperation()
+    /// Same, for the author bookmarks pane's page walk.
+    let authorBookmarksRefreshOp = TrackedOperation()
     /// The in-flight crawl's task. Each crawl gets its own instance so that
     /// cancelling one can never be undone by a later crawl's retry reset.
     private(set) var authorTask = NetworkTask()
@@ -1082,45 +1084,68 @@ final class MacAppModel {
         loadAuthorPaneContent(authorPane, username: username)
     }
 
-    /// Refetch the bookmarks from AO3, starting over at page 1 — the only
-    /// network trigger for the pane (Load More continues from there).
+    /// Refetch the bookmarks from AO3, starting over at page 1 and walking
+    /// every page — the pane's main network trigger. Pages land in the list
+    /// as they arrive; the Rust client's rate limiter paces the requests.
     func refreshAuthorBookmarks() {
-        guard !isLoadingAuthorBookmarks else { return }
+        guard let username = authorUsername, !isLoadingAuthorBookmarks else { return }
+        isLoadingAuthorBookmarks = true
         authorBookmarksList = []
         authorBookmarksPage = 0
         authorBookmarksHasNext = false
         authorBookmarksError = nil
-        loadMoreAuthorBookmarks()
+        Task { @MainActor in
+            // Request-tracking standard: one id for the whole walk — every
+            // page's requests carry it, so the progress banner tracks it.
+            await authorBookmarksRefreshOp.run(appState.bridge) { opID in
+                while await fetchAuthorBookmarksPage(username: username, opID: opID) == true,
+                      authorUsername == username {}
+            }
+            if authorUsername == username { isLoadingAuthorBookmarks = false }
+        }
     }
 
     /// Fetch the next page of the author's public bookmarks (page 1 when
-    /// nothing is loaded).
+    /// nothing is loaded) — resumes an interrupted refresh walk.
     func loadMoreAuthorBookmarks() {
         guard let username = authorUsername, !isLoadingAuthorBookmarks else { return }
         isLoadingAuthorBookmarks = true
-        authorBookmarksError = nil
-        let page = authorBookmarksPage + 1
         Task { @MainActor in
-            do {
-                let result = try await appState.bridge.fetchUserBookmarksPage(username: username, page: page)
-                guard authorUsername == username else { return }
-                let works = result.works.map(AppState.workFromSummary)
-                for work in works { appState.fetchedWorks[work.id] = work }
-                let existing = Set(authorBookmarksList.map(\.id))
-                authorBookmarksList.append(contentsOf: works.filter { !existing.contains($0.id) })
-                authorBookmarksPage = page
-                authorBookmarksHasNext = result.hasNextPage
-                // Persist the list membership so reopening the author shows
-                // these bookmarks without touching AO3.
-                appState.bridge.saveSubscriptionWorks(
-                    subType: "author-bookmarks", subId: username,
-                    workIds: authorBookmarksList.compactMap { UInt64($0.id) })
-            } catch {
-                if authorUsername == username, !error.isCancellation {
-                    authorBookmarksError = error.localizedDescription
-                }
+            await authorBookmarksRefreshOp.run(appState.bridge) { opID in
+                _ = await fetchAuthorBookmarksPage(username: username, opID: opID)
             }
             if authorUsername == username { isLoadingAuthorBookmarks = false }
+        }
+    }
+
+    /// Fetch the page after `authorBookmarksPage` and append its works to
+    /// the list. Returns whether AO3 reports a further page, or nil on
+    /// error or when the pane has moved to a different author.
+    @MainActor
+    private func fetchAuthorBookmarksPage(username: String, opID: UInt64) async -> Bool? {
+        authorBookmarksError = nil
+        let page = authorBookmarksPage + 1
+        do {
+            let result = try await appState.bridge.fetchUserBookmarksPage(username: username, page: page,
+                                                                          opID: opID)
+            guard authorUsername == username else { return nil }
+            let works = result.works.map(AppState.workFromSummary)
+            for work in works { appState.fetchedWorks[work.id] = work }
+            let existing = Set(authorBookmarksList.map(\.id))
+            authorBookmarksList.append(contentsOf: works.filter { !existing.contains($0.id) })
+            authorBookmarksPage = page
+            authorBookmarksHasNext = result.hasNextPage
+            // Persist the list membership so reopening the author shows
+            // these bookmarks without touching AO3.
+            appState.bridge.saveSubscriptionWorks(
+                subType: "author-bookmarks", subId: username,
+                workIds: authorBookmarksList.compactMap { UInt64($0.id) })
+            return result.hasNextPage
+        } catch {
+            if authorUsername == username, !error.isCancellation {
+                authorBookmarksError = error.localizedDescription
+            }
+            return nil
         }
     }
 

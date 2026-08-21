@@ -767,9 +767,11 @@ final class ReadPaneViewController: NSViewController {
             case .bookmarks:
                 let count = model.authorBookmarksList.count
                 let sub = model.isLoadingAuthorBookmarks
-                    ? "Fetching bookmarks from AO3…"
+                    ? (count == 0 ? "Fetching bookmarks from AO3…"
+                                  : "Fetching bookmarks from AO3… \(count) so far")
                     : count == 1 ? "1 bookmark" : "\(count) bookmarks"
                 toolbar.configure(title: "Bookmarks", sub: sub)
+                requestOverlayOpID = model.authorBookmarksRefreshOp.opID
                 toolbar.setLeading([])
                 var trailing: [NSView] = []
                 if model.authorBookmarksHasNext {
