@@ -350,6 +350,7 @@ struct ReadingListPopover: View {
     let work: Work
 
     @State private var term = ""
+    @State private var memberListIds: Set<Int64> = []
     @FocusState private var searchFocused: Bool
 
     private var workId: UInt64? { UInt64(work.id) }
@@ -371,8 +372,7 @@ struct ReadingListPopover: View {
     }
 
     private func isMember(_ list: UReadingList) -> Bool {
-        guard let workId else { return false }
-        return appState.bridge.getReadingListItems(list.id).contains(workId)
+        memberListIds.contains(list.id)
     }
 
     var body: some View {
@@ -416,7 +416,12 @@ struct ReadingListPopover: View {
         }
         .frame(width: 280)
         .background(theme.surface)
-        .onAppear { searchFocused = true }
+        .onAppear {
+            searchFocused = true
+            if let workId {
+                memberListIds = Set(appState.bridge.getReadingListsForWork(workId))
+            }
+        }
     }
 
     private func listRow(_ list: UReadingList) -> some View {
@@ -425,8 +430,10 @@ struct ReadingListPopover: View {
             guard workId != nil else { return }
             if member {
                 appState.removeFromReadingList(list.id, workId: work.id)
+                memberListIds.remove(list.id)
             } else {
                 appState.addToReadingList(list.id, workId: work.id)
+                memberListIds.insert(list.id)
             }
         } label: {
             HStack(spacing: 10) {
@@ -481,6 +488,7 @@ struct ReadingListPopover: View {
         let listId = appState.createReadingList(name)
         if listId >= 0 {
             appState.addToReadingList(listId, workId: work.id)
+            memberListIds.insert(listId)
         }
         term = ""
     }

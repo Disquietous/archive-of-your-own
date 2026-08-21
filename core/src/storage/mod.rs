@@ -13,10 +13,16 @@ mod accounts;
 mod consts;
 mod library;
 mod subscriptions;
+mod state_cache;
+mod tag_cache;
 mod works;
+mod works_cache;
 mod works_search;
 
 use consts::*;
+use state_cache::StateCache;
+use tag_cache::TagCache;
+use works_cache::WorksCache;
 
 /// Encrypted local storage backed by SQLCipher.
 ///
@@ -24,11 +30,50 @@ use consts::*;
 /// ContentBlock trees are stored as JSON in the `chapters.content_json` column.
 pub struct Storage {
     conn: Connection,
-    /// Every cached tag, name → (rowid, type-known). Loaded once at open and
-    /// kept coherent by the tag write paths, so a tag the library already
-    /// knows (with its type) costs no SQL to re-encounter — only genuinely
-    /// new tags and the rare type upgrade ('' learning a real type) write.
-    tag_cache: std::cell::RefCell<std::collections::HashMap<String, (i64, bool)>>,
+    /// The tags table's in-memory mirror and single write authority — every
+    /// post-open write to `tags` goes through its methods, which mutate map
+    /// and database together (see tag_cache.rs for the invariant). A tag the
+    /// library already knows (with its type) costs no SQL to re-encounter.
+    tag_cache: TagCache,
+    /// The works (+ work_tags/work_authors) mirror and single write
+    /// authority — same contract as `tag_cache` (see works_cache.rs).
+    /// Work reads and membership scans cost no SQL; tag names hydrate from
+    /// `tag_cache` by id instead of a join.
+    works_cache: WorksCache,
+    /// The app_state (settings key→value) mirror and single write
+    /// authority — same contract as the caches above (see state_cache.rs).
+    /// Settings lookups cost no SQL.
+    state_cache: StateCache,
+}
+
+/// A live write transaction from `Storage::begin_tx`. Commit consumes it;
+/// dropping it uncommitted rolls the transaction back and resyncs the
+/// in-memory caches so a discarded write can't leave them ahead of the
+/// database.
+pub struct TxGuard<'a> {
+    tx: Option<rusqlite::Transaction<'a>>,
+    storage: &'a Storage,
+}
+
+impl TxGuard<'_> {
+    pub fn commit(mut self) -> Result<(), AppError> {
+        let tx = self.tx.take().expect("TxGuard commit is take-once");
+        tx.commit().map_err(|e| {
+            // A failed commit rolled back server-side; put the caches back
+            // on the table truth before surfacing the error.
+            self.storage.resync_caches();
+            map_sql(e)
+        })
+    }
+}
+
+impl Drop for TxGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            drop(tx); // rusqlite's drop-without-commit is a rollback
+            self.storage.resync_caches();
+        }
+    }
 }
 
 /// Account-scoped rows (bookmarks) made while signed out live under this
@@ -134,11 +179,20 @@ impl Storage {
         )
         .map_err(map_sql)?;
 
-        let storage = Self { conn, tag_cache: Default::default() };
+        let storage = Self {
+            conn,
+            tag_cache: TagCache::default(),
+            works_cache: WorksCache::default(),
+            state_cache: StateCache::default(),
+        };
         storage.migrate()?;
-        // Prime the in-memory tag cache before anything harvests tags, so
-        // even the backfill below takes the no-SQL path for known names.
-        storage.load_tag_cache()?;
+        // Prime the in-memory caches (tags first — work hydration resolves
+        // tag ids against it) before anything reads or harvests. Migrations
+        // are the one code path allowed to write these tables without the
+        // caches — they ran before these loads.
+        storage.tag_cache.load(&storage.conn)?;
+        storage.works_cache.load(&storage.conn)?;
+        storage.state_cache.load(&storage.conn)?;
         // One-time: seed the tags table from works cached before it existed.
         let _ = storage.backfill_tags();
         Ok(storage)
@@ -508,9 +562,21 @@ impl Storage {
 
     /// A write transaction for multi-row batches. Statements executed on
     /// `self` while the guard lives join the transaction; dropping it
-    /// without `commit()` rolls everything back.
-    pub fn begin_tx(&self) -> Result<rusqlite::Transaction<'_>, AppError> {
-        self.conn.unchecked_transaction().map_err(map_sql)
+    /// without `commit()` rolls everything back — and resyncs the in-memory
+    /// caches, since the rollback may have discarded state they recorded.
+    pub fn begin_tx(&self) -> Result<TxGuard<'_>, AppError> {
+        Ok(TxGuard {
+            tx: Some(self.conn.unchecked_transaction().map_err(map_sql)?),
+            storage: self,
+        })
+    }
+
+    /// Reload the in-memory caches from the database — the recovery for any
+    /// rollback that may have discarded rows they already recorded.
+    fn resync_caches(&self) {
+        let _ = self.tag_cache.load(&self.conn);
+        let _ = self.works_cache.load(&self.conn);
+        let _ = self.state_cache.load(&self.conn);
     }
 
     /// Run `f` atomically inside a named savepoint. Unlike BEGIN, savepoints
@@ -534,6 +600,10 @@ impl Storage {
                 let _ = self
                     .conn
                     .execute_batch(&format!("{SQL_ROLLBACK_TO} {name}; {SQL_RELEASE} {name}"));
+                // The rollback may have discarded rows the in-memory caches
+                // already recorded (a dead tag id would break later join
+                // inserts); resync them with the table truth.
+                self.resync_caches();
                 Err(e)
             }
         }
@@ -801,9 +871,21 @@ impl Storage {
 
         // One-time: purge avatars cached by the unscoped icon selector (they
         // captured the signed-in user's chrome icon, not the profile owner's).
-        if self.get_state(STATE_AVATAR_CACHE_RESET).ok().flatten().is_none() {
+        // Inline SQL, not get_state/set_state — this runs before the state
+        // cache loads, and migration steps stay version-frozen anyway.
+        let reset_done: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'avatar_cache_reset_1')",
+                [], |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !reset_done {
             let _ = self.conn.execute("DELETE FROM image_cache WHERE key LIKE 'avatar:%'", []);
-            let _ = self.set_state(STATE_AVATAR_CACHE_RESET, "1");
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO app_state (key, value) VALUES ('avatar_cache_reset_1', '1')",
+                [],
+            );
         }
 
         // Migration: AO3 bookmarks are rich objects — notes, own tags,

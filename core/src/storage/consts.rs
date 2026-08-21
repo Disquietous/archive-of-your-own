@@ -130,7 +130,6 @@ pub(super) const STATE_LAST_SUB_CHECK: &str = "last_subscription_check";
 /// Historical name — predates the tags-table rename; keeping it stops
 /// already-seeded databases from re-running the backfill.
 pub(super) const STATE_KNOWN_TAGS_BACKFILLED: &str = "known_tags_backfilled";
-pub(super) const STATE_AVATAR_CACHE_RESET: &str = "avatar_cache_reset_1";
 
 // ---------------------------------------------------------------------------
 // SQLite pragmas
@@ -148,10 +147,6 @@ pub(super) const LOG_TAG_COLLECTIONS: &str = "collections";
 // ---------------------------------------------------------------------------
 // IN-list batching
 // ---------------------------------------------------------------------------
-
-/// Ids per `IN (...)` chunk — comfortably under SQLite's bound-variable
-/// limit while keeping round trips rare.
-pub(super) const SQL_IN_CHUNK: usize = 500;
 
 /// `?, ?, ?` placeholder list for an `IN (...)` clause of `n` bound values.
 pub(super) fn sql_placeholders(n: usize) -> String {

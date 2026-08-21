@@ -655,10 +655,11 @@ fn test_collection_profile_tags_and_works() {
     assert_eq!(tag_rows, 1, "one universal tags row per name");
 
     // Deleting the tags row cascades the relationship out of every join
-    // table that references it. Direct deletion bypasses the in-memory tag
-    // cache, so it must be resynced or later saves would reuse the dead id.
+    // table that references it. Raw deletion is a test-only bypass of the
+    // TagCache write path (app code has no tags-delete path), so the map
+    // must be resynced or later saves would reuse the dead id.
     db.conn.execute("DELETE FROM tags WHERE name = 'Fandom A'", []).unwrap();
-    db.load_tag_cache().unwrap();
+    db.tag_cache.load(&db.conn).unwrap();
     let cached = db.get_collection("test_fest").unwrap().unwrap();
     assert_eq!(cached.tags, vec!["Brand New Tag".to_string()]);
     assert_eq!(db.get_work(1).unwrap().unwrap().fandoms, Vec::<String>::new());
@@ -1750,4 +1751,183 @@ fn test_search_masks_backfill_v11() {
     assert_eq!(wm, 1 << 0); // Warning::None
     assert_eq!(cm, 1 << 1); // F/M
     assert_eq!(fc, 1); // Fandom A
+}
+
+// ===========================================================================
+// Cache invariants — the tags/works tables are written only through their
+// in-memory caches, and rollbacks can never leave the caches ahead of the
+// database.
+// ===========================================================================
+
+/// Structural guardrail: post-open writes to the cache-owned tables (tags,
+/// works, work_tags, work_authors) may only live in tag_cache.rs /
+/// works_cache.rs. Migrations and version-frozen backfills are exempt —
+/// they run before the caches load — and are pinned here line by line, so
+/// any new stray writer fails this test instead of drifting in silently.
+/// (tests.rs itself is excluded: test-only bypasses are deliberate.)
+#[test]
+fn cache_owned_tables_have_no_stray_writers() {
+    let sources = [
+        ("mod.rs", include_str!("mod.rs")),
+        ("works.rs", include_str!("works.rs")),
+        ("works_search.rs", include_str!("works_search.rs")),
+        ("library.rs", include_str!("library.rs")),
+        ("subscriptions.rs", include_str!("subscriptions.rs")),
+        ("accounts.rs", include_str!("accounts.rs")),
+        ("consts.rs", include_str!("consts.rs")),
+    ];
+    let write_markers = [
+        "INSERT INTO tags", "INSERT OR IGNORE INTO tags", "INSERT OR REPLACE INTO tags",
+        "UPDATE tags", "DELETE FROM tags",
+        "INSERT INTO works", "INSERT OR IGNORE INTO works", "INSERT OR REPLACE INTO works",
+        "UPDATE works", "DELETE FROM works",
+        "INTO work_tags", "UPDATE work_tags", "DELETE FROM work_tags",
+        "INTO work_authors", "UPDATE work_authors", "DELETE FROM work_authors",
+        "INTO app_state", "UPDATE app_state", "DELETE FROM app_state",
+    ];
+    // (file, line fragment) pairs for the migration-frozen exemptions.
+    let allowed: &[(&str, &str)] = &[
+        ("mod.rs", "UPDATE works SET detail_viewed_at ="),          // v2 timestamp re-encode
+        ("mod.rs", "INSERT INTO tags (name, tag_type, uses, canonical, last_seen)"), // v8 known_tags merge
+        ("mod.rs", "UPDATE works SET last_chapter_read = COALESCE("), // v7 progress backfill
+        ("mod.rs", "UPDATE works SET fandom_count ="),               // v11 backfill
+        ("mod.rs", "UPDATE works SET last_read_dt = COALESCE("),     // v1 baseline backfill
+        ("works.rs", "INSERT INTO tags (name, tag_type) VALUES"),    // backfill_work_tags_v8
+        ("works.rs", "INSERT OR IGNORE INTO work_tags"),             // backfill_work_tags_v8
+        ("works.rs", "INSERT OR IGNORE INTO work_authors"),          // backfill_work_authors (v2)
+        ("works_search.rs", "UPDATE works SET warnings_mask"),       // backfill_search_masks_v11
+        ("mod.rs", "UPDATE app_state SET value = datetime("),        // v2 timestamp re-encode
+        ("mod.rs", "INSERT OR REPLACE INTO app_state (key, value) VALUES ('avatar_cache_reset_1', '1')"), // v1 baseline
+    ];
+    for (file, src) in sources {
+        for (lineno, line) in src.lines().enumerate() {
+            for marker in &write_markers {
+                if line.contains(marker) {
+                    let exempt = allowed
+                        .iter()
+                        .any(|(f, fragment)| *f == file && line.contains(fragment));
+                    assert!(
+                        exempt,
+                        "stray write to a cache-owned table in {file}:{} — \
+                         route it through TagCache/WorksCache (or pin it in the \
+                         exemption list if it is migration-frozen): {}",
+                        lineno + 1,
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tag_indexes_share_one_entity() {
+    let db = open_test_db();
+    let resolved = db.tag_cache.resolve(&db.conn, "Shared Entity", "fandom").unwrap();
+    let by_id = db.tag_cache.get(resolved.id).unwrap();
+    let by_name = db.tag_cache.get_by_name("Shared Entity").unwrap();
+    // Both indexes hand back the same allocation — one copy, two pointers.
+    assert!(std::sync::Arc::ptr_eq(&by_id, &by_name));
+    assert!(std::sync::Arc::ptr_eq(&resolved, &by_id));
+    assert_eq!(by_name.tag_type, "fandom");
+}
+
+#[test]
+fn savepoint_rollback_resyncs_caches() {
+    let db = open_test_db();
+    let result: Result<(), AppError> = db.with_savepoint(Savepoint::UpsertTags, || {
+        db.tag_cache.resolve(&db.conn, "Rolled Back Tag", "fandom")?;
+        assert!(db.tag_cache.get_by_name("Rolled Back Tag").is_some());
+        Err(AppError::StorageError("forced rollback".into()))
+    });
+    assert!(result.is_err());
+    // The insert rolled back; the cache must not keep the dead entity.
+    assert!(db.tag_cache.get_by_name("Rolled Back Tag").is_none());
+    let rows: i64 = db.conn
+        .query_row("SELECT COUNT(*) FROM tags WHERE name = 'Rolled Back Tag'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn tx_drop_without_commit_resyncs_caches() {
+    let db = open_test_db();
+    let tx = db.begin_tx().unwrap();
+    db.save_work(&sample_work(4242)).unwrap();
+    assert!(db.get_work(4242).unwrap().is_some());
+    drop(tx); // rollback — the guard resyncs both caches
+    assert!(db.get_work(4242).unwrap().is_none());
+    let rows: i64 = db.conn
+        .query_row("SELECT COUNT(*) FROM works WHERE id = 4242", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// Every write-through mutation must leave the cached entity and the
+/// database row agreeing.
+#[test]
+fn works_cache_matches_rows_after_each_mutation() {
+    let db = open_test_db();
+    db.save_work(&sample_work(9)).unwrap();
+
+    db.save_progress(9, 3, 120).unwrap();
+    db.mark_work_read(9).unwrap();
+    db.mark_work_detail_viewed(9, "2026-08-21 00:00:00").unwrap();
+    db.set_works_gone(&[9], true).unwrap();
+    let series = vec![SeriesMembership {
+        series_id: 5, name: "S".into(), part: 1,
+        prev_work_id: None, next_work_id: None,
+    }];
+    db.set_work_series(9, &series).unwrap();
+
+    let (ch, pos, last_read, viewed, gone, series_json): (i64, i64, String, String, i64, String) =
+        db.conn.query_row(
+            "SELECT last_chapter_read, last_chapter_read_pos, last_read_dt,
+                    detail_viewed_at, gone_from_ao3, series_json
+             FROM works WHERE id = 9",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).unwrap();
+
+    assert_eq!(db.get_progress(9).unwrap(), Some((ch as u32, pos as u32)));
+    assert_eq!(db.get_work_last_read_times().unwrap(), vec![(9, last_read)]);
+    assert_eq!(viewed, "2026-08-21 00:00:00");
+    assert_eq!(db.get_detail_viewed_work_ids().unwrap(), vec![9]);
+    assert_eq!(gone, 1);
+    assert_eq!(db.get_gone_work_ids().unwrap(), vec![9]);
+    let hydrated = db.get_work(9).unwrap().unwrap();
+    assert_eq!(hydrated.series, series);
+    assert_eq!(serde_json::to_string(&hydrated.series).unwrap(), series_json);
+
+    // A listing re-save (blurbs carry no series or library state) must
+    // preserve all of it, in the row and the entity alike.
+    db.save_work(&sample_work(9)).unwrap();
+    let again = db.get_work(9).unwrap().unwrap();
+    assert_eq!(again.series, series);
+    assert_eq!(db.get_progress(9).unwrap(), Some((3, 120)));
+    assert_eq!(db.get_gone_work_ids().unwrap(), vec![9]);
+
+    // Deletion drops the entity with the row.
+    db.delete_work(9).unwrap();
+    assert!(db.get_work(9).unwrap().is_none());
+    assert!(db.get_gone_work_ids().unwrap().is_empty());
+}
+
+#[test]
+fn state_cache_write_through_and_rollback() {
+    let db = open_test_db();
+    // Round trip without SQL on the read side.
+    assert_eq!(db.get_state("cache_test_key").unwrap(), None);
+    db.set_state("cache_test_key", "v1").unwrap();
+    assert_eq!(db.get_state("cache_test_key").unwrap(), Some("v1".into()));
+    let row: String = db.conn
+        .query_row("SELECT value FROM app_state WHERE key = 'cache_test_key'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(row, "v1");
+
+    // A dropped transaction rolls the write back out of map and table alike.
+    let tx = db.begin_tx().unwrap();
+    db.set_state("cache_test_key", "v2").unwrap();
+    assert_eq!(db.get_state("cache_test_key").unwrap(), Some("v2".into()));
+    drop(tx);
+    assert_eq!(db.get_state("cache_test_key").unwrap(), Some("v1".into()));
 }

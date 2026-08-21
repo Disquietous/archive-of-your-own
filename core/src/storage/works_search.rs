@@ -10,8 +10,6 @@
 //! substrings — hence the registered `ao3_lower` SQL function — and ASCII
 //! folding for the equality matches that use `eq_ignore_ascii_case`).
 
-use std::collections::HashMap;
-
 use rusqlite::params;
 use rusqlite::types::Value;
 
@@ -479,15 +477,10 @@ impl Storage {
 
     /// Ids of every tag whose name contains the (pre-lowered) needle —
     /// the substring semantics of the oracle's `any_ci` over tag names.
+    /// Answered from the in-memory tag cache (same Unicode lowering as the
+    /// `ao3_lower` SQL scan it replaces).
     fn tag_ids_containing(&self, needle_lower: &str) -> Result<Vec<i64>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id FROM tags WHERE instr(ao3_lower(name), ?1) > 0")
-            .map_err(map_sql)?;
-        let rows = stmt
-            .query_map(params![needle_lower], |r| r.get::<_, i64>(0))
-            .map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        Ok(self.tag_cache.ids_containing(needle_lower))
     }
 
     /// Seed the v11 mask columns from the JSON columns every existing row
@@ -518,32 +511,14 @@ impl Storage {
     }
 
     /// Hydrate a slice of search-result ids into summaries, preserving the
-    /// ids' order; ids without a cached row are skipped. Batched (chunked
-    /// `WHERE id IN`) so a page costs one query plus tag attachment.
+    /// ids' order; ids without a cached row are skipped. Answered from the
+    /// works cache — no SQL.
     pub fn get_works_by_ids_ordered(&self, ids: &[u64]) -> Result<Vec<crate::models::WorkSummary>, AppError> {
-        let mut by_id: HashMap<u64, crate::models::WorkSummary> = HashMap::with_capacity(ids.len());
-        for chunk in ids.chunks(SQL_IN_CHUNK) {
-            let sql = format!(
-                "SELECT {} FROM works WHERE id IN ({})",
-                Self::work_select(""),
-                sql_placeholders(chunk.len())
-            );
-            let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-            let rows = stmt
-                .query_map(
-                    rusqlite::params_from_iter(chunk.iter().map(|id| *id as i64)),
-                    |row| Ok(Self::work_from_row(row)),
-                )
-                .map_err(map_sql)?;
-            for row in rows {
-                let work = row.map_err(map_sql)?.map_err(map_sql)?;
-                by_id.insert(work.id, work);
-            }
-        }
-        let mut out: Vec<crate::models::WorkSummary> =
-            ids.iter().filter_map(|id| by_id.remove(id)).collect();
-        self.attach_work_tags(&mut out)?;
-        Ok(out)
+        Ok(ids
+            .iter()
+            .filter_map(|id| self.works_cache.get(*id))
+            .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
+            .collect())
     }
 }
 

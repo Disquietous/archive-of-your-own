@@ -5,7 +5,7 @@ use crate::models::{Chapter, ContentBlock, LocalSearchCriteria, Rating, SeriesMe
                     WorkSummary};
 
 use super::consts::*;
-use super::{map_json, map_sql, rating_to_str, str_to_rating, Storage};
+use super::{map_json, map_sql, str_to_rating, Storage};
 
 impl Storage {
     // -------------------------------------------------------------------
@@ -33,208 +33,20 @@ impl Storage {
             .join(", ")
     }
 
-    /// Upsert a work summary plus its author-index rows, atomically (a
-    /// savepoint, so it also composes inside callers' batch transactions).
+    /// Upsert a work summary plus its author- and tag-index rows, atomically
+    /// (a savepoint, so it also composes inside callers' batch transactions).
+    /// The write itself lives on the works cache — the single write
+    /// authority for the works tables.
     pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
-        self.with_savepoint(Savepoint::SaveWork, || self.save_work_inner(work))
-    }
-
-    fn save_work_inner(&self, work: &WorkSummary) -> Result<(), AppError> {
-        // Upsert, NOT INSERT OR REPLACE: replace re-creates the row, wiping
-        // columns the blurb doesn't carry (gone_from_ao3).
-        self.conn
-            .execute(
-                "INSERT INTO works (
-                    id, title, authors_json, rating,
-                    warnings_json, categories_json, summary, word_count,
-                    chapter_count, total_chapters, kudos, hits,
-                    bookmarks, comments, date_published, date_updated, language, complete,
-                    fetched_at, warnings_mask, categories_mask, fandom_count
-                ) VALUES (
-                    ?1, ?2, ?3, ?4,
-                    ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22
-                )
-                ON CONFLICT(id) DO UPDATE SET
-                    title = ?2, authors_json = ?3, rating = ?4,
-                    warnings_json = ?5, categories_json = ?6, summary = ?7, word_count = ?8,
-                    chapter_count = ?9, total_chapters = ?10, kudos = ?11, hits = ?12,
-                    bookmarks = ?13, comments = ?14, date_published = ?15, date_updated = ?16,
-                    language = ?17, complete = ?18, fetched_at = ?19,
-                    warnings_mask = ?20, categories_mask = ?21, fandom_count = ?22",
-                params![
-                    work.id as i64,
-                    work.title,
-                    serde_json::to_string(&work.authors).map_err(map_json)?,
-                    rating_to_str(&work.rating),
-                    serde_json::to_string(&work.warnings).map_err(map_json)?,
-                    serde_json::to_string(&work.categories).map_err(map_json)?,
-                    work.summary,
-                    work.word_count as i64,
-                    work.chapter_count as i64,
-                    work.total_chapters.map(|c| c as i64),
-                    work.kudos as i64,
-                    work.hits as i64,
-                    work.bookmarks as i64,
-                    work.comments as i64,
-                    work.date_published,
-                    work.date_updated,
-                    work.language,
-                    work.complete as i32,
-                    crate::timefmt::now_utc_datetime(),
-                    super::works_search::warnings_mask(&work.warnings),
-                    super::works_search::categories_mask(&work.categories),
-                    work.fandoms.len() as i64,
-                ],
-            )
-            .map_err(map_sql)?;
-        self.replace_work_authors(work.id, &work.authors)?;
-        self.replace_work_tag_rows(work.id, &work.fandoms, &work.characters,
-                                   &work.relationships, &work.tags)?;
-        // Seeing a work's details anywhere feeds the autocomplete tag cache.
-        let _ = self.harvest_work_tags(work);
-        Ok(())
-    }
-
-    // -------------------------------------------------------------------
-    // Normalized tags (tags + work_tags/collection_tags join tables)
-    // -------------------------------------------------------------------
-
-    /// (Re)fill the in-memory tag cache from the tags table — run once at
-    /// open, after migrations (which write tags with inline SQL, not through
-    /// the cache-coherent paths below). Anything that deletes tags rows
-    /// directly must call this again: a stale cached id would break the
-    /// join-table foreign keys.
-    pub(super) fn load_tag_cache(&self) -> Result<(), AppError> {
-        let mut stmt = self.conn
-            .prepare("SELECT id, name, tag_type FROM tags")
-            .map_err(map_sql)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-            })
-            .map_err(map_sql)?;
-        let mut cache = self.tag_cache.borrow_mut();
-        cache.clear();
-        for row in rows {
-            let (id, name, tag_type) = row.map_err(map_sql)?;
-            cache.insert(name, (id, !tag_type.is_empty()));
-        }
-        Ok(())
-    }
-
-    /// The tags-table id for a name, inserting the row if new. Tag identity
-    /// is the name alone — AO3 tag names are globally unique across every
-    /// tag type (hence the "- Freeform" suffixes), so the same tag is one
-    /// row wherever it appears: on works, on collections, anywhere.
-    /// `tag_type` fills in an existing row's type only when it hasn't been
-    /// learned yet ("" = unknown, e.g. from a collection profile).
-    /// Answered from the in-memory cache: a known tag with a known type
-    /// costs no SQL.
-    pub(super) fn tag_row_id(&self, name: &str, tag_type: &str) -> Result<i64, AppError> {
-        let cached = self.tag_cache.borrow().get(name).copied();
-        if let Some((id, type_known)) = cached {
-            if type_known || tag_type.is_empty() {
-                return Ok(id);
-            }
-            // Rare: an unknown-typed row (e.g. from a collection profile)
-            // learning its real type from a work listing.
-            self.conn
-                .prepare_cached("UPDATE tags SET tag_type = ?2 WHERE id = ?1 AND tag_type = ''")
-                .map_err(map_sql)?
-                .execute(params![id, tag_type])
-                .map_err(map_sql)?;
-            self.tag_cache.borrow_mut().insert(name.to_string(), (id, true));
-            return Ok(id);
-        }
-        self.conn
-            .prepare_cached(
-                "INSERT INTO tags (name, tag_type) VALUES (?1, ?2)
-                 ON CONFLICT(name) DO UPDATE SET tag_type = excluded.tag_type
-                     WHERE tags.tag_type = '' AND excluded.tag_type <> ''")
-            .map_err(map_sql)?
-            .execute(params![name, tag_type])
-            .map_err(map_sql)?;
-        let id: i64 = self.conn
-            .prepare_cached("SELECT id FROM tags WHERE name = ?1")
-            .map_err(map_sql)?
-            .query_row(params![name], |r| r.get(0))
-            .map_err(map_sql)?;
-        self.tag_cache.borrow_mut().insert(name.to_string(), (id, !tag_type.is_empty()));
-        Ok(id)
-    }
-
-    /// Rewrite a work's join rows. `tag_type` records how this work uses
-    /// the tag (which blurb list it came from); `position` runs across the
-    /// four lists in AO3's blurb order so reads reproduce the original
-    /// ordering.
-    fn replace_work_tag_rows(&self, work_id: u64, fandoms: &[String], characters: &[String],
-                             relationships: &[String], freeforms: &[String])
-        -> Result<(), AppError>
-    {
-        self.conn
-            .execute("DELETE FROM work_tags WHERE work_id = ?1", params![work_id as i64])
-            .map_err(map_sql)?;
-        let mut stmt = self.conn
-            .prepare_cached("INSERT OR IGNORE INTO work_tags (work_id, tag_id, tag_type, position)
-                             VALUES (?1, ?2, ?3, ?4)")
-            .map_err(map_sql)?;
-        let mut position = 0i64;
-        for (list, tag_type) in [(fandoms, TAG_TYPE_FANDOM), (characters, TAG_TYPE_CHARACTER),
-                                 (relationships, TAG_TYPE_RELATIONSHIP), (freeforms, TAG_TYPE_FREEFORM)] {
-            for name in list {
-                let tag_id = self.tag_row_id(name, tag_type)?;
-                stmt.execute(params![work_id as i64, tag_id, tag_type, position])
-                    .map_err(map_sql)?;
-                position += 1;
-            }
-        }
-        Ok(())
-    }
-
-    /// Hydrate the tag vectors on loaded rows from the join tables — the
-    /// works SELECTs only carry scalar columns. Batched in id chunks (one
-    /// query per chunk, not per work): per-statement overhead dominates
-    /// this path, so N works must not mean N round trips.
-    pub(super) fn attach_work_tags(&self, works: &mut [WorkSummary]) -> Result<(), AppError> {
-        if works.is_empty() {
-            return Ok(());
-        }
-        let slot_by_id: std::collections::HashMap<i64, usize> = works
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.id as i64, i))
-            .collect();
-        let ids: Vec<i64> = works.iter().map(|w| w.id as i64).collect();
-        for chunk in ids.chunks(SQL_IN_CHUNK) {
-            let sql = format!(
-                "SELECT wt.work_id, t.name, wt.tag_type FROM work_tags wt
-                 JOIN tags t ON t.id = wt.tag_id
-                 WHERE wt.work_id IN ({})
-                 ORDER BY wt.work_id, wt.position",
-                sql_placeholders(chunk.len())
-            );
-            let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-                })
-                .map_err(map_sql)?;
-            for row in rows {
-                let (work_id, name, tag_type) = row.map_err(map_sql)?;
-                let Some(&slot) = slot_by_id.get(&work_id) else { continue };
-                let work = &mut works[slot];
-                match tag_type.as_str() {
-                    TAG_TYPE_FANDOM => work.fandoms.push(name),
-                    TAG_TYPE_CHARACTER => work.characters.push(name),
-                    TAG_TYPE_RELATIONSHIP => work.relationships.push(name),
-                    _ => work.tags.push(name),
-                }
-            }
-        }
-        Ok(())
+        self.with_savepoint(Savepoint::SaveWork, || {
+            self.works_cache.save_work(
+                &self.conn, &self.tag_cache, work,
+                &crate::timefmt::now_utc_datetime(),
+            )?;
+            // Seeing a work's details anywhere feeds the autocomplete tag cache.
+            let _ = self.harvest_work_tags(work);
+            Ok(())
+        })
     }
 
     /// Seed work_tags join rows from the pre-v8 JSON list columns, adding
@@ -286,21 +98,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Rewrite the author-index rows for one work.
-    fn replace_work_authors(&self, work_id: u64, authors: &[String]) -> Result<(), AppError> {
-        self.conn
-            .execute("DELETE FROM work_authors WHERE work_id = ?1", params![work_id as i64])
-            .map_err(map_sql)?;
-        let mut stmt = self
-            .conn
-            .prepare_cached("INSERT OR IGNORE INTO work_authors (work_id, author) VALUES (?1, ?2)")
-            .map_err(map_sql)?;
-        for author in authors {
-            stmt.execute(params![work_id as i64, author]).map_err(map_sql)?;
-        }
-        Ok(())
-    }
-
     /// Seed the author index from every already-cached work (v2 migration).
     pub(super) fn backfill_work_authors(&self) -> Result<(), AppError> {
         let rows: Vec<(i64, String)> = {
@@ -330,16 +127,7 @@ impl Storage {
     /// must not clobber it; only full work-page fetches call this. Always
     /// writes — the work page is authoritative, so an empty slice clears.
     pub fn set_work_series(&self, work_id: u64, series: &[SeriesMembership]) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "UPDATE works SET series_json = ?2 WHERE id = ?1",
-                params![
-                    work_id as i64,
-                    serde_json::to_string(series).map_err(map_json)?
-                ],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.set_series(&self.conn, work_id, series)
     }
 
     /// An avatar URL already harvested for this username (from cached
@@ -412,11 +200,7 @@ impl Storage {
         let pending: Vec<(&str, &str)> = tags.iter()
             .map(|(name, tag_type)| (name.trim(), *tag_type))
             .filter(|(name, tag_type)| {
-                !name.is_empty()
-                    && match self.tag_cache.borrow().get(*name) {
-                        Some(&(_, type_known)) => !type_known && !tag_type.is_empty(),
-                        None => true,
-                    }
+                !name.is_empty() && self.tag_cache.needs_write(name, tag_type)
             })
             .collect();
         if pending.is_empty() {
@@ -424,7 +208,7 @@ impl Storage {
         }
         self.with_savepoint(Savepoint::UpsertTags, || {
             for (name, tag_type) in &pending {
-                self.tag_row_id(name, tag_type)?;
+                self.tag_cache.resolve(&self.conn, name, tag_type)?;
             }
             Ok(())
         })
@@ -440,18 +224,10 @@ impl Storage {
         }
         let learned_type = if tag_type == "tag" { "" } else { tag_type };
         self.with_savepoint(Savepoint::CanonicalTags, || {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO tags (name, tag_type, canonical) VALUES (?1, ?2, 1)
-                 ON CONFLICT(name) DO UPDATE SET
-                     canonical = 1,
-                     last_seen = datetime('now'),
-                     tag_type = CASE WHEN excluded.tag_type <> '' THEN excluded.tag_type
-                                     ELSE tags.tag_type END"
-            ).map_err(map_sql)?;
             for name in names {
                 let trimmed = name.trim();
                 if trimmed.is_empty() { continue; }
-                stmt.execute(params![trimmed, learned_type]).map_err(map_sql)?;
+                self.tag_cache.mark_canonical(&self.conn, trimmed, learned_type)?;
             }
             Ok(())
         })
@@ -472,95 +248,62 @@ impl Storage {
         if limit == 0 { -1 } else { limit as i64 }
     }
 
-    /// Local autocomplete: substring match, alphabetical.
+    /// Local autocomplete: substring match, alphabetical. Answered from the
+    /// in-memory tag cache — no SQL.
     pub fn search_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
-        let escaped = Self::escape_like(term);
-        if escaped.is_empty() {
-            return Ok(Vec::new());
-        }
-        let contains = like_contains(&escaped);
-        let mut stmt = self.conn.prepare(
-            "SELECT name FROM tags
-             WHERE tag_type = ?1 AND name LIKE ?2 ESCAPE '\\'
-             ORDER BY name COLLATE NOCASE
-             LIMIT ?3"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![tag_type, contains, limit], |row| {
-            row.get::<_, String>(0)
-        }).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(self.tag_cache
+            .search(Some(tag_type), term, limit as usize)
+            .into_iter()
+            .map(|e| e.name.to_string())
+            .collect())
     }
 
     /// Library-scope tag search: like `search_tags` but across every
     /// tag type. Returns (name, tag_type) so rows can say what kind of tag
-    /// each hit is.
+    /// each hit is. `limit` of 0 means no limit.
     pub fn search_tags_all(&self, term: &str, limit: u32) -> Result<Vec<(String, String)>, AppError> {
-        let limit = Self::sql_limit(limit);
-        let escaped = Self::escape_like(term);
-        if escaped.is_empty() {
-            return Ok(Vec::new());
-        }
-        let contains = like_contains(&escaped);
-        let mut stmt = self.conn.prepare(
-            "SELECT name, tag_type FROM tags
-             WHERE name LIKE ?1 ESCAPE '\\'
-             ORDER BY name COLLATE NOCASE
-             LIMIT ?2"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![contains, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let limit = if limit == 0 { usize::MAX } else { limit as usize };
+        Ok(self.tag_cache
+            .search(None, term, limit)
+            .into_iter()
+            .map(|e| (e.name.to_string(), e.tag_type.clone()))
+            .collect())
     }
 
     /// Library-scope work search: case-insensitive substring across the
     /// title, creators, fandoms, tags, and summary of every cached work.
-    /// Title matches rank first, then most recently updated.
+    /// Title matches rank first, then most recently updated. Answered from
+    /// the works cache (ASCII case folding, like the SQL LIKE it replaces);
+    /// `limit` of 0 means no limit.
     pub fn search_local_works(&self, term: &str, limit: u32) -> Result<Vec<WorkSummary>, AppError> {
-        let limit = Self::sql_limit(limit);
-        let escaped = Self::escape_like(term);
-        if escaped.is_empty() {
+        let needle = term.trim().to_ascii_lowercase();
+        let mut out: Vec<WorkSummary> = if needle.is_empty() {
             // An empty query means "my whole library", not "nothing" — the
             // search form's default state runs it with no criteria.
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT {} FROM works
-                 ORDER BY date_updated DESC
-                 LIMIT ?1", Self::work_select(""))
-            ).map_err(map_sql)?;
-            let rows = stmt.query_map(params![limit], |row| {
-                Ok(Self::work_from_row(row))
-            }).map_err(map_sql)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(map_sql)?.map_err(map_sql)?);
-            }
-            self.attach_work_tags(&mut out)?;
-            return Ok(out);
+            self.get_all_works()?
+        } else {
+            let contains = |s: &str| s.to_ascii_lowercase().contains(&needle);
+            self.get_all_works()?
+                .into_iter()
+                .filter(|w| {
+                    contains(&w.title)
+                        || w.authors.iter().any(|a| contains(a))
+                        || contains(&w.summary)
+                        || w.fandoms.iter().any(|t| contains(t))
+                        || w.characters.iter().any(|t| contains(t))
+                        || w.relationships.iter().any(|t| contains(t))
+                        || w.tags.iter().any(|t| contains(t))
+                })
+                .collect()
+        };
+        out.sort_by(|a, b| {
+            let a_title = !needle.is_empty() && a.title.to_ascii_lowercase().starts_with(&needle);
+            let b_title = !needle.is_empty() && b.title.to_ascii_lowercase().starts_with(&needle);
+            b_title.cmp(&a_title).then_with(|| b.date_updated.cmp(&a.date_updated))
+        });
+        if limit > 0 {
+            out.truncate(limit as usize);
         }
-        let contains = like_contains(&escaped);
-        let title_prefix = like_prefix(&escaped);
-        // Tag names live in the join tables now — one EXISTS covers what
-        // the four dropped JSON columns used to.
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM works
-             WHERE title LIKE ?1 ESCAPE '\\'
-                OR authors_json LIKE ?1 ESCAPE '\\'
-                OR summary LIKE ?1 ESCAPE '\\'
-                OR EXISTS (SELECT 1 FROM work_tags wt
-                           JOIN tags t ON t.id = wt.tag_id
-                           WHERE wt.work_id = works.id
-                             AND t.name LIKE ?1 ESCAPE '\\')
-             ORDER BY (title LIKE ?2 ESCAPE '\\') DESC, date_updated DESC
-             LIMIT ?3", Self::work_select(""))
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![contains, title_prefix, limit], |row| {
-            Ok(Self::work_from_row(row))
-        }).map_err(map_sql)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(map_sql)?.map_err(map_sql)?);
-        }
-        self.attach_work_tags(&mut out)?;
         Ok(out)
     }
 
@@ -768,75 +511,39 @@ impl Storage {
     }
 
     /// Retrieve a single work by its AO3 id, or `None` if not stored.
+    /// Answered from the works cache — no SQL.
     pub fn get_work(&self, work_id: u64) -> Result<Option<WorkSummary>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {} FROM works WHERE id = ?1", Self::work_select("")))
-            .map_err(map_sql)?;
-
-        let mut rows = stmt
-            .query_map(params![work_id as i64], |row| {
-                Ok(Self::work_from_row(row))
-            })
-            .map_err(map_sql)?;
-
-        match rows.next() {
-            Some(Ok(inner)) => {
-                let mut works = [inner.map_err(map_sql)?];
-                self.attach_work_tags(&mut works)?;
-                let [work] = works;
-                Ok(Some(work))
-            }
-            Some(Err(e)) => Err(map_sql(e)),
-            None => Ok(None),
-        }
+        Ok(self.works_cache
+            .get(work_id)
+            .map(|e| self.works_cache.hydrate(&e, &self.tag_cache)))
     }
 
     /// The stored works for `ids`, preserving the ids' order; ids without a
-    /// cached row are skipped. Batched — never one query per id.
+    /// cached row are skipped.
     pub fn get_works_by_ids(&self, ids: &[u64]) -> Result<Vec<WorkSummary>, AppError> {
         self.get_works_by_ids_ordered(ids)
     }
 
-    /// Return every stored work (unordered).
+    /// Return every stored work (unordered). Answered from the works cache.
     pub fn get_all_works(&self) -> Result<Vec<WorkSummary>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {} FROM works", Self::work_select("")))
-            .map_err(map_sql)?;
-
-        let rows = stmt
-            .query_map([], |row| Ok(Self::work_from_row(row)))
-            .map_err(map_sql)?;
-
-        let mut works = Vec::new();
-        for row in rows {
-            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
-        }
-        self.attach_work_tags(&mut works)?;
-        Ok(works)
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
+            .collect())
     }
 
-    /// Return works whose `authors_json` contains the given username.
+    /// Return works with the given author, most recently updated first.
+    /// Answered from the works cache (exact author match, like the
+    /// work_authors index lookup it replaces).
     pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!(
-                "SELECT {} FROM works w JOIN work_authors a ON a.work_id = w.id
-                 WHERE a.author = ?1
-                 ORDER BY w.date_updated DESC", Self::work_select("w.")))
-            .map_err(map_sql)?;
-
-        let rows = stmt
-            .query_map(params![username], |row| Ok(Self::work_from_row(row)))
-            .map_err(map_sql)?;
-
-        let mut works = Vec::new();
-        for row in rows {
-            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
-        }
-        self.attach_work_tags(&mut works)?;
+        let mut works: Vec<WorkSummary> = self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| e.summary.authors.iter().any(|a| a == username))
+            .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
+            .collect();
+        works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated));
         Ok(works)
     }
 
@@ -853,10 +560,7 @@ impl Storage {
         self.conn
             .execute("DELETE FROM history WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
-        self.conn
-            .execute("DELETE FROM works WHERE id = ?1", params![id])
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.delete(&self.conn, work_id)
     }
 
     // -------------------------------------------------------------------

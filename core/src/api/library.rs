@@ -118,6 +118,11 @@ impl AO3App {
         storage.get_reading_list_items(list_id).map_err(AO3Error::from)
     }
 
+    pub fn get_reading_lists_for_work(&self, work_id: u64) -> Result<Vec<i64>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.get_reading_lists_for_work(work_id).map_err(AO3Error::from)
+    }
+
     pub fn get_all_cached_works(&self) -> Result<Vec<UWorkSummary>, AO3Error> {
         let storage = self.storage.blocking_lock();
         let works = storage.get_all_works().map_err(AO3Error::from)?;

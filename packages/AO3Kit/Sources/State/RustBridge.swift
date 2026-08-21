@@ -645,6 +645,10 @@ final class RustBridge {
         (try? app?.getReadingListItems(listId: listId)) ?? []
     }
 
+    func getReadingListsForWork(_ workId: UInt64) -> [Int64] {
+        (try? app?.getReadingListsForWork(workId: workId)) ?? []
+    }
+
     func getAllCachedWorks() -> [UWorkSummary] {
         (try? app?.getAllCachedWorks()) ?? []
     }

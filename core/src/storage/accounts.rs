@@ -20,23 +20,15 @@ impl Storage {
     // App state (key-value)
     // -------------------------------------------------------------------
 
+    /// Write-through via the state cache — the single write authority for
+    /// app_state.
     pub fn set_state(&self, key: &str, value: &str) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO app_state (key, value) VALUES (?1, ?2)",
-            params![key, value],
-        ).map_err(map_sql)?;
-        Ok(())
+        self.state_cache.set(&self.conn, key, value)
     }
 
+    /// Answered from the state cache — no SQL.
     pub fn get_state(&self, key: &str) -> Result<Option<String>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT value FROM app_state WHERE key = ?1"
-        ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![key], |row| row.get(0)).map_err(map_sql)?;
-        match rows.next() {
-            Some(Ok(v)) => Ok(Some(v)),
-            _ => Ok(None),
-        }
+        Ok(self.state_cache.get(key))
     }
 
     // -------------------------------------------------------------------

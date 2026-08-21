@@ -333,22 +333,18 @@ impl Storage {
     /// never deleted — this flag is the only record of the disappearance.
     pub fn set_works_gone(&self, work_ids: &[u64], gone: bool) -> Result<(), AppError> {
         self.with_savepoint(Savepoint::WorksGone, || {
-            let mut stmt = self.conn.prepare_cached(
-                "UPDATE works SET gone_from_ao3 = ?2 WHERE id = ?1"
-            ).map_err(map_sql)?;
-            for id in work_ids {
-                stmt.execute(params![id, gone as i64]).map_err(map_sql)?;
-            }
-            Ok(())
+            self.works_cache.set_gone(&self.conn, work_ids, gone)
         })
     }
 
+    /// Answered from the works cache.
     pub fn get_gone_work_ids(&self) -> Result<Vec<u64>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id FROM works WHERE gone_from_ao3 = 1"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map([], |row| row.get::<_, u64>(0)).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| e.gone_from_ao3)
+            .map(|e| e.summary.id)
+            .collect())
     }
 
     /// associations (unlike save_subscription_works, which replaces the set).
@@ -365,24 +361,20 @@ impl Storage {
     }
 
     pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
-        // Series works keep their crawl (reading) order; author works sort
-        // newest-first like the live listing.
-        let order = if sub_type == SUB_TYPE_SERIES { "sw.rowid ASC" } else { "w.date_updated DESC" };
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {}
-             FROM subscription_works sw
-             JOIN works w ON w.id = sw.work_id
-             WHERE sw.sub_type = ?1 AND sw.sub_id = ?2
-             ORDER BY {order}", Self::work_select("w.")
-        )).map_err(map_sql)?;
-        let rows = stmt.query_map(params![sub_type, sub_id], |row| {
-            Ok(Self::work_from_row(row))
-        }).map_err(map_sql)?;
-        let mut works = Vec::new();
-        for r in rows {
-            if let Ok(Ok(w)) = r { works.push(w); }
+        // One id query (crawl order); the works themselves hydrate from the
+        // works cache. Series works keep their crawl (reading) order; author
+        // works sort newest-first like the live listing.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT work_id FROM subscription_works
+             WHERE sub_type = ?1 AND sub_id = ?2 ORDER BY rowid ASC"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, i64>(0))
+            .map_err(map_sql)?;
+        let ids: Vec<u64> = rows.filter_map(|r| r.ok()).map(|id| id as u64).collect();
+        let mut works = self.get_works_by_ids_ordered(&ids)?;
+        if sub_type != SUB_TYPE_SERIES {
+            works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated));
         }
-        self.attach_work_tags(&mut works)?;
         Ok(works)
     }
 

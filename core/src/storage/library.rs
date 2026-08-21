@@ -13,59 +13,36 @@ impl Storage {
     /// discovered by crawls feed the What's New badge, and those always
     /// have blurb rows).
     pub fn mark_work_detail_viewed(&self, work_id: u64, at: &str) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "UPDATE works SET detail_viewed_at = ?2
-                 WHERE id = ?1 AND detail_viewed_at = ''",
-                params![work_id as i64, at],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.mark_detail_viewed(&self.conn, work_id, at)
     }
 
     /// Stamp "the user just opened a chapter of this work" — every open
     /// overwrites, so the value is always the most recent read.
     pub fn mark_work_read(&self, work_id: u64) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "UPDATE works SET last_read_dt = datetime('now') WHERE id = ?1",
-                params![work_id as i64],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.mark_read(&self.conn, work_id, &crate::timefmt::now_utc_datetime())
     }
 
     /// Last-read datetimes for every work that has one, as
     /// `(work_id, "YYYY-MM-DD HH:MM:SS")` — lexicographically sortable UTC.
+    /// Answered from the works cache.
     pub fn get_work_last_read_times(&self) -> Result<Vec<(u64, String)>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, last_read_dt FROM works WHERE last_read_dt != ''")
-            .map_err(map_sql)?;
-        let rows = stmt
-            .query_map([], |row| {
-                let id: i64 = row.get(0)?;
-                let at: String = row.get(1)?;
-                Ok((id as u64, at))
-            })
-            .map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| !e.last_read_dt.is_empty())
+            .map(|e| (e.summary.id, e.last_read_dt.clone()))
+            .collect())
     }
 
     /// Ids of every work whose detail view has been opened at least once.
+    /// Answered from the works cache.
     pub fn get_detail_viewed_work_ids(&self) -> Result<Vec<u64>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM works WHERE detail_viewed_at != ''")
-            .map_err(map_sql)?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, i64>(0))
-            .map_err(map_sql)?;
-        let mut ids = Vec::new();
-        for r in rows {
-            ids.push(r.map_err(map_sql)? as u64);
-        }
-        Ok(ids)
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| !e.detail_viewed_at.is_empty())
+            .map(|e| e.summary.id)
+            .collect())
     }
 
     // -------------------------------------------------------------------
@@ -83,49 +60,18 @@ impl Storage {
         chapter: u32,
         position: u32,
     ) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "UPDATE works SET last_chapter_read = ?2, last_chapter_read_pos = ?3
-                 WHERE id = ?1",
-                params![work_id as i64, chapter as i64, position as i64],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.save_progress(&self.conn, work_id, chapter, position)
     }
 
     pub fn delete_progress(&self, work_id: u64) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "UPDATE works SET last_chapter_read = 0, last_chapter_read_pos = 0
-                 WHERE id = ?1",
-                params![work_id as i64],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+        self.works_cache.clear_progress(&self.conn, work_id)
     }
 
     pub fn get_progress(&self, work_id: u64) -> Result<Option<(u32, u32)>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT last_chapter_read, last_chapter_read_pos FROM works
-                 WHERE id = ?1 AND last_chapter_read > 0",
-            )
-            .map_err(map_sql)?;
-
-        let mut rows = stmt
-            .query_map(params![work_id as i64], |row| {
-                let chapter: i64 = row.get(0)?;
-                let position: i64 = row.get(1)?;
-                Ok((chapter as u32, position as u32))
-            })
-            .map_err(map_sql)?;
-
-        match rows.next() {
-            Some(Ok(pair)) => Ok(Some(pair)),
-            Some(Err(e)) => Err(map_sql(e)),
-            None => Ok(None),
-        }
+        Ok(self.works_cache
+            .get(work_id)
+            .filter(|e| e.last_chapter_read > 0)
+            .map(|e| (e.last_chapter_read, e.last_chapter_read_pos)))
     }
 
     /// Character count of a cached chapter's plain text (0 when the chapter
@@ -172,19 +118,12 @@ impl Storage {
     }
 
     pub fn get_all_progress(&self) -> Result<Vec<(u64, u32, u32)>, AppError> {
-        let mut stmt = self.conn
-            .prepare(
-                "SELECT id, last_chapter_read, last_chapter_read_pos FROM works
-                 WHERE last_chapter_read > 0",
-            )
-            .map_err(map_sql)?;
-        let rows = stmt.query_map([], |row| {
-            let work_id: i64 = row.get(0)?;
-            let chapter: i64 = row.get(1)?;
-            let position: i64 = row.get(2)?;
-            Ok((work_id as u64, chapter as u32, position as u32))
-        }).map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| e.last_chapter_read > 0)
+            .map(|e| (e.summary.id, e.last_chapter_read, e.last_chapter_read_pos))
+            .collect())
     }
 
     // -------------------------------------------------------------------
@@ -903,7 +842,7 @@ impl Storage {
         for (position, tag) in tags.iter().enumerate() {
             // Profile pages don't state tag types — "" until a work
             // listing teaches us.
-            let tag_id = self.tag_row_id(tag, "")?;
+            let tag_id = self.tag_cache.resolve(&self.conn, tag, "")?.id;
             inserted += stmt.execute(params![name, tag_id, position as i64]).map_err(map_sql)?;
         }
         crate::log_debug!(LOG_TAG_COLLECTIONS,
@@ -917,17 +856,23 @@ impl Storage {
         Ok(())
     }
 
-    /// A collection's tag names, in profile-page order.
+    /// A collection's tag names, in profile-page order. Names resolve from
+    /// the in-memory tag cache — no join.
     pub fn get_collection_tags(&self, name: &str) -> Result<Vec<String>, AppError> {
         let mut stmt = self.conn
             .prepare_cached(
-                "SELECT t.name FROM collection_tags ct
-                 JOIN tags t ON t.id = ct.tag_id
-                 WHERE ct.collection_name = ?1
-                 ORDER BY ct.position")
+                "SELECT tag_id FROM collection_tags
+                 WHERE collection_name = ?1
+                 ORDER BY position")
             .map_err(map_sql)?;
-        let rows = stmt.query_map(params![name], |r| r.get::<_, String>(0)).map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        let rows = stmt.query_map(params![name], |r| r.get::<_, i64>(0)).map_err(map_sql)?;
+        let mut names = Vec::new();
+        for row in rows {
+            if let Some(tag) = self.tag_cache.get(row.map_err(map_sql)?) {
+                names.push(tag.name.to_string());
+            }
+        }
+        Ok(names)
     }
 
     /// Record works seen in a collection's listing. Accumulates across
@@ -957,33 +902,17 @@ impl Storage {
 
     /// The cached works seen in a collection's listing, in listing order —
     /// the library-mode view of a collection's works. No network; only
-    /// what fetches already recorded in collection_works.
+    /// what fetches already recorded in collection_works. One id query;
+    /// the works themselves hydrate from the works cache.
     pub fn get_collection_works(&self, name: &str) -> Result<Vec<crate::models::WorkSummary>, AppError> {
-        let mut stmt = self.conn
-            .prepare_cached(&format!(
-                "SELECT {} FROM collection_works cw
-                 JOIN works w ON w.id = cw.work_id
-                 WHERE cw.collection_name = ?1
-                 ORDER BY cw.rowid", Self::work_select("w.")))
-            .map_err(map_sql)?;
-        let rows = stmt
-            .query_map(params![name], |row| Ok(Self::work_from_row(row)))
-            .map_err(map_sql)?;
-        let mut works = Vec::new();
-        for row in rows {
-            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
-        }
-        self.attach_work_tags(&mut works)?;
-        let links: i64 = self.conn
-            .query_row("SELECT COUNT(*) FROM collection_works WHERE collection_name = ?1",
-                       params![name], |r| r.get(0))
-            .map_err(map_sql)?;
+        let ids = self.get_collection_work_ids(name)?;
+        let works = self.get_works_by_ids_ordered(&ids)?;
         crate::log_debug!(LOG_TAG_COLLECTIONS,
-            "get_collection_works '{}': {} link row(s), {} work(s) returned", name, links, works.len());
-        if links as usize != works.len() {
+            "get_collection_works '{}': {} link row(s), {} work(s) returned", name, ids.len(), works.len());
+        if ids.len() != works.len() {
             crate::log_error!(LOG_TAG_COLLECTIONS,
                 "get_collection_works '{}': {} link(s) have no matching works row — those works were never cached",
-                name, links as usize - works.len());
+                name, ids.len() - works.len());
         }
         Ok(works)
     }
@@ -1014,33 +943,24 @@ impl Storage {
 
     /// The cached works seen in a collection's /bookmarks listing, in
     /// listing order — the library-mode view of a collection's bookmarked
-    /// items. No network; only what fetches already recorded.
+    /// items. No network; only what fetches already recorded. One id query;
+    /// the works themselves hydrate from the works cache.
     pub fn get_collection_bookmarks(&self, name: &str) -> Result<Vec<crate::models::WorkSummary>, AppError> {
         let mut stmt = self.conn
-            .prepare_cached(&format!(
-                "SELECT {} FROM collection_bookmarks cb
-                 JOIN works w ON w.id = cb.work_id
-                 WHERE cb.collection_name = ?1
-                 ORDER BY cb.rowid", Self::work_select("w.")))
+            .prepare_cached("SELECT work_id FROM collection_bookmarks
+                             WHERE collection_name = ?1 ORDER BY rowid")
             .map_err(map_sql)?;
         let rows = stmt
-            .query_map(params![name], |row| Ok(Self::work_from_row(row)))
+            .query_map(params![name], |r| r.get::<_, i64>(0))
             .map_err(map_sql)?;
-        let mut works = Vec::new();
-        for row in rows {
-            works.push(row.map_err(map_sql)?.map_err(map_sql)?);
-        }
-        self.attach_work_tags(&mut works)?;
-        let links: i64 = self.conn
-            .query_row("SELECT COUNT(*) FROM collection_bookmarks WHERE collection_name = ?1",
-                       params![name], |r| r.get(0))
-            .map_err(map_sql)?;
+        let ids: Vec<u64> = rows.filter_map(|r| r.ok()).map(|id| id as u64).collect();
+        let works = self.get_works_by_ids_ordered(&ids)?;
         crate::log_debug!(LOG_TAG_COLLECTIONS,
-            "get_collection_bookmarks '{}': {} link row(s), {} work(s) returned", name, links, works.len());
-        if links as usize != works.len() {
+            "get_collection_bookmarks '{}': {} link row(s), {} work(s) returned", name, ids.len(), works.len());
+        if ids.len() != works.len() {
             crate::log_error!(LOG_TAG_COLLECTIONS,
                 "get_collection_bookmarks '{}': {} link(s) have no matching works row — those works were never cached",
-                name, links as usize - works.len());
+                name, ids.len() - works.len());
         }
         Ok(works)
     }
@@ -1159,6 +1079,16 @@ impl Storage {
         let rows = stmt.query_map(params![list_id], |row| {
             let id: i64 = row.get(0)?;
             Ok(id as u64)
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    pub fn get_reading_lists_for_work(&self, work_id: u64) -> Result<Vec<i64>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT list_id FROM reading_list_items WHERE work_id = ?1"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![work_id as i64], |row| {
+            row.get::<_, i64>(0)
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
