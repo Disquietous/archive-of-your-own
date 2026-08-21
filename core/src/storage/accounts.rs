@@ -7,13 +7,10 @@ use super::consts::*;
 use super::{map_json, map_sql, Storage};
 
 impl Storage {
-    /// Whether any ao3_users row exists for this username.
+    /// Whether any ao3_users row exists for this username. Answered from
+    /// the users cache.
     pub fn has_ao3_user_with_username(&self, username: &str) -> Result<bool, AppError> {
-        let count: u32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ao3_users WHERE username = ?1 COLLATE NOCASE",
-            params![username], |row| row.get(0)
-        ).map_err(map_sql)?;
-        Ok(count > 0)
+        Ok(self.users_cache.has_username(username))
     }
 
     // -------------------------------------------------------------------
@@ -431,67 +428,21 @@ impl Storage {
     }
 
     pub fn upsert_ao3_user(&self, user: &AO3User) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT INTO ao3_users (id, username, profile_url, avatar_url)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-                username = excluded.username,
-                profile_url = excluded.profile_url,
-                avatar_url = CASE WHEN excluded.avatar_url = '' THEN ao3_users.avatar_url ELSE excluded.avatar_url END,
-                updated_at = datetime('now')",
-            params![
-                user.id,
-                user.username,
-                user.profile_url.as_deref().unwrap_or(""),
-                user.avatar_url.as_deref().unwrap_or(""),
-            ],
-        ).map_err(map_sql)?;
-        Ok(())
+        self.users_cache.upsert(&self.conn, user, &crate::timefmt::now_utc_datetime())
     }
 
+    /// Answered from the users cache — no SQL.
     pub fn get_ao3_user(&self, user_id: &str) -> Result<Option<AO3User>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, username, profile_url, avatar_url FROM ao3_users WHERE id = ?1"
-        ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![user_id], |row| {
-            let id: String = row.get(0)?;
-            let username: String = row.get(1)?;
-            let profile_url: String = row.get(2)?;
-            let avatar_url: String = row.get(3)?;
-            Ok(AO3User {
-                id,
-                username,
-                profile_url: if profile_url.is_empty() { None } else { Some(profile_url) },
-                avatar_url: if avatar_url.is_empty() { None } else { Some(avatar_url) },
-            })
-        }).map_err(map_sql)?;
-        match rows.next() {
-            Some(Ok(u)) => Ok(Some(u)),
-            _ => Ok(None),
-        }
+        Ok(self.users_cache.get(user_id).map(|e| e.to_ao3_user()))
     }
 
     /// Library-scope user search: every AO3 user the app has cached (from
     /// works, comments, kudos, profiles) whose username matches. Prefix
-    /// matches rank first.
+    /// matches rank first. Answered from the users cache; `limit` of 0
+    /// means no limit.
     pub fn search_ao3_usernames(&self, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
-        let limit = Self::sql_limit(limit);
-        let escaped = Self::escape_like(term);
-        if escaped.is_empty() {
-            return Ok(Vec::new());
-        }
-        let contains = like_contains(&escaped);
-        let prefix = like_prefix(&escaped);
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT username FROM ao3_users
-             WHERE username LIKE ?1 ESCAPE '\\'
-             ORDER BY (username LIKE ?2 ESCAPE '\\') DESC, username COLLATE NOCASE
-             LIMIT ?3"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![contains, prefix, limit], |row| {
-            row.get::<_, String>(0)
-        }).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let limit = if limit == 0 { usize::MAX } else { limit as usize };
+        Ok(self.users_cache.search_usernames(term, limit))
     }
 
     /// Persist a fetched profile onto the user's ao3_users row (keyed by
@@ -504,73 +455,19 @@ impl Storage {
             profile_url: Some(format!("{}/users/{}", crate::client::BASE_URL, p.username)),
             avatar_url: p.avatar_url.clone(),
         })?;
-        let pseuds_json = serde_json::to_string(&p.pseuds).map_err(map_json)?;
-        let bio_json = serde_json::to_string(&p.bio).map_err(map_json)?;
-        self.conn.execute(
-            "UPDATE ao3_users SET
-                numeric_id = CASE WHEN ?2 = '' THEN numeric_id ELSE ?2 END,
-                joined = ?3, location = ?4, birthday = ?5,
-                pseuds_json = ?6, bio_json = ?7,
-                works_count = ?8, series_count = ?9, bookmarks_count = ?10,
-                collections_count = ?11, gifts_count = ?12,
-                is_blocked = ?13, block_ao3_id = ?14,
-                is_muted = ?15, mute_ao3_id = ?16,
-                profile_fetched_at = datetime('now'),
-                updated_at = datetime('now')
-             WHERE username = ?1 COLLATE NOCASE",
-            params![
-                p.username,
-                p.numeric_id.as_deref().unwrap_or(""),
-                p.joined, p.location, p.birthday,
-                pseuds_json, bio_json,
-                p.works_count, p.series_count, p.bookmarks_count,
-                p.collections_count, p.gifts_count,
-                p.blocked as i64, p.block_ao3_id.as_deref().unwrap_or(""),
-                p.muted as i64, p.mute_ao3_id.as_deref().unwrap_or(""),
-            ],
-        ).map_err(map_sql)?;
-        Ok(())
+        self.users_cache.update_profile(&self.conn, p, &crate::timefmt::now_utc_datetime())
     }
 
     /// The cached profile for a username, with live subscription state
     /// joined in from the local subscriptions table. None when the user
     /// has never had a profile fetch recorded.
     pub fn get_user_profile(&self, username: &str) -> Result<Option<UserProfile>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT username, numeric_id, avatar_url, pseuds_json, joined, location, birthday,
-                    bio_json, works_count, series_count, bookmarks_count, collections_count,
-                    gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id, profile_fetched_at
-             FROM ao3_users
-             WHERE username = ?1 COLLATE NOCASE AND profile_fetched_at != ''
-             ORDER BY updated_at DESC LIMIT 1"
-        ).map_err(map_sql)?;
-        let row = stmt.query_map(params![username], |row| {
-            let opt = |s: String| if s.is_empty() { None } else { Some(s) };
-            Ok(UserProfile {
-                username: row.get::<_, String>(0)?,
-                numeric_id: opt(row.get(1)?),
-                avatar_url: opt(row.get(2)?),
-                pseuds: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
-                joined: row.get(4)?,
-                location: row.get(5)?,
-                birthday: row.get(6)?,
-                bio: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-                works_count: row.get(8)?,
-                series_count: row.get(9)?,
-                bookmarks_count: row.get(10)?,
-                collections_count: row.get(11)?,
-                gifts_count: row.get(12)?,
-                blocked: row.get::<_, i64>(13)? != 0,
-                block_ao3_id: opt(row.get(14)?),
-                muted: row.get::<_, i64>(15)? != 0,
-                mute_ao3_id: opt(row.get(16)?),
-                viewer_signed_in: false,
-                subscribed: false,
-                subscription_ao3_id: None,
-                fetched_at: row.get(17)?,
-            })
-        }).map_err(map_sql)?.next();
-        let Some(Ok(mut profile)) = row else { return Ok(None) };
+        let Some(entity) = self.users_cache
+            .by_username(username)
+            .into_iter()
+            .find(|e| !e.profile_fetched_at.is_empty())
+        else { return Ok(None) };
+        let mut profile = entity.to_profile();
         profile.subscribed = self.has_subscription(SUB_TYPE_AUTHOR, &profile.username)?;
         profile.subscription_ao3_id =
             self.get_subscription_ao3_id(SUB_TYPE_AUTHOR, &profile.username)?;
@@ -582,26 +479,18 @@ impl Storage {
     pub fn set_user_block_state(&self, username: &str, blocked: bool,
                                 ao3_id: Option<&str>) -> Result<(), AppError> {
         self.ensure_ao3_user_row(username)?;
-        self.conn.execute(
-            "UPDATE ao3_users SET is_blocked = ?2, block_ao3_id = ?3,
-                updated_at = datetime('now')
-             WHERE username = ?1 COLLATE NOCASE",
-            params![username, blocked as i64, ao3_id.unwrap_or("")],
-        ).map_err(map_sql)?;
-        Ok(())
+        self.users_cache.set_block_state(&self.conn, username, blocked,
+                                         ao3_id.unwrap_or(""),
+                                         &crate::timefmt::now_utc_datetime())
     }
 
     /// Record mute state locally (mirrors an AO3-side change).
     pub fn set_user_mute_state(&self, username: &str, muted: bool,
                                ao3_id: Option<&str>) -> Result<(), AppError> {
         self.ensure_ao3_user_row(username)?;
-        self.conn.execute(
-            "UPDATE ao3_users SET is_muted = ?2, mute_ao3_id = ?3,
-                updated_at = datetime('now')
-             WHERE username = ?1 COLLATE NOCASE",
-            params![username, muted as i64, ao3_id.unwrap_or("")],
-        ).map_err(map_sql)?;
-        Ok(())
+        self.users_cache.set_mute_state(&self.conn, username, muted,
+                                        ao3_id.unwrap_or(""),
+                                        &crate::timefmt::now_utc_datetime())
     }
 
     fn ensure_ao3_user_row(&self, username: &str) -> Result<(), AppError> {

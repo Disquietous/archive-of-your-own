@@ -62,8 +62,6 @@ pub(super) const SQL_UPSERT_SUBSCRIPTION: &str =
 
 /// Stub row satisfying collection foreign keys for deep-linked listings —
 /// the next blurb or profile save fills it in.
-pub(super) const SQL_INSERT_COLLECTION_STUB: &str =
-    "INSERT OR IGNORE INTO collections (name, title) VALUES (?1, ?1)";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary (work_tags.tag_type / tags.tag_type values)

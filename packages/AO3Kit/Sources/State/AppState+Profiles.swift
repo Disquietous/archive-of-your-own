@@ -58,9 +58,11 @@ extension AppState {
         }
     }
 
-    /// Load a user's profile: cached copy immediately, then a network
-    /// refresh only when there's nothing cached or the cache has aged out.
-    /// Safe to call repeatedly; concurrent loads coalesce.
+    /// Load a user's profile. Cache-forever: a cached copy (session or DB)
+    /// is served as-is and never triggers a network refresh — only an
+    /// explicit `forceRefresh` (the user's manual refresh action) fetches
+    /// when something is already cached. Safe to call repeatedly;
+    /// concurrent loads coalesce.
     func loadUserProfile(_ username: String, forceRefresh: Bool = false) async {
         let username = Self.canonicalAuthorUsername(username)
         let key = username.lowercased()
@@ -72,8 +74,7 @@ extension AppState {
            let cached = bridge.getCachedUserProfile(username: username) {
             userProfiles[key] = cached
         }
-        if !forceRefresh, let existing = userProfiles[key],
-           !Self.isProfileStale(existing) {
+        if !forceRefresh, userProfiles[key] != nil {
             userProfileErrors[key] = nil
             return
         }
@@ -88,18 +89,6 @@ extension AppState {
             userProfileErrors[key] = Self.readableError(error)
             NSLog("[profile] fetch for %@ failed: %@", username, "\(error)")
         }
-    }
-
-    /// A profile fetched this session (empty fetchedAt) is always fresh;
-    /// a DB-cached one goes stale after 15 minutes.
-    private static func isProfileStale(_ profile: UUserProfile) -> Bool {
-        guard !profile.fetchedAt.isEmpty else { return false }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        guard let fetched = formatter.date(from: profile.fetchedAt) else { return true }
-        return Date().timeIntervalSince(fetched) > 15 * 60
     }
 
     func toggleAuthorSubscription(_ username: String) {

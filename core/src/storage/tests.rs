@@ -1301,7 +1301,35 @@ fn test_migration_v1_to_v2() {
                 note       TEXT DEFAULT '',
                 sync_to_ao3 INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ao3_bookmark_id INTEGER,
+                tag_string TEXT NOT NULL DEFAULT '',
+                collection_names TEXT NOT NULL DEFAULT '',
+                private INTEGER NOT NULL DEFAULT 1,
+                rec INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (account_id, work_id)
+            );
+            CREATE TABLE ao3_users (
+                id          TEXT PRIMARY KEY,
+                username    TEXT NOT NULL,
+                profile_url TEXT NOT NULL DEFAULT '',
+                avatar_url  TEXT NOT NULL DEFAULT '',
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                numeric_id TEXT NOT NULL DEFAULT '',
+                joined TEXT NOT NULL DEFAULT '',
+                location TEXT NOT NULL DEFAULT '',
+                birthday TEXT NOT NULL DEFAULT '',
+                pseuds_json TEXT NOT NULL DEFAULT '[]',
+                bio_json TEXT NOT NULL DEFAULT '[]',
+                works_count INTEGER NOT NULL DEFAULT 0,
+                series_count INTEGER NOT NULL DEFAULT 0,
+                bookmarks_count INTEGER NOT NULL DEFAULT 0,
+                collections_count INTEGER NOT NULL DEFAULT 0,
+                gifts_count INTEGER NOT NULL DEFAULT 0,
+                is_blocked INTEGER NOT NULL DEFAULT 0,
+                block_ao3_id TEXT NOT NULL DEFAULT '',
+                is_muted INTEGER NOT NULL DEFAULT 0,
+                mute_ao3_id TEXT NOT NULL DEFAULT '',
+                profile_fetched_at TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE accounts (
                 id          TEXT PRIMARY KEY,
@@ -1784,6 +1812,13 @@ fn cache_owned_tables_have_no_stray_writers() {
         "INTO work_tags", "UPDATE work_tags", "DELETE FROM work_tags",
         "INTO work_authors", "UPDATE work_authors", "DELETE FROM work_authors",
         "INTO app_state", "UPDATE app_state", "DELETE FROM app_state",
+        "INTO bookmarks", "UPDATE bookmarks", "UPDATE OR IGNORE bookmarks",
+        "DELETE FROM bookmarks",
+        "INTO collections", "UPDATE collections", "DELETE FROM collections",
+        "INTO collection_tags", "DELETE FROM collection_tags",
+        "INTO collection_works", "DELETE FROM collection_works",
+        "INTO collection_bookmarks", "DELETE FROM collection_bookmarks",
+        "INTO ao3_users", "UPDATE ao3_users", "DELETE FROM ao3_users",
     ];
     // (file, line fragment) pairs for the migration-frozen exemptions.
     let allowed: &[(&str, &str)] = &[
@@ -1798,6 +1833,9 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("works_search.rs", "UPDATE works SET warnings_mask"),       // backfill_search_masks_v11
         ("mod.rs", "UPDATE app_state SET value = datetime("),        // v2 timestamp re-encode
         ("mod.rs", "INSERT OR REPLACE INTO app_state (key, value) VALUES ('avatar_cache_reset_1', '1')"), // v1 baseline
+        ("mod.rs", "UPDATE OR IGNORE bookmarks SET account_id = substr(account_id"), // v10 account-id rekey
+        ("mod.rs", "DELETE FROM bookmarks WHERE account_id LIKE"),   // v10 account-id rekey
+        ("mod.rs", "UPDATE bookmarks SET account_id = '[none]'"),    // v10 logged-out sentinel
     ];
     for (file, src) in sources {
         for (lineno, line) in src.lines().enumerate() {
@@ -1930,4 +1968,129 @@ fn state_cache_write_through_and_rollback() {
     assert_eq!(db.get_state("cache_test_key").unwrap(), Some("v2".into()));
     drop(tx);
     assert_eq!(db.get_state("cache_test_key").unwrap(), Some("v1".into()));
+}
+
+#[test]
+fn bookmarks_cache_matches_rows() {
+    let db = open_test_db();
+    db.save_work(&sample_work(11)).unwrap();
+    db.add_bookmark(11, Some("first note"), false).unwrap();
+    assert!(db.is_bookmarked(11).unwrap());
+    db.update_bookmark_details(11, "note2", "tag a, tag b", "coll", false, true).unwrap();
+    db.set_ao3_bookmark_id(11, 999).unwrap();
+
+    let (note, tags, colls, private, rec, sync, ao3): (String, String, String, i64, i64, i64, Option<i64>) =
+        db.conn.query_row(
+            "SELECT note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id
+             FROM bookmarks WHERE work_id = 11",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).unwrap();
+    assert_eq!(
+        db.get_bookmark_details(11).unwrap().unwrap(),
+        (note, tags, colls, private != 0, rec != 0, sync != 0, ao3.map(|v| v as u64))
+    );
+
+    // add() is a full reset, like the INSERT OR REPLACE it fronts.
+    db.add_bookmark(11, None, true).unwrap();
+    let d = db.get_bookmark_details(11).unwrap().unwrap();
+    assert_eq!(d, (String::new(), String::new(), String::new(), true, false, true, None));
+
+    // Rollback pulls the removal back out of the map.
+    let tx = db.begin_tx().unwrap();
+    db.remove_bookmark(11).unwrap();
+    assert!(!db.is_bookmarked(11).unwrap());
+    drop(tx);
+    assert!(db.is_bookmarked(11).unwrap());
+
+    // delete_work drops every account's bookmark of the work.
+    db.delete_work(11).unwrap();
+    assert!(!db.is_bookmarked(11).unwrap());
+}
+
+#[test]
+fn collections_cache_links_and_purge() {
+    let db = open_test_db();
+    db.save_work(&sample_work(21)).unwrap();
+    db.save_work(&sample_work(22)).unwrap();
+
+    // Deep-link listing before any blurb: stub + links accumulate, deduped.
+    db.add_collection_works("fest", &[21, 22]).unwrap();
+    db.add_collection_works("fest", &[21]).unwrap();
+    db.add_collection_bookmarks("fest", &[22]).unwrap();
+    assert_eq!(db.get_collection_work_ids("fest").unwrap(), vec![21, 22]);
+    assert_eq!(db.get_collection("fest").unwrap().unwrap().title, "fest");
+    assert!(!db.collection_profile_cached("fest").unwrap());
+
+    // Row parity after the profile save path.
+    let mut c = db.get_collection("fest").unwrap().unwrap();
+    c.title = "The Fest".into();
+    c.tags = vec!["Fandom A".into(), "Extra Tag".into()];
+    db.save_collection_profile(&c).unwrap();
+    assert!(db.collection_profile_cached("fest").unwrap());
+    assert_eq!(db.get_collection_tags("fest").unwrap(),
+               vec!["Fandom A".to_string(), "Extra Tag".to_string()]);
+    let (title, stamped): (String, String) = db.conn.query_row(
+        "SELECT title, profile_fetched_at FROM collections WHERE name = 'fest'",
+        [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(title, "The Fest");
+    assert!(!stamped.is_empty());
+
+    // Deleting a work mirrors the FK cascade out of the link lists.
+    db.delete_work(21).unwrap();
+    assert_eq!(db.get_collection_work_ids("fest").unwrap(), vec![22]);
+    let rows: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM collection_works WHERE collection_name = 'fest'",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn users_cache_profile_round_trip_no_sql_reads() {
+    let db = open_test_db();
+    db.upsert_ao3_user(&AO3User {
+        id: "reader_x".into(), username: "Reader_X".into(),
+        profile_url: None, avatar_url: Some("http://a/av.png".into()),
+    }).unwrap();
+    // NOCASE lookups and avatar reuse, from the map.
+    assert!(db.has_ao3_user_with_username("reader_x").unwrap());
+    assert_eq!(db.get_known_avatar_url("READER_X").unwrap(),
+               Some("http://a/av.png".into()));
+    assert_eq!(db.search_ao3_usernames("read", 10).unwrap(), vec!["Reader_X".to_string()]);
+
+    // A blank incoming avatar never wipes the harvested one.
+    db.upsert_ao3_user(&AO3User {
+        id: "reader_x".into(), username: "Reader_X".into(),
+        profile_url: Some("http://a/u".into()), avatar_url: None,
+    }).unwrap();
+    assert_eq!(db.get_known_avatar_url("reader_x").unwrap(),
+               Some("http://a/av.png".into()));
+
+    assert!(db.get_user_profile("Reader_X").unwrap().is_none());
+    let profile = UserProfile {
+        username: "Reader_X".into(), numeric_id: Some("42".into()),
+        avatar_url: Some("http://a/av.png".into()),
+        pseuds: vec!["RX".into()], joined: "2020-01-01".into(),
+        location: "Nowhere".into(), birthday: String::new(),
+        bio: Vec::new(), works_count: 3, series_count: 1,
+        bookmarks_count: 7, collections_count: 0, gifts_count: 2,
+        blocked: false, block_ao3_id: None, muted: false, mute_ao3_id: None,
+        viewer_signed_in: false, subscribed: false, subscription_ao3_id: None,
+        fetched_at: String::new(),
+    };
+    db.upsert_user_profile(&profile).unwrap();
+    let got = db.get_user_profile("reader_x").unwrap().unwrap();
+    assert_eq!(got.numeric_id.as_deref(), Some("42"));
+    assert_eq!(got.works_count, 3);
+    assert_eq!(got.pseuds, vec!["RX".to_string()]);
+    assert!(!got.fetched_at.is_empty());
+    let row_fetched: String = db.conn.query_row(
+        "SELECT profile_fetched_at FROM ao3_users WHERE id = 'reader_x'",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(got.fetched_at, row_fetched);
+
+    db.set_user_block_state("READER_X", true, Some("b1")).unwrap();
+    assert!(db.get_user_profile("reader_x").unwrap().unwrap().blocked);
+    let blocked: i64 = db.conn.query_row(
+        "SELECT is_blocked FROM ao3_users WHERE id = 'reader_x'", [], |r| r.get(0)).unwrap();
+    assert_eq!(blocked, 1);
 }

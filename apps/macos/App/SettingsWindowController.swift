@@ -499,6 +499,7 @@ struct PrivacySettingsPane: View {
 
     @State private var showPasswordSheet = false
     @State private var showRemoveConfirm = false
+    @State private var chapterCleanupRan = false
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -606,10 +607,29 @@ struct PrivacySettingsPane: View {
                     theme.line.frame(height: 1)
                     SettingsInfoRow(theme: theme, label: "Encryption key",
                                     value: appState.bridge.hasDbPassword ? "Your password" : "Stored in Keychain")
+                    theme.line.frame(height: 1)
+                    SettingsToggleRow(theme: theme, label: "Clean up chapters automatically",
+                                      sublabel: "Remove cached chapters of works that aren't downloaded or currently reading",
+                                      isOn: autoPurgeBinding)
+                }
+                ghostButton("Clean Up Chapters Now", tint: theme.ink) {
+                    appState.purgeStaleChaptersNow()
+                    chapterCleanupRan = true
+                }
+                if chapterCleanupRan {
+                    Text("Cleanup complete. Downloaded and in-progress works keep their chapters.")
+                        .font(Font(MacFont.ui(11.5)))
+                        .foregroundStyle(theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
         .padding(16)
+    }
+
+    private var autoPurgeBinding: Binding<Bool> {
+        Binding(get: { appState.autoPurgeChapters },
+                set: { appState.autoPurgeChapters = $0 })
     }
 
     private var autoLockBinding: Binding<String> {

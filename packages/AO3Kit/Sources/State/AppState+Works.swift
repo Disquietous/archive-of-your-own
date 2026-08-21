@@ -135,7 +135,7 @@ extension AppState {
         // Session continuity (resume UI) works regardless of mode; the
         // history list and its persistence are what the setting governs.
         lastReadID = id
-        if UInt64(id) != nil {
+        if autoPurgeChapters, UInt64(id) != nil {
             bridge.purgeStaleChapters()
         }
         guard historyMode != .disabled else { return }

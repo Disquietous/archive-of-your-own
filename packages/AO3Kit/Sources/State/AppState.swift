@@ -36,6 +36,20 @@ final class AppState {
         lastReadID = nil
     }
 
+    /// Whether stale-chapter cleanup (chapters of works that aren't
+    /// downloaded or currently reading) runs automatically at launch and
+    /// while reading. Off by default — cleanup is the user's call, via this
+    /// toggle or the manual "clean up now" action in Settings. Persisted in
+    /// the Rust prefs store.
+    var autoPurgeChapters: Bool = false {
+        didSet { bridge.setPref(key: "auto_purge_chapters", value: autoPurgeChapters ? "1" : "0") }
+    }
+
+    /// Run the stale-chapter cleanup once, on demand.
+    func purgeStaleChaptersNow() {
+        bridge.purgeStaleChapters()
+    }
+
     /// Idle minutes before the library auto-locks; 0 disables. Only applies
     /// when a library password is set (an auto-key DB reopens itself).
     var autoLockMinutes: Int = UserDefaults.standard.object(forKey: "autoLockMinutes") as? Int ?? 5 {
@@ -267,8 +281,11 @@ final class AppState {
         // Kudos already left on AO3 (permanent — keeps the heart truthful)
         kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
 
-        // Purge chapters for works that aren't downloaded or in currently reading
-        bridge.purgeStaleChapters()
+        // Stale-chapter cleanup runs only when the user has opted in.
+        autoPurgeChapters = bridge.getPref(key: "auto_purge_chapters") == "1"
+        if autoPurgeChapters {
+            bridge.purgeStaleChapters()
+        }
 
         // Load reading lists
         readingLists = bridge.getReadingLists()

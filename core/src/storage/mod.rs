@@ -13,15 +13,21 @@ mod accounts;
 mod consts;
 mod library;
 mod subscriptions;
+mod bookmarks_cache;
+mod collections_cache;
 mod state_cache;
 mod tag_cache;
+mod users_cache;
 mod works;
 mod works_cache;
 mod works_search;
 
+use bookmarks_cache::BookmarksCache;
+use collections_cache::CollectionsCache;
 use consts::*;
 use state_cache::StateCache;
 use tag_cache::TagCache;
+use users_cache::UsersCache;
 use works_cache::WorksCache;
 
 /// Encrypted local storage backed by SQLCipher.
@@ -44,6 +50,13 @@ pub struct Storage {
     /// authority — same contract as the caches above (see state_cache.rs).
     /// Settings lookups cost no SQL.
     state_cache: StateCache,
+    /// The bookmarks mirror — same contract (see bookmarks_cache.rs).
+    bookmarks_cache: BookmarksCache,
+    /// The collections (+ join tables) mirror — same contract
+    /// (see collections_cache.rs). Tag names hydrate from `tag_cache`.
+    collections_cache: CollectionsCache,
+    /// The ao3_users mirror — same contract (see users_cache.rs).
+    users_cache: UsersCache,
 }
 
 /// A live write transaction from `Storage::begin_tx`. Commit consumes it;
@@ -184,15 +197,21 @@ impl Storage {
             tag_cache: TagCache::default(),
             works_cache: WorksCache::default(),
             state_cache: StateCache::default(),
+            bookmarks_cache: BookmarksCache::default(),
+            collections_cache: CollectionsCache::default(),
+            users_cache: UsersCache::default(),
         };
         storage.migrate()?;
-        // Prime the in-memory caches (tags first — work hydration resolves
-        // tag ids against it) before anything reads or harvests. Migrations
-        // are the one code path allowed to write these tables without the
-        // caches — they ran before these loads.
+        // Prime the in-memory caches (tags first — work and collection
+        // hydration resolve tag ids against it) before anything reads or
+        // harvests. Migrations are the one code path allowed to write these
+        // tables without the caches — they ran before these loads.
         storage.tag_cache.load(&storage.conn)?;
         storage.works_cache.load(&storage.conn)?;
         storage.state_cache.load(&storage.conn)?;
+        storage.bookmarks_cache.load(&storage.conn)?;
+        storage.collections_cache.load(&storage.conn)?;
+        storage.users_cache.load(&storage.conn)?;
         // One-time: seed the tags table from works cached before it existed.
         let _ = storage.backfill_tags();
         Ok(storage)
@@ -577,6 +596,9 @@ impl Storage {
         let _ = self.tag_cache.load(&self.conn);
         let _ = self.works_cache.load(&self.conn);
         let _ = self.state_cache.load(&self.conn);
+        let _ = self.bookmarks_cache.load(&self.conn);
+        let _ = self.collections_cache.load(&self.conn);
+        let _ = self.users_cache.load(&self.conn);
     }
 
     /// Run `f` atomically inside a named savepoint. Unlike BEGIN, savepoints

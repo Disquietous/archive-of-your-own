@@ -132,18 +132,9 @@ impl Storage {
 
     /// An avatar URL already harvested for this username (from cached
     /// comments/inbox data) — saves the profile-page request entirely.
+    /// Answered from the users cache.
     pub fn get_known_avatar_url(&self, username: &str) -> Result<Option<String>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT avatar_url FROM ao3_users
-             WHERE username = ?1 COLLATE NOCASE AND avatar_url != ''
-             ORDER BY updated_at DESC LIMIT 1"
-        ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![username], |row| row.get::<_, String>(0)).map_err(map_sql)?;
-        match rows.next() {
-            Some(Ok(url)) => Ok(Some(url)),
-            Some(Err(e)) => Err(map_sql(e)),
-            None => Ok(None),
-        }
+        Ok(self.users_cache.known_avatar_url(username))
     }
 
     // -------------------------------------------------------------------
@@ -554,13 +545,15 @@ impl Storage {
         self.conn
             .execute("DELETE FROM chapters WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
-        self.conn
-            .execute("DELETE FROM bookmarks WHERE work_id = ?1", params![id])
-            .map_err(map_sql)?;
+        self.bookmarks_cache.remove_for_work(&self.conn, work_id)?;
         self.conn
             .execute("DELETE FROM history WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
-        self.works_cache.delete(&self.conn, work_id)
+        self.works_cache.delete(&self.conn, work_id)?;
+        // The works DELETE cascades collection_works/collection_bookmarks
+        // rows via their foreign keys — mirror that in the collections map.
+        self.collections_cache.purge_work(work_id);
+        Ok(())
     }
 
     // -------------------------------------------------------------------

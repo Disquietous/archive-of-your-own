@@ -51,8 +51,9 @@ extension ListPaneViewController {
         return button
     }
 
-    /// Author view: refetch the user's profile from AO3, bypassing the
-    /// cached copy's freshness window.
+    /// Author view: refetch the user's profile from AO3. This is the only
+    /// path that refreshes a cached profile — cached copies are otherwise
+    /// served forever.
     func authorProfileRefreshButton(username: String) -> ToolButton {
         let button = authorProfileRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                            tooltip: "Refresh profile from AO3") { [weak self] in
