@@ -33,6 +33,7 @@ mod prefs;
 mod records;
 mod recovery;
 mod social;
+mod upkeep;
 mod whats_new;
 mod works;
 
@@ -214,7 +215,8 @@ impl AO3App {
             r.request_bytes, r.response_bytes, r.error, r.payload,
         )).collect();
         if let Ok(storage) = self.storage.try_lock() {
-            log_db("insert_request_logs", storage.insert_request_logs(&tuples));
+            let cap = upkeep::request_log_row_cap(&storage);
+            log_db("insert_request_logs", storage.insert_request_logs(&tuples, cap));
         } else {
             for t in tuples.into_iter().rev() {
                 crate::client::push_request_record(crate::client::RequestRecord {

@@ -302,8 +302,104 @@ struct RequestsSettingsPane: View {
             SettingsGroup(theme: theme, label: "Per-page timeouts") {
                 RouteTimeoutsList(theme: theme, appState: appState)
             }
+
+            SettingsGroup(theme: theme, label: "Request log") {
+                trimAgeRow(value: intBinding(\.requestLogMaxAgeValue),
+                           unit: $appState.requestLogMaxAgeUnit)
+                trimRowsRow(value: rowsBinding(\.requestLogMaxRows))
+                Text("Leave a field empty for no limit. Entries past the age limit are deleted first, then the log is trimmed to the entry cap.")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SettingsGroup(theme: theme, label: "Debug log") {
+                trimAgeRow(value: intBinding(\.debugLogMaxAgeValue),
+                           unit: $appState.debugLogMaxAgeUnit)
+                trimRowsRow(value: rowsBinding(\.debugLogMaxRows))
+                Text("Same rules as the request log: empty means no limit, age applies before the entry cap.")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SettingsGroup(theme: theme, label: "Log cleanup") {
+                HStack(spacing: 8) {
+                    Text("Run cleanup every")
+                        .font(Font(MacFont.ui(13, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                    numberField(intBinding(\.logTrimIntervalValue), width: 60)
+                    unitPicker($appState.logTrimIntervalUnit)
+                    Spacer()
+                }
+                Text("Trims both logs in the background on this schedule. Empty falls back to hourly.")
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(16)
+    }
+
+    private func trimAgeRow(value: Binding<String>, unit: Binding<AppState.LogTrimUnit>) -> some View {
+        HStack(spacing: 8) {
+            Text("Delete entries older than")
+                .font(Font(MacFont.ui(13, weight: .medium)))
+                .foregroundStyle(theme.ink)
+            numberField(value, width: 60)
+            unitPicker(unit)
+            Spacer()
+        }
+    }
+
+    private func trimRowsRow(value: Binding<String>) -> some View {
+        HStack(spacing: 8) {
+            Text("Keep at most")
+                .font(Font(MacFont.ui(13, weight: .medium)))
+                .foregroundStyle(theme.ink)
+            numberField(value, width: 90)
+            Text("entries")
+                .font(Font(MacFont.ui(13, weight: .medium)))
+                .foregroundStyle(theme.ink)
+            Spacer()
+        }
+    }
+
+    private func numberField(_ text: Binding<String>, width: CGFloat) -> some View {
+        TextField("", text: text)
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.center)
+            .font(Font(MacFont.ui(13, weight: .semibold)))
+            .foregroundStyle(theme.ink)
+            .frame(width: width, height: 28)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+    }
+
+    private func unitPicker(_ unit: Binding<AppState.LogTrimUnit>) -> some View {
+        HStack(spacing: 3) {
+            ForEach(AppState.LogTrimUnit.allCases, id: \.self) { u in
+                segButton(u.rawValue, on: unit.wrappedValue == u) { unit.wrappedValue = u }
+            }
+        }
+        .padding(3)
+        .background(theme.surface2)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .frame(width: 220)
+    }
+
+    /// Digits-only text binding onto an Int setting; 0 shows as empty
+    /// (limit disabled).
+    private func intBinding(_ path: ReferenceWritableKeyPath<AppState, Int>) -> Binding<String> {
+        Binding(get: { appState[keyPath: path] == 0 ? "" : String(appState[keyPath: path]) },
+                set: { appState[keyPath: path] = Int($0.filter(\.isNumber).prefix(12)) ?? 0 })
+    }
+
+    /// Same, for the row caps — arbitrary magnitudes (1M+ is fine).
+    private func rowsBinding(_ path: ReferenceWritableKeyPath<AppState, UInt64>) -> Binding<String> {
+        Binding(get: { appState[keyPath: path] == 0 ? "" : String(appState[keyPath: path]) },
+                set: { appState[keyPath: path] = UInt64($0.filter(\.isNumber).prefix(12)) ?? 0 })
     }
 
     private func segButton(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {

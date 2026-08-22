@@ -57,6 +57,7 @@ impl AO3App {
             library_searches: Default::default(),
         };
         app.register_reconnect_context();
+        super::upkeep::spawn_log_upkeep(app._runtime.handle(), Arc::downgrade(&app.storage));
         Ok(app)
     }
 
@@ -96,6 +97,9 @@ impl AO3App {
             library_searches: Default::default(),
         };
         app.register_reconnect_context();
+        // The previous app's upkeep task exits once its storage drops;
+        // this one watches the freshly opened database.
+        super::upkeep::spawn_log_upkeep(app._runtime.handle(), Arc::downgrade(&app.storage));
         Ok(app)
     }
 

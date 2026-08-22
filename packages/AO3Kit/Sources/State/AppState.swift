@@ -50,6 +50,43 @@ final class AppState {
         bridge.purgeStaleChapters()
     }
 
+    /// Time unit for the log-upkeep settings' value+unit pref pairs.
+    /// Raw values match what the Rust upkeep task parses.
+    enum LogTrimUnit: String, CaseIterable {
+        case minutes, hours, days
+    }
+
+    /// Log upkeep settings, read by the Rust core's periodic trim task
+    /// (re-read every cycle, so changes apply without a restart). Ages and
+    /// row caps are independently optional — 0 disables that limit; when
+    /// both are set the trim removes old entries first, then trims to the
+    /// row cap. The request log's row cap defaults to its long-standing
+    /// 2000; an explicit 0 lifts it.
+    var logTrimIntervalValue: Int = 1 {
+        didSet { bridge.setPref(key: "log_trim_interval_value", value: String(logTrimIntervalValue)) }
+    }
+    var logTrimIntervalUnit: LogTrimUnit = .hours {
+        didSet { bridge.setPref(key: "log_trim_interval_unit", value: logTrimIntervalUnit.rawValue) }
+    }
+    var debugLogMaxAgeValue: Int = 0 {
+        didSet { bridge.setPref(key: "debug_log_max_age_value", value: String(debugLogMaxAgeValue)) }
+    }
+    var debugLogMaxAgeUnit: LogTrimUnit = .days {
+        didSet { bridge.setPref(key: "debug_log_max_age_unit", value: debugLogMaxAgeUnit.rawValue) }
+    }
+    var debugLogMaxRows: UInt64 = 0 {
+        didSet { bridge.setPref(key: "debug_log_max_rows", value: String(debugLogMaxRows)) }
+    }
+    var requestLogMaxAgeValue: Int = 0 {
+        didSet { bridge.setPref(key: "request_log_max_age_value", value: String(requestLogMaxAgeValue)) }
+    }
+    var requestLogMaxAgeUnit: LogTrimUnit = .days {
+        didSet { bridge.setPref(key: "request_log_max_age_unit", value: requestLogMaxAgeUnit.rawValue) }
+    }
+    var requestLogMaxRows: UInt64 = 2000 {
+        didSet { bridge.setPref(key: "request_log_max_rows", value: String(requestLogMaxRows)) }
+    }
+
     /// Idle minutes before the library auto-locks; 0 disables. Only applies
     /// when a library password is set (an auto-key DB reopens itself).
     var autoLockMinutes: Int = UserDefaults.standard.object(forKey: "autoLockMinutes") as? Int ?? 5 {
@@ -280,6 +317,17 @@ final class AppState {
 
         // Kudos already left on AO3 (permanent — keeps the heart truthful)
         kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
+
+        // Log upkeep settings (defaults when never set match the Rust
+        // trim task's own fallbacks).
+        logTrimIntervalValue = Int(bridge.getPref(key: "log_trim_interval_value") ?? "") ?? 1
+        logTrimIntervalUnit = LogTrimUnit(rawValue: bridge.getPref(key: "log_trim_interval_unit") ?? "") ?? .hours
+        debugLogMaxAgeValue = Int(bridge.getPref(key: "debug_log_max_age_value") ?? "") ?? 0
+        debugLogMaxAgeUnit = LogTrimUnit(rawValue: bridge.getPref(key: "debug_log_max_age_unit") ?? "") ?? .days
+        debugLogMaxRows = UInt64(bridge.getPref(key: "debug_log_max_rows") ?? "") ?? 0
+        requestLogMaxAgeValue = Int(bridge.getPref(key: "request_log_max_age_value") ?? "") ?? 0
+        requestLogMaxAgeUnit = LogTrimUnit(rawValue: bridge.getPref(key: "request_log_max_age_unit") ?? "") ?? .days
+        requestLogMaxRows = UInt64(bridge.getPref(key: "request_log_max_rows") ?? "") ?? 2000
 
         // Stale-chapter cleanup runs only when the user has opted in.
         autoPurgeChapters = bridge.getPref(key: "auto_purge_chapters") == "1"

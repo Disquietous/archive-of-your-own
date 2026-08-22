@@ -49,6 +49,35 @@ where
         .map(|conn| f(&conn))
 }
 
+/// Delete up to `batch` debug-log rows older than `minutes`. Returns the
+/// count deleted; the upkeep task loops until 0, taking the log-db lock
+/// per batch so live logging interleaves.
+pub fn trim_debug_log_before(minutes: u64, batch: u32) -> usize {
+    with_log_db(|conn| {
+        conn.execute(
+            "DELETE FROM debug_log WHERE id IN
+             (SELECT id FROM debug_log WHERE timestamp < datetime('now', ?1) ORDER BY id LIMIT ?2)",
+            rusqlite::params![format!("-{minutes} minutes"), batch as i64],
+        ).unwrap_or(0)
+    }).unwrap_or(0)
+}
+
+/// Delete up to `batch` of the oldest debug-log rows beyond `max_rows`.
+/// Returns the count deleted (0 = under the cap).
+pub fn trim_debug_log_over(max_rows: u64, batch: u32) -> usize {
+    with_log_db(|conn| {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM debug_log", [], |r| r.get(0))
+            .unwrap_or(0);
+        let excess = count - max_rows as i64;
+        if excess <= 0 { return 0; }
+        conn.execute(
+            "DELETE FROM debug_log WHERE id IN
+             (SELECT id FROM debug_log ORDER BY id LIMIT ?1)",
+            rusqlite::params![excess.min(batch as i64)],
+        ).unwrap_or(0)
+    }).unwrap_or(0)
+}
+
 pub fn dlog(level: &str, tag: &str, message: &str) {
     if let Some(db) = GLOBAL_LOG_DB.get() {
         if let Ok(conn) = db.lock() {

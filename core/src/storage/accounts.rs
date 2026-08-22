@@ -201,11 +201,14 @@ impl Storage {
     // Request Audit Log
     // -------------------------------------------------------------------
 
-    /// Insert drained request records; caps the table at 2000 rows.
+    /// Insert drained request records; `max_rows` caps the table (oldest
+    /// dropped), None = unlimited — the caller reads it from the
+    /// request-log settings so the cap tracks the user's row limit.
     #[allow(clippy::type_complexity)]
     pub fn insert_request_logs(
         &self,
         records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>)],
+        max_rows: Option<u64>,
     ) -> Result<(), AppError> {
         for (started, method, url, status, dur, req_b, resp_b, error, payload) in records {
             self.conn.execute(
@@ -216,14 +219,39 @@ impl Storage {
                         *req_b as i64, *resp_b as i64, error, payload],
             ).map_err(map_sql)?;
         }
-        if !records.is_empty() {
+        if let Some(max) = max_rows.filter(|_| !records.is_empty()) {
             self.conn.execute(
                 "DELETE FROM request_log WHERE id NOT IN
-                 (SELECT id FROM request_log ORDER BY id DESC LIMIT 2000)",
-                [],
+                 (SELECT id FROM request_log ORDER BY id DESC LIMIT ?1)",
+                params![max as i64],
             ).map_err(map_sql)?;
         }
         Ok(())
+    }
+
+    /// Delete up to `batch` request-log rows started before `cutoff_ms`.
+    /// Returns the count deleted; the upkeep task loops until 0, taking
+    /// the storage lock per batch so other work interleaves.
+    pub fn trim_request_logs_before(&self, cutoff_ms: i64, batch: u32) -> Result<usize, AppError> {
+        self.conn.execute(
+            "DELETE FROM request_log WHERE id IN
+             (SELECT id FROM request_log WHERE started_ms < ?1 ORDER BY id LIMIT ?2)",
+            params![cutoff_ms, batch as i64],
+        ).map_err(map_sql)
+    }
+
+    /// Delete up to `batch` of the oldest request-log rows beyond
+    /// `max_rows`. Returns the count deleted (0 = under the cap).
+    pub fn trim_request_logs_over(&self, max_rows: u64, batch: u32) -> Result<usize, AppError> {
+        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM request_log", [], |r| r.get(0))
+            .map_err(map_sql)?;
+        let excess = count - max_rows as i64;
+        if excess <= 0 { return Ok(0); }
+        self.conn.execute(
+            "DELETE FROM request_log WHERE id IN
+             (SELECT id FROM request_log ORDER BY id LIMIT ?1)",
+            params![excess.min(batch as i64)],
+        ).map_err(map_sql)
     }
 
     #[allow(clippy::type_complexity)]
