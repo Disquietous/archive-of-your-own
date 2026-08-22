@@ -516,7 +516,7 @@ final class ReadPaneViewController: NSViewController {
         let button = searchSourceBtn ?? ToolButton(theme: theme, symbol: "internaldrive",
                                                    tooltip: "Search source") { [weak self] in
             guard let self else { return }
-            model.search.searchLibraryOnly.toggle()
+            model.search.toggleSearchSource(appState)
         }
         searchSourceBtn = button
         let libraryOnly = model.search.searchLibraryOnly

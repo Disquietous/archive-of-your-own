@@ -758,6 +758,30 @@ final class MacSearchModel {
         runWorksSearch(request, appState: appState)
     }
 
+    /// The library/AO3 source toggle. Flipped while search results are
+    /// showing, the results clear and the same search re-runs under the
+    /// new source — works results re-run their active request, the other
+    /// scopes re-run their form criteria. Drill-in listings (a tag's AO3
+    /// browse, a collection's works, the split view) aren't re-runnable
+    /// searches, and the forms just pick up the new value on the next Go.
+    @MainActor
+    func toggleSearchSource(_ appState: AppState) {
+        searchLibraryOnly.toggle()
+        guard showingResults, splitCollectionName == nil, !canReturnToCollectionHits else { return }
+        if scope == .works {
+            switch activeQuery {
+            case .form, nil:
+                if let request = activeWorksRequest {
+                    runWorksSearch(request, appState: appState)
+                }
+            default:
+                break
+            }
+        } else {
+            performScopedSearch(appState)
+        }
+    }
+
     /// A clicked tag (pill, fandom card, tag hit): a one-criterion works
     /// request — the tag in the field matching its library-known category,
     /// Additional Tags when unknown — through the works-search API. The
