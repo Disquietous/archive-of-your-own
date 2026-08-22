@@ -4,35 +4,6 @@ import SwiftUI
 // MARK: - Toolbar buttons
 
 extension ListPaneViewController {
-    func eyeToggleButton() -> ToolButton {
-        let eye = eyeButton ?? ToolButton(theme: theme, symbol: "eye", tooltip: "Hide explicit") { [weak self] in
-            self?.model.hideExplicit.toggle()
-        }
-        eyeButton = eye
-        eye.isOn = model.hideExplicit
-        eye.setSymbol(model.hideExplicit ? "eye.slash" : "eye")
-        return eye
-    }
-
-    func searchGoButton() -> ToolButton {
-        let button = searchButton ?? ToolButton(theme: theme, symbol: "magnifyingglass", tooltip: "Search") { [weak self] in
-            guard let self else { return }
-            model.search.performSearch(appState)
-        }
-        searchButton = button
-        button.isOn = true
-        return button
-    }
-
-    func reloadFieldsButton() -> ToolButton {
-        let button = loadMoreButton ?? ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Reload search criteria from AO3") { [weak self] in
-            guard let self else { return }
-            Task { await self.model.search.scrapeForm(self.appState) }
-        }
-        loadMoreButton = button
-        return button
-    }
-
     func removeAllReadingButton() -> ToolButton {
         let button = removeAllButton ?? ToolButton(theme: theme, symbol: "trash", tooltip: "Remove all") { [weak self] in
             self?.confirmRemoveAllReading()

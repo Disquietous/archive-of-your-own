@@ -19,9 +19,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var filterPopover: NSPopover?
     var variantHost: NSView?
     var overlayHost: NSView?
-    var eyeButton: ToolButton?
-    var loadMoreButton: ToolButton?
-    var searchButton: ToolButton?
     var removeAllButton: ToolButton?
     var clearHistoryBtn: ToolButton?
     /// Author view: the drilled-in author's profile card, hosted in this

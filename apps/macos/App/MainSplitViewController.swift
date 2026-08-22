@@ -57,16 +57,27 @@ final class MainSplitViewController: NSSplitViewController {
             // middle pane has nothing to show for either.
             let hideList = immersive || self.model.section == .search
                 || self.model.section == .settings
-            DispatchQueue.main.async {
-                self.applyCollapse(sidebar: immersive, list: hideList)
-            }
+            // Immersive toggles slide — a deliberate reading-mode
+            // transition. Section-driven changes snap: the merged
+            // search/settings layout must appear whole, never showing
+            // the list pane mid-collapse.
+            let animated = immersive != self.sidebarCollapsedApplied
+            // Applied in this same main-queue pass: deferring even one
+            // hop lands past the frame commit, painting the new pane
+            // content while the stale list pane is still on screen.
+            self.applyCollapse(sidebar: immersive, list: hideList, animated: animated)
         }
     }
 
-    private func applyCollapse(sidebar: Bool, list: Bool) {
+    private func applyCollapse(sidebar: Bool, list: Bool, animated: Bool) {
         guard sidebar != sidebarCollapsedApplied || list != listCollapsedApplied else { return }
         sidebarCollapsedApplied = sidebar
         listCollapsedApplied = list
+        guard animated else {
+            sidebarItem.isCollapsed = sidebar
+            listItem.isCollapsed = list
+            return
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.32
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.2, 1)

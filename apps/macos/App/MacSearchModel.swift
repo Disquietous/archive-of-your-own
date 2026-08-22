@@ -48,10 +48,34 @@ final class MacSearchModel {
     var scopeNotice: String?
 
     /// The in-flight AO3-side query (request-tracking standard) — its opID
-    /// feeds the results pane's progress banner. The Works, Bookmarks, and
-    /// Collections scope searches run tracked; the drill-in listings (tag,
-    /// a collection's works/bookmarks) don't yet.
+    /// feeds the results pane's progress banner. Every AO3-side query runs
+    /// tracked through `trackedFetch`, whatever triggered it: the scope
+    /// forms, a clicked tag, and the collection drill-in listings alike.
     let searchFetchOp = TrackedOperation()
+
+    /// The split collection view's bookmarks pane fetch, tracked apart from
+    /// searchFetchOp: in split mode both listings fetch concurrently, and a
+    /// TrackedOperation holds a single in-flight opID — sharing one would
+    /// let each fetch clobber the other's banner. Each pane's overlay reads
+    /// its own operation.
+    let bookmarksFetchOp = TrackedOperation()
+
+    /// The one search process for AO3-side queries: mint a tracked opID
+    /// (progress banner) and run the bridge fetch under the standard
+    /// timeout retry. Every trigger of every query type funnels through
+    /// here so they all get identical progress UI and retry behavior.
+    @MainActor
+    private func trackedFetch<T>(
+        _ op: TrackedOperation,
+        _ appState: AppState,
+        _ body: @escaping (UInt64) async throws -> T
+    ) async throws -> T {
+        try await op.run(appState.bridge) { opID in
+            try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
+                try await body(opID)
+            }
+        }
+    }
 
     /// Switch tabs: back to that scope's form, stale notice cleared, any
     /// split collection view dissolved.
@@ -516,10 +540,10 @@ final class MacSearchModel {
         scopeNotice = nil
         originScope = scope
         switch (scope, searchLibraryOnly) {
-        case (.works, false):
-            performSearch(appState)
-        case (.works, true):
-            runLibraryWorksSearch(appState, criteria: libraryCriteria())
+        case (.works, _):
+            // The form is one producer of a works request like any other
+            // trigger — snapshot it and hand it to the works-search API.
+            runWorksSearch(formRequest(), appState: appState)
         case (.bookmarks, true):
             // The full bookmark-search form against the cached bookmark
             // rows — hits render as bookmark rows, not plain works.
@@ -563,43 +587,46 @@ final class MacSearchModel {
             sortColumn: "", sortDirection: "")
     }
 
-    /// The current works-form state as label-based criteria for the local
-    /// library search. Select and checkbox choices are stored as AO3's
-    /// option values (numeric ids); the scraped form knows each value's
-    /// label, and the core matches on names — translate here so the Rust
-    /// side never needs AO3's id tables.
+    /// A works request as label-based criteria for the local library
+    /// search. Select and checkbox choices are stored as AO3's option
+    /// values (numeric ids); the scraped form knows each value's label,
+    /// and the core matches on names — translate here so the Rust side
+    /// never needs AO3's id tables.
     @MainActor
-    func libraryCriteria() -> ULibrarySearchCriteria {
+    private func libraryCriteria(from request: WorksSearchRequest) -> ULibrarySearchCriteria {
         var c = Self.emptyLibraryCriteria()
-        // Works even when the criteria form was never scraped.
-        c.query = queryText
-        for field in formFields {
-            let name = field.name
-            let value = (fieldValues[name] ?? "").trimmingCharacters(in: .whitespaces)
-            let checked = checkboxValues[name] ?? []
-            // Selected option values → their labels, for id-valued controls.
-            func labels() -> [String] {
-                let values = checked.isEmpty ? (value.isEmpty ? [] : [value]) : Array(checked)
-                return values.compactMap { v in
-                    field.options.first { $0.value == v }?.label
-                        .trimmingCharacters(in: .whitespaces)
-                }.filter { !$0.isEmpty }
-            }
-            if name.hasSuffix("[title]") { c.title = value }
+        // Selected option values → their labels, for id-valued controls —
+        // via the scraped form when it's loaded; raw values pass through
+        // otherwise. Driven by the request's own keys, never formFields,
+        // so programmatic requests (a tag click) match correctly even
+        // when the form was never scraped.
+        func labels(_ name: String, _ value: String, _ checked: Set<String>) -> [String] {
+            let values = checked.isEmpty ? (value.isEmpty ? [] : [value]) : Array(checked)
+            guard let field = formFields.first(where: { $0.name == name }) else { return values }
+            return values.compactMap { v in
+                field.options.first { $0.value == v }?.label
+                    .trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+        }
+        for name in Set(request.fieldValues.keys).union(request.checkboxValues.keys) {
+            let value = (request.fieldValues[name] ?? "").trimmingCharacters(in: .whitespaces)
+            let checked = request.checkboxValues[name] ?? []
+            if name.hasSuffix("[query]") { c.query = value }
+            else if name.hasSuffix("[title]") { c.title = value }
             else if name.hasSuffix("[creators]") { c.creators = value }
             else if name.hasSuffix("[revised_at]") { c.revisedAt = value }
             else if name.hasSuffix("[complete]") { c.complete = value }
             else if name.hasSuffix("[crossover]") { c.crossover = value }
             else if name.hasSuffix("[single_chapter]") { c.singleChapter = checked.contains("1") || value == "1" }
             else if name.hasSuffix("[word_count]") { c.wordCount = value }
-            else if name.hasSuffix("[language_id]") { c.language = labels().first ?? "" }
+            else if name.hasSuffix("[language_id]") { c.language = labels(name, value, checked).first ?? "" }
             else if name.hasSuffix("[fandom_names]") { c.fandomNames = value }
             else if name.hasSuffix("[character_names]") { c.characterNames = value }
             else if name.hasSuffix("[relationship_names]") { c.relationshipNames = value }
             else if name.hasSuffix("[freeform_names]") { c.freeformNames = value }
-            else if name.contains("[rating_ids]") { c.ratings = labels() }
-            else if name.contains("[archive_warning_ids]") { c.warnings = labels() }
-            else if name.contains("[category_ids]") { c.categories = labels() }
+            else if name.contains("[rating_ids]") { c.ratings = labels(name, value, checked) }
+            else if name.contains("[archive_warning_ids]") { c.warnings = labels(name, value, checked) }
+            else if name.contains("[category_ids]") { c.categories = labels(name, value, checked) }
             else if name.hasSuffix("[hits]") { c.hits = value }
             else if name.hasSuffix("[kudos_count]") { c.kudosCount = value }
             else if name.hasSuffix("[comments_count]") { c.commentsCount = value }
@@ -667,15 +694,50 @@ final class MacSearchModel {
         showingResults = true
     }
 
+    // MARK: - Works search API (the one entry point for works searches)
+
+    /// Every Search→Works criterion as one value: field values keyed by
+    /// AO3's form field names plus the checkbox-group selections. The
+    /// form's Go press snapshots the visible form into one; programmatic
+    /// triggers (tag clicks, the sidebar quick search, sort re-runs)
+    /// construct or amend one directly — the form's stored state is never
+    /// touched, so backing out of programmatic results shows the form as
+    /// the user left it.
+    struct WorksSearchRequest {
+        var fieldValues: [String: String] = [:]
+        var checkboxValues: [String: Set<String>] = [:]
+    }
+
+    /// The visible form state as a request — what the Go button submits.
+    func formRequest() -> WorksSearchRequest {
+        WorksSearchRequest(fieldValues: fieldValues, checkboxValues: checkboxValues)
+    }
+
+    /// The request behind the works results currently showing. Sort
+    /// re-runs amend this, so refining programmatically triggered results
+    /// never falls back to the form's criteria.
+    private(set) var activeWorksRequest: WorksSearchRequest?
+
+    /// The works-search API: execute `request` under the library/AO3
+    /// source toggle and show the results view. Every works-search
+    /// trigger funnels through here.
     @MainActor
-    func performSearch(_ appState: AppState) {
+    func runWorksSearch(_ request: WorksSearchRequest, appState: AppState) {
+        scopeNotice = nil
+        originScope = scope
+        scope = .works
+        activeWorksRequest = request
+        if searchLibraryOnly {
+            runLibraryWorksSearch(appState, criteria: libraryCriteria(from: request))
+            return
+        }
         var keys: [String] = []
         var values: [String] = []
-        for (name, value) in fieldValues where !value.isEmpty {
+        for (name, value) in request.fieldValues where !value.isEmpty {
             keys.append(name)
             values.append(value)
         }
-        for (name, selected) in checkboxValues {
+        for (name, selected) in request.checkboxValues {
             for value in selected {
                 keys.append(name)
                 values.append(value)
@@ -686,8 +748,40 @@ final class MacSearchModel {
         Task { await fetch(page: 1, appState: appState) }
     }
 
+    /// Re-run the current works results with one field changed (the
+    /// results header's server-side sort menu). No-op when no works
+    /// request has run.
+    @MainActor
+    func updateWorksSearchField(_ name: String, value: String, appState: AppState) {
+        guard var request = activeWorksRequest else { return }
+        request.fieldValues[name] = value
+        runWorksSearch(request, appState: appState)
+    }
+
+    /// A clicked tag (pill, fandom card, tag hit): a one-criterion works
+    /// request — the tag in the field matching its library-known category,
+    /// Additional Tags when unknown — through the works-search API. The
+    /// visible form is neither shown nor touched.
     @MainActor
     func startTagQuery(_ tag: String, appState: AppState) {
+        let tagType = appState.bridge.searchLibraryTags(tag)
+            .first { $0.name.caseInsensitiveCompare(tag) == .orderedSame }?
+            .tagType
+        let suffix = switch tagType {
+        case "fandom": "[fandom_names]"
+        case "character": "[character_names]"
+        case "relationship": "[relationship_names]"
+        default: "[freeform_names]"
+        }
+        let field = formFields.first { $0.name.hasSuffix(suffix) }?.name ?? "work_search\(suffix)"
+        runWorksSearch(WorksSearchRequest(fieldValues: [field: tag]), appState: appState)
+    }
+
+    /// AO3's tag-browse listing (/tags/…/works), paged — the explicitly
+    /// AO3-side listing behind the fandom drill-in's "Search AO3" button,
+    /// which bypasses the source toggle by design.
+    @MainActor
+    func startAO3TagListing(_ tag: String, appState: AppState) {
         // Tag/collection listings are works results — land on the Works tab
         // whatever scope the search section was left on. The pre-flip scope
         // is where the back arrow returns.
@@ -822,8 +916,8 @@ final class MacSearchModel {
         isFetchingBookmarks = true
         bookmarksError = nil
         do {
-            let result = try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
+            let result = try await trackedFetch(bookmarksFetchOp, appState) { opID in
+                try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
             }
             bookmarkResults = result.works.map(AppState.workFromSummary)
             bookmarksPage = page
@@ -856,28 +950,24 @@ final class MacSearchModel {
         do {
             switch query {
             case .form(let keys, let values):
-                applyWorksPage(try await searchFetchOp.run(appState.bridge) { opID in
-                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                        try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page, opID: opID)
-                    }
+                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .tag(let tag):
-                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.searchByTagPaged(tag, page: page)
+                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.searchByTagPaged(tag, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .collection(let name):
-                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.fetchCollectionWorks(name: name, page: page)
+                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.fetchCollectionWorks(name: name, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .collectionBookmarks(let name):
-                applyWorksPage(try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                    try await appState.bridge.fetchCollectionBookmarks(name: name, page: page)
+                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .bookmarkSearch(let criteria):
-                let result = try await searchFetchOp.run(appState.bridge) { opID in
-                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                        try await appState.bridge.searchBookmarks(criteria: criteria, page: page, opID: opID)
-                    }
+                let result = try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.searchBookmarks(criteria: criteria, page: page, opID: opID)
                 }
                 bookmarkHits = result.bookmarks
                 totalWorks = result.totalFound
@@ -888,10 +978,8 @@ final class MacSearchModel {
                 // the library snapshot so they join local lists at once.
                 appState.reloadCachedWorks()
             case .collectionsIndex(let criteria):
-                let result = try await searchFetchOp.run(appState.bridge) { opID in
-                    try await appState.retryOnTimeout(task: appState.searchTask, using: appState.bridge) {
-                        try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)
-                    }
+                let result = try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)
                 }
                 collectionHits = result.collections
                 totalWorks = nil

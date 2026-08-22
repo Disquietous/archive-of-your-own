@@ -21,11 +21,16 @@ final class MacAppModel {
     var readerOpen = false
     var readerChapter = 0
     var immersive = false
-    var query = ""
     /// Reading list shown in the list pane when a collection is selected.
     var selectedReadingListID: Int64?
-    /// Title override for search results driven from elsewhere (fandom cards).
-    var searchDisplayTitle: String?
+    /// Title line for search results driven by a tag (tag pill, fandom
+    /// card). Derived from the active query so it appears with a tag
+    /// drill-in and clears the moment any other query replaces it — a
+    /// stored copy went stale when later searches came from the form.
+    var searchDisplayTitle: String? {
+        if case .tag(let tag) = search.activeQuery { return tag }
+        return nil
+    }
 
     init(appState: AppState) {
         self.appState = appState
@@ -286,6 +291,9 @@ final class MacAppModel {
         restorePane(for: s)
         switch s {
         case .search:
+            // Choosing Search in the sidebar makes it the home context —
+            // the results back arrow goes to the form, not a past trigger.
+            searchReturnSection = nil
             Task { await search.loadFormIfNeeded(appState) }
         case .subscriptions:
             Task { await appState.loadSubscriptions() }
@@ -517,38 +525,52 @@ final class MacAppModel {
         immersive = false
     }
 
-    /// Quick search from the sidebar field: fills the criteria query and runs it.
-    func submitSearch() {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return }
-        searchDisplayTitle = nil
+    /// Where a search was triggered from, when that wasn't the Search
+    /// section itself — the results back arrow returns here instead of
+    /// the criteria form. Cleared once used, or when the user navigates
+    /// to Search themselves.
+    private(set) var searchReturnSection: Section?
+
+    /// The search results back arrow: one level toward where the search
+    /// came from — the collections hit list behind a drill-in, the
+    /// originating section for searches triggered outside the Search
+    /// section (a work detail's tag pill), the criteria form otherwise.
+    @MainActor
+    func searchBack() {
+        if !search.canReturnToCollectionHits, let target = searchReturnSection {
+            searchReturnSection = nil
+            search.showingResults = false
+            goSection(target)
+            return
+        }
+        search.returnToForm()
+    }
+
+    /// The one process for driving the Search section from anywhere in
+    /// the app: switch to the section (snapshotting the pane it replaces,
+    /// and remembering it as the back arrow's return target), drop the
+    /// pane's prior context (a new search replaces it by design), then
+    /// run the caller's query synchronously — results render on the very
+    /// next pass, so the criteria form never appears in between.
+    @MainActor
+    private func openSearch(andRun run: @MainActor () -> Void) {
         if section != .search {
             snapshotPane(for: section)
+            searchReturnSection = section
             section = .search
+        } else {
+            searchReturnSection = nil
         }
-        // A new search replaces the search pane's prior context by design.
         readerOpen = false
         selectedWorkID = nil
         immersive = false
-        Task { @MainActor in
-            await search.loadFormIfNeeded(appState)
-            search.setQuery(q)
-            search.performSearch(appState)
-        }
+        run()
     }
 
     /// A tag pill or fandom card: live tag-scoped results shown in Search.
+    @MainActor
     func searchTag(_ tag: String) {
-        query = tag
-        searchDisplayTitle = tag
-        if section != .search {
-            snapshotPane(for: section)
-            section = .search
-        }
-        readerOpen = false
-        selectedWorkID = nil
-        immersive = false
-        Task { @MainActor in
+        openSearch { [self] in
             search.startTagQuery(tag, appState: appState)
         }
     }
@@ -605,7 +627,7 @@ final class MacAppModel {
         fandomSearchActive = true
         selectedWorkID = nil
         Task { @MainActor in
-            search.startTagQuery(tag, appState: appState)
+            search.startAO3TagListing(tag, appState: appState)
         }
     }
 

@@ -86,6 +86,11 @@ struct SearchFormView: View {
             }
             .padding(20)
         }
+        // The form loads its own fields on appearance (cache first, AO3
+        // scrape only if never cached) — so it's populated however the
+        // search section was reached, not just via the sidebar entry
+        // points that used to trigger the load.
+        .task { await search.loadFormIfNeeded(appState) }
     }
 
     /// Chip-cloud groups get their own grid — they're tall and variable,
@@ -134,7 +139,7 @@ struct SearchFormView: View {
                     .textFieldStyle(.plain)
                     .font(Font(MacFont.ui(13)))
                     .foregroundStyle(theme.ink)
-                    .onSubmit { search.performSearch(appState) }
+                    .onSubmit { search.performScopedSearch(appState) }
             }
             .padding(.horizontal, 10)
             .frame(height: 34)
@@ -259,7 +264,7 @@ struct SearchFormView: View {
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
-                .onSubmit { search.performSearch(appState) }
+                .onSubmit { search.performScopedSearch(appState) }
                 .help(Self.rangeHelp(for: field) ?? field.label)
         }
     }

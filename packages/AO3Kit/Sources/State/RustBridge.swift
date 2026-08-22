@@ -468,9 +468,10 @@ final class RustBridge {
     }
 
     /// Paged variant of searchByTag.
-    func searchByTagPaged(_ tag: String, page: UInt32 = 1) async throws -> UPagedWorks {
+    func searchByTagPaged(_ tag: String, page: UInt32 = 1,
+                          opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.searchByTag(tag: tag, page: page)
+        return try await app.searchByTag(tag: tag, page: page, opId: opID)
     }
 
     /// One page of AO3's /bookmarks/search under the form's criteria —
@@ -492,16 +493,18 @@ final class RustBridge {
     }
 
     /// One page of a collection's works. `name` is the collection's URL slug.
-    func fetchCollectionWorks(name: String, page: UInt32 = 1) async throws -> UPagedWorks {
+    func fetchCollectionWorks(name: String, page: UInt32 = 1,
+                              opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchCollectionWorks(name: name, page: page)
+        return try await app.fetchCollectionWorks(name: name, page: page, opId: opID)
     }
 
     /// One page of a collection's bookmarked items (works only — series and
     /// external bookmarks are skipped).
-    func fetchCollectionBookmarks(name: String, page: UInt32 = 1) async throws -> UPagedWorks {
+    func fetchCollectionBookmarks(name: String, page: UInt32 = 1,
+                                  opID: UInt64? = nil) async throws -> UPagedWorks {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchCollectionBookmarks(name: name, page: page)
+        return try await app.fetchCollectionBookmarks(name: name, page: page, opId: opID)
     }
 
     /// The collection's /profile metadata and tags — fetched once, answered

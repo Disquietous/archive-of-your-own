@@ -302,8 +302,9 @@ final class ReadPaneViewController: NSViewController {
         let sortHeader = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
         sortHeader.isEnabled = false
         menu.addItem(sortHeader)
-        // AO3 pre-selects a default when the field is unset locally.
-        let currentSort = search.fieldValues[sortField.name]
+        // AO3 pre-selects a default when the field is unset in the
+        // request behind the current results.
+        let currentSort = search.activeWorksRequest?.fieldValues[sortField.name]
             ?? sortField.options.first { $0.selected }?.value ?? ""
         for option in sortField.options {
             let title = option.label.trimmingCharacters(in: .whitespaces)
@@ -320,7 +321,7 @@ final class ReadPaneViewController: NSViewController {
             let directionHeader = NSMenuItem(title: "Direction", action: nil, keyEquivalent: "")
             directionHeader.isEnabled = false
             menu.addItem(directionHeader)
-            let currentDirection = search.fieldValues[directionField.name]
+            let currentDirection = search.activeWorksRequest?.fieldValues[directionField.name]
                 ?? directionField.options.first { $0.selected }?.value ?? ""
             for option in directionField.options {
                 let title = option.label.trimmingCharacters(in: .whitespaces)
@@ -338,8 +339,9 @@ final class ReadPaneViewController: NSViewController {
 
     @objc private func searchSortChosen(_ sender: NSMenuItem) {
         guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
-        model.search.fieldValues[pair[0]] = pair[1]
-        model.search.performSearch(appState)
+        // Amend the request behind the current results — never the form,
+        // which programmatic triggers (tag clicks) don't populate.
+        model.search.updateWorksSearchField(pair[0], value: pair[1], appState: appState)
     }
     private var authorRefreshBtn: LabelToolButton?
     private var subscriptionRefreshBtn: LabelToolButton?
@@ -381,6 +383,15 @@ final class ReadPaneViewController: NSViewController {
     /// `container` added after it so the content swaps `show(mode:)`
     /// performs inside the container can never cover it.
     private let requestProgressOverlay = RequestProgressOverlay()
+
+    /// The split collection view's per-half banners — one overlay instance
+    /// per pane, each reading its own tracked operation (the halves fetch
+    /// concurrently, so they can't share one). The view refs are captured
+    /// when the halves are built; nil until then.
+    private let splitWorksOverlay = RequestProgressOverlay()
+    private let splitBookmarksOverlay = RequestProgressOverlay()
+    private var splitWorksHalf: (root: NSView, table: NSView)?
+    private var splitBookmarksHalf: (root: NSView, table: NSView)?
 
     private var readerRefreshBtn: ToolButton?
 
@@ -569,7 +580,7 @@ final class ReadPaneViewController: NSViewController {
     private func searchFormBackButton() -> ToolButton {
         let button = searchBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left",
                                                  tooltip: "Back to search criteria") { [weak self] in
-            self?.model.search.returnToForm()
+            self?.model.searchBack()
         }
         searchBackBtn = button
         return button
@@ -710,6 +721,20 @@ final class ReadPaneViewController: NSViewController {
         var requestOverlayOpID: UInt64?
         defer { requestProgressOverlay.update(opID: requestOverlayOpID, over: container, in: view,
                                               theme: theme, appState: appState) }
+        // The split collection view's halves each carry their own banner,
+        // set only by the split branch — same defer discipline.
+        var splitWorksOpID: UInt64?
+        var splitBookmarksOpID: UInt64?
+        defer {
+            if let half = splitWorksHalf {
+                splitWorksOverlay.update(opID: splitWorksOpID, over: half.table, in: half.root,
+                                         theme: theme, appState: appState)
+            }
+            if let half = splitBookmarksHalf {
+                splitBookmarksOverlay.update(opID: splitBookmarksOpID, over: half.table, in: half.root,
+                                             theme: theme, appState: appState)
+            }
+        }
         view.layer?.backgroundColor = theme.nsBg.cgColor
         toolbar.applyTheme()
         toolbarTop.constant = model.immersive ? 20 : 0
@@ -856,6 +881,10 @@ final class ReadPaneViewController: NSViewController {
                 // halves' own header bars.
                 toolbar.configure(title: search.splitCollectionTitle ?? "Collection",
                                   sub: splitCollectionSubtitle(search))
+                // Each half's fetch runs tracked under its own operation;
+                // each half's banner follows its own opID.
+                splitWorksOpID = search.searchFetchOp.opID
+                splitBookmarksOpID = search.bookmarksFetchOp.opID
                 toolbar.setLeading([])
                 toolbar.setTrailing([ao3Button(url: ExternalLinkOpener.ao3CollectionURL(collectionName),
                                                tooltip: "Open this collection on AO3 in your browser"),
@@ -871,9 +900,13 @@ final class ReadPaneViewController: NSViewController {
                 toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
                 let back = searchFormBackButton()
                 // The same arrow pops one level: to the collections hit
-                // list behind a drill-in, to the form otherwise.
+                // list behind a drill-in, to the screen that triggered the
+                // search when it came from outside the Search section, to
+                // the form otherwise.
                 back.toolTip = search.canReturnToCollectionHits
-                    ? "Back to collections results" : "Back to search criteria"
+                    ? "Back to collections results"
+                    : model.searchReturnSection != nil ? "Back"
+                    : "Back to search criteria"
                 toolbar.setLeading([back])
                 if worksStyle {
                     var trailing: [NSView] = search.hasSearched
@@ -1146,6 +1179,13 @@ final class ReadPaneViewController: NSViewController {
             table.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             table.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        // Record the half's views so the render pass can float its
+        // request-progress banner over the table (below the header).
+        if isWorks {
+            splitWorksHalf = (root: root, table: table)
+        } else {
+            splitBookmarksHalf = (root: root, table: table)
+        }
         return controller
     }
 

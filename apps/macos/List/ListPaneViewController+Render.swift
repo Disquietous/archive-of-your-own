@@ -20,18 +20,12 @@ extension ListPaneViewController {
 
         let section = model.section
         switch section {
-        case .search:
-            toolbar.configure(title: "Search", sub: model.search.formFields.isEmpty ? "Criteria" : "AO3 criteria")
-            toolbar.setLeading([])
-            toolbar.setTrailing([searchGoButton(), saveSearchButton(), reloadFieldsButton(), eyeToggleButton()])
-            showVariant(SearchFormView(theme: theme, appState: appState, model: model), section: section)
-
         case .authorWorks:
             break
 
-        case .settings:
-            // The list pane is collapsed for Settings — the reading pane
-            // hosts the whole thing. Nothing to render here.
+        case .search, .settings:
+            // The list pane is collapsed for Search and Settings — the
+            // reading pane hosts the whole flow. Nothing to render here.
             break
 
         case .reading, .history, .bookmarks, .downloads:

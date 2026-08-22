@@ -70,8 +70,9 @@ impl AO3App {
         }).await.map(|p| p.works)
     }
 
-    pub async fn search_by_tag(&self, tag: String, page: u32) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("tag_browse", None, move |client| {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn search_by_tag(&self, tag: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
+        self.run_listing_fetch("tag_browse", op_id, move |client| {
             let tag = tag.clone();
             async move {
                 client.read().await.search_by_tag(&tag, page).await.map_err(AO3Error::from)
@@ -237,11 +238,13 @@ impl AO3App {
     /// One page of a collection's works, cached like every other listing —
     /// plus the collection↔work relationship, so the library knows which
     /// cached works were seen in which collection.
-    pub async fn fetch_collection_works(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn fetch_collection_works(&self, name: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         let slug = name.clone();
         self.run_on_runtime(move |client, storage| async move {
-            let (works, has_next, total, found) = with_recovery(
+            let (works, has_next, total, found) = with_recovery_as(
                 client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "collection_works".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let name = name.clone();
@@ -273,11 +276,13 @@ impl AO3App {
     /// themselves (scoped to whoever made them — only the active user's
     /// own land in the Bookmarks view), and the collection↔work rows in
     /// collection_bookmarks, so library mode can replay the listing.
-    pub async fn fetch_collection_bookmarks(&self, name: String, page: u32) -> Result<UPagedWorks, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn fetch_collection_bookmarks(&self, name: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         let slug = name.clone();
         self.run_on_runtime(move |client, storage| async move {
-            let (listings, has_next, total, found) = with_recovery(
+            let (listings, has_next, total, found) = with_recovery_as(
                 client, storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "collection_bookmarks".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let name = name.clone();

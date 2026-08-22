@@ -108,26 +108,6 @@ extension ListPaneViewController: NSMenuDelegate {
     }
 
     /// Star button on the search toolbar — names and saves the current criteria.
-    func saveSearchButton() -> ToolButton {
-        ToolButton(theme: theme, symbol: "star", tooltip: "Save this search") { [weak self] in
-            guard let self else { return }
-            let alert = NSAlert()
-            alert.messageText = "Save Search"
-            alert.informativeText = "The current criteria will appear under Saved Searches in the sidebar."
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-            field.placeholderString = "Name"
-            field.stringValue = model.search.queryText
-            alert.accessoryView = field
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Cancel")
-            alert.window.initialFirstResponder = field
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty else { return }
-            model.search.saveCurrentSearch(named: name, appState: appState)
-        }
-    }
-
     @objc private func menuCopySubscriptionLink(_ sender: NSMenuItem) {
         guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }
         let sub = displayedSubscriptions[sender.tag]
