@@ -1,16 +1,18 @@
 use rusqlite::params;
 
 use crate::error::AppError;
-use crate::models::{AO3User, Comment, ContentBlock, UserProfile};
+use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile};
 
 use super::consts::*;
+use super::users_cache::comment_byline;
 use super::{map_json, map_sql, Storage};
 
 impl Storage {
-    /// Whether any ao3_users row exists for this username. Answered from
-    /// the users cache.
+    /// Whether the app has an ao3_users row for this name — account
+    /// username, "Pseud (account)" byline, or a recorded pseud. Answered
+    /// from the users cache.
     pub fn has_ao3_user_with_username(&self, username: &str) -> Result<bool, AppError> {
-        Ok(self.users_cache.has_username(username))
+        Ok(self.users_cache.has_user(username))
     }
 
     // -------------------------------------------------------------------
@@ -455,45 +457,52 @@ impl Storage {
         self.save_comment_recursive(work_id, chapter_id, 0, comment)
     }
 
+    /// Record a sighting of an AO3 user. `user.username` is the byline as
+    /// AO3 rendered it — "Pseud (account)" folds into the account's single
+    /// row and teaches it the pseud. Write-through via the users cache.
     pub fn upsert_ao3_user(&self, user: &AO3User) -> Result<(), AppError> {
-        self.users_cache.upsert(&self.conn, user, &crate::timefmt::now_utc_datetime())
+        self.users_cache.record(&self.conn, user, &crate::timefmt::now_utc_datetime())
+            .map(|_| ())
     }
 
-    /// Answered from the users cache — no SQL.
-    pub fn get_ao3_user(&self, user_id: &str) -> Result<Option<AO3User>, AppError> {
-        Ok(self.users_cache.get(user_id).map(|e| e.to_ao3_user()))
+    /// Record author bylines seen on AO3 data (work blurbs, bookmarks,
+    /// series pages): ensures each account row and learns any pseud.
+    pub fn record_author_bylines(&self, bylines: &[String]) -> Result<(), AppError> {
+        let now = crate::timefmt::now_utc_datetime();
+        for b in bylines {
+            self.users_cache.record_byline(&self.conn, b, &now)?;
+        }
+        Ok(())
     }
 
-    /// Library-scope user search: every AO3 user the app has cached (from
-    /// works, comments, kudos, profiles) whose username matches. Prefix
-    /// matches rank first. Answered from the users cache; `limit` of 0
-    /// means no limit.
+    /// The account for any name form (account username, byline, pseud,
+    /// guest id). Answered from the users cache — no SQL.
+    pub fn get_ao3_user(&self, name: &str) -> Result<Option<AO3User>, AppError> {
+        Ok(self.users_cache.resolve(name).map(|e| e.to_ao3_user()))
+    }
+
+    /// Library-scope user search: every AO3 account the app has cached
+    /// (from works, comments, profiles, subscriptions) whose username or
+    /// any pseud matches. Prefix matches rank first. Answered from the
+    /// users cache; `limit` of 0 means no limit.
     pub fn search_ao3_usernames(&self, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
         let limit = if limit == 0 { usize::MAX } else { limit as usize };
         Ok(self.users_cache.search_usernames(term, limit))
     }
 
-    /// Persist a fetched profile onto the user's ao3_users row (keyed by
-    /// username, matching how author rows are recorded elsewhere).
-    /// Creates the row when the user has never been seen.
+    /// Persist a fetched profile onto the account's row, creating it when
+    /// the user has never been seen.
     pub fn upsert_user_profile(&self, p: &UserProfile) -> Result<(), AppError> {
-        self.upsert_ao3_user(&AO3User {
-            id: p.username.clone(),
-            username: p.username.clone(),
-            profile_url: Some(format!("{}/users/{}", crate::client::BASE_URL, p.username)),
-            avatar_url: p.avatar_url.clone(),
-        })?;
         self.users_cache.update_profile(&self.conn, p, &crate::timefmt::now_utc_datetime())
     }
 
-    /// The cached profile for a username, with live subscription state
-    /// joined in from the local subscriptions table. None when the user
-    /// has never had a profile fetch recorded.
+    /// The cached profile for a name (account username, byline, or pseud),
+    /// with live subscription state joined in from the local subscriptions
+    /// table. None when the account has never had a profile fetch recorded.
     pub fn get_user_profile(&self, username: &str) -> Result<Option<UserProfile>, AppError> {
         let Some(entity) = self.users_cache
-            .by_username(username)
-            .into_iter()
-            .find(|e| !e.profile_fetched_at.is_empty())
+            .resolve(username)
+            .filter(|e| !e.profile_fetched_at.is_empty())
         else { return Ok(None) };
         let mut profile = entity.to_profile();
         profile.subscribed = self.has_subscription(SUB_TYPE_AUTHOR, &profile.username)?;
@@ -502,11 +511,10 @@ impl Storage {
         Ok(Some(profile))
     }
 
-    /// Record block state locally (mirrors an AO3-side change). Creates a
-    /// minimal user row when needed so state is never dropped.
+    /// Record block state locally (mirrors an AO3-side change). Creates the
+    /// account row when needed so state is never dropped.
     pub fn set_user_block_state(&self, username: &str, blocked: bool,
                                 ao3_id: Option<&str>) -> Result<(), AppError> {
-        self.ensure_ao3_user_row(username)?;
         self.users_cache.set_block_state(&self.conn, username, blocked,
                                          ao3_id.unwrap_or(""),
                                          &crate::timefmt::now_utc_datetime())
@@ -515,37 +523,31 @@ impl Storage {
     /// Record mute state locally (mirrors an AO3-side change).
     pub fn set_user_mute_state(&self, username: &str, muted: bool,
                                ao3_id: Option<&str>) -> Result<(), AppError> {
-        self.ensure_ao3_user_row(username)?;
         self.users_cache.set_mute_state(&self.conn, username, muted,
                                         ao3_id.unwrap_or(""),
                                         &crate::timefmt::now_utc_datetime())
     }
 
-    fn ensure_ao3_user_row(&self, username: &str) -> Result<(), AppError> {
-        if !self.has_ao3_user_with_username(username)? {
-            self.upsert_ao3_user(&AO3User {
-                id: username.to_string(),
-                username: username.to_string(),
-                profile_url: Some(format!("{}/users/{username}", crate::client::BASE_URL)),
-                avatar_url: None,
-            })?;
-        }
-        Ok(())
-    }
-
     fn save_comment_recursive(&self, work_id: u64, chapter_id: u64, parent_id: u64, comment: &Comment) -> Result<(), AppError> {
-        self.upsert_ao3_user(&comment.author)?;
+        // The author row is the account; which of its pseuds posted the
+        // comment rides on the comment row so the byline can be rebuilt.
+        let author = self.users_cache.record(
+            &self.conn, &comment.author, &crate::timefmt::now_utc_datetime())?;
+        let pseud = if author.is_guest() { String::new() } else {
+            split_author_byline(&comment.author.username).1.unwrap_or_default()
+        };
 
         let content_json = serde_json::to_string(&comment.content).map_err(map_json)?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO comments (id, work_id, chapter_id, parent_id, author_id, posted_at, content_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO comments (id, work_id, chapter_id, parent_id, author_id, author_pseud, posted_at, content_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 comment.id as i64,
                 work_id as i64,
                 chapter_id as i64,
                 parent_id as i64,
-                comment.author.id,
+                author.id,
+                pseud,
                 comment.posted_at,
                 content_json,
             ],
@@ -564,36 +566,42 @@ impl Storage {
             ("work_id = ?1", work_id as i64)
         };
         let sql = format!(
-            "SELECT c.id, c.posted_at, c.content_json, c.parent_id,
-                    u.id, u.username, u.profile_url, u.avatar_url
-             FROM comments c
-             LEFT JOIN ao3_users u ON c.author_id = u.id
-             WHERE c.{} ORDER BY c.id",
+            "SELECT id, posted_at, content_json, parent_id, author_id, author_pseud
+             FROM comments WHERE {} ORDER BY id",
             where_clause
         );
         let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-        let rows: Vec<(i64, String, String, i64, String, String, String, String)> = stmt
+        let rows: Vec<(i64, String, String, i64, String, String)> = stmt
             .query_map(params![param_val], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get::<_, String>(4).unwrap_or_default(),
-                    row.get::<_, String>(5).unwrap_or_default(),
-                    row.get::<_, String>(6).unwrap_or_default(),
-                    row.get::<_, String>(7).unwrap_or_default()))
+                    row.get(4)?, row.get(5)?))
             })
             .map_err(map_sql)?
             .filter_map(|r| r.ok())
             .collect();
 
-        let mut all: Vec<(Comment, u64)> = rows.into_iter().map(|(id, posted_at, content_json, parent_id, user_id, username, profile_url, avatar_url)| {
+        // Authors come from the users cache: the account row plus the
+        // pseud the comment was posted under.
+        let mut all: Vec<(Comment, u64)> = rows.into_iter().map(|(id, posted_at, content_json, parent_id, author_id, author_pseud)| {
             let content: Vec<ContentBlock> = serde_json::from_str(&content_json).unwrap_or_default();
+            let author = match self.users_cache.resolve(&author_id) {
+                Some(e) => {
+                    let mut u = e.to_ao3_user();
+                    if !e.is_guest() {
+                        u.username = comment_byline(&e.username, &author_pseud);
+                    }
+                    u
+                }
+                None => AO3User {
+                    id: author_id,
+                    username: "Anonymous".to_string(),
+                    profile_url: None,
+                    avatar_url: None,
+                },
+            };
             let c = Comment {
                 id: id as u64,
-                author: AO3User {
-                    id: user_id,
-                    username: if username.is_empty() { "Anonymous".to_string() } else { username },
-                    profile_url: if profile_url.is_empty() { None } else { Some(profile_url) },
-                    avatar_url: if avatar_url.is_empty() { None } else { Some(avatar_url) },
-                },
+                author,
                 posted_at,
                 content,
                 replies: Vec::new(),

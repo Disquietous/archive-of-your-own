@@ -220,7 +220,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 11;
+    const SCHEMA_VERSION: u32 = 12;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -269,6 +269,7 @@ impl Storage {
                 9 => self.migrate_v9(),
                 10 => self.migrate_v10(),
                 11 => self.migrate_v11(),
+                12 => self.migrate_v12(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -577,6 +578,193 @@ impl Storage {
             )
             .map_err(map_sql)?;
         self.backfill_search_masks_v11()
+    }
+
+    /// v12 — one ao3_users row per AO3 account (2026-08):
+    /// A pseud is a detail of an account, not a user of its own. Rows
+    /// that were keyed by a pseud (comment authors used the profile URL's
+    /// last path segment, bylines "Pseud (account)" as username) fold into
+    /// the account's row: the pseud joins its pseuds_json, their comments
+    /// re-point to the account, and the posting pseud moves onto the
+    /// comment row (`comments.author_pseud`) so the byline still renders.
+    /// Guest commenters (`guest:` ids) are untouched.
+    fn migrate_v12(&self) -> Result<(), AppError> {
+        // Comments reference ao3_users(id); the fold re-points children
+        // before deleting their old parent, so check the FK at commit.
+        self.conn
+            .execute_batch(
+                "PRAGMA defer_foreign_keys = ON;
+                 ALTER TABLE comments ADD COLUMN author_pseud TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(map_sql)?;
+
+        #[derive(Clone)]
+        struct Row {
+            id: String, username: String, profile_url: String, avatar_url: String,
+            updated_at: String, numeric_id: String, joined: String, location: String,
+            birthday: String, pseuds_json: String, bio_json: String,
+            works_count: i64, series_count: i64, bookmarks_count: i64,
+            collections_count: i64, gifts_count: i64,
+            is_blocked: i64, block_ao3_id: String, is_muted: i64, mute_ao3_id: String,
+            profile_fetched_at: String,
+        }
+        let rows: Vec<Row> = {
+            let mut stmt = self.conn
+                .prepare(
+                    "SELECT id, username, profile_url, avatar_url, updated_at,
+                            numeric_id, joined, location, birthday, pseuds_json, bio_json,
+                            works_count, series_count, bookmarks_count, collections_count,
+                            gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id,
+                            profile_fetched_at
+                     FROM ao3_users WHERE id NOT LIKE 'guest:%'",
+                )
+                .map_err(map_sql)?;
+            let mapped = stmt
+                .query_map([], |r| {
+                    Ok(Row {
+                        id: r.get(0)?, username: r.get(1)?, profile_url: r.get(2)?,
+                        avatar_url: r.get(3)?, updated_at: r.get(4)?, numeric_id: r.get(5)?,
+                        joined: r.get(6)?, location: r.get(7)?, birthday: r.get(8)?,
+                        pseuds_json: r.get(9)?, bio_json: r.get(10)?, works_count: r.get(11)?,
+                        series_count: r.get(12)?, bookmarks_count: r.get(13)?,
+                        collections_count: r.get(14)?, gifts_count: r.get(15)?,
+                        is_blocked: r.get(16)?, block_ao3_id: r.get(17)?,
+                        is_muted: r.get(18)?, mute_ao3_id: r.get(19)?,
+                        profile_fetched_at: r.get(20)?,
+                    })
+                })
+                .map_err(map_sql)?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(map_sql)?
+        };
+
+        // Group by account (NOCASE). The byline split is frozen here (same
+        // rule as models::split_author_byline at v12): "Pseud (account)".
+        fn split(byline: &str) -> (String, Option<String>) {
+            let t = byline.trim();
+            if let Some(open) = t.rfind('(') {
+                if t.ends_with(')') {
+                    let user = t[open + 1..t.len() - 1].trim();
+                    let pseud = t[..open].trim();
+                    if !user.is_empty() {
+                        return (user.to_string(),
+                                Some(pseud.to_string()).filter(|p| !p.is_empty()));
+                    }
+                }
+            }
+            (t.to_string(), None)
+        }
+        let mut groups: std::collections::BTreeMap<String, Vec<(Row, String, Option<String>)>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let name = if row.username.trim().is_empty() { row.id.clone() } else { row.username.clone() };
+            let (account, pseud) = split(&name);
+            // A row keyed by something other than the account (the old
+            // URL-segment id) was keyed by the pseud.
+            let pseud = pseud.or_else(|| {
+                (!row.id.eq_ignore_ascii_case(&account)).then(|| row.id.clone())
+            });
+            groups.entry(account.to_ascii_lowercase()).or_default().push((row, account, pseud));
+        }
+
+        let upsert = "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at, numeric_id, joined, location, birthday, pseuds_json, bio_json, works_count, series_count, bookmarks_count, collections_count, gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id, profile_fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+             ON CONFLICT(id) DO UPDATE SET
+                username = excluded.username, profile_url = excluded.profile_url,
+                avatar_url = excluded.avatar_url, updated_at = excluded.updated_at,
+                numeric_id = excluded.numeric_id, joined = excluded.joined,
+                location = excluded.location, birthday = excluded.birthday,
+                pseuds_json = excluded.pseuds_json, bio_json = excluded.bio_json,
+                works_count = excluded.works_count, series_count = excluded.series_count,
+                bookmarks_count = excluded.bookmarks_count,
+                collections_count = excluded.collections_count,
+                gifts_count = excluded.gifts_count,
+                is_blocked = excluded.is_blocked, block_ao3_id = excluded.block_ao3_id,
+                is_muted = excluded.is_muted, mute_ao3_id = excluded.mute_ao3_id,
+                profile_fetched_at = excluded.profile_fetched_at";
+
+        for (_, mut members) in groups {
+            // Freshest profile first, then most recently updated: that row
+            // seeds the merged account; the others fill gaps.
+            members.sort_by(|a, b| {
+                (!b.0.profile_fetched_at.is_empty()).cmp(&!a.0.profile_fetched_at.is_empty())
+                    .then_with(|| b.0.profile_fetched_at.cmp(&a.0.profile_fetched_at))
+                    .then_with(|| b.0.updated_at.cmp(&a.0.updated_at))
+            });
+            let account = members[0].1.clone();
+            // Keep an existing account-keyed id's exact spelling (comments
+            // already point at it); otherwise the account name is the id.
+            let target_id = members.iter()
+                .find(|(r, _, _)| r.id.eq_ignore_ascii_case(&account))
+                .map(|(r, _, _)| r.id.clone())
+                .unwrap_or_else(|| account.clone());
+            let needs_write = members.len() > 1
+                || members[0].0.id != target_id
+                || members[0].0.username != account
+                || members[0].2.is_some();
+            if !needs_write {
+                continue;
+            }
+            let mut merged = members[0].0.clone();
+            merged.id = target_id.clone();
+            merged.username = account.clone();
+            if merged.profile_url.is_empty() || merged.profile_url.contains("/pseuds/") {
+                merged.profile_url = format!("{}/users/{account}", crate::client::BASE_URL);
+            }
+            let mut pseuds: Vec<String> = Vec::new();
+            let mut add = |p: &str| {
+                let p = p.trim();
+                if !p.is_empty() && !pseuds.iter().any(|q| q.eq_ignore_ascii_case(p)) {
+                    pseuds.push(p.to_string());
+                }
+            };
+            for (row, _, pseud) in &members {
+                for p in serde_json::from_str::<Vec<String>>(&row.pseuds_json).unwrap_or_default() {
+                    add(&p);
+                }
+                if let Some(p) = pseud { add(p); }
+            }
+            for (row, _, _) in members.iter().skip(1) {
+                if merged.avatar_url.is_empty() { merged.avatar_url = row.avatar_url.clone(); }
+                if merged.numeric_id.is_empty() { merged.numeric_id = row.numeric_id.clone(); }
+                if merged.is_blocked == 0 && row.is_blocked != 0 {
+                    merged.is_blocked = 1;
+                    merged.block_ao3_id = row.block_ao3_id.clone();
+                }
+                if merged.is_muted == 0 && row.is_muted != 0 {
+                    merged.is_muted = 1;
+                    merged.mute_ao3_id = row.mute_ao3_id.clone();
+                }
+                if merged.updated_at < row.updated_at { merged.updated_at = row.updated_at.clone(); }
+            }
+            merged.pseuds_json = serde_json::to_string(&pseuds).unwrap_or_else(|_| "[]".into());
+
+            self.conn
+                .execute(upsert, rusqlite::params![
+                    merged.id, merged.username, merged.profile_url, merged.avatar_url,
+                    merged.updated_at, merged.numeric_id, merged.joined, merged.location,
+                    merged.birthday, merged.pseuds_json, merged.bio_json, merged.works_count,
+                    merged.series_count, merged.bookmarks_count, merged.collections_count,
+                    merged.gifts_count, merged.is_blocked, merged.block_ao3_id,
+                    merged.is_muted, merged.mute_ao3_id, merged.profile_fetched_at,
+                ])
+                .map_err(map_sql)?;
+            for (row, _, pseud) in &members {
+                if row.id == target_id {
+                    continue;
+                }
+                self.conn
+                    .execute(
+                        "UPDATE comments SET author_id = ?1, author_pseud = ?2 WHERE author_id = ?3",
+                        rusqlite::params![target_id, pseud.clone().unwrap_or_default(), row.id],
+                    )
+                    .map_err(map_sql)?;
+                self.conn
+                    .execute("DELETE FROM ao3_users WHERE id = ?1 AND id <> ?2 /* v12 fold */",
+                             rusqlite::params![row.id, target_id])
+                    .map_err(map_sql)?;
+            }
+        }
+        Ok(())
     }
 
     /// A write transaction for multi-row batches. Statements executed on

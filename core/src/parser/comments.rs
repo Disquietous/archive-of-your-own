@@ -253,10 +253,17 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         ("Anonymous".to_string(), None)
     };
 
-    // Stable user ID: for registered users use the username from their profile path,
-    // for guests use a hash of their display name
+    // Stable user ID: for registered users the account username from
+    // their profile path (/users/{account}[/pseuds/{pseud}] — a pseud is
+    // a detail of the account, never an identity of its own); for guests
+    // a hash of their display name.
     let user_id = if let Some(ref url) = profile_url {
-        url.rsplit('/').next().unwrap_or(&username).to_string()
+        let path = url.split('?').next().unwrap_or(url);
+        path.split("/users/").nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&username).to_string())
     } else {
         format!("guest:{:x}", simple_hash(&username))
     };

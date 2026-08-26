@@ -247,30 +247,13 @@ pub(super) fn now_utc() -> String {
     crate::timefmt::now_utc_datetime()
 }
 
-/// AO3 bylines render as "Pseud (Username)" (also without the space) when
-/// the pseud differs from the account name. Returns (username, pseud) —
-/// plain names pass through as (name, None). Real usernames never contain
-/// spaces or parens, so URLs must always use the split-out account name.
-pub(super) fn split_author_byline(author: &str) -> (String, Option<String>) {
-    let t = author.trim();
-    if let Some(open) = t.rfind('(') {
-        if t.ends_with(')') {
-            let user = t[open + 1..t.len() - 1].trim();
-            let pseud = t[..open].trim();
-            if !user.is_empty() {
-                return (user.to_string(),
-                        Some(pseud.to_string()).filter(|p| !p.is_empty()));
-            }
-        }
-    }
-    (t.to_string(), None)
-}
+pub(super) use crate::models::split_author_byline;
 
 // scaffolding is in lib.rs
 
 #[cfg(test)]
 mod byline_tests {
-    use super::split_author_byline;
+    use crate::models::split_author_byline;
 
     #[test]
     fn test_split_author_byline() {

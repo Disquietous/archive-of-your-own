@@ -551,6 +551,29 @@ mod comment_tests {
     use std::fs;
 
     #[test]
+    fn test_comment_author_pseud_keys_by_account() {
+        // A comment posted from a pseud links /users/{account}/pseuds/{pseud}
+        // with the byline "Pseud (account)": the id is the account, the
+        // username keeps the byline.
+        let html = r#"<ol class="thread">
+  <li class="comment group" id="comment_555" role="article">
+    <div class="comment">
+      <h4 class="heading byline">
+        <a href="/users/ambirch/pseuds/AshWrecksEverything" rel="nofollow">AshWrecksEverything (ambirch)</a>
+      </h4>
+      <span class="posted datetime"><span class="date">2025-03-15</span></span>
+      <blockquote class="userstuff"><p>hi</p></blockquote>
+    </div>
+  </li>
+</ol>"#;
+        let page = parse_comments(html);
+        assert_eq!(page.comments.len(), 1);
+        let c = &page.comments[0];
+        assert_eq!(c.author.id, "ambirch");
+        assert_eq!(c.author.username, "AshWrecksEverything (ambirch)");
+    }
+
+    #[test]
     fn test_parse_comments() {
         let html = fs::read_to_string("tests/fixtures/comments.html")
             .expect("Failed to read comments fixture");

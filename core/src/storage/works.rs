@@ -45,6 +45,9 @@ impl Storage {
             )?;
             // Seeing a work's details anywhere feeds the autocomplete tag cache.
             let _ = self.harvest_work_tags(work);
+            // Author bylines are user sightings: "Pseud (account)" teaches
+            // the account row a pseud it hadn't recorded.
+            self.record_author_bylines(&work.authors)?;
             Ok(())
         })
     }
@@ -525,13 +528,21 @@ impl Storage {
     }
 
     /// Return works with the given author, most recently updated first.
-    /// Answered from the works cache (exact author match, like the
-    /// work_authors index lookup it replaces).
+    /// Answered from the works cache. `username` may be any name form the
+    /// users cache resolves (account username, byline, or recorded pseud);
+    /// a work bylined "Pseud (account)" belongs to the account, so an
+    /// author's list includes works posted under any of their pseuds —
+    /// the same set AO3 shows on /users/{account}/works.
     pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
+        let account = self.users_cache
+            .resolve(username)
+            .map(|e| e.username.clone())
+            .unwrap_or_else(|| crate::models::split_author_byline(username).0);
         let mut works: Vec<WorkSummary> = self.works_cache
             .all()
             .into_iter()
-            .filter(|e| e.summary.authors.iter().any(|a| a == username))
+            .filter(|e| e.summary.authors.iter()
+                .any(|a| crate::models::split_author_byline(a).0.eq_ignore_ascii_case(&account)))
             .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
             .collect();
         works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated));

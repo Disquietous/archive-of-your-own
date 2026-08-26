@@ -470,3 +470,32 @@ pub enum InlineContent {
     Superscript { content: Vec<InlineContent> },
     LineBreak,
 }
+
+/// AO3 bylines render as "Pseud (Username)" (also without the space) when
+/// the pseud differs from the account name. Returns (username, pseud) —
+/// plain names pass through as (name, None). Real usernames never contain
+/// spaces or parens, so URLs must always use the split-out account name.
+pub fn split_author_byline(author: &str) -> (String, Option<String>) {
+    let t = author.trim();
+    if let Some(open) = t.rfind('(') {
+        if t.ends_with(')') {
+            let user = t[open + 1..t.len() - 1].trim();
+            let pseud = t[..open].trim();
+            if !user.is_empty() {
+                return (user.to_string(),
+                        Some(pseud.to_string()).filter(|p| !p.is_empty()));
+            }
+        }
+    }
+    (t.to_string(), None)
+}
+
+/// The inverse of `split_author_byline`: how AO3 renders an author —
+/// "Pseud (account)" when the pseud differs from the account name, else
+/// the bare account name.
+pub fn join_author_byline(account: &str, pseud: Option<&str>) -> String {
+    match pseud.map(str::trim).filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case(account)) {
+        Some(p) => format!("{p} ({account})"),
+        None => account.to_string(),
+    }
+}

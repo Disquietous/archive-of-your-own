@@ -1247,7 +1247,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1257,6 +1257,31 @@ fn test_schema_version_fetched_at_and_author_index() {
     assert_eq!(db.get_works_by_author("Author1").unwrap().len(), 1);
     assert_eq!(db.get_works_by_author("Author2").unwrap().len(), 1);
     assert!(db.get_works_by_author("Nobody").unwrap().is_empty());
+}
+
+#[test]
+fn test_get_works_by_author_includes_pseud_bylines() {
+    let db = open_test_db();
+    let mut plain = sample_work(1);
+    plain.authors = vec!["writer".into()];
+    let mut pseud = sample_work(2);
+    pseud.authors = vec!["PenName (writer)".into()];
+    let mut other = sample_work(3);
+    other.authors = vec!["writer_two".into()];
+    for w in [&plain, &pseud, &other] { db.save_work(w).unwrap(); }
+    // An author's list is everything under their account, pseud or not —
+    // what AO3 shows on /users/writer/works.
+    let ids: Vec<u64> = db.get_works_by_author("writer").unwrap().iter().map(|w| w.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&1) && ids.contains(&2));
+    // Asking by a byline resolves to the account too.
+    assert_eq!(db.get_works_by_author("PenName (writer)").unwrap().len(), 2);
+    // save_work taught the users cache the pseud, so the bare pseud
+    // resolves to the account too.
+    assert_eq!(db.get_works_by_author("PenName").unwrap().len(), 2);
+    assert!(db.get_user_profile("writer").unwrap().is_none());
+    assert_eq!(db.get_ao3_user("PenName").unwrap().map(|u| u.username), Some("writer".to_string()));
+    assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
 }
 
 #[test]
@@ -1331,6 +1356,24 @@ fn test_migration_v1_to_v2() {
                 mute_ao3_id TEXT NOT NULL DEFAULT '',
                 profile_fetched_at TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE comments (
+                id INTEGER PRIMARY KEY, work_id INTEGER NOT NULL DEFAULT 0,
+                chapter_id INTEGER NOT NULL DEFAULT 0, parent_id INTEGER NOT NULL DEFAULT 0,
+                author_id TEXT NOT NULL, posted_at TEXT NOT NULL DEFAULT '',
+                content_json TEXT NOT NULL DEFAULT '[]',
+                cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (author_id) REFERENCES ao3_users(id)
+            );
+            INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at,
+                                   profile_fetched_at, pseuds_json, numeric_id)
+             VALUES ('writer_one', 'writer_one', 'https://archiveofourown.org/users/writer_one',
+                     '', '2024-01-01 00:00:00', '2024-01-01 00:00:00', '[\"writer_one\"]', '11'),
+                    ('PenOne', 'PenOne (writer_one)',
+                     'https://archiveofourown.org/users/writer_one/pseuds/PenOne',
+                     'http://a/pen.png', '2024-02-01 00:00:00', '', '[]', ''),
+                    ('guest:abc', 'A Guest (Guest)', '', '', '2024-01-01 00:00:00', '', '[]', '');
+            INSERT INTO comments (id, work_id, author_id, content_json)
+             VALUES (1, 7, 'PenOne', '[]'), (2, 7, 'guest:abc', '[]');
             CREATE TABLE accounts (
                 id          TEXT PRIMARY KEY,
                 username    TEXT NOT NULL,
@@ -1369,7 +1412,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1384,6 +1427,24 @@ fn test_migration_v1_to_v2() {
     assert_eq!(fluff.2, "{\"a\":3}");
     // Author index backfilled from authors_json.
     assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
+    // v12: the pseud-keyed row folded into the account row — pseud learned,
+    // avatar kept, comment re-pointed with the posting pseud preserved.
+    let non_guest: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM ao3_users WHERE id NOT LIKE 'guest:%'", [], |r| r.get(0)).unwrap();
+    assert_eq!(non_guest, 1);
+    let folded = db.users_cache.resolve("writer_one").expect("profile row kept");
+    assert!(!folded.profile_fetched_at.is_empty());
+    assert_eq!(folded.numeric_id, "11");
+    assert_eq!(folded.avatar_url, "http://a/pen.png");
+    assert_eq!(folded.pseuds(), vec!["writer_one".to_string(), "PenOne".to_string()]);
+    assert_eq!(db.get_ao3_user("PenOne").unwrap().map(|u| u.id), Some("writer_one".to_string()));
+    let comments = db.get_comments(7, 0).unwrap();
+    let by_pen = comments.iter().find(|c| c.id == 1).unwrap();
+    assert_eq!(by_pen.author.id, "writer_one");
+    assert_eq!(by_pen.author.username, "PenOne (writer_one)");
+    assert_eq!(by_pen.author.avatar_url.as_deref(), Some("http://a/pen.png"));
+    let by_guest = comments.iter().find(|c| c.id == 2).unwrap();
+    assert_eq!(by_guest.author.username, "A Guest (Guest)");
     // v8: tags backfilled into the join tables from the JSON columns
     // (which are gone), and reads hydrate from work_tags.
     let legacy = db.get_work(7).unwrap().unwrap();
@@ -1421,7 +1482,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 11);
+    assert_eq!(db.schema_version().unwrap(), 12);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1836,6 +1897,8 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "UPDATE OR IGNORE bookmarks SET account_id = substr(account_id"), // v10 account-id rekey
         ("mod.rs", "DELETE FROM bookmarks WHERE account_id LIKE"),   // v10 account-id rekey
         ("mod.rs", "UPDATE bookmarks SET account_id = '[none]'"),    // v10 logged-out sentinel
+        ("mod.rs", "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at, numeric_id, joined,"), // v12 account fold
+        ("mod.rs", "DELETE FROM ao3_users WHERE id = ?1 AND id <> ?2 /* v12 fold */"), // v12 account fold
     ];
     for (file, src) in sources {
         for (lineno, line) in src.lines().enumerate() {
@@ -2084,13 +2147,128 @@ fn users_cache_profile_round_trip_no_sql_reads() {
     assert_eq!(got.pseuds, vec!["RX".to_string()]);
     assert!(!got.fetched_at.is_empty());
     let row_fetched: String = db.conn.query_row(
-        "SELECT profile_fetched_at FROM ao3_users WHERE id = 'reader_x'",
+        "SELECT profile_fetched_at FROM ao3_users WHERE id = 'reader_x' COLLATE NOCASE",
         [], |r| r.get(0)).unwrap();
     assert_eq!(got.fetched_at, row_fetched);
 
     db.set_user_block_state("READER_X", true, Some("b1")).unwrap();
     assert!(db.get_user_profile("reader_x").unwrap().unwrap().blocked);
     let blocked: i64 = db.conn.query_row(
-        "SELECT is_blocked FROM ao3_users WHERE id = 'reader_x'", [], |r| r.get(0)).unwrap();
+        "SELECT is_blocked FROM ao3_users WHERE id = 'reader_x' COLLATE NOCASE", [], |r| r.get(0)).unwrap();
     assert_eq!(blocked, 1);
+}
+
+// ===========================================================================
+// Users cache — one row per AO3 account, pseuds learned from sightings
+// ===========================================================================
+
+#[test]
+fn users_cache_learns_pseuds_from_sightings_and_keys_by_account() {
+    let db = open_test_db();
+    // A comment author posting from a pseud: the row is the account, the
+    // pseud is recorded on it, and every name form resolves to it.
+    db.upsert_ao3_user(&AO3User {
+        id: "ambirch".into(), username: "AshWrecksEverything (ambirch)".into(),
+        profile_url: Some("https://archiveofourown.org/users/ambirch/pseuds/AshWrecksEverything".into()),
+        avatar_url: None,
+    }).unwrap();
+    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+    for name in ["ambirch", "AMBIRCH", "AshWrecksEverything", "AshWrecksEverything (ambirch)"] {
+        let u = db.get_ao3_user(name).unwrap().unwrap_or_else(|| panic!("{name} resolves"));
+        assert_eq!(u.id, "ambirch");
+        assert_eq!(u.username, "ambirch");
+        assert!(db.has_ao3_user_with_username(name).unwrap());
+    }
+    let pseuds_json: String = db.conn.query_row(
+        "SELECT pseuds_json FROM ao3_users WHERE id = 'ambirch'", [], |r| r.get(0)).unwrap();
+    assert_eq!(pseuds_json, r#"["AshWrecksEverything"]"#);
+
+    // A work byline teaches a second pseud; a repeat sighting is a no-op.
+    let mut w = sample_work(1);
+    w.authors = vec!["OtherPen (ambirch)".into(), "someone_else".into()];
+    db.save_work(&w).unwrap();
+    db.save_work(&w).unwrap();
+    let pseuds_json: String = db.conn.query_row(
+        "SELECT pseuds_json FROM ao3_users WHERE id = 'ambirch'", [], |r| r.get(0)).unwrap();
+    assert_eq!(pseuds_json, r#"["AshWrecksEverything","OtherPen"]"#);
+    assert!(db.has_ao3_user_with_username("someone_else").unwrap());
+    assert_eq!(db.get_works_by_author("OtherPen").unwrap().len(), 1);
+
+    // The profile page's pseud list merges with sightings — nothing lost.
+    let profile = UserProfile {
+        username: "ambirch".into(), numeric_id: Some("7".into()), avatar_url: None,
+        pseuds: vec!["ambirch".into(), "AshWrecksEverything".into()],
+        joined: String::new(), location: String::new(), birthday: String::new(),
+        bio: Vec::new(), works_count: 17, series_count: 0, bookmarks_count: 0,
+        collections_count: 0, gifts_count: 0, blocked: false, block_ao3_id: None,
+        muted: false, mute_ao3_id: None, viewer_signed_in: false, subscribed: false,
+        subscription_ao3_id: None, fetched_at: String::new(),
+    };
+    db.upsert_user_profile(&profile).unwrap();
+    let got = db.get_user_profile("OtherPen").unwrap().expect("pseud resolves to the profile");
+    assert_eq!(got.username, "ambirch");
+    assert_eq!(got.pseuds, vec!["ambirch".to_string(), "AshWrecksEverything".into(), "OtherPen".into()]);
+    assert_eq!(got.works_count, 17);
+
+    // Search matches pseuds and returns the account.
+    assert_eq!(db.search_ao3_usernames("ashwrecks", 10).unwrap(), vec!["ambirch".to_string()]);
+
+    // A pseud never shadows a real account of the same name.
+    db.upsert_ao3_user(&AO3User {
+        id: "OtherPen".into(), username: "OtherPen".into(), profile_url: None, avatar_url: None,
+    }).unwrap();
+    assert_eq!(db.get_ao3_user("OtherPen").unwrap().unwrap().id, "OtherPen");
+    assert_eq!(db.get_ao3_user("OtherPen (ambirch)").unwrap().unwrap().id, "ambirch");
+}
+
+#[test]
+fn users_cache_matches_rows_after_each_mutation() {
+    let db = open_test_db();
+    let check = |name: &str| {
+        let e = db.users_cache.resolve(name).expect("cached");
+        let (username, avatar, pseuds, blocked, muted, fetched): (String, String, String, i64, i64, String) =
+            db.conn.query_row(
+                "SELECT username, avatar_url, pseuds_json, is_blocked, is_muted, profile_fetched_at
+                 FROM ao3_users WHERE id = ?1", [&e.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap();
+        assert_eq!(e.username, username);
+        assert_eq!(e.avatar_url, avatar);
+        assert_eq!(e.pseuds_json, pseuds);
+        assert_eq!(e.is_blocked as i64, blocked);
+        assert_eq!(e.is_muted as i64, muted);
+        assert_eq!(e.profile_fetched_at, fetched);
+    };
+    db.upsert_ao3_user(&AO3User {
+        id: "w".into(), username: "Pen (w)".into(), profile_url: None,
+        avatar_url: Some("http://a/w.png".into()),
+    }).unwrap();
+    check("w");
+    db.record_author_bylines(&["Quill (w)".into()]).unwrap();
+    check("Quill");
+    db.set_user_block_state("Pen (w)", true, Some("b9")).unwrap();
+    check("w");
+    db.set_user_mute_state("w", true, None).unwrap();
+    check("w");
+    let profile = UserProfile {
+        username: "w".into(), numeric_id: None, avatar_url: None, pseuds: vec!["w".into()],
+        joined: String::new(), location: String::new(), birthday: String::new(),
+        bio: Vec::new(), works_count: 1, series_count: 0, bookmarks_count: 0,
+        collections_count: 0, gifts_count: 0, blocked: true, block_ao3_id: Some("b9".into()),
+        muted: true, mute_ao3_id: None, viewer_signed_in: false, subscribed: false,
+        subscription_ao3_id: None, fetched_at: String::new(),
+    };
+    db.upsert_user_profile(&profile).unwrap();
+    check("Pen");
+    // Guests keep their synthetic id and display name.
+    db.upsert_ao3_user(&AO3User {
+        id: "guest:abc".into(), username: "A Guest (Guest)".into(),
+        profile_url: None, avatar_url: None,
+    }).unwrap();
+    let g = db.users_cache.resolve("guest:abc").unwrap();
+    assert_eq!(g.username, "A Guest (Guest)");
+    assert!(g.pseuds().is_empty());
+    check("guest:abc");
+    // One row per account: the whole table is the three identities above.
+    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 2);
 }
