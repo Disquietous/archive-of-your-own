@@ -70,7 +70,9 @@ extension AppState {
         kudosFailedIsRetryable = false
         Task { @MainActor in
             do {
-                let success = try await bridge.leaveKudos(workId: workId)
+                let success = try await kudosOp.run(bridge) { opID in
+                    try await bridge.leaveKudos(workId: workId, opID: opID)
+                }
                 kudosPendingWorkIDs.remove(id)
                 if success {
                     kudosGivenWorkIDs.insert(id)

@@ -223,6 +223,8 @@ final class AppState {
     /// Same, for the reading pane's chapter fetch (first open of an
     /// uncached work, or the toolbar's Refresh).
     let chapterFetchOp = TrackedOperation()
+    /// Same, for the detail pane's kudos POST.
+    let kudosOp = TrackedOperation()
 
     /// Work IDs with a subscription toggle in flight (disables the button).
     var subscriptionTogglingWorkIDs: Set<String> = []

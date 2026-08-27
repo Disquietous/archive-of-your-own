@@ -1263,9 +1263,9 @@ final class RustBridge {
         (try? app?.getKudosGiven()) ?? []
     }
 
-    func leaveKudos(workId: UInt64) async throws -> Bool {
+    func leaveKudos(workId: UInt64, opID: UInt64? = nil) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.leaveKudos(workId: workId)
+        return try await app.leaveKudos(workId: workId, opId: opID)
     }
 
     func postComment(workId: UInt64, chapterId: UInt64, comment: String) async throws -> Bool {

@@ -983,7 +983,9 @@ final class ReadPaneViewController: NSViewController {
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
-        requestOverlayOpID = reading ? appState.chapterFetchOp.opID : appState.workRefreshOp.opID
+        // Kudos posts from either mode's toolbar, so its op shows in both.
+        requestOverlayOpID = appState.kudosOp.opID
+            ?? (reading ? appState.chapterFetchOp.opID : appState.workRefreshOp.opID)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)

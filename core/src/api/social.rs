@@ -6,7 +6,8 @@ use super::*;
 impl AO3App {
     // -- Kudos --
 
-    pub async fn leave_kudos(&self, work_id: u64) -> Result<bool, AO3Error> {
+    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    pub async fn leave_kudos(&self, work_id: u64, op_id: Option<u64>) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             {
                 let c = client.read().await;
@@ -16,7 +17,9 @@ impl AO3App {
             // AO3 answers a duplicate kudos with "already left kudos"
             // rather than erroring, so a full retry after rotation can
             // never double-apply — safe to retry for every failure kind.
-            let accepted = with_recovery(client.clone(), storage.clone(), OpKind::Kudos, RetrySafety::Idempotent,
+            let accepted = with_recovery_as(client.clone(), storage.clone(),
+                op_id.unwrap_or_else(crate::events::next_op_id),
+                OpKind::Kudos, RetrySafety::Idempotent,
                 move |client| {
                     let work_id = work_id;
                     async move {
