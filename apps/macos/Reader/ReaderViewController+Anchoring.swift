@@ -105,7 +105,16 @@ extension ReaderViewController {
     /// Scrolls so the line holding `anchorOffset` sits back at the top of the
     /// viewport, then republishes progress from the new geometry.
     private func restoreAnchor() {
-        guard let offset = anchorOffset else { return }
+        // scheduleAnchorRestore suppressed tracking on the way in. If the
+        // anchor was cleared before this turn (show() repointed the reader
+        // at another work), there is nothing to restore — but tracking must
+        // still be released, or every later scroll tick bails and the new
+        // work's position is never captured or persisted.
+        guard let offset = anchorOffset else {
+            suppressTracking = false
+            posLog("restore skipped: no anchor — tracking released")
+            return
+        }
         suppressTracking = true
         defer {
             suppressTracking = false

@@ -1153,6 +1153,14 @@ final class RustBridge {
         (try? app?.getNewWorkIds()) ?? []
     }
 
+    func getUnseenNewWorkIds() -> [UInt64] {
+        (try? app?.getUnseenNewWorkIds()) ?? []
+    }
+
+    func markNewWorkSeen(_ workId: UInt64) {
+        try? app?.markNewWorkSeen(workId: workId)
+    }
+
     /// Works a census confirmed are no longer listed on AO3 (cached copies
     /// are retained; this is display metadata).
     func markWorkDetailViewed(_ workId: UInt64) {

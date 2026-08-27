@@ -78,6 +78,10 @@ final class WorkRowCellView: NSTableCellView {
     private var fullTagsHeight: CGFloat = 0
     private let metaLabel = NSTextField(labelWithString: "")
     private let datesLabel = NSTextField(labelWithString: "")
+    /// "New" pill in the top-right corner: a What's New entry the user has
+    /// not selected since it was added. Hidden everywhere else.
+    private let newBadge = NSTextField(labelWithString: "NEW")
+    private var isNew = false
     private let progressTrack = NSView()
     private let progressFill = NSView()
     private var progressWidth: NSLayoutConstraint!
@@ -196,6 +200,11 @@ final class WorkRowCellView: NSTableCellView {
         datesLabel.alignment = .right
         datesLabel.maximumNumberOfLines = 2
 
+        newBadge.wantsLayer = true
+        newBadge.layer?.cornerRadius = 4
+        newBadge.alignment = .center
+        newBadge.isHidden = true
+
         progressTrack.wantsLayer = true
         progressTrack.layer?.cornerRadius = 1.5
         progressFill.wantsLayer = true
@@ -227,7 +236,7 @@ final class WorkRowCellView: NSTableCellView {
         bookmarkButton.toolTip = "Bookmark"
 
         separator.wantsLayer = true
-        for view in [selectionBar, spine, body, datesLabel, separator, bookmarkButton] {
+        for view in [selectionBar, spine, body, datesLabel, newBadge, separator, bookmarkButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -267,6 +276,11 @@ final class WorkRowCellView: NSTableCellView {
 
             datesTop,
             datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            // Pill sits left of the dates block, on the dates' first line.
+            newBadge.trailingAnchor.constraint(equalTo: datesLabel.leadingAnchor, constant: -8),
+            newBadge.firstBaselineAnchor.constraint(equalTo: datesLabel.firstBaselineAnchor),
+            newBadge.widthAnchor.constraint(equalToConstant: 36),
+            newBadge.heightAnchor.constraint(equalToConstant: 16),
             fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
 
             bookmarkButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -309,6 +323,12 @@ final class WorkRowCellView: NSTableCellView {
 
     /// Flip only the bookmark indicator — callable without reconfiguring so
     /// toggles reflect instantly on every visible row.
+    /// What's New "New" pill — shown until the entry is selected.
+    func setNew(_ new: Bool) {
+        isNew = new
+        newBadge.isHidden = !new
+    }
+
     func setBookmarked(_ bookmarked: Bool) {
         isBookmarked = bookmarked
         bookmarkButton.image = NSImage(systemSymbolName: bookmarked ? "bookmark.fill" : "bookmark",
@@ -450,8 +470,10 @@ final class WorkRowCellView: NSTableCellView {
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
                    bookmarked: Bool = false, followState: MacAppModel.AuthorFollowState = .none,
+                   isNew: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
+        setNew(isNew)
         authorName = work.author
         authorLabel.toolTip = "View \(work.author)’s profile"
         setFollowState(followState)
@@ -519,6 +541,11 @@ final class WorkRowCellView: NSTableCellView {
         if !dateLines.isEmpty {
             let size = datesLabel.intrinsicContentSize
             datesSize = NSSize(width: size.width + 10, height: size.height)
+        }
+        // The pill shares the corner — keep the title clear of it too.
+        if isNew {
+            datesSize.width += 44
+            datesSize.height = max(datesSize.height, 16)
         }
         titleLabel.attributedStringValue = Self.wrappedAroundDates(
             title, width: availableTextWidth, datesSize: datesSize)
@@ -601,6 +628,11 @@ final class WorkRowCellView: NSTableCellView {
         summaryLabel.textColor = theme.nsInk2
         metaLabel.textColor = theme.nsInk3
         datesLabel.textColor = theme.nsInk3
+        newBadge.font = MacFont.ui(9, weight: .bold)
+        newBadge.textColor = theme.nsAccent
+        newBadge.layer?.backgroundColor = theme.nsAccentSoft.cgColor
+        newBadge.layer?.borderColor = theme.nsAccent.withAlphaComponent(0.5).cgColor
+        newBadge.layer?.borderWidth = 1
         progressTrack.layer?.backgroundColor = theme.nsSurface3.cgColor
         progressFill.layer?.backgroundColor = theme.nsAccent.cgColor
     }

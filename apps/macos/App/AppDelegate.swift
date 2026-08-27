@@ -4,7 +4,7 @@ import UserNotifications
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let theme = AppTheme()
     let appState = AppState()
-    lazy var model = MacAppModel(appState: appState)
+    lazy var model = MacAppModel(appState: appState, theme: theme)
 
     private var mainWindowController: MainWindowController?
     private var requestLogWindowController: RequestLogWindowController?

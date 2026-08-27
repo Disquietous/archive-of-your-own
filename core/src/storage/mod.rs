@@ -220,7 +220,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 12;
+    const SCHEMA_VERSION: u32 = 13;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -270,6 +270,7 @@ impl Storage {
                 10 => self.migrate_v10(),
                 11 => self.migrate_v11(),
                 12 => self.migrate_v12(),
+                13 => self.migrate_v13(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -764,6 +765,27 @@ impl Storage {
                     .map_err(map_sql)?;
             }
         }
+        Ok(())
+    }
+
+    /// v13 — per-entry "seen" stamp on What's New (2026-08):
+    /// `subscription_new_works.seen_at` ('' = not yet selected since this
+    /// entry was added). Drives the row's "New" badge and the What's New
+    /// count; a re-flagged work resets it so a fresh update reads as new
+    /// again even if the work was viewed before.
+    fn migrate_v13(&self) -> Result<(), AppError> {
+        // The table normally comes from the post-migration ensure-tables
+        // DDL; a database that never reached that step (fresh from v1)
+        // needs it created here before the column can be added.
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS subscription_new_works (
+                    work_id     INTEGER PRIMARY KEY,
+                    added_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 ALTER TABLE subscription_new_works ADD COLUMN seen_at TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(map_sql)?;
         Ok(())
     }
 

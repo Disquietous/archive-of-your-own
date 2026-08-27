@@ -65,6 +65,11 @@ final class AppTheme {
     var imageAutoLoad: Bool {
         didSet { UserDefaults.standard.set(imageAutoLoad, forKey: "imageAutoLoad") }
     }
+    /// Start/Continue Reading opens the chapter in the immersive (fullscreen)
+    /// view when on; the normal reading pane otherwise. Default on.
+    var fullscreenReading: Bool {
+        didSet { UserDefaults.standard.set(fullscreenReading, forKey: "fullscreenReading") }
+    }
     /// Per-image download cap in megabytes; 0 = no limit. Default 2 MB.
     var imageMaxMB: Int {
         didSet { UserDefaults.standard.set(imageMaxMB, forKey: "imageMaxMB") }
@@ -128,6 +133,7 @@ final class AppTheme {
         readHyphenation = d.object(forKey: "readHyphenation") as? Bool ?? false
         readJustified = d.object(forKey: "readJustified") as? Bool ?? false
         imageAutoLoad = d.object(forKey: "imageAutoLoad") as? Bool ?? false
+        fullscreenReading = d.object(forKey: "fullscreenReading") as? Bool ?? true
         imageMaxMB = d.object(forKey: "imageMaxMB") as? Int ?? 2
     }
 

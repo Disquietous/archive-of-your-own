@@ -58,6 +58,7 @@ extension ListPaneViewController {
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        followState: model.authorFollowState(work.author),
+                       isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        summaryExpanded: expandedSummaries.contains(work.id),
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)

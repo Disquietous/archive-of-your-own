@@ -67,6 +67,18 @@ impl AO3App {
         s.get_new_work_ids().map_err(AO3Error::from)
     }
 
+    /// What's New entries not yet selected since they were added.
+    pub fn get_unseen_new_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_unseen_new_work_ids().map_err(AO3Error::from)
+    }
+
+    /// The user selected this What's New entry — clears its "New" badge.
+    pub fn mark_new_work_seen(&self, work_id: u64) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.mark_new_work_seen(work_id, &now_utc()).map_err(AO3Error::from)
+    }
+
     /// Works a census confirmed are no longer listed on AO3 (cached copies
     /// are retained; this is display metadata).
     pub fn get_gone_work_ids(&self) -> Result<Vec<u64>, AO3Error> {

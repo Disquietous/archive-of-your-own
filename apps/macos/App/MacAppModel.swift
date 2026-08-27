@@ -13,6 +13,7 @@ final class MacAppModel {
     }
 
     let appState: AppState
+    let theme: AppTheme
     let search: MacSearchModel
 
     /// The app opens on Currently Reading — the primary use case.
@@ -32,8 +33,9 @@ final class MacAppModel {
         return nil
     }
 
-    init(appState: AppState) {
+    init(appState: AppState, theme: AppTheme) {
         self.appState = appState
+        self.theme = theme
         self.search = MacSearchModel()
         // A new query throws away the previous results, so the filter that
         // targeted them goes too — the same rule every other list follows.
@@ -425,6 +427,7 @@ final class MacAppModel {
         readerReturnPoint = nil
         // Opening the detail view counts as "seen" for the What's New badge.
         appState.markDetailViewed(id)
+        appState.markNewWorkSeen(id)
         // Fill in full metadata (tags, summary, chapter titles) if the row
         // came from a listing with partial data.
         Task { await appState.fetchWorkMetadata(id) }
@@ -442,6 +445,10 @@ final class MacAppModel {
             }
         } else {
             readerReturnPoint = nil
+            // A fresh open lands in the user's preferred reading view;
+            // chapter changes inside an open work keep whatever view the
+            // reader is already in.
+            immersive = theme.fullscreenReading
         }
         // Stash the in-chapter position — the reader consumes this to land
         // back on the anchored line. An explicit `pos` (the return control)

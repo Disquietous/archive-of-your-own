@@ -400,8 +400,11 @@ impl Storage {
 
     pub fn add_new_work_ids(&self, ids: &[u64]) -> Result<(), AppError> {
         self.with_savepoint(Savepoint::NewWorkIds, || {
+            // A work already in the feed that updates again is new again:
+            // reset its seen stamp and bump it to the top of the list.
             let mut stmt = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO subscription_new_works (work_id) VALUES (?1)"
+                "INSERT INTO subscription_new_works (work_id) VALUES (?1)
+                 ON CONFLICT(work_id) DO UPDATE SET seen_at = '', added_at = datetime('now')"
             ).map_err(map_sql)?;
             for id in ids {
                 stmt.execute(params![*id as i64]).map_err(map_sql)?;
@@ -421,6 +424,30 @@ impl Storage {
             .filter_map(|r| r.ok())
             .collect();
         Ok(ids)
+    }
+
+    /// What's New entries the user has not selected since they were added
+    /// (feeds the row "New" badge and the sidebar/dock count).
+    pub fn get_unseen_new_work_ids(&self) -> Result<Vec<u64>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT work_id FROM subscription_new_works WHERE seen_at = '' ORDER BY added_at DESC"
+        ).map_err(map_sql)?;
+        let ids = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            Ok(id as u64)
+        }).map_err(map_sql)?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }
+
+    /// Stamp a What's New entry as selected. No-op for works not in the feed.
+    pub fn mark_new_work_seen(&self, work_id: u64, at: &str) -> Result<(), AppError> {
+        self.conn.execute(
+            "UPDATE subscription_new_works SET seen_at = ?2 WHERE work_id = ?1 AND seen_at = ''",
+            params![work_id as i64, at],
+        ).map_err(map_sql)?;
+        Ok(())
     }
 
     pub fn remove_new_work_id(&self, work_id: u64) -> Result<(), AppError> {

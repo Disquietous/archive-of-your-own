@@ -144,9 +144,14 @@ final class AppState {
     /// works.detail_viewed_at). The What's New badge counts only works the
     /// user hasn't looked at yet.
     var detailViewedWorkIDs: Set<String> = []
-    /// What's New badge: new works whose details the user has yet to view.
+    /// What's New entries the user hasn't selected since they were added
+    /// (persisted as subscription_new_works.seen_at). A work that updates
+    /// again re-enters this set. Drives the row "New" badge, the sidebar and
+    /// dock counts, and the system notification count — one number.
+    var unseenNewWorkIDs: Set<String> = []
+    /// What's New badge: entries not yet selected since they were added.
     var newUnviewedWorkCount: Int {
-        newWorkIDs.filter { !detailViewedWorkIDs.contains($0) }.count
+        newWorkIDs.filter { unseenNewWorkIDs.contains($0) }.count
     }
     /// Works a census confirmed are no longer listed on AO3 — cached copies
     /// are retained everywhere; views may badge them.

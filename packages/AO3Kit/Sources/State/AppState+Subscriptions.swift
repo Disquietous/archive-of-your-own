@@ -77,7 +77,9 @@ extension AppState {
         isCheckingSubscriptions = true
         subscriptionCheckTask.reset()
         subscriptionCheckFailed = 0
-        let newWorksBefore = Set(newWorkIDs)
+        // Notification count = entries that will badge as "New", so the
+        // alert, the sidebar/dock count, and the list agree.
+        let unseenBefore = unseenNewWorkIDs
 
         do {
             // Device-local follows join the check queue alongside real AO3
@@ -137,7 +139,7 @@ extension AppState {
 
             if !subscriptionCheckTask.isCancelled {
                 loadNotifications()
-                let added = newWorkIDs.filter { !newWorksBefore.contains($0) }.count
+                let added = unseenNewWorkIDs.subtracting(unseenBefore).count
                 if added > 0 {
                     onNewWorksFound?(added)
                 }
@@ -157,8 +159,19 @@ extension AppState {
 
     func loadNewWorks() {
         newWorkIDs = bridge.getNewWorkIds().map { String($0) }
+        unseenNewWorkIDs = Set(bridge.getUnseenNewWorkIds().map { String($0) })
         goneWorkIDs = Set(bridge.getGoneWorkIds().map { String($0) })
         detailViewedWorkIDs = Set(bridge.getDetailViewedWorkIds().map { String($0) })
+    }
+
+    /// Selecting a What's New entry clears its "New" badge (and drops it
+    /// from the sidebar/dock count). No-op for works not in the feed.
+    func markNewWorkSeen(_ id: String) {
+        guard unseenNewWorkIDs.contains(id) else { return }
+        unseenNewWorkIDs.remove(id)
+        if let workId = UInt64(id) {
+            bridge.markNewWorkSeen(workId)
+        }
     }
 
     func removeNewWork(_ id: String) {
@@ -166,11 +179,13 @@ extension AppState {
             bridge.removeNewWork(workId)
         }
         newWorkIDs.removeAll { $0 == id }
+        unseenNewWorkIDs.remove(id)
     }
 
     func clearNewWorks() {
         bridge.clearNewWorks()
         newWorkIDs = []
+        unseenNewWorkIDs = []
     }
 
     func reloadCachedWorks() {

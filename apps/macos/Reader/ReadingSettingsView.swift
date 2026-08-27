@@ -112,6 +112,8 @@ struct ReadingSettingsView: View {
                 HStack(spacing: 14) {
                     Toggle("Hyphenation", isOn: $theme.readHyphenation)
                     Toggle("Justify text", isOn: $theme.readJustified)
+                    Toggle("Fullscreen Reading", isOn: $theme.fullscreenReading)
+                        .help("Start/Continue Reading opens chapters in the immersive view")
                     Spacer()
                 }
                 .toggleStyle(.checkbox)
