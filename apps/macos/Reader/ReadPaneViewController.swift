@@ -1219,7 +1219,7 @@ final class ReadPaneViewController: NSViewController {
         downloadButton.toolTip = downloaded ? "Downloaded" : "Download for offline"
 
         let workId = UInt64(work.id)
-        let inList = workId.map { !appState.bridge.getReadingListsForWork($0).isEmpty } ?? false
+        let inList = workId.map { !appState.readingListIDs(forWork: $0).isEmpty } ?? false
         readingListButton.setSymbol(inList ? "books.vertical.fill" : "books.vertical")
         readingListButton.tintOverride = inList ? theme.nsAccent : nil
         readingListButton.isEnabled = workId != nil

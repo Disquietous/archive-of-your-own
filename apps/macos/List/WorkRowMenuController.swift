@@ -77,7 +77,7 @@ final class WorkRowMenuController: NSObject {
         let parent = NSMenuItem(title: "Add to Reading List", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
         let workId = UInt64(work.id)
-        let memberListIds = Set(workId.map { appState.bridge.getReadingListsForWork($0) } ?? [])
+        let memberListIds = Set(workId.map { appState.readingListIDs(forWork: $0) } ?? [])
         for list in appState.readingLists {
             let member = memberListIds.contains(list.id)
             let entry = item(list.name, #selector(menuToggleReadingList(_:)), row)

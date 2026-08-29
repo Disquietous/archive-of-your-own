@@ -45,7 +45,7 @@ extension AppState {
         }
         lastReadID = history.first
 
-        readingLists = bridge.getReadingLists()
+        refreshReadingLists()
         loadNotifications()
     }
 }

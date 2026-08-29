@@ -188,8 +188,37 @@ extension AppState {
         unseenNewWorkIDs = []
     }
 
+    /// Replace the library snapshot from the DB. The full-table read runs
+    /// off the main thread; use `mergeCachedWorks` instead when the set of
+    /// rewritten works is already known.
     func reloadCachedWorks() {
-        cachedWorks = bridge.getAllCachedWorks().map(Self.workFromSummary)
+        let bridge = self.bridge
+        Task.detached(priority: .utility) {
+            let works = bridge.getAllCachedWorks().map(Self.workFromSummary)
+            await MainActor.run { self.cachedWorks = works }
+        }
+    }
+
+    /// Upsert freshly persisted works into the snapshot without re-reading
+    /// the whole table.
+    func mergeCachedWorks(_ works: [Work]) {
+        guard !works.isEmpty else { return }
+        var merged = cachedWorks
+        var index = cachedWorksByID
+        for w in works {
+            if let existing = index[w.id],
+               let pos = merged.firstIndex(where: { $0.id == existing.id }) {
+                merged[pos] = w
+            } else {
+                merged.append(w)
+            }
+            index[w.id] = w
+        }
+        cachedWorks = merged
+    }
+
+    func mergeCachedWorks(_ summaries: [UWorkSummary]) {
+        mergeCachedWorks(summaries.map(Self.workFromSummary))
     }
 
     func loadNotifications() {

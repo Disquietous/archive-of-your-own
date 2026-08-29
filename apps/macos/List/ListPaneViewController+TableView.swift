@@ -21,7 +21,7 @@ extension ListPaneViewController {
             }
             let list = displayedReadingLists[row]
             cell.configure(name: list.name,
-                           workCount: appState.worksInReadingList(list.id).count,
+                           workCount: Int(list.workCount),
                            isActive: model.selectedReadingListID == list.id)
             return cell
         }

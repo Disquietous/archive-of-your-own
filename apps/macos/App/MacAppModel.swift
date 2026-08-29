@@ -848,8 +848,8 @@ final class MacAppModel {
                     appState.bridge.setWorksCrawledNow(subType: subType, subId: subId)
                     subscriptionWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subId)
                     // The crawl rewrote works in the DB (author renames,
-                    // updated stats) — refresh the launch-time snapshot too.
-                    appState.reloadCachedWorks()
+                    // updated stats) — merge them into the snapshot too.
+                    appState.mergeCachedWorks(all)
                 }
             } catch {
                 if !task.isCancelled && !error.isCancellation,
@@ -970,7 +970,7 @@ final class MacAppModel {
                 if authorUsername == username && !task.isCancelled {
                     appState.bridge.setWorksCrawledNow(subType: "author", subId: username)
                     authorWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
-                    appState.reloadCachedWorks()
+                    appState.mergeCachedWorks(all)
                     // Show the cache union, not just the crawl result: works
                     // that disappeared from AO3 stay on the author's list.
                     let cached = appState.bridge.getWorksByAuthor(username: username)

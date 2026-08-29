@@ -106,9 +106,20 @@ final class AppState {
 
     // Cached works from SQLCipher (previously browsed/fetched)
     var cachedWorks: [Work] = [] {
-        didSet { worksGeneration &+= 1 }
+        didSet {
+            worksGeneration &+= 1
+            cachedWorksByID = Dictionary(cachedWorks.map { ($0.id, $0) },
+                                         uniquingKeysWith: { _, last in last })
+        }
     }
+    /// O(1) index over `cachedWorks` for `work(byID:)`; rebuilt whenever the
+    /// snapshot is replaced.
+    private(set) var cachedWorksByID: [String: Work] = [:]
     var readingLists: [UReadingList] = []
+    /// Reading-list membership, refreshed alongside `readingLists` on every
+    /// list mutation so render paths never query the DB for it.
+    var readingListMembers: [Int64: [UInt64]] = [:]
+    var readingListsByWork: [UInt64: [Int64]] = [:]
 
     // Account tracking for per-account data freshness
     var subscriptionsLoadedForAccount: String?
@@ -343,7 +354,7 @@ final class AppState {
         }
 
         // Load reading lists
-        readingLists = bridge.getReadingLists()
+        refreshReadingLists()
 
         // Restore AO3 session. Login state is whatever the stored account
         // says — never probed. If AO3 rejects a request later, the Rust
@@ -418,7 +429,7 @@ final class AppState {
         // consulting the snapshot first showed stale data (e.g. an author's
         // old name) even after a refresh had written the new copy.
         fetchedWorks[id]
-        ?? cachedWorks.first { $0.id == id }
+        ?? cachedWorksByID[id]
         ?? browseResults.first { $0.id == id }
         ?? searchResults.first { $0.id == id }
     }

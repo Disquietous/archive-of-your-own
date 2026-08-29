@@ -188,7 +188,7 @@ extension ListPaneViewController {
                 else { return }
                 let list = displayedReadingLists[row]
                 cell.configure(name: list.name,
-                               workCount: appState.worksInReadingList(list.id).count,
+                               workCount: Int(list.workCount),
                                isActive: activeID == list.id)
             }
         }

@@ -948,9 +948,9 @@ final class MacSearchModel {
             bookmarksHasNext = result.hasNextPage
             bookmarksTotalPages = max(result.totalPages, page)
             bookmarksTotal = result.totalWorks
-            // Fetched works are persisted by the Rust layer — refresh the
-            // library snapshot so they join local lists at once.
-            appState.reloadCachedWorks()
+            // Fetched works are persisted by the Rust layer — merge them
+            // into the library snapshot so they join local lists at once.
+            appState.mergeCachedWorks(bookmarkResults)
         } catch {
             if !appState.searchTask.isCancelled && !error.isCancellation {
                 bookmarksError = error.localizedDescription
@@ -998,9 +998,9 @@ final class MacSearchModel {
                 currentPage = page
                 hasNextPage = result.hasNextPage
                 totalPages = max(result.totalPages, page)
-                // Fetched works are persisted by the Rust layer — refresh
-                // the library snapshot so they join local lists at once.
-                appState.reloadCachedWorks()
+                // Fetched works are persisted by the Rust layer — merge
+                // them into the library snapshot so they join local lists.
+                appState.mergeCachedWorks(result.bookmarks.map(\.work))
             case .collectionsIndex(let criteria):
                 let result = try await trackedFetch(searchFetchOp, appState) { opID in
                     try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)
@@ -1029,8 +1029,8 @@ final class MacSearchModel {
         hasNextPage = result.hasNextPage
         totalPages = max(result.totalPages, page)
         // Results are persisted by the Rust layer as they're fetched —
-        // refresh the library snapshot so they join local lists at once.
-        appState.reloadCachedWorks()
+        // merge them into the library snapshot so they join local lists.
+        appState.mergeCachedWorks(appState.searchResults)
     }
 
     func clearFilters() {

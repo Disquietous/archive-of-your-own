@@ -419,7 +419,7 @@ struct ReadingListPopover: View {
         .onAppear {
             searchFocused = true
             if let workId {
-                memberListIds = Set(appState.bridge.getReadingListsForWork(workId))
+                memberListIds = Set(appState.readingListIDs(forWork: workId))
             }
         }
     }

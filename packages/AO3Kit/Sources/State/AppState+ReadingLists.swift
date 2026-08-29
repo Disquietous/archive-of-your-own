@@ -4,7 +4,23 @@ import SwiftUI
 
 extension AppState {
     func refreshReadingLists() {
-        readingLists = bridge.getReadingLists()
+        let lists = bridge.getReadingLists()
+        var members: [Int64: [UInt64]] = [:]
+        var byWork: [UInt64: [Int64]] = [:]
+        for list in lists {
+            let ids = bridge.getReadingListItems(list.id)
+            members[list.id] = ids
+            for id in ids { byWork[id, default: []].append(list.id) }
+        }
+        readingLists = lists
+        readingListMembers = members
+        readingListsByWork = byWork
+    }
+
+    /// IDs of the lists containing `workId`, from the in-memory membership
+    /// map — safe to call from render paths.
+    func readingListIDs(forWork workId: UInt64) -> [Int64] {
+        readingListsByWork[workId] ?? []
     }
 
     @discardableResult
@@ -37,8 +53,7 @@ extension AppState {
     }
 
     func worksInReadingList(_ listId: Int64) -> [Work] {
-        let ids = bridge.getReadingListItems(listId)
-        return ids.compactMap { work(byID: String($0)) }
+        (readingListMembers[listId] ?? []).compactMap { work(byID: String($0)) }
     }
 
     struct ReadingListSummary {

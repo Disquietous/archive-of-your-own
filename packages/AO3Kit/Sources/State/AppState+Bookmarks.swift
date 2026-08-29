@@ -43,8 +43,7 @@ extension AppState {
             let bookmarks = try await bridge.pullBookmarks(username: username)
             let ids = Set(bookmarks.map { String($0.workId) })
             bookmarkedWorkIDs.formUnion(ids)
-            let works = bridge.getAllCachedWorks()
-            cachedWorks = works.map(Self.workFromSummary)
+            reloadCachedWorks()
             bookmarksLoadedForAccount = username
             bookmarkSyncTask.statusMessage = "Imported \(bookmarks.count) bookmarks"
         } catch let error as Ao3Error {
