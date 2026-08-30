@@ -429,10 +429,10 @@ final class RustBridge {
         return try await app.fetchAuthorWorks(username: username, pseud: pseud, page: page, opId: opID)
     }
 
-    /// One page of a user's public bookmarks — works and bookmarker-scoped
-    /// bookmark rows are cached by the core.
+    /// One page of a user's public bookmarks — the targets (works and
+    /// series) and bookmarker-scoped bookmark rows are cached by the core.
     func fetchUserBookmarksPage(username: String, page: UInt32 = 1,
-                                opID: UInt64? = nil) async throws -> UPagedWorks {
+                                opID: UInt64? = nil) async throws -> UPagedBookmarks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchUserBookmarksPage(username: username, page: page, opId: opID)
     }
@@ -499,10 +499,10 @@ final class RustBridge {
         return try await app.fetchCollectionWorks(name: name, page: page, opId: opID)
     }
 
-    /// One page of a collection's bookmarked items (works only — series and
+    /// One page of a collection's bookmarked items (works and series;
     /// external bookmarks are skipped).
     func fetchCollectionBookmarks(name: String, page: UInt32 = 1,
-                                  opID: UInt64? = nil) async throws -> UPagedWorks {
+                                  opID: UInt64? = nil) async throws -> UPagedBookmarks {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchCollectionBookmarks(name: name, page: page, opId: opID)
     }
@@ -685,6 +685,54 @@ final class RustBridge {
 
     func getBookmarkedWorkIds() -> [UInt64] {
         (try? app?.getBookmarkedWorkIds()) ?? []
+    }
+
+    // Series bookmarks — the series twins of the work-keyed calls above.
+    // A series must be cached (a series bookmark blurb fetched it) before
+    // it can be bookmarked.
+
+    func addSeriesBookmark(_ seriesId: UInt64, note: String? = nil, syncToAo3: Bool = false) {
+        try? app?.addSeriesBookmark(seriesId: seriesId, note: note, syncToAo3: syncToAo3)
+    }
+
+    func removeSeriesBookmark(_ seriesId: UInt64) {
+        try? app?.removeSeriesBookmark(seriesId: seriesId)
+    }
+
+    func isSeriesBookmarked(_ seriesId: UInt64) -> Bool {
+        (try? app?.isSeriesBookmarked(seriesId: seriesId)) ?? false
+    }
+
+    func getBookmarkedSeriesIds() -> [UInt64] {
+        (try? app?.getBookmarkedSeriesIds()) ?? []
+    }
+
+    func getSeriesBookmarkDetails(_ seriesId: UInt64) -> UBookmarkDetails? {
+        (try? app?.getSeriesBookmarkDetails(seriesId: seriesId)) ?? nil
+    }
+
+    func updateSeriesBookmarkDetails(_ seriesId: UInt64, note: String, tagString: String,
+                                     collectionNames: String, private isPrivate: Bool, rec: Bool) {
+        try? app?.updateSeriesBookmarkDetails(seriesId: seriesId, note: note, tagString: tagString,
+                                              collectionNames: collectionNames, private: isPrivate, rec: rec)
+    }
+
+    func updateSeriesBookmarkSync(_ seriesId: UInt64, sync: Bool) {
+        try? app?.updateSeriesBookmarkSync(seriesId: seriesId, sync: sync)
+    }
+
+    func pushSeriesBookmark(seriesId: UInt64) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.pushSeriesBookmark(seriesId: seriesId)
+    }
+
+    func deleteAo3SeriesBookmark(seriesId: UInt64) async throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.deleteAo3SeriesBookmark(seriesId: seriesId)
+    }
+
+    func getCachedSeries(_ seriesId: UInt64) -> USeriesSummary? {
+        (try? app?.getCachedSeries(seriesId: seriesId)) ?? nil
     }
 
     // MARK: - Progress
@@ -1134,9 +1182,9 @@ final class RustBridge {
         (try? app?.getLibraryCollectionWorks(name: name)) ?? []
     }
 
-    /// The cached works seen in a collection's /bookmarks listing — the
+    /// The cached bookmarks seen in a collection's /bookmarks listing — the
     /// library-mode view of its bookmarked items, no network.
-    func getLibraryCollectionBookmarks(name: String) -> [UWorkSummary] {
+    func getLibraryCollectionBookmarks(name: String) -> [UBookmarkHit] {
         (try? app?.getLibraryCollectionBookmarks(name: name)) ?? []
     }
 

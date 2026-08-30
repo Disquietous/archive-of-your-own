@@ -99,6 +99,27 @@ mod tests {
     }
 
     #[test]
+    fn test_blurb_series() {
+        let html = r#"<div id="main"><ol class="work index group">
+          <li id="work_11" class="work blurb group">
+            <div class="header module"><h4 class="heading"><a href="/works/11">T</a>
+              <a rel="author" href="/users/u/pseuds/u">u</a></h4></div>
+            <ul class="series">
+              <li>Part <strong>2</strong> of <a href="/series/501">1st Series</a></li>
+              <li>Part <strong>1</strong> of <a href="/series/502">Other</a></li>
+            </ul>
+            <dl class="stats"></dl>
+          </li></ol></div>"#;
+        let works = parse_work_listings(html).unwrap();
+        assert_eq!(works.len(), 1);
+        let s = &works[0].series;
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].series_id, s[0].part, s[0].name.as_str()), (501, 2, "1st Series"));
+        assert_eq!((s[1].series_id, s[1].part), (502, 1));
+        assert!(s[0].prev_work_id.is_none() && s[0].next_work_id.is_none());
+    }
+
+    #[test]
     fn test_listing_accepts_genuinely_empty_pages() {
         // Empty index list still present.
         let empty_index = r#"<div id="main"><ol class="work index group"></ol></div>"#;
@@ -716,16 +737,17 @@ mod comment_tests {
 
     #[test]
     fn test_parse_collection_bookmarks_fixture() {
-        // Bookmark blurbs wrap standard work blurbs; series/external
-        // bookmarks (no /works/ link) are skipped, and query strings on the
-        // title link don't break id extraction. "Mystery Work" bookmarks
-        // (unrevealed challenge works) parse into a mystery listing with a
-        // synthetic display stub.
+        // Bookmark blurbs wrap standard work blurbs; a series bookmark
+        // (a /series/ link) parses into a Series target with the series
+        // blurb; external bookmarks (neither link) are skipped; query
+        // strings on the title link don't break id extraction. "Mystery
+        // Work" bookmarks (unrevealed challenge works) parse into a
+        // mystery listing with a synthetic display stub.
         let html = fs::read_to_string("tests/fixtures/collection_bookmarks.html")
             .expect("Failed to read collection bookmarks fixture");
         let bookmarks = parse_bookmark_listings(&html).expect("bookmark listing parse");
-        assert_eq!(bookmarks.len(), 3);
-        assert_eq!(bookmarks[0].work_id, 3000001);
+        assert_eq!(bookmarks.len(), 4);
+        assert_eq!(bookmarks[0].target, crate::models::BookmarkTarget::Work(3000001));
         assert_eq!(bookmarks[0].ao3_bookmark_id, 9000001);
         assert_eq!(bookmarks[0].bookmarker, "MockReader");
         assert_eq!(bookmarks[0].note, "A synthetic bookmarker note.");
@@ -739,7 +761,7 @@ mod comment_tests {
         assert_eq!(work.title, "Bookmarked Mock Work");
         assert_eq!(work.word_count, 7777);
         assert!(!bookmarks[0].mystery);
-        assert_eq!(bookmarks[1].work_id, 3000002);
+        assert_eq!(bookmarks[1].target, crate::models::BookmarkTarget::Work(3000002));
         assert_eq!(bookmarks[1].bookmarker, "OtherReader");
         assert_eq!(bookmarks[1].note, "");
         assert!(bookmarks[1].tags.is_empty());
@@ -752,9 +774,18 @@ mod comment_tests {
         // work-N class, the Rec symbol from the li-level status block, and
         // the "Part of" collection from the placeholder header. The work
         // stub carries only the placeholder title and reveal notice.
-        let mystery = &bookmarks[2];
+        // The series bookmark: target and series blurb, no work blurb.
+        let series = &bookmarks[2];
+        assert_eq!(series.target, crate::models::BookmarkTarget::Series(555555));
+        assert_eq!(series.ao3_bookmark_id, 9000003);
+        assert!(series.work_summary.is_none());
+        let sr = series.series_summary.as_ref().expect("series blurb");
+        assert_eq!((sr.id, sr.name.as_str()), (555555, "A Mock Series Bookmark"));
+        assert_eq!(sr.authors, vec!["MockAuthor".to_string()]);
+
+        let mystery = &bookmarks[3];
         assert!(mystery.mystery);
-        assert_eq!(mystery.work_id, 3000004);
+        assert_eq!(mystery.target, crate::models::BookmarkTarget::Work(3000004));
         assert_eq!(mystery.ao3_bookmark_id, 9000004);
         assert_eq!(mystery.bookmarker, "MockReader");
         assert!(mystery.rec);

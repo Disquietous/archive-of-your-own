@@ -1,8 +1,8 @@
 use rusqlite::params;
 
 use crate::error::AppError;
-use crate::models::{Chapter, ContentBlock, LocalSearchCriteria, Rating, SeriesMembership, Warning,
-                    WorkSummary};
+use crate::models::{BookmarkTarget, Chapter, ContentBlock, LocalSearchCriteria, Rating,
+                    SeriesMembership, SeriesSummary, Warning, WorkSummary};
 
 use super::consts::*;
 use super::{map_json, map_sql, str_to_rating, Storage};
@@ -131,6 +131,36 @@ impl Storage {
     /// writes — the work page is authoritative, so an empty slice clears.
     pub fn set_work_series(&self, work_id: u64, series: &[SeriesMembership]) -> Result<(), AppError> {
         self.works_cache.set_series(&self.conn, work_id, series)
+    }
+
+    // -------------------------------------------------------------------
+    // Series
+    // -------------------------------------------------------------------
+
+    /// Upsert a series summary (a series bookmark blurb or series page).
+    pub fn save_series(&self, series: &SeriesSummary) -> Result<(), AppError> {
+        self.with_savepoint(Savepoint::SaveSeries, || {
+            self.series_cache.save(&self.conn, series, &crate::timefmt::now_utc_datetime())
+        })
+    }
+
+    /// Ensure a `series` row exists (a name-only stub when nothing better
+    /// is cached) so a bookmark may target it. Returns true if created.
+    pub fn ensure_series(&self, id: u64, name: &str) -> Result<bool, AppError> {
+        self.series_cache.ensure(&self.conn, id, name, &crate::timefmt::now_utc_datetime())
+    }
+
+    pub fn get_series(&self, id: u64) -> Result<Option<SeriesSummary>, AppError> {
+        Ok(self.series_cache.get(id).map(|s| (*s).clone()))
+    }
+
+    /// Delete a series row; its bookmarks cascade (trigger) and their
+    /// collection links with them (FK) — mirrored in the caches.
+    pub fn delete_series(&self, id: u64) -> Result<(), AppError> {
+        self.series_cache.delete(&self.conn, id)?;
+        let gone = self.bookmarks_cache.purge_target(BookmarkTarget::Series(id));
+        self.collections_cache.purge_bookmarks(&gone);
+        Ok(())
     }
 
     /// An avatar URL already harvested for this username (from cached
@@ -556,14 +586,17 @@ impl Storage {
         self.conn
             .execute("DELETE FROM chapters WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
-        self.bookmarks_cache.remove_for_work(&self.conn, work_id)?;
         self.conn
             .execute("DELETE FROM history WHERE work_id = ?1", params![id])
             .map_err(map_sql)?;
         self.works_cache.delete(&self.conn, work_id)?;
-        // The works DELETE cascades collection_works/collection_bookmarks
-        // rows via their foreign keys — mirror that in the collections map.
+        // The works DELETE cascades: collection_works via its foreign key,
+        // bookmarks via the bookmarks_cascade_work trigger, and those
+        // bookmarks' collection_bookmarks links via their foreign key —
+        // mirror all three in the caches.
         self.collections_cache.purge_work(work_id);
+        let gone = self.bookmarks_cache.purge_target(BookmarkTarget::Work(work_id));
+        self.collections_cache.purge_bookmarks(&gone);
         Ok(())
     }
 

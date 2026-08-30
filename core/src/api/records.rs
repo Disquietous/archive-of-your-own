@@ -24,9 +24,37 @@ pub struct URequestLogEntry {
     pub payload: Option<String>,
 }
 
-/// The full AO3 bookmark object for one work.
+/// An AO3 series as a listing shows it (a series bookmark blurb).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct USeriesSummary {
+    pub id: u64,
+    pub name: String,
+    pub authors: Vec<String>,
+    pub summary: String,
+    pub word_count: u64,
+    pub work_count: u32,
+    pub complete: bool,
+    pub date_updated: String,
+    pub fetched_at: String,
+}
+
+impl From<SeriesSummary> for USeriesSummary {
+    fn from(s: SeriesSummary) -> Self {
+        USeriesSummary {
+            id: s.id, name: s.name, authors: s.authors, summary: s.summary,
+            word_count: s.word_count, work_count: s.work_count, complete: s.complete,
+            date_updated: s.date_updated, fetched_at: s.fetched_at,
+        }
+    }
+}
+
+/// The full AO3 bookmark object for one target (work or series).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UBookmarkDetails {
+    /// "work" or "series".
+    pub bookmark_type: String,
+    /// The work id or series id, per `bookmark_type`.
+    pub target_id: u64,
     pub note: String,
     pub tag_string: String,
     pub collection_names: String,
@@ -284,9 +312,16 @@ impl From<UBookmarkSearchCriteria> for BookmarkSearchCriteria {
 }
 
 /// One bookmark search hit: the bookmark's own fields plus the bookmarked
-/// work's blurb.
+/// item's blurb — exactly one of `work` / `series` is set, per
+/// `bookmark_type`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UBookmarkHit {
+    /// Local bookmark row id; 0 for a remote hit that was not cached.
+    pub id: i64,
+    /// "work" or "series".
+    pub bookmark_type: String,
+    /// The work id or series id, per `bookmark_type`.
+    pub target_id: u64,
     /// Username the bookmark is attributed to (the library search reports
     /// the lowercased account key).
     pub bookmarker: String,
@@ -304,12 +339,16 @@ pub struct UBookmarkHit {
     /// <title>" in the blurb); "" unless mystery.
     pub mystery_collection_name: String,
     pub mystery_collection_title: String,
-    pub work: UWorkSummary,
+    pub work: Option<UWorkSummary>,
+    pub series: Option<USeriesSummary>,
 }
 
 impl From<BookmarkHit> for UBookmarkHit {
     fn from(h: BookmarkHit) -> Self {
         UBookmarkHit {
+            id: h.id,
+            bookmark_type: h.target.kind().to_string(),
+            target_id: h.target.id(),
             bookmarker: h.bookmarker,
             note: h.note,
             tags: h.tags,
@@ -318,7 +357,8 @@ impl From<BookmarkHit> for UBookmarkHit {
             mystery: h.mystery,
             mystery_collection_name: h.mystery_collection_name,
             mystery_collection_title: h.mystery_collection_title,
-            work: UWorkSummary::from(h.work),
+            work: h.work.map(UWorkSummary::from),
+            series: h.series.map(USeriesSummary::from),
         }
     }
 }
@@ -607,7 +647,12 @@ pub struct UCircuitHop {
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UBookmark {
-    pub work_id: u64,
+    /// Local bookmark row id.
+    pub id: i64,
+    /// "work" or "series".
+    pub bookmark_type: String,
+    /// The work id or series id, per `bookmark_type`.
+    pub target_id: u64,
     pub note: String,
     pub sync_to_ao3: bool,
     pub ao3_bookmark_id: i64, // -1 if none

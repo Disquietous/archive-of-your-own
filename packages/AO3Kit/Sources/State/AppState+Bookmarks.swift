@@ -41,8 +41,10 @@ extension AppState {
         bookmarkSyncTask.statusMessage = "Importing bookmarks..."
         do {
             let bookmarks = try await bridge.pullBookmarks(username: username)
-            let ids = Set(bookmarks.map { String($0.workId) })
-            bookmarkedWorkIDs.formUnion(ids)
+            let workIDs = bookmarks.filter { $0.bookmarkType == "work" }.map { String($0.targetId) }
+            let seriesIDs = bookmarks.filter { $0.bookmarkType == "series" }.map { String($0.targetId) }
+            bookmarkedWorkIDs.formUnion(workIDs)
+            bookmarkedSeriesIDs.formUnion(seriesIDs)
             reloadCachedWorks()
             bookmarksLoadedForAccount = username
             bookmarkSyncTask.statusMessage = "Imported \(bookmarks.count) bookmarks"

@@ -302,9 +302,6 @@ impl AO3App {
                     log_db("save_work", s.save_work(w));
                 }
                 let page_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
-                if !page_ids.is_empty() {
-                    log_db("add_subscription_works", s.add_subscription_works(&sub_type, &sub_id, &page_ids));
-                }
                 for id in page_ids {
                     if !state.seen_ids.contains(&id) {
                         state.seen_ids.push(id);
@@ -364,12 +361,9 @@ impl AO3App {
             for w in &parsed_works {
                 log_db("save_work", s.save_work(w));
             }
-            // Merge (not replace): the check only sees page 1, and a full
-            // "Refresh Works" crawl may have cached the author's complete list.
+            // Membership (author byline / series part) rides on the saved
+            // works themselves — nothing to record per subscription.
             let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
-            if !all_ids.is_empty() {
-                log_db("add_subscription_works", s.add_subscription_works(&sub_type, &sub_id, &all_ids));
-            }
             if changed {
                 log_db("add_new_work_ids", s.add_new_work_ids(&updated_ids));
             }

@@ -59,6 +59,7 @@ extension ListPaneViewController {
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        followState: model.authorFollowState(work.author),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
+                       isRemoved: appState.goneWorkIDs.contains(work.id),
                        summaryExpanded: expandedSummaries.contains(work.id),
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)
@@ -155,6 +156,8 @@ extension ListPaneViewController {
                              progress: model.progress(for: work),
                              downloaded: appState.downloadedWorkIDs.contains(work.id),
                              selected: false,
+                             isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
+                             isRemoved: appState.goneWorkIDs.contains(work.id),
                              summaryExpanded: expandedSummaries.contains(work.id),
                              tagsExpanded: expandedTags.contains(work.id),
                              availableTextWidth: max(100, width - 45))

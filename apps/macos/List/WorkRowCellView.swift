@@ -82,6 +82,12 @@ final class WorkRowCellView: NSTableCellView {
     /// not selected since it was added. Hidden everywhere else.
     private let newBadge = NSTextField(labelWithString: "NEW")
     private var isNew = false
+    /// "Removed" pill beside the "New" pill: the work is flagged
+    /// `gone_from_ao3` (deleted or hidden on AO3; only the cached copy remains).
+    private let removedBadge = NSTextField(labelWithString: "REMOVED")
+    private var isRemoved = false
+    /// Holds both pills; a hidden pill detaches so the other slides over.
+    private let badgeStack = NSStackView()
     private let progressTrack = NSView()
     private let progressFill = NSView()
     private var progressWidth: NSLayoutConstraint!
@@ -205,6 +211,11 @@ final class WorkRowCellView: NSTableCellView {
         newBadge.alignment = .center
         newBadge.isHidden = true
 
+        removedBadge.wantsLayer = true
+        removedBadge.layer?.cornerRadius = 4
+        removedBadge.alignment = .center
+        removedBadge.isHidden = true
+
         progressTrack.wantsLayer = true
         progressTrack.layer?.cornerRadius = 1.5
         progressFill.wantsLayer = true
@@ -236,7 +247,11 @@ final class WorkRowCellView: NSTableCellView {
         bookmarkButton.toolTip = "Bookmark"
 
         separator.wantsLayer = true
-        for view in [selectionBar, spine, body, datesLabel, newBadge, separator, bookmarkButton] {
+        badgeStack.orientation = .horizontal
+        badgeStack.spacing = 6
+        badgeStack.addArrangedSubview(removedBadge)
+        badgeStack.addArrangedSubview(newBadge)
+        for view in [selectionBar, spine, body, datesLabel, badgeStack, separator, bookmarkButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -276,11 +291,13 @@ final class WorkRowCellView: NSTableCellView {
 
             datesTop,
             datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            // Pill sits left of the dates block, on the dates' first line.
-            newBadge.trailingAnchor.constraint(equalTo: datesLabel.leadingAnchor, constant: -8),
-            newBadge.firstBaselineAnchor.constraint(equalTo: datesLabel.firstBaselineAnchor),
+            // Pills sit left of the dates block, on the dates' first line.
+            badgeStack.trailingAnchor.constraint(equalTo: datesLabel.leadingAnchor, constant: -8),
+            badgeStack.centerYAnchor.constraint(equalTo: datesLabel.firstBaselineAnchor, constant: -3),
             newBadge.widthAnchor.constraint(equalToConstant: 36),
             newBadge.heightAnchor.constraint(equalToConstant: 16),
+            removedBadge.widthAnchor.constraint(equalToConstant: 58),
+            removedBadge.heightAnchor.constraint(equalToConstant: 16),
             fandomLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
 
             bookmarkButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -327,6 +344,12 @@ final class WorkRowCellView: NSTableCellView {
     func setNew(_ new: Bool) {
         isNew = new
         newBadge.isHidden = !new
+    }
+
+    /// "Removed" pill — the work's `gone_from_ao3` flag.
+    func setRemoved(_ removed: Bool) {
+        isRemoved = removed
+        removedBadge.isHidden = !removed
     }
 
     func setBookmarked(_ bookmarked: Bool) {
@@ -470,10 +493,11 @@ final class WorkRowCellView: NSTableCellView {
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
                    bookmarked: Bool = false, followState: MacAppModel.AuthorFollowState = .none,
-                   isNew: Bool = false,
+                   isNew: Bool = false, isRemoved: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
         setNew(isNew)
+        setRemoved(isRemoved)
         authorName = work.author
         authorLabel.toolTip = "View \(work.author)’s profile"
         setFollowState(followState)
@@ -542,11 +566,10 @@ final class WorkRowCellView: NSTableCellView {
             let size = datesLabel.intrinsicContentSize
             datesSize = NSSize(width: size.width + 10, height: size.height)
         }
-        // The pill shares the corner — keep the title clear of it too.
-        if isNew {
-            datesSize.width += 44
-            datesSize.height = max(datesSize.height, 16)
-        }
+        // The pills share the corner — keep the title clear of them too.
+        if isNew { datesSize.width += 44 }
+        if isRemoved { datesSize.width += 66 }
+        if isNew || isRemoved { datesSize.height = max(datesSize.height, 16) }
         titleLabel.attributedStringValue = Self.wrappedAroundDates(
             title, width: availableTextWidth, datesSize: datesSize)
 
@@ -633,6 +656,11 @@ final class WorkRowCellView: NSTableCellView {
         newBadge.layer?.backgroundColor = theme.nsAccentSoft.cgColor
         newBadge.layer?.borderColor = theme.nsAccent.withAlphaComponent(0.5).cgColor
         newBadge.layer?.borderWidth = 1
+        removedBadge.font = MacFont.ui(9, weight: .bold)
+        removedBadge.textColor = theme.nsAccent2
+        removedBadge.layer?.backgroundColor = theme.nsAccent2.withAlphaComponent(0.13).cgColor
+        removedBadge.layer?.borderColor = theme.nsAccent2.withAlphaComponent(0.5).cgColor
+        removedBadge.layer?.borderWidth = 1
         progressTrack.layer?.backgroundColor = theme.nsSurface3.cgColor
         progressFill.layer?.backgroundColor = theme.nsAccent.cgColor
     }

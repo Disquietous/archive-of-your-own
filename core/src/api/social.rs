@@ -298,10 +298,11 @@ impl AO3App {
     /// Everything the listing showed is cached like collection bookmark
     /// listings: the works, and the bookmark rows scoped to whoever made
     /// them (only the active user's own land in the Bookmarks view).
-    /// Series/external bookmarks are skipped by the parser.
+    /// Work and series bookmarks both cache (targets first); external
+    /// bookmarks are skipped by the parser; mystery blurbs display only.
     /// `op_id`: request-tracking standard (see `fetch_work_full`); a crawl
     /// passes the same id for every page so the whole operation reads as one.
-    pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
+    pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32, op_id: Option<u64>) -> Result<UPagedBookmarks, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let (username, _) = split_author_byline(&username);
             let fetch_user = username.clone();
@@ -317,28 +318,17 @@ impl AO3App {
                 }).await?;
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            let mut works = Vec::new();
+            let mut hits = Vec::new();
             for l in listings {
-                let Some(w) = l.work_summary else { continue };
-                // Mystery stubs (unrevealed challenge works) display in the
-                // returned page but are never cached — no real work data
-                // exists behind them until the reveal.
-                if l.mystery {
-                    works.push(w);
-                    continue;
-                }
-                log_db("save_work", s.save_work(&w));
-                log_db("cache_fetched_bookmark",
-                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
-                                                &l.note, &l.tags.join(", "), l.rec));
-                works.push(w);
+                let id = cache_bookmark_listing(&s, &l);
+                hits.push(hit_from_listing(l, id));
             }
             log_db("commit listing save", tx.commit());
-            Ok(UPagedWorks {
-                works: works.into_iter().map(UWorkSummary::from).collect(),
+            Ok(UPagedBookmarks {
+                bookmarks: hits.into_iter().map(UBookmarkHit::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
-                total_works: found,
+                total_found: found,
             })
         }).await
     }

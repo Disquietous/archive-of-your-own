@@ -211,22 +211,22 @@ final class MacSearchModel {
         }
         let text = f.text.trimmingCharacters(in: .whitespaces)
         if !text.isEmpty {
-            let w = hit.work
-            if !(ci(w.title, text) || w.authors.contains { ci($0, text) } || ci(w.summary, text)) {
+            if !(ci(hit.displayTitle, text) || hit.displayAuthors.contains { ci($0, text) }
+                 || ci(hit.displaySummary, text)) {
                 return false
             }
         }
-        if !Self.numberMatches(f.kudos, value: UInt64(hit.work.kudos)) { return false }
-        if !Self.numberMatches(f.words, value: hit.work.wordCount) { return false }
+        if !Self.numberMatches(f.kudos, value: UInt64(hit.displayKudos)) { return false }
+        if !Self.numberMatches(f.words, value: hit.displayWordCount) { return false }
         if !f.tags.isEmpty {
-            let all = hit.work.relationships + hit.work.characters + hit.work.tags + hit.tags
+            let all = hit.displayWorkTags + hit.tags
             for tag in f.tags
             where !all.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) {
                 return false
             }
         }
         for fandom in f.fandoms
-        where !hit.work.fandoms.contains(where: { $0.caseInsensitiveCompare(fandom) == .orderedSame }) {
+        where !hit.displayFandoms.contains(where: { $0.caseInsensitiveCompare(fandom) == .orderedSame }) {
             return false
         }
         let who = f.bookmarker.trimmingCharacters(in: .whitespaces)
@@ -259,12 +259,12 @@ final class MacSearchModel {
     /// (pre-filter) hits — work tags of every category plus the
     /// bookmarkers' own tags.
     var bookmarkFilterTagPool: [String] {
-        Set(bookmarkHits.flatMap { $0.work.relationships + $0.work.characters + $0.work.tags + $0.tags })
+        Set(bookmarkHits.flatMap { $0.displayWorkTags + $0.tags })
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     var bookmarkFilterFandomPool: [String] {
-        Set(bookmarkHits.flatMap(\.work.fandoms))
+        Set(bookmarkHits.flatMap(\.displayFandoms))
             .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
@@ -839,8 +839,10 @@ final class MacSearchModel {
         if searchLibraryOnly {
             let works = appState.bridge.getLibraryCollectionWorks(name: name)
                 .map(AppState.workFromSummary)
+            // Library-mode panes are works lists; series bookmarks have
+            // no row here.
             let bookmarks = appState.bridge.getLibraryCollectionBookmarks(name: name)
-                .map(AppState.workFromSummary)
+                .compactMap(\.work).map(AppState.workFromSummary)
             if works.isEmpty || bookmarks.isEmpty {
                 originScope = scope
                 scope = .works
@@ -934,15 +936,25 @@ final class MacSearchModel {
         Task { await fetchBookmarksPage(page, appState: appState) }
     }
 
+    /// A bookmark listing page as a works page — the work-row panes show
+    /// the bookmarked works; series bookmarks (cached by the core) have no
+    /// row in a works list.
+    private static func worksPage(_ page: UPagedBookmarks) -> UPagedWorks {
+        UPagedWorks(works: page.bookmarks.compactMap(\.work),
+                    hasNextPage: page.hasNextPage,
+                    totalPages: page.totalPages,
+                    totalWorks: page.totalFound)
+    }
+
     @MainActor
     private func fetchBookmarksPage(_ page: UInt32, appState: AppState) async {
         guard let name = splitCollectionName else { return }
         isFetchingBookmarks = true
         bookmarksError = nil
         do {
-            let result = try await trackedFetch(bookmarksFetchOp, appState) { opID in
+            let result = Self.worksPage(try await trackedFetch(bookmarksFetchOp, appState) { opID in
                 try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
-            }
+            })
             bookmarkResults = result.works.map(AppState.workFromSummary)
             bookmarksPage = page
             bookmarksHasNext = result.hasNextPage
@@ -986,9 +998,9 @@ final class MacSearchModel {
                     try await appState.bridge.fetchCollectionWorks(name: name, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .collectionBookmarks(let name):
-                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                applyWorksPage(Self.worksPage(try await trackedFetch(searchFetchOp, appState) { opID in
                     try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
-                }, page: page, appState: appState)
+                }), page: page, appState: appState)
             case .bookmarkSearch(let criteria):
                 let result = try await trackedFetch(searchFetchOp, appState) { opID in
                     try await appState.bridge.searchBookmarks(criteria: criteria, page: page, opID: opID)
@@ -1000,7 +1012,7 @@ final class MacSearchModel {
                 totalPages = max(result.totalPages, page)
                 // Fetched works are persisted by the Rust layer — merge
                 // them into the library snapshot so they join local lists.
-                appState.mergeCachedWorks(result.bookmarks.map(\.work))
+                appState.mergeCachedWorks(result.bookmarks.compactMap(\.work))
             case .collectionsIndex(let criteria):
                 let result = try await trackedFetch(searchFetchOp, appState) { opID in
                     try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)

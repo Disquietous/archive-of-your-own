@@ -150,10 +150,10 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         renderedHitIDs = ids
     }
 
-    /// Stable row key: the same work can be bookmarked by several users in
-    /// one result set, so the work id alone is not unique.
+    /// Stable row key: the same target can be bookmarked by several users
+    /// in one result set, so the target alone is not unique.
     private static func hitKey(_ hit: UBookmarkHit) -> String {
-        "\(hit.bookmarker)|\(hit.work.id)|\(hit.dateBookmarked)"
+        "\(hit.bookmarker)|\(hit.targetKey)|\(hit.dateBookmarked)"
     }
 
     // MARK: - Table
@@ -228,7 +228,12 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
     @objc private func rowClicked() {
         let row = tableView.clickedRow
         guard row >= 0, row < hits.count else { return }
-        model.openWorkByID(String(hits[row].work.id))
+        let hit = hits[row]
+        if let work = hit.work {
+            model.openWorkByID(String(work.id))
+        } else if let series = hit.series {
+            model.openSeries(id: String(series.id), name: series.name)
+        }
     }
 
     func tableView(_ tableView: NSTableView, shouldShowCellExpansionFor tableColumn: NSTableColumn?, row: Int) -> Bool {

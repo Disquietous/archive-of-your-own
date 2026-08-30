@@ -23,7 +23,8 @@ pub(super) struct CollectionEntity {
     pub profile_fetched_at: String,
     pub tag_ids: Vec<i64>,
     pub work_ids: Vec<u64>,
-    pub bookmark_work_ids: Vec<u64>,
+    /// Row ids in `bookmarks` seen in the collection's /bookmarks listing.
+    pub bookmark_ids: Vec<i64>,
 }
 
 /// The collections tables' in-memory mirror and single write authority
@@ -73,7 +74,7 @@ impl CollectionsCache {
                         profile_fetched_at: row.get(11)?,
                         tag_ids: Vec::new(),
                         work_ids: Vec::new(),
-                        bookmark_work_ids: Vec::new(),
+                        bookmark_ids: Vec::new(),
                     })
                 })
                 .map_err(map_sql)?;
@@ -87,7 +88,7 @@ impl CollectionsCache {
               ORDER BY collection_name, position",
              0usize),
             ("SELECT collection_name, work_id FROM collection_works ORDER BY rowid", 1),
-            ("SELECT collection_name, work_id FROM collection_bookmarks ORDER BY rowid", 2),
+            ("SELECT collection_name, bookmark_id FROM collection_bookmarks ORDER BY rowid", 2),
         ] {
             let mut stmt = conn.prepare(sql).map_err(map_sql)?;
             let rows = stmt
@@ -99,7 +100,7 @@ impl CollectionsCache {
                     match pick {
                         0 => e.tag_ids.push(id),
                         1 => e.work_ids.push(id as u64),
-                        _ => e.bookmark_work_ids.push(id as u64),
+                        _ => e.bookmark_ids.push(id),
                     }
                 }
             }
@@ -183,7 +184,7 @@ impl CollectionsCache {
             profile_fetched_at: old.as_ref().map(|o| o.profile_fetched_at.clone()).unwrap_or_default(),
             tag_ids: old.as_ref().map(|o| o.tag_ids.clone()).unwrap_or_default(),
             work_ids: old.as_ref().map(|o| o.work_ids.clone()).unwrap_or_default(),
-            bookmark_work_ids: old.as_ref().map(|o| o.bookmark_work_ids.clone()).unwrap_or_default(),
+            bookmark_ids: old.as_ref().map(|o| o.bookmark_ids.clone()).unwrap_or_default(),
         }));
         Ok(())
     }
@@ -256,7 +257,7 @@ impl CollectionsCache {
                 profile_fetched_at: String::new(),
                 tag_ids: Vec::new(),
                 work_ids: Vec::new(),
-                bookmark_work_ids: Vec::new(),
+                bookmark_ids: Vec::new(),
             }));
         }
         Ok(created > 0)
@@ -283,45 +284,58 @@ impl CollectionsCache {
         Ok(inserted)
     }
 
-    /// Record works seen in a collection's /bookmarks listing (accumulates
-    /// across pages). Returns how many links were new.
-    pub(super) fn add_bookmarks(&self, conn: &Connection, name: &str, work_ids: &[u64])
+    /// Record bookmarks seen in a collection's /bookmarks listing
+    /// (accumulates across pages). Returns how many links were new.
+    pub(super) fn add_bookmarks(&self, conn: &Connection, name: &str, bookmark_ids: &[i64])
         -> Result<usize, AppError>
     {
         let mut stmt = conn
             .prepare_cached("INSERT OR IGNORE INTO collection_bookmarks
-                             (collection_name, work_id) VALUES (?1, ?2)")
+                             (collection_name, bookmark_id) VALUES (?1, ?2)")
             .map_err(map_sql)?;
         let mut inserted = 0;
-        let mut new_ids: Vec<u64> = Vec::new();
-        for id in work_ids {
-            if stmt.execute(params![name, *id as i64]).map_err(map_sql)? > 0 {
+        let mut new_ids: Vec<i64> = Vec::new();
+        for id in bookmark_ids {
+            if stmt.execute(params![name, *id]).map_err(map_sql)? > 0 {
                 inserted += 1;
                 new_ids.push(*id);
             }
         }
-        self.update_entity(name, |e| e.bookmark_work_ids.extend(new_ids));
+        self.update_entity(name, |e| e.bookmark_ids.extend(new_ids));
         Ok(inserted)
     }
 
-    /// Mirror the works table's ON DELETE CASCADE: a deleted work's join
-    /// rows are gone, so its id leaves every collection's lists. (The
-    /// database rows were removed by the cascade — no SQL here.)
+    /// Mirror collection_bookmarks' ON DELETE CASCADE from bookmarks: the
+    /// bookmark rows are gone, so their links left every collection. (No
+    /// SQL — the cascade already ran.)
+    pub(super) fn purge_bookmarks(&self, bookmark_ids: &[i64]) {
+        if bookmark_ids.is_empty() { return; }
+        let names: Vec<String> = self
+            .map
+            .borrow()
+            .iter()
+            .filter(|(_, e)| e.bookmark_ids.iter().any(|id| bookmark_ids.contains(id)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in names {
+            self.update_entity(&name, |e| e.bookmark_ids.retain(|id| !bookmark_ids.contains(id)));
+        }
+    }
+
+    /// Mirror the works table's ON DELETE CASCADE: a deleted work's
+    /// collection_works rows are gone, so its id leaves every collection's
+    /// works list. (The database rows were removed by the cascade — no SQL
+    /// here.) Its bookmarks' links go through `purge_bookmarks`.
     pub(super) fn purge_work(&self, work_id: u64) {
         let names: Vec<String> = self
             .map
             .borrow()
             .iter()
-            .filter(|(_, e)| {
-                e.work_ids.contains(&work_id) || e.bookmark_work_ids.contains(&work_id)
-            })
+            .filter(|(_, e)| e.work_ids.contains(&work_id))
             .map(|(name, _)| name.clone())
             .collect();
         for name in names {
-            self.update_entity(&name, |e| {
-                e.work_ids.retain(|id| *id != work_id);
-                e.bookmark_work_ids.retain(|id| *id != work_id);
-            });
+            self.update_entity(&name, |e| e.work_ids.retain(|id| *id != work_id));
         }
     }
 }

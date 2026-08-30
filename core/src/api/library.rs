@@ -142,10 +142,23 @@ impl AO3App {
     }
 
     // -- Bookmarks --
+    //
+    // A bookmark targets a work or a series. The `*_bookmark(work_id)`
+    // functions are the work-target forms every existing caller uses; the
+    // `*_series_bookmark(series_id)` forms are their series twins.
 
     pub fn add_bookmark(&self, work_id: u64, note: Option<String>, sync_to_ao3: bool) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.add_bookmark(work_id, note.as_deref(), sync_to_ao3).map_err(AO3Error::from)
+    }
+
+    /// Bookmark a series. The series must be cached (a series bookmark
+    /// blurb or series page fetched it) — the database rejects a bookmark
+    /// of an unknown target.
+    pub fn add_series_bookmark(&self, series_id: u64, note: Option<String>, sync_to_ao3: bool) -> Result<(), AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.add_bookmark_for(BookmarkTarget::Series(series_id), note.as_deref(), sync_to_ao3)
+            .map(|_| ()).map_err(AO3Error::from)
     }
 
     pub fn remove_bookmark(&self, work_id: u64) -> Result<(), AO3Error> {
@@ -153,9 +166,19 @@ impl AO3App {
         storage.remove_bookmark(work_id).map_err(AO3Error::from)
     }
 
+    pub fn remove_series_bookmark(&self, series_id: u64) -> Result<(), AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.remove_bookmark_for(BookmarkTarget::Series(series_id)).map_err(AO3Error::from)
+    }
+
     pub fn is_bookmarked(&self, work_id: u64) -> Result<bool, AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.is_bookmarked(work_id).map_err(AO3Error::from)
+    }
+
+    pub fn is_series_bookmarked(&self, series_id: u64) -> Result<bool, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.is_bookmarked_for(BookmarkTarget::Series(series_id)).map_err(AO3Error::from)
     }
 
     pub fn update_bookmark_note(&self, work_id: u64, note: String) -> Result<(), AO3Error> {
@@ -168,45 +191,56 @@ impl AO3App {
         storage.update_bookmark_sync(work_id, sync).map_err(AO3Error::from)
     }
 
+    pub fn update_series_bookmark_sync(&self, series_id: u64, sync: bool) -> Result<(), AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.update_bookmark_sync_for(BookmarkTarget::Series(series_id), sync).map_err(AO3Error::from)
+    }
+
     pub fn is_bookmark_synced(&self, work_id: u64) -> Result<bool, AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.is_bookmark_synced(work_id).map_err(AO3Error::from)
     }
 
+    /// Work ids of the active account's AO3-synced bookmarks.
     pub fn get_synced_bookmark_ids(&self) -> Result<Vec<u64>, AO3Error> {
         let storage = self.storage.blocking_lock();
         let bookmarks = storage.get_synced_bookmarks().map_err(AO3Error::from)?;
-        Ok(bookmarks.into_iter().map(|(id, _)| id).collect())
+        Ok(bookmarks.into_iter().filter_map(|(t, _)| t.work_id()).collect())
+    }
+
+    /// Series ids of the active account's AO3-synced bookmarks.
+    pub fn get_synced_series_bookmark_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        let bookmarks = storage.get_synced_bookmarks().map_err(AO3Error::from)?;
+        Ok(bookmarks.into_iter().filter_map(|(t, _)| t.series_id()).collect())
     }
 
     pub fn get_bookmark(&self, work_id: u64) -> Result<Option<UBookmark>, AO3Error> {
-        let storage = self.storage.blocking_lock();
-        let bm = storage.get_bookmark_full(work_id).map_err(AO3Error::from)?;
-        Ok(bm.map(|(note, sync, ao3_id)| UBookmark {
-            work_id,
-            note,
-            sync_to_ao3: sync,
-            ao3_bookmark_id: ao3_id.map(|id| id as i64).unwrap_or(-1),
-        }))
+        self.get_bookmark_for(BookmarkTarget::Work(work_id))
     }
 
+    pub fn get_series_bookmark(&self, series_id: u64) -> Result<Option<UBookmark>, AO3Error> {
+        self.get_bookmark_for(BookmarkTarget::Series(series_id))
+    }
+
+    /// Every bookmark of the active account (works and series), newest first.
     pub fn get_all_bookmarks_full(&self) -> Result<Vec<UBookmark>, AO3Error> {
         let storage = self.storage.blocking_lock();
-        let ids = storage.get_bookmarks().map_err(AO3Error::from)?;
+        let targets = storage.get_bookmark_targets().map_err(AO3Error::from)?;
         let mut result = Vec::new();
-        for work_id in ids {
-            if let Some((note, sync, ao3_id)) = storage.get_bookmark_full(work_id).map_err(AO3Error::from)? {
-                result.push(UBookmark {
-                    work_id,
-                    note,
-                    sync_to_ao3: sync,
-                    ao3_bookmark_id: ao3_id.map(|id| id as i64).unwrap_or(-1),
-                });
+        for target in targets {
+            if let Some((note, sync, ao3_id)) = storage.get_bookmark_full_for(target).map_err(AO3Error::from)? {
+                let id = storage.get_bookmark_id(target).map_err(AO3Error::from)?.unwrap_or(0);
+                result.push(Self::ubookmark(target, note, sync, ao3_id, id));
             }
         }
         Ok(result)
     }
 
+    /// Pull the signed-in user's own bookmark listing and mirror it locally
+    /// (the explicit overwrite path: each listed bookmark's note replaces
+    /// the local one). Targets are cached first — the blurb's work or
+    /// series — so every bookmark row has its referent.
     pub async fn pull_bookmarks(&self, username: String) -> Result<Vec<UBookmark>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let mut all_bookmarks = Vec::new();
@@ -231,19 +265,25 @@ impl AO3App {
                     // cache, so a local bookmark row would render blank.
                     // Skip; the pull picks the work up after the reveal.
                     if listing.mystery { continue; }
-                    // Upsert bookmark with sync_to_ao3=true
-                    log_db("add_bookmark", s.add_bookmark(listing.work_id, Some(&listing.note), true));
-                    log_db("set_ao3_bookmark_id", s.set_ao3_bookmark_id(listing.work_id, listing.ao3_bookmark_id));
-                    // Save work metadata if available
-                    if let Some(ref ws) = listing.work_summary {
-                        log_db("save_work", s.save_work(ws));
+                    match listing.target {
+                        BookmarkTarget::Work(_) => {
+                            let Some(ws) = listing.work_summary.as_ref() else { continue };
+                            log_db("save_work", s.save_work(ws));
+                        }
+                        BookmarkTarget::Series(_) => {
+                            let Some(sr) = listing.series_summary.as_ref() else { continue };
+                            log_db("save_series", s.save_series(sr));
+                        }
                     }
-                    all_bookmarks.push(UBookmark {
-                        work_id: listing.work_id,
-                        note: listing.note.clone(),
-                        sync_to_ao3: true,
-                        ao3_bookmark_id: listing.ao3_bookmark_id as i64,
-                    });
+                    // Upsert bookmark with sync_to_ao3=true
+                    let id = match s.add_bookmark_for(listing.target, Some(&listing.note), true) {
+                        Ok(id) => id,
+                        Err(e) => { log_error!("db", "add_bookmark failed: {e}"); continue; }
+                    };
+                    log_db("set_ao3_bookmark_id",
+                           s.set_ao3_bookmark_id_for(listing.target, listing.ao3_bookmark_id));
+                    all_bookmarks.push(Self::ubookmark(listing.target, listing.note.clone(), true,
+                                                       Some(listing.ao3_bookmark_id), id));
                 }
                 log_db("commit bookmark page", tx.commit());
                 drop(s);
@@ -258,49 +298,21 @@ impl AO3App {
     }
 
     pub async fn push_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
-            let details = {
-                let c = client.read().await;
-                let s = storage.lock().await;
-                seed_posting_credentials(&c, &s);
-                s.get_bookmark_details(work_id).map_err(AO3Error::from)?
-            };
-            let Some((note, tags, collections, private, rec, _, _)) = details else {
-                return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
-            };
+        self.push_bookmark_for(BookmarkTarget::Work(work_id)).await
+    }
 
-            // Creating a bookmark that already exists updates it in place
-            // (AO3-side upsert), so a full retry after rotation is safe.
-            let ao3_id = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "bookmark_push".to_string() }, RetrySafety::Idempotent,
-                move |client| {
-                    let (note, tags, collections) = (note.clone(), tags.clone(), collections.clone());
-                    async move {
-                        client.read().await.create_ao3_bookmark(work_id, &note, &tags, &collections, private, rec)
-                            .await.map_err(AO3Error::from)
-                    }
-                }).await?;
-
-            let s = storage.lock().await;
-            {
-                let c = client.read().await;
-                persist_posting_credentials(&c, &s);
-            }
-            if let Some(id) = ao3_id {
-                s.set_ao3_bookmark_id(work_id, id).map_err(AO3Error::from)?;
-                Ok(true)
-            } else {
-                Err(AO3Error::Network { message: "The archive didn’t accept the bookmark.".to_string() })
-            }
-        }).await
+    pub async fn push_series_bookmark(&self, series_id: u64) -> Result<bool, AO3Error> {
+        self.push_bookmark_for(BookmarkTarget::Series(series_id)).await
     }
 
     /// Full bookmark object for a work (notes, tags, collections, flags).
     pub fn get_bookmark_details(&self, work_id: u64) -> Result<Option<UBookmarkDetails>, AO3Error> {
-        let s = self.storage.blocking_lock();
-        Ok(s.get_bookmark_details(work_id).map_err(AO3Error::from)?
-            .map(|(note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id)| {
-                UBookmarkDetails { note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id }
-            }))
+        self.get_bookmark_details_for(BookmarkTarget::Work(work_id))
+    }
+
+    /// Full bookmark object for a series.
+    pub fn get_series_bookmark_details(&self, series_id: u64) -> Result<Option<UBookmarkDetails>, AO3Error> {
+        self.get_bookmark_details_for(BookmarkTarget::Series(series_id))
     }
 
     pub fn update_bookmark_details(&self, work_id: u64, note: String, tag_string: String,
@@ -310,28 +322,36 @@ impl AO3App {
             .map_err(AO3Error::from)
     }
 
-    pub async fn delete_ao3_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
-            let ao3_id = {
-                let s = storage.lock().await;
-                s.get_ao3_bookmark_id(work_id).map_err(AO3Error::from)?
-            };
+    pub fn update_series_bookmark_details(&self, series_id: u64, note: String, tag_string: String,
+                                          collection_names: String, private: bool, rec: bool) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.update_bookmark_details_for(BookmarkTarget::Series(series_id), &note, &tag_string,
+                                      &collection_names, private, rec)
+            .map_err(AO3Error::from)
+    }
 
-            match ao3_id {
-                Some(id) => {
-                    with_recovery(client, storage, OpKind::Fetch { label: "bookmark_delete".to_string() }, RetrySafety::Idempotent,
-                        move |client| async move {
-                            client.read().await.delete_ao3_bookmark(id).await.map_err(AO3Error::from)
-                        }).await
-                }
-                None => Ok(false),
-            }
-        }).await
+    pub async fn delete_ao3_bookmark(&self, work_id: u64) -> Result<bool, AO3Error> {
+        self.delete_ao3_bookmark_for(BookmarkTarget::Work(work_id)).await
+    }
+
+    pub async fn delete_ao3_series_bookmark(&self, series_id: u64) -> Result<bool, AO3Error> {
+        self.delete_ao3_bookmark_for(BookmarkTarget::Series(series_id)).await
     }
 
     pub fn get_bookmarked_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.get_bookmarks().map_err(AO3Error::from)
+    }
+
+    pub fn get_bookmarked_series_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.get_bookmarked_series().map_err(AO3Error::from)
+    }
+
+    /// A cached series summary (from a series bookmark blurb), if any.
+    pub fn get_cached_series(&self, series_id: u64) -> Result<Option<USeriesSummary>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        Ok(storage.get_series(series_id).map_err(AO3Error::from)?.map(USeriesSummary::from))
     }
 
     // -- Reading Progress --
@@ -399,4 +419,95 @@ impl AO3App {
         let storage = self.storage.blocking_lock();
         storage.clear_session_cache().map_err(AO3Error::from)
     }
+}
+
+/// Bookmark helpers shared by the work and series forms above — a separate
+/// block so UniFFI does not try to export them (BookmarkTarget is not an
+/// FFI type).
+impl AO3App {
+    fn ubookmark(target: BookmarkTarget, note: String, sync: bool, ao3_id: Option<u64>, id: i64) -> UBookmark {
+        UBookmark {
+            id,
+            bookmark_type: target.kind().to_string(),
+            target_id: target.id(),
+            note,
+            sync_to_ao3: sync,
+            ao3_bookmark_id: ao3_id.map(|id| id as i64).unwrap_or(-1),
+        }
+    }
+
+    fn get_bookmark_for(&self, target: BookmarkTarget) -> Result<Option<UBookmark>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        let bm = storage.get_bookmark_full_for(target).map_err(AO3Error::from)?;
+        let id = storage.get_bookmark_id(target).map_err(AO3Error::from)?.unwrap_or(0);
+        Ok(bm.map(|(note, sync, ao3_id)| Self::ubookmark(target, note, sync, ao3_id, id)))
+    }
+
+    async fn push_bookmark_for(&self, target: BookmarkTarget) -> Result<bool, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let details = {
+                let c = client.read().await;
+                let s = storage.lock().await;
+                seed_posting_credentials(&c, &s);
+                s.get_bookmark_details_for(target).map_err(AO3Error::from)?
+            };
+            let Some((note, tags, collections, private, rec, _, _)) = details else {
+                return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
+            };
+
+            // Creating a bookmark that already exists updates it in place
+            // (AO3-side upsert), so a full retry after rotation is safe.
+            let ao3_id = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "bookmark_push".to_string() }, RetrySafety::Idempotent,
+                move |client| {
+                    let (note, tags, collections) = (note.clone(), tags.clone(), collections.clone());
+                    async move {
+                        client.read().await.create_ao3_bookmark(target, &note, &tags, &collections, private, rec)
+                            .await.map_err(AO3Error::from)
+                    }
+                }).await?;
+
+            let s = storage.lock().await;
+            {
+                let c = client.read().await;
+                persist_posting_credentials(&c, &s);
+            }
+            if let Some(id) = ao3_id {
+                s.set_ao3_bookmark_id_for(target, id).map_err(AO3Error::from)?;
+                Ok(true)
+            } else {
+                Err(AO3Error::Network { message: "The archive didn’t accept the bookmark.".to_string() })
+            }
+        }).await
+    }
+
+    fn get_bookmark_details_for(&self, target: BookmarkTarget) -> Result<Option<UBookmarkDetails>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_bookmark_details_for(target).map_err(AO3Error::from)?
+            .map(|(note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id)| {
+                UBookmarkDetails {
+                    bookmark_type: target.kind().to_string(), target_id: target.id(),
+                    note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id,
+                }
+            }))
+    }
+
+    async fn delete_ao3_bookmark_for(&self, target: BookmarkTarget) -> Result<bool, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let ao3_id = {
+                let s = storage.lock().await;
+                s.get_ao3_bookmark_id_for(target).map_err(AO3Error::from)?
+            };
+
+            match ao3_id {
+                Some(id) => {
+                    with_recovery(client, storage, OpKind::Fetch { label: "bookmark_delete".to_string() }, RetrySafety::Idempotent,
+                        move |client| async move {
+                            client.read().await.delete_ao3_bookmark(id).await.map_err(AO3Error::from)
+                        }).await
+                }
+                None => Ok(false),
+            }
+        }).await
+    }
+
 }

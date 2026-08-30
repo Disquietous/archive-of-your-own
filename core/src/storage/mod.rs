@@ -15,6 +15,7 @@ mod library;
 mod subscriptions;
 mod bookmarks_cache;
 mod collections_cache;
+mod series_cache;
 mod state_cache;
 mod tag_cache;
 mod users_cache;
@@ -24,6 +25,7 @@ mod works_search;
 
 use bookmarks_cache::BookmarksCache;
 use collections_cache::CollectionsCache;
+use series_cache::SeriesCache;
 use consts::*;
 use state_cache::StateCache;
 use tag_cache::TagCache;
@@ -57,6 +59,8 @@ pub struct Storage {
     collections_cache: CollectionsCache,
     /// The ao3_users mirror — same contract (see users_cache.rs).
     users_cache: UsersCache,
+    /// The series mirror — same contract (see series_cache.rs).
+    series_cache: SeriesCache,
 }
 
 /// A live write transaction from `Storage::begin_tx`. Commit consumes it;
@@ -200,6 +204,7 @@ impl Storage {
             bookmarks_cache: BookmarksCache::default(),
             collections_cache: CollectionsCache::default(),
             users_cache: UsersCache::default(),
+            series_cache: SeriesCache::default(),
         };
         storage.migrate()?;
         // Prime the in-memory caches (tags first — work and collection
@@ -209,6 +214,7 @@ impl Storage {
         storage.tag_cache.load(&storage.conn)?;
         storage.works_cache.load(&storage.conn)?;
         storage.state_cache.load(&storage.conn)?;
+        storage.series_cache.load(&storage.conn)?;
         storage.bookmarks_cache.load(&storage.conn)?;
         storage.collections_cache.load(&storage.conn)?;
         storage.users_cache.load(&storage.conn)?;
@@ -220,7 +226,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 13;
+    const SCHEMA_VERSION: u32 = 15;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -271,6 +277,8 @@ impl Storage {
                 11 => self.migrate_v11(),
                 12 => self.migrate_v12(),
                 13 => self.migrate_v13(),
+                14 => self.migrate_v14(),
+                15 => self.migrate_v15(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -773,6 +781,105 @@ impl Storage {
     /// entry was added). Drives the row's "New" badge and the What's New
     /// count; a re-flagged work resets it so a fresh update reads as new
     /// again even if the work was viewed before.
+    /// v15: bookmarks are real AO3 bookmarks (2026-08-30). A surrogate
+    /// `id` primary key; `bookmark_type` + `target_id` name a work or a
+    /// series (new `series` table, keyed by the AO3 series id like works);
+    /// `UNIQUE(account_id, bookmark_type, target_id)`; target existence and
+    /// delete cascades enforced by triggers (one column can't carry two
+    /// REFERENCES). `collection_bookmarks` links collections to bookmark
+    /// rows instead of works — its rows are dropped (one cached collection;
+    /// Refresh re-fetches) rather than re-pointed.
+    fn migrate_v15(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS series (
+                    id           INTEGER PRIMARY KEY,
+                    name         TEXT NOT NULL DEFAULT '',
+                    authors_json TEXT NOT NULL DEFAULT '[]',
+                    summary      TEXT NOT NULL DEFAULT '',
+                    word_count   INTEGER NOT NULL DEFAULT 0,
+                    work_count   INTEGER NOT NULL DEFAULT 0,
+                    complete     INTEGER NOT NULL DEFAULT 0,
+                    date_updated TEXT NOT NULL DEFAULT '',
+                    fetched_at   TEXT NOT NULL DEFAULT ''
+                 );
+                 CREATE TABLE bookmarks_v15 (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id       TEXT    NOT NULL DEFAULT '[none]',
+                    bookmark_type    TEXT    NOT NULL CHECK (bookmark_type IN ('work', 'series')),
+                    target_id        INTEGER NOT NULL,
+                    note             TEXT    NOT NULL DEFAULT '',
+                    tag_string       TEXT    NOT NULL DEFAULT '',
+                    collection_names TEXT    NOT NULL DEFAULT '',
+                    private          INTEGER NOT NULL DEFAULT 1,
+                    rec              INTEGER NOT NULL DEFAULT 0,
+                    sync_to_ao3      INTEGER NOT NULL DEFAULT 0,
+                    ao3_bookmark_id  INTEGER,
+                    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (account_id, bookmark_type, target_id)
+                 );
+                 INSERT INTO bookmarks_v15
+                    (account_id, bookmark_type, target_id, note, tag_string, collection_names,
+                     private, rec, sync_to_ao3, ao3_bookmark_id, created_at)
+                 SELECT b.account_id, 'work', b.work_id, COALESCE(b.note, ''), b.tag_string,
+                        b.collection_names, b.private, b.rec, b.sync_to_ao3, b.ao3_bookmark_id,
+                        b.created_at
+                 FROM bookmarks b
+                 WHERE EXISTS (SELECT 1 FROM works w WHERE w.id = b.work_id)
+                 ORDER BY b.created_at, b.rowid;
+                 DROP TABLE collection_bookmarks;
+                 DROP TABLE bookmarks;
+                 ALTER TABLE bookmarks_v15 RENAME TO bookmarks;
+                 CREATE INDEX idx_bookmarks_target  ON bookmarks (bookmark_type, target_id);
+                 CREATE INDEX idx_bookmarks_account ON bookmarks (account_id, created_at DESC);
+                 CREATE UNIQUE INDEX idx_bookmarks_ao3 ON bookmarks (ao3_bookmark_id)
+                    WHERE ao3_bookmark_id IS NOT NULL;
+                 CREATE TABLE collection_bookmarks (
+                    collection_name TEXT    NOT NULL REFERENCES collections(name) ON DELETE CASCADE,
+                    bookmark_id     INTEGER NOT NULL REFERENCES bookmarks(id)     ON DELETE CASCADE,
+                    PRIMARY KEY (collection_name, bookmark_id)
+                 );
+                 CREATE INDEX idx_collection_bookmarks_bookmark ON collection_bookmarks (bookmark_id);
+                 CREATE TRIGGER bookmarks_target_exists_ins BEFORE INSERT ON bookmarks BEGIN
+                    SELECT RAISE(ABORT, 'bookmark target missing') WHERE NOT EXISTS (
+                        SELECT 1 FROM works  WHERE NEW.bookmark_type = 'work'   AND id = NEW.target_id
+                        UNION ALL
+                        SELECT 1 FROM series WHERE NEW.bookmark_type = 'series' AND id = NEW.target_id);
+                 END;
+                 CREATE TRIGGER bookmarks_target_exists_upd
+                    BEFORE UPDATE OF bookmark_type, target_id ON bookmarks BEGIN
+                    SELECT RAISE(ABORT, 'bookmark target missing') WHERE NOT EXISTS (
+                        SELECT 1 FROM works  WHERE NEW.bookmark_type = 'work'   AND id = NEW.target_id
+                        UNION ALL
+                        SELECT 1 FROM series WHERE NEW.bookmark_type = 'series' AND id = NEW.target_id);
+                 END;
+                 CREATE TRIGGER bookmarks_cascade_work AFTER DELETE ON works BEGIN
+                    DELETE FROM bookmarks WHERE bookmark_type = 'work' AND target_id = OLD.id;
+                 END;
+                 CREATE TRIGGER bookmarks_cascade_series AFTER DELETE ON series BEGIN
+                    DELETE FROM bookmarks WHERE bookmark_type = 'series' AND target_id = OLD.id;
+                 END;",
+            )
+            .map_err(map_sql)
+    }
+
+    /// v14: author and series membership is derived from the works table
+    /// (bylines / series_json) — drop the explicit rows. Only the
+    /// author-bookmarks cache still uses `subscription_works`.
+    fn migrate_v14(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS subscription_works (
+                    sub_type TEXT NOT NULL,
+                    sub_id   TEXT NOT NULL,
+                    work_id  INTEGER NOT NULL,
+                    PRIMARY KEY (sub_type, sub_id, work_id)
+                 );
+                 DELETE FROM subscription_works WHERE sub_type IN ('author', 'series');",
+            )
+            .map_err(map_sql)
+    }
+
     fn migrate_v13(&self) -> Result<(), AppError> {
         // The table normally comes from the post-migration ensure-tables
         // DDL; a database that never reached that step (fresh from v1)
@@ -806,6 +913,7 @@ impl Storage {
         let _ = self.tag_cache.load(&self.conn);
         let _ = self.works_cache.load(&self.conn);
         let _ = self.state_cache.load(&self.conn);
+        let _ = self.series_cache.load(&self.conn);
         let _ = self.bookmarks_cache.load(&self.conn);
         let _ = self.collections_cache.load(&self.conn);
         let _ = self.users_cache.load(&self.conn);

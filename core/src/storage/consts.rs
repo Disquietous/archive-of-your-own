@@ -28,6 +28,7 @@ pub(crate) enum Savepoint {
     WorksGone,
     AddSubWorks,
     NewWorkIds,
+    SaveSeries,
 }
 
 impl Savepoint {
@@ -42,6 +43,7 @@ impl Savepoint {
             Self::WorksGone => "works_gone",
             Self::AddSubWorks => "add_sub_works",
             Self::NewWorkIds => "new_work_ids",
+            Self::SaveSeries => "save_series",
         }
     }
 }

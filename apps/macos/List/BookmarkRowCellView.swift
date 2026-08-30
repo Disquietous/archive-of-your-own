@@ -320,7 +320,10 @@ final class BookmarkRowCellView: NSTableCellView {
                    workTagsExpanded: Bool, bookmarkerTagsExpanded: Bool,
                    availableTextWidth: CGFloat,
                    followState: (String) -> MacAppModel.AuthorFollowState = { _ in .none }) {
+        // A hit targets a work or a series; the row reads the same display
+        // fields from whichever is present.
         let work = hit.work
+        let series = hit.series
 
         // Chrome fonts are assigned here, not in init, so the app text-size
         // setting (MacFont.scale) applies on every (re)configure.
@@ -373,26 +376,30 @@ final class BookmarkRowCellView: NSTableCellView {
         ], range: NSRange(location: 0, length: corner.length))
         cornerLabel.attributedStringValue = corner
 
-        spine.layer?.backgroundColor = NSColor(Fandom.spineColor(for: work.fandoms.first ?? "Unknown Fandom")).cgColor
+        spine.layer?.backgroundColor = NSColor(Fandom.spineColor(for: hit.displayFandoms.first ?? "Unknown Fandom")).cgColor
         // One fandom per line, matching the work list item. A mystery hit
         // (unrevealed challenge work) has no fandoms — its "Part of
-        // <collection>" line rides the fandom slot, as on AO3.
+        // <collection>" line rides the fandom slot, as on AO3. A series
+        // blurb carries no fandoms — "Series" rides the slot instead.
         fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
-        if hit.mystery && work.fandoms.isEmpty && !hit.mysteryCollectionTitle.isEmpty {
+        if hit.mystery && hit.displayFandoms.isEmpty && !hit.mysteryCollectionTitle.isEmpty {
             fandomLabel.stringValue = "Part of \(hit.mysteryCollectionTitle)"
+        } else if series != nil {
+            fandomLabel.stringValue = "Series"
         } else {
-            fandomLabel.stringValue = work.fandoms.joined(separator: "\n")
+            fandomLabel.stringValue = hit.displayFandoms.joined(separator: "\n")
         }
         fandomLabel.isHidden = fandomLabel.stringValue.isEmpty
 
         // Serif title with the rating badge inline after the last word,
         // wrapped short of the corner block — exactly the work row's title.
-        // No badge when the rating is unknown (mystery works carry none).
+        // No badge when the rating is unknown (mystery works and series
+        // carry none).
         let titleFont = MacFont.serif(16, weight: .semibold)
         let title = NSMutableAttributedString(
-            string: work.title + "\u{00A0}",
+            string: hit.displayTitle + "\u{00A0}",
             attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
-        if let rating = Rating(rawValue: work.rating) {
+        if let work, let rating = Rating(rawValue: work.rating) {
             let badge = NSTextAttachment()
             badge.image = WorkRowCellView.ratingBadgeImage(for: rating)
             badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - WorkRowCellView.badgeSize) / 2,
@@ -407,10 +414,10 @@ final class BookmarkRowCellView: NSTableCellView {
         // Mystery works have no byline at all; other blurbs without an
         // author link (anonymous works) keep the "Unknown" fallback.
         bylineStack.isHidden = hit.mystery
-        rebuildByline(authors: work.authors, followState: followState)
+        rebuildByline(authors: hit.displayAuthors, followState: followState)
 
         let workHeights = configureTagClip(
-            work.relationships + work.characters + work.tags, accented: false,
+            hit.displayWorkTags, accented: false,
             expanded: workTagsExpanded, clip: workTagsClip, label: workTagsLabel,
             heightConstraint: workTagsHeight, width: availableTextWidth)
         collapsedWorkTagsHeight = workHeights.collapsed
@@ -428,8 +435,15 @@ final class BookmarkRowCellView: NSTableCellView {
 
         // No stats exist for a mystery work — zeros would just be noise.
         metaLabel.isHidden = hit.mystery
-        let total = work.complete ? String(work.totalChapters) : "?"
-        metaLabel.stringValue = "♥ \(Fmt.k(Int(work.kudos)))   \(Fmt.k(Int(work.wordCount))) words   \(work.chapterCount)/\(total)"
+        if let work {
+            let total = work.complete ? String(work.totalChapters) : "?"
+            metaLabel.stringValue = "♥ \(Fmt.k(Int(work.kudos)))   \(Fmt.k(Int(work.wordCount))) words   \(work.chapterCount)/\(total)"
+        } else if let series {
+            let works = series.workCount == 1 ? "1 work" : "\(series.workCount) works"
+            metaLabel.stringValue = "\(works)   \(Fmt.k(Int(series.wordCount))) words   \(series.complete ? "Complete" : "In progress")"
+        } else {
+            metaLabel.stringValue = ""
+        }
 
         // One VoiceOver element per row.
         setAccessibilityElement(true)
@@ -440,13 +454,13 @@ final class BookmarkRowCellView: NSTableCellView {
     }
 
     private static func axDescription(for hit: UBookmarkHit) -> String {
-        let work = hit.work
-        var parts: [String] = [work.title, "by \(work.authors.joined(separator: ", "))"]
-        if !work.fandoms.isEmpty { parts.append(work.fandoms.joined(separator: ", ")) }
+        var parts: [String] = [hit.displayTitle, "by \(hit.displayAuthors.joined(separator: ", "))"]
+        if hit.isSeries { parts.append("series") }
+        if !hit.displayFandoms.isEmpty { parts.append(hit.displayFandoms.joined(separator: ", ")) }
         parts.append(hit.bookmarker.isEmpty ? "bookmarked" : "bookmarked by \(hit.bookmarker)")
         if hit.rec { parts.append("recommended") }
         if !hit.dateBookmarked.isEmpty { parts.append("on \(hit.dateBookmarked)") }
-        parts.append("\(Fmt.k(Int(work.wordCount))) words")
+        parts.append("\(Fmt.k(Int(hit.displayWordCount))) words")
         if !hit.note.isEmpty { parts.append("note: \(hit.note)") }
         return parts.joined(separator: ", ")
     }

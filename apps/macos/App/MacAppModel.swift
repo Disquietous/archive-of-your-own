@@ -363,6 +363,15 @@ final class MacAppModel {
 
     /// Show a work's detail page, fetching its metadata first when it isn't
     /// known locally (e.g. opened from a pasted URL).
+    /// Open a series' locally stored works (the subscriptions drill-in)
+    /// — a series bookmark row's click target.
+    func openSeries(id: String, name: String) {
+        goSection(.subscriptions)
+        openSubscriptionAuthorWorks(subscriptionID: id,
+                                    author: name.isEmpty ? "Series \(id)" : name,
+                                    subType: "series")
+    }
+
     func openWorkByID(_ id: String) {
         if appState.work(byID: id) != nil {
             selectWork(id)
@@ -843,8 +852,8 @@ final class MacAppModel {
                 }
                 if subscriptionWorksSubId == subId && !task.isCancelled {
                     subscriptionWorksList = all
-                    let ids = all.map { UInt64($0.id) ?? 0 }.filter { $0 > 0 }
-                    appState.bridge.saveSubscriptionWorks(subType: subType, subId: subId, workIds: ids)
+                    // Membership is derived from the crawled works
+                    // themselves (byline / series part) — nothing to save.
                     appState.bridge.setWorksCrawledNow(subType: subType, subId: subId)
                     subscriptionWorksCrawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subId)
                     // The crawl rewrote works in the DB (author renames,
@@ -1158,7 +1167,9 @@ final class MacAppModel {
             let result = try await appState.bridge.fetchUserBookmarksPage(username: username, page: page,
                                                                           opID: opID)
             guard authorUsername == username else { return nil }
-            let works = result.works.map(AppState.workFromSummary)
+            // This pane is a works list; series bookmarks (cached by the
+            // core) have no row here.
+            let works = result.bookmarks.compactMap(\.work).map(AppState.workFromSummary)
             for work in works { appState.fetchedWorks[work.id] = work }
             let existing = Set(authorBookmarksList.map(\.id))
             authorBookmarksList.append(contentsOf: works.filter { !existing.contains($0.id) })

@@ -65,6 +65,7 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
     let language = extract_stat_text(blurb, "dd.language");
     let (word_count, chapter_count, total_chapters, kudos, hits, bookmarks, comments) =
         extract_blurb_stats(blurb);
+    let series = extract_blurb_series(blurb);
 
     Ok(WorkSummary {
         id,
@@ -91,11 +92,44 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         date_updated,
         language,
         complete,
-        // Listing blurbs do carry series markup (ul.series) but blurb series
-        // parsing is out of scope; only the work page populates this.
-        series: Vec::new(),
+        // Blurb series carry id, name and part; prev/next links exist only
+        // on the work page (storage merges them in on save).
+        series,
         fetched_at: String::new(),
     })
+}
+
+/// Series memberships from a blurb's `ul.series` block:
+/// `<li>Part <strong>2</strong> of <a href="/series/123">Name</a></li>`.
+fn extract_blurb_series(blurb: &ElementRef) -> Vec<SeriesMembership> {
+    let item_sel = sel("ul.series li");
+    let link_sel = sel("a[href^='/series/']");
+    let mut out = Vec::new();
+    for item in blurb.select(&item_sel) {
+        let Some(link) = item.select(&link_sel).next() else { continue };
+        let Some(series_id) = link.value().attr("href")
+            .and_then(|h| h.split('/').find_map(|seg| seg.parse::<u64>().ok()))
+        else { continue };
+        // Part number: first integer in the text before the link (the
+        // wording is localizable and series names may start with digits).
+        let mut before = String::new();
+        for node in item.descendants() {
+            if node.id() == link.id() { break; }
+            if let Some(t) = node.value().as_text() { before.push_str(t); }
+        }
+        let part = before.split(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        out.push(SeriesMembership {
+            series_id,
+            name: text(&link),
+            part,
+            prev_work_id: None,
+            next_work_id: None,
+        });
+    }
+    out
 }
 
 fn extract_work_id(blurb: &ElementRef) -> Result<u64, AppError> {
@@ -300,24 +334,34 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     let mystery_sel = sel("div.mystery");
     let mystery = blurb.select(&mystery_sel).next().is_some();
 
-    // Extract work_id from the heading link. Mystery blurbs have no link —
-    // their id survives only in the li's work-N class (which series and
-    // external bookmarks lack, so those still fail out here and get
-    // skipped).
+    // The target from the heading link: /works/N or /series/N. Mystery
+    // blurbs have no link — their work id survives only in the li's
+    // work-N class. External bookmarks have neither and are skipped.
     let work_link_sel = sel("h4.heading a[href*='/works/']");
+    let series_link_sel = sel("h4.heading a[href*='/series/']");
+    let id_after = |href: &str, marker: &str| -> Option<u64> {
+        href.split(marker)
+            .nth(1)
+            .and_then(|s| s.split('/').next())
+            .and_then(|s| s.split('?').next())
+            .and_then(|s| s.parse::<u64>().ok())
+    };
     let work_id = blurb
         .select(&work_link_sel)
         .next()
         .and_then(|a| a.value().attr("href"))
-        .and_then(|href| {
-            href.split("/works/")
-                .nth(1)
-                .and_then(|s| s.split('/').next())
-                .and_then(|s| s.split('?').next())
-                .and_then(|s| s.parse::<u64>().ok())
-        })
-        .or_else(|| if mystery { extract_work_id(blurb).ok() } else { None })
-        .ok_or_else(|| AppError::ElementNotFound("work id in bookmark".to_string()))?;
+        .and_then(|href| id_after(href, "/works/"))
+        .or_else(|| if mystery { extract_work_id(blurb).ok() } else { None });
+    let series_id = blurb
+        .select(&series_link_sel)
+        .next()
+        .and_then(|a| a.value().attr("href"))
+        .and_then(|href| id_after(href, "/series/"));
+    let target = match (work_id, series_id) {
+        (Some(id), _) => BookmarkTarget::Work(id),
+        (None, Some(id)) => BookmarkTarget::Series(id),
+        (None, None) => return Err(AppError::ElementNotFound("bookmark target".to_string())),
+    };
 
     // Extract bookmarker's notes (not the work summary)
     let note_sel = sel("blockquote.userstuff.notes p");
@@ -380,9 +424,11 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     // The work blurb data. A mystery blurb has none — synthesize a display
     // stub carrying the only things AO3 shows: the placeholder title and
     // the reveal notice. Callers must never cache it (see the field docs).
-    let work_summary = if mystery {
+    let work_summary = if let BookmarkTarget::Series(_) = target {
+        None
+    } else if mystery {
         Some(WorkSummary {
-            id: work_id,
+            id: target.id(),
             title: "Mystery Work".to_string(),
             summary: extract_blurb_summary(blurb),
             rating: Rating::NotRated,
@@ -410,9 +456,13 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     } else {
         parse_single_blurb(blurb).ok()
     };
+    let series_summary = match target {
+        BookmarkTarget::Series(id) => Some(parse_series_blurb(blurb, id)),
+        BookmarkTarget::Work(_) => None,
+    };
 
     Ok(BookmarkListing {
-        work_id,
+        target,
         ao3_bookmark_id,
         note,
         bookmarker,
@@ -423,5 +473,29 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         mystery_collection_name,
         mystery_collection_title,
         work_summary,
+        series_summary,
     })
+}
+
+/// A series blurb (bookmark listings wrap one exactly like a work blurb):
+/// name, byline, summary, and the series stats block (Words, Works,
+/// Complete, Bookmarks).
+fn parse_series_blurb(blurb: &ElementRef, id: u64) -> SeriesSummary {
+    let name = blurb
+        .select(&sel("h4.heading a[href*='/series/']"))
+        .next()
+        .map(|a| text(&a).trim().to_string())
+        .unwrap_or_default();
+    let complete_text = extract_stat_text(blurb, "dd.complete, dd.status").to_lowercase();
+    SeriesSummary {
+        id,
+        name,
+        authors: extract_blurb_authors(blurb),
+        summary: extract_blurb_summary(blurb),
+        word_count: parse_number(&extract_stat_text(blurb, "dd.words")),
+        work_count: parse_number(&extract_stat_text(blurb, "dd.works")) as u32,
+        complete: complete_text.starts_with("yes") || complete_text == "complete",
+        date_updated: extract_blurb_date(blurb),
+        fetched_at: String::new(),
+    }
 }

@@ -415,15 +415,24 @@ impl AO3Client {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_ao3_bookmark(
         &self,
-        work_id: u64,
+        target: crate::models::BookmarkTarget,
         note: &str,
         tag_string: &str,
         collection_names: &str,
         private: bool,
         rec: bool,
     ) -> Result<Option<u64>, AppError> {
-        let endpoint = format!("{BASE_URL}/works/{work_id}/bookmarks");
-        let form_page = format!("{BASE_URL}/works/{work_id}?view_adult=true");
+        use crate::models::BookmarkTarget;
+        let (endpoint, form_page) = match target {
+            BookmarkTarget::Work(id) => (
+                format!("{BASE_URL}/works/{id}/bookmarks"),
+                format!("{BASE_URL}/works/{id}?view_adult=true"),
+            ),
+            BookmarkTarget::Series(id) => (
+                format!("{BASE_URL}/series/{id}/bookmarks"),
+                format!("{BASE_URL}/series/{id}"),
+            ),
+        };
         let mut refreshed = false;
         loop {
             let (token, pseud) = (self.cached_csrf_token(), self.cached_pseud_id());

@@ -164,9 +164,9 @@ impl WorksCache {
 
     /// Upsert a work summary plus its author- and tag-index rows.
     /// `fetched_at` is stamped by the caller so entity and row agree.
-    /// Blurbs never carry series or library state, so those survive from
-    /// the existing entity/row (upsert, NOT INSERT OR REPLACE — replace
-    /// would re-create the row and wipe them).
+    /// Library state survives from the existing entity/row (upsert, NOT
+    /// INSERT OR REPLACE — replace would re-create the row and wipe it);
+    /// series merges with the stored memberships (see below).
     pub(super) fn save_work(&self, conn: &Connection, tags: &TagCache,
                             work: &WorkSummary, fetched_at: &str)
         -> Result<(), AppError>
@@ -229,9 +229,30 @@ impl WorksCache {
         summary.fetched_at = fetched_at.to_string();
         let mut map = self.map.borrow_mut();
         let old = map.get(&work.id).cloned();
-        summary.series = old.as_ref()
-            .map(|o| o.summary.series.clone())
-            .unwrap_or_default();
+        let old_series = old.as_ref().map(|o| o.summary.series.clone()).unwrap_or_default();
+        // Blurbs carry series id/name/part but not the prev/next links;
+        // keep those from the stored (work-page) entry for the same
+        // series. An empty incoming list is "unknown", not "none" — only
+        // set_series (work page) clears.
+        summary.series = if work.series.is_empty() {
+            old_series.clone()
+        } else {
+            work.series.iter().map(|m| {
+                let mut m = m.clone();
+                if let Some(o) = old_series.iter().find(|o| o.series_id == m.series_id) {
+                    if m.prev_work_id.is_none() { m.prev_work_id = o.prev_work_id; }
+                    if m.next_work_id.is_none() { m.next_work_id = o.next_work_id; }
+                }
+                m
+            }).collect()
+        };
+        if summary.series != old_series {
+            conn.execute(
+                    "UPDATE works SET series_json = ?2 WHERE id = ?1",
+                    params![work.id as i64, serde_json::to_string(&summary.series).map_err(map_json)?],
+                )
+                .map_err(map_sql)?;
+        }
         let entity = WorkEntity {
             summary,
             tags: tag_refs,

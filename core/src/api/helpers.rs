@@ -178,7 +178,7 @@ pub(super) fn diff_and_flag_works(
 /// gone-from-AO3 flags, adopt the authoritative total, stamp the census
 /// time, and clear the in-progress state.
 pub(super) fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_name: &str, state: &CensusState) {
-    let known = s.get_subscription_work_ids(sub_type, sub_id).unwrap_or_default();
+    let known = s.get_subscription_member_ids(sub_type, sub_id).unwrap_or_default();
     let seen: std::collections::HashSet<u64> = state.seen_ids.iter().copied().collect();
     let gone: Vec<u64> = known.into_iter().filter(|id| !seen.contains(id)).collect();
     if !gone.is_empty() {
@@ -266,5 +266,53 @@ mod byline_tests {
         // Same pseud as username still splits to the clean account name.
         assert_eq!(split_author_byline("astolat (astolat)"),
                    ("astolat".to_string(), Some("astolat".to_string())));
+    }
+}
+
+/// Cache everything a bookmark listing showed, target first so the
+/// bookmarks target-exists trigger passes: the work (or series) blurb,
+/// then the bookmark row attributed to whoever made it. Mystery blurbs
+/// (unrevealed challenge works) carry only a synthetic display stub — no
+/// real data to cache — and are skipped. Returns the bookmark row id, or
+/// None when nothing was cached (mystery, unattributed, or no blurb).
+pub(super) fn cache_bookmark_listing(s: &Storage, l: &BookmarkListing) -> Option<i64> {
+    if l.mystery {
+        return None;
+    }
+    match l.target {
+        BookmarkTarget::Work(_) => {
+            let w = l.work_summary.as_ref()?;
+            log_db("save_work", s.save_work(w));
+        }
+        BookmarkTarget::Series(_) => {
+            let sr = l.series_summary.as_ref()?;
+            log_db("save_series", s.save_series(sr));
+        }
+    }
+    match s.cache_fetched_bookmark_for(&l.bookmarker, l.target, l.ao3_bookmark_id,
+                                       &l.note, &l.tags.join(", "), l.rec) {
+        Ok(id) => id,
+        Err(e) => {
+            crate::log_error!("db", "cache_fetched_bookmark failed: {e}");
+            None
+        }
+    }
+}
+
+/// A remote listing as a search hit (cached or not).
+pub(super) fn hit_from_listing(l: BookmarkListing, id: Option<i64>) -> BookmarkHit {
+    BookmarkHit {
+        id: id.unwrap_or(0),
+        target: l.target,
+        bookmarker: l.bookmarker,
+        note: l.note,
+        tags: l.tags,
+        rec: l.rec,
+        date_bookmarked: l.date_bookmarked,
+        mystery: l.mystery,
+        mystery_collection_name: l.mystery_collection_name,
+        mystery_collection_title: l.mystery_collection_title,
+        work: l.work_summary,
+        series: l.series_summary,
     }
 }

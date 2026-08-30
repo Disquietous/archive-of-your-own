@@ -203,9 +203,68 @@ pub struct LocalSearchCriteria {
     pub sort_direction: String,
 }
 
+/// What an AO3 bookmark points at. AO3 also allows external-work
+/// bookmarks; those are not modelled (the parser skips them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BookmarkTarget {
+    Work(u64),
+    Series(u64),
+}
+
+impl BookmarkTarget {
+    /// The `bookmarks.bookmark_type` column value.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            BookmarkTarget::Work(_) => "work",
+            BookmarkTarget::Series(_) => "series",
+        }
+    }
+
+    /// The `bookmarks.target_id` column value.
+    pub fn id(&self) -> u64 {
+        match self {
+            BookmarkTarget::Work(id) | BookmarkTarget::Series(id) => *id,
+        }
+    }
+
+    pub fn from_parts(kind: &str, id: u64) -> Option<Self> {
+        match kind {
+            "work" => Some(BookmarkTarget::Work(id)),
+            "series" => Some(BookmarkTarget::Series(id)),
+            _ => None,
+        }
+    }
+
+    pub fn work_id(&self) -> Option<u64> {
+        match self { BookmarkTarget::Work(id) => Some(*id), _ => None }
+    }
+
+    pub fn series_id(&self) -> Option<u64> {
+        match self { BookmarkTarget::Series(id) => Some(*id), _ => None }
+    }
+}
+
+/// An AO3 series as a listing shows it (a series bookmark blurb or the
+/// series page header). Rows in the `series` table.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SeriesSummary {
+    pub id: u64,
+    pub name: String,
+    pub authors: Vec<String>,
+    pub summary: String,
+    pub word_count: u64,
+    pub work_count: u32,
+    pub complete: bool,
+    pub date_updated: String,
+    /// When this summary last arrived from AO3 (DB datetime text; "" for
+    /// freshly parsed summaries — storage stamps it on save).
+    #[serde(default)]
+    pub fetched_at: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BookmarkListing {
-    pub work_id: u64,
+    pub target: BookmarkTarget,
     pub ao3_bookmark_id: u64,
     pub note: String,
     /// AO3 username the blurb's "Bookmarked by" byline attributes the
@@ -229,13 +288,20 @@ pub struct BookmarkListing {
     /// display title; "" unless mystery.
     pub mystery_collection_name: String,
     pub mystery_collection_title: String,
+    /// The work blurb (work bookmarks; a synthetic stub for mystery ones).
     pub work_summary: Option<WorkSummary>,
+    /// The series blurb (series bookmarks).
+    pub series_summary: Option<SeriesSummary>,
 }
 
 /// One bookmark search hit: the bookmark's own fields plus the bookmarked
-/// work's blurb — what a bookmark listing row displays.
+/// item's blurb — what a bookmark listing row displays. Exactly one of
+/// `work` / `series` is set, per `target`.
 #[derive(Debug, Clone)]
 pub struct BookmarkHit {
+    /// Local row id (0 for remote hits that were not cached).
+    pub id: i64,
+    pub target: BookmarkTarget,
     pub bookmarker: String,
     pub note: String,
     /// The bookmarker's own tags.
@@ -252,7 +318,8 @@ pub struct BookmarkHit {
     /// mystery.
     pub mystery_collection_name: String,
     pub mystery_collection_title: String,
-    pub work: WorkSummary,
+    pub work: Option<WorkSummary>,
+    pub series: Option<SeriesSummary>,
 }
 
 /// AO3's /bookmarks/search form (bookmark_search[...] GET params). Every
@@ -266,8 +333,8 @@ pub struct BookmarkSearchCriteria {
     /// bookmark_search[other_tag_names] — comma-separated work tag names.
     pub other_tag_names: String,
     /// bookmark_search[bookmarkable_type] — "Work", "Series",
-    /// "External Work", or "" (any). Only work bookmarks are cached, so a
-    /// Series/External filter matches nothing locally.
+    /// "External Work", or "" (any). External bookmarks are never cached,
+    /// so that filter matches nothing locally.
     pub bookmarkable_type: String,
     /// bookmark_search[word_count] — AO3 numeric range syntax.
     pub word_count: String,

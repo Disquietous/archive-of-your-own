@@ -1,7 +1,7 @@
 use super::*;
 use crate::models::{
-    AO3User, Chapter, ContentBlock, InlineContent, LocalSearchCriteria, Rating, SeriesMembership,
-    UserProfile, Warning, WorkSummary,
+    AO3User, BookmarkTarget, Chapter, ContentBlock, InlineContent, LocalSearchCriteria, Rating,
+    SeriesMembership, UserProfile, Warning, WorkSummary,
 };
 
 fn sample_work(id: u64) -> WorkSummary {
@@ -203,6 +203,10 @@ fn test_bookmarks() {
     assert!(!db.is_bookmarked(1).unwrap());
     assert!(db.get_bookmarks().unwrap().is_empty());
 
+    // A bookmark needs its target row (trigger-enforced).
+    assert!(db.add_bookmark(1, Some("great fic"), false).is_err());
+    db.save_work(&sample_work(1)).unwrap();
+    db.save_work(&sample_work(2)).unwrap();
     db.add_bookmark(1, Some("great fic"), false).unwrap();
     assert!(db.is_bookmarked(1).unwrap());
 
@@ -230,15 +234,16 @@ fn test_search_local_bookmarks_filtered() {
     db.save_work(&b).unwrap();
 
     // Own bookmark on work 1 (rec, own tag); a fetched listing's bookmark
-    // by another user on work 2; a fetched bookmark whose work was never
-    // cached (must be skipped, not error).
+    // by another user on work 2.
     db.add_bookmark(1, Some("great fic"), false).unwrap();
     db.update_bookmark_details(1, "great fic", "Comfort Read", "", false, true).unwrap();
     db.cache_fetched_bookmark("OtherUser", 2, 999, "note from a friend", "Favorite", false).unwrap();
-    db.cache_fetched_bookmark("OtherUser", 3, 1000, "work not cached", "", false).unwrap();
+    // A bookmark of a work that was never cached has no referent — the
+    // target-exists trigger rejects it.
+    assert!(db.cache_fetched_bookmark("OtherUser", 3, 1000, "work not cached", "", false).is_err());
 
     let ids = |c: &crate::models::BookmarkSearchCriteria| -> Vec<u64> {
-        db.search_local_bookmarks_filtered(c, 0).unwrap().iter().map(|h| h.work.id).collect()
+        db.search_local_bookmarks_filtered(c, 0).unwrap().iter().map(|h| h.target.id()).collect()
     };
     type C = crate::models::BookmarkSearchCriteria;
 
@@ -286,12 +291,44 @@ fn test_search_local_bookmarks_filtered() {
     assert_eq!(hit.note, "note from a friend");
     assert_eq!(hit.tags, vec!["Favorite".to_string()]);
     assert!(!hit.rec);
-    assert_eq!(hit.work.title, "Another Story");
+    assert_eq!(hit.work.as_ref().unwrap().title, "Another Story");
 
-    // Only work bookmarks are cached — a Series filter matches nothing.
+    // A series bookmark: cached with its series row, matched by the type
+    // filter and by name/author queries; work-tag and language filters
+    // exclude it (series carry neither).
     let mut c = C::default();
     c.bookmarkable_type = "Series".into();
     assert!(ids(&c).is_empty());
+    db.save_series(&crate::models::SeriesSummary {
+        id: 77, name: "A Long Saga".into(), authors: vec!["SagaWriter".into()],
+        summary: "Epic.".into(), word_count: 250_000, work_count: 4, complete: false,
+        date_updated: "2026-07-01".into(), fetched_at: String::new(),
+    }).unwrap();
+    db.cache_fetched_bookmark_for("OtherUser", BookmarkTarget::Series(77), 1001,
+                                  "saga note", "", true).unwrap();
+    assert_eq!(ids(&c), vec![77]);
+    let hit = &db.search_local_bookmarks_filtered(&c, 0).unwrap()[0];
+    assert!(hit.work.is_none());
+    assert_eq!(hit.series.as_ref().unwrap().name, "A Long Saga");
+    let mut c = C::default();
+    c.bookmarkable_query = "SagaWriter".into();
+    assert_eq!(ids(&c), vec![77]);
+    let mut c = C::default();
+    c.other_tag_names = "Fluff".into();
+    assert_eq!(ids(&c), vec![1]);
+    let mut c = C::default();
+    c.language_id = "english".into();
+    assert_eq!(ids(&c), vec![1]);
+    let mut c = C::default();
+    c.bookmarkable_type = "Work".into();
+    let mut w = ids(&c); w.sort();
+    assert_eq!(w, vec![1, 2]);
+    // External-work bookmarks are never cached.
+    let mut c = C::default();
+    c.bookmarkable_type = "External Work".into();
+    assert!(ids(&c).is_empty());
+    db.remove_bookmark_for(BookmarkTarget::Series(77)).unwrap();
+    db.delete_series(77).unwrap();
 
     // Sort by word count, AO3-style descending.
     let mut c = C::default();
@@ -726,18 +763,33 @@ fn test_collection_bookmark_caching() {
         [], |r| r.get(0)).unwrap();
     assert_eq!(foreign, 1);
 
-    // Collection↔bookmark joins accumulate across pages and replay in
-    // listing order, independent of the works-listing joins.
-    db.add_collection_bookmarks("test_fest", &[1]).unwrap();
-    db.add_collection_bookmarks("test_fest", &[1, 2]).unwrap();
-    let works = db.get_collection_bookmarks("test_fest").unwrap();
-    assert_eq!(works.iter().map(|w| w.id).collect::<Vec<_>>(), vec![1, 2]);
+    // Collection↔bookmark joins (by bookmark row id) accumulate across
+    // pages and replay in listing order, independent of the works joins.
+    let mine = db.get_bookmark_id(BookmarkTarget::Work(1)).unwrap().unwrap();
+    let theirs: i64 = db.conn.query_row(
+        "SELECT id FROM bookmarks WHERE account_id = 'someoneelse' AND target_id = 2",
+        [], |r| r.get(0)).unwrap();
+    db.add_collection_bookmarks("test_fest", &[mine]).unwrap();
+    db.add_collection_bookmarks("test_fest", &[mine, theirs]).unwrap();
+    let hits = db.get_collection_bookmarks("test_fest").unwrap();
+    assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![mine, theirs]);
+    assert_eq!(hits[1].work.as_ref().unwrap().id, 2);
+    assert_eq!(hits[1].bookmarker, "someoneelse");
     assert!(db.get_collection_work_ids("test_fest").unwrap().is_empty());
 
-    // Deleting a work cascades its join row.
+    // Deleting a work cascades its bookmarks (trigger) and their links (FK).
     db.delete_work(1).unwrap();
-    let works = db.get_collection_bookmarks("test_fest").unwrap();
-    assert_eq!(works.iter().map(|w| w.id).collect::<Vec<_>>(), vec![2]);
+    let hits = db.get_collection_bookmarks("test_fest").unwrap();
+    assert_eq!(hits.iter().map(|h| h.id).collect::<Vec<_>>(), vec![theirs]);
+    let rows: u32 = db.conn.query_row(
+        "SELECT COUNT(*) FROM collection_bookmarks", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+    // Removing a bookmark drops its link too.
+    db.set_active_account("someoneelse").ok();
+    db.delete_series(999).ok();
+    db.conn.execute("DELETE FROM bookmarks WHERE id = ?1", [theirs]).unwrap();
+    db.resync_caches();
+    assert!(db.get_collection_bookmarks("test_fest").unwrap().is_empty());
 }
 
 #[test]
@@ -1040,12 +1092,29 @@ fn test_work_series_roundtrip() {
     let got = db.get_work(7101).unwrap().unwrap();
     assert_eq!(got.series, series);
 
-    // The subscription-works path (which swallows row errors) must
-    // still deserialize rows with the series column intact.
-    db.add_subscription_works("series", "9000001", &[7101]).unwrap();
+    // Series subscription membership is derived from series_json.
     let subs = db.get_subscription_works("series", "9000001").unwrap();
     assert_eq!(subs.len(), 1);
     assert_eq!(subs[0].series, series);
+    assert_eq!(db.get_subscription_member_ids("series", "9000002").unwrap(), vec![7101]);
+    assert!(db.get_subscription_member_ids("series", "9000009").unwrap().is_empty());
+
+    // A blurb-shaped save carrying series (no prev/next) keeps the
+    // work-page links for the same series and drops memberships the
+    // blurb no longer lists.
+    let mut blurb = sample_work(7101);
+    blurb.series = vec![SeriesMembership {
+        series_id: 9000001, name: "Alpha Test Series".into(), part: 3,
+        prev_work_id: None, next_work_id: None,
+    }];
+    db.save_work(&blurb).unwrap();
+    let got = db.get_work(7101).unwrap().unwrap();
+    assert_eq!(got.series.len(), 1);
+    assert_eq!(got.series[0].part, 3);
+    assert_eq!(got.series[0].prev_work_id, Some(7100));
+    assert_eq!(got.series[0].next_work_id, Some(7102));
+    assert!(db.get_subscription_member_ids("series", "9000002").unwrap().is_empty());
+    db.set_work_series(7101, &series).unwrap();
 
     // Explicit empty write clears (work removed from series on AO3).
     db.set_work_series(7101, &[]).unwrap();
@@ -1100,13 +1169,24 @@ fn test_last_read_dt() {
 }
 
 #[test]
-fn test_subscription_work_ids() {
+fn test_subscription_member_ids() {
     let db = open_test_db();
-    db.add_subscription_works("author", "u", &[1, 2, 3]).unwrap();
-    db.add_subscription_works("author", "u", &[3, 4]).unwrap();
-    let mut ids = db.get_subscription_work_ids("author", "u").unwrap();
+    // Author membership comes from bylines (pseud form included), however
+    // the work was cached; the explicit table is only for other kinds.
+    let mut a = sample_work(1); a.authors = vec!["alice".into()];
+    let mut b = sample_work(2); b.authors = vec!["Nom (alice)".into()];
+    let mut c = sample_work(3); c.authors = vec!["bob".into()];
+    for w in [&a, &b, &c] { db.save_work(w).unwrap(); }
+    let mut ids = db.get_subscription_member_ids("author", "Alice").unwrap();
     ids.sort();
-    assert_eq!(ids, vec![1, 2, 3, 4]);
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(db.get_subscription_member_ids("author", "bob").unwrap(), vec![3]);
+
+    db.add_subscription_works("author-bookmarks", "alice", &[3]).unwrap();
+    db.add_subscription_works("author-bookmarks", "alice", &[3, 1]).unwrap();
+    let mut ids = db.get_subscription_member_ids("author-bookmarks", "alice").unwrap();
+    ids.sort();
+    assert_eq!(ids, vec![1, 3]);
 }
 
 #[test]
@@ -1247,7 +1327,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 13);
+    assert_eq!(db.schema_version().unwrap(), 15);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1412,7 +1492,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 13);
+    assert_eq!(db.schema_version().unwrap(), 15);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1471,7 +1551,7 @@ fn test_migration_v1_to_v2() {
     assert_eq!((id.as_str(), username.as_str()), ("writer_one", "Writer_One"));
     assert_eq!(db.get_bookmarks().unwrap(), vec![7]);
     let sentinel_note: String = db.conn.query_row(
-        "SELECT note FROM bookmarks WHERE account_id = '[none]' AND work_id = 7",
+        "SELECT note FROM bookmarks WHERE account_id = '[none]' AND bookmark_type = 'work' AND target_id = 7",
         [], |r| r.get(0)).unwrap();
     assert_eq!(sentinel_note, "signed-out era");
     // v4: last_checked_at exists on the migrated table and starts NULL.
@@ -1482,7 +1562,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 13);
+    assert_eq!(db.schema_version().unwrap(), 15);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1880,6 +1960,7 @@ fn cache_owned_tables_have_no_stray_writers() {
         "INTO collection_works", "DELETE FROM collection_works",
         "INTO collection_bookmarks", "DELETE FROM collection_bookmarks",
         "INTO ao3_users", "UPDATE ao3_users", "DELETE FROM ao3_users",
+        "INTO series", "UPDATE series", "DELETE FROM series",
     ];
     // (file, line fragment) pairs for the migration-frozen exemptions.
     let allowed: &[(&str, &str)] = &[
@@ -1897,6 +1978,9 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "UPDATE OR IGNORE bookmarks SET account_id = substr(account_id"), // v10 account-id rekey
         ("mod.rs", "DELETE FROM bookmarks WHERE account_id LIKE"),   // v10 account-id rekey
         ("mod.rs", "UPDATE bookmarks SET account_id = '[none]'"),    // v10 logged-out sentinel
+        ("mod.rs", "INSERT INTO bookmarks_v15"),                      // v15 rebuild
+        ("mod.rs", "DELETE FROM bookmarks WHERE bookmark_type = 'work' AND target_id = OLD.id;"), // v15 cascade trigger
+        ("mod.rs", "DELETE FROM bookmarks WHERE bookmark_type = 'series' AND target_id = OLD.id;"), // v15 cascade trigger
         ("mod.rs", "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at, numeric_id, joined,"), // v12 account fold
         ("mod.rs", "DELETE FROM ao3_users WHERE id = ?1 AND id <> ?2 /* v12 fold */"), // v12 account fold
     ];
@@ -2045,7 +2129,7 @@ fn bookmarks_cache_matches_rows() {
     let (note, tags, colls, private, rec, sync, ao3): (String, String, String, i64, i64, i64, Option<i64>) =
         db.conn.query_row(
             "SELECT note, tag_string, collection_names, private, rec, sync_to_ao3, ao3_bookmark_id
-             FROM bookmarks WHERE work_id = 11",
+             FROM bookmarks WHERE bookmark_type = 'work' AND target_id = 11",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
         ).unwrap();
     assert_eq!(
@@ -2079,7 +2163,11 @@ fn collections_cache_links_and_purge() {
     // Deep-link listing before any blurb: stub + links accumulate, deduped.
     db.add_collection_works("fest", &[21, 22]).unwrap();
     db.add_collection_works("fest", &[21]).unwrap();
-    db.add_collection_bookmarks("fest", &[22]).unwrap();
+    // A collection bookmark link needs a real bookmark row (FK).
+    assert!(db.add_collection_bookmarks("fest", &[22]).is_err());
+    let bm = db.add_bookmark_for(BookmarkTarget::Work(22), None, false).unwrap();
+    db.add_collection_bookmarks("fest", &[bm]).unwrap();
+    assert_eq!(db.get_collection_bookmarks("fest").unwrap().len(), 1);
     assert_eq!(db.get_collection_work_ids("fest").unwrap(), vec![21, 22]);
     assert_eq!(db.get_collection("fest").unwrap().unwrap().title, "fest");
     assert!(!db.collection_profile_cached("fest").unwrap());

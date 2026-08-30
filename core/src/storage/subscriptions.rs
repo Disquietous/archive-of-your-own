@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use rusqlite::params;
 
 use crate::error::AppError;
-use crate::models::WorkSummary;
+use crate::models::{split_author_byline, WorkSummary};
 
 use super::consts::*;
+use super::works_cache::WorkEntity;
 use super::{map_sql, Storage};
 
 impl Storage {
@@ -318,15 +321,49 @@ impl Storage {
     }
 
     /// Add works to a subscription's cached set without dropping existing
-    /// Just the associated work ids — the cheap set-membership view the
-    /// census reconciles against.
-    pub fn get_subscription_work_ids(&self, sub_type: &str, sub_id: &str) -> Result<Vec<u64>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT work_id FROM subscription_works WHERE sub_type = ?1 AND sub_id = ?2"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, u64>(0))
-            .map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+    /// Every cached work that belongs to an author or series subscription,
+    /// answered from the works table (author bylines / series memberships)
+    /// — the set the census reconciles against. Other subscription kinds
+    /// (author-bookmarks) still read the explicit `subscription_works` set.
+    pub fn get_subscription_member_ids(&self, sub_type: &str, sub_id: &str) -> Result<Vec<u64>, AppError> {
+        Ok(self.subscription_member_entities(sub_type, sub_id)?
+            .into_iter()
+            .map(|e| e.summary.id)
+            .collect())
+    }
+
+    fn subscription_member_entities(&self, sub_type: &str, sub_id: &str)
+        -> Result<Vec<Arc<WorkEntity>>, AppError>
+    {
+        match sub_type {
+            SUB_TYPE_AUTHOR => {
+                let account = self.users_cache
+                    .resolve(sub_id)
+                    .map(|e| e.username.clone())
+                    .unwrap_or_else(|| split_author_byline(sub_id).0);
+                Ok(self.works_cache.all().into_iter()
+                    .filter(|e| e.summary.authors.iter()
+                        .any(|a| split_author_byline(a).0.eq_ignore_ascii_case(&account)))
+                    .collect())
+            }
+            SUB_TYPE_SERIES => {
+                let Ok(series_id) = sub_id.parse::<u64>() else { return Ok(Vec::new()) };
+                Ok(self.works_cache.all().into_iter()
+                    .filter(|e| e.summary.series.iter().any(|m| m.series_id == series_id))
+                    .collect())
+            }
+            _ => {
+                let mut stmt = self.conn.prepare_cached(
+                    "SELECT work_id FROM subscription_works
+                     WHERE sub_type = ?1 AND sub_id = ?2 ORDER BY rowid ASC"
+                ).map_err(map_sql)?;
+                let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, i64>(0))
+                    .map_err(map_sql)?;
+                Ok(rows.filter_map(|r| r.ok())
+                    .filter_map(|id| self.works_cache.get(id as u64))
+                    .collect())
+            }
+        }
     }
 
     /// Mark (or clear) works as no longer listed on AO3. The cached rows are
@@ -360,20 +397,18 @@ impl Storage {
         })
     }
 
+    /// Works of a subscription. Author/series come from the works table
+    /// (see `get_subscription_member_ids`); series works sort by part,
+    /// everything else newest-first like the live listing.
     pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
-        // One id query (crawl order); the works themselves hydrate from the
-        // works cache. Series works keep their crawl (reading) order; author
-        // works sort newest-first like the live listing.
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT work_id FROM subscription_works
-             WHERE sub_type = ?1 AND sub_id = ?2 ORDER BY rowid ASC"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, i64>(0))
-            .map_err(map_sql)?;
-        let ids: Vec<u64> = rows.filter_map(|r| r.ok()).map(|id| id as u64).collect();
-        let mut works = self.get_works_by_ids_ordered(&ids)?;
-        if sub_type != SUB_TYPE_SERIES {
-            works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated));
+        let mut works: Vec<WorkSummary> = self.subscription_member_entities(sub_type, sub_id)?
+            .iter()
+            .map(|e| self.works_cache.hydrate(e, &self.tag_cache))
+            .collect();
+        match (sub_type, sub_id.parse::<u64>()) {
+            (SUB_TYPE_SERIES, Ok(series_id)) => works.sort_by_key(|w| w.series.iter()
+                .find(|m| m.series_id == series_id).map(|m| m.part).unwrap_or(0)),
+            _ => works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated)),
         }
         Ok(works)
     }

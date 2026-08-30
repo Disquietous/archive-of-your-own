@@ -16,6 +16,7 @@ extension AppTheme {
     var nsLine2: NSColor { NSColor(line2) }
     var nsAccent: NSColor { NSColor(accent) }
     var nsAccentSoft: NSColor { NSColor(accentSoft) }
+    var nsAccent2: NSColor { NSColor(accent2) }
     var nsOnAccent: NSColor { NSColor(onAccent) }
     var nsSage: NSColor { NSColor(sage) }
 

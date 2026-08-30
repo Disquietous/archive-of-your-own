@@ -6,6 +6,10 @@ final class AppState {
     let sessionId = UUID().uuidString
 
     var bookmarkedWorkIDs: Set<String> = []
+
+    /// Series the active account has bookmarked (series ids as strings).
+
+    var bookmarkedSeriesIDs: Set<String> = []
     var kudosGivenWorkIDs: Set<String> = []
     var downloadedWorkIDs: Set<String> = []
     var history: [String] = []
@@ -309,6 +313,7 @@ final class AppState {
         // Load bookmarks
         let bookmarkIDs = bridge.getBookmarkedWorkIds()
         bookmarkedWorkIDs = Set(bookmarkIDs.map { String($0) })
+        bookmarkedSeriesIDs = Set(bridge.getBookmarkedSeriesIds().map { String($0) })
 
         // Load history (deduplicated, most recent first)
         let historyEntries = bridge.getHistory()

@@ -61,6 +61,7 @@ extension ListPaneViewController {
             // Reading unseenNewWorkIDs re-renders when a selection clears
             // a "New" pill, so the badge drops without a full reload.
             let unseen = section == .whatsNew ? appState.unseenNewWorkIDs : []
+            let gone = appState.goneWorkIDs
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < works.count,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
@@ -68,6 +69,7 @@ extension ListPaneViewController {
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
                 cell.setNew(unseen.contains(works[row].id))
+                cell.setRemoved(gone.contains(works[row].id))
                 cell.setFollowState(model.authorFollowState(works[row].author))
             }
         }

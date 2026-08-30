@@ -1,7 +1,9 @@
 use rusqlite::params;
 
 use crate::error::AppError;
+use crate::models::{BookmarkHit, BookmarkTarget};
 
+use super::bookmarks_cache::BookmarkEntity;
 use super::consts::*;
 use super::{map_sql, Storage};
 
@@ -129,8 +131,11 @@ impl Storage {
     // -------------------------------------------------------------------
     // Bookmarks
     // -------------------------------------------------------------------
+    //
+    // A bookmark targets a work or a series (`BookmarkTarget`). The
+    // `*_for` functions take the target; the plain `work_id` functions are
+    // the work-target wrappers every existing caller uses.
 
-    /// Bookmark a work, optionally attaching a note.
     fn active_account_id(&self) -> String {
         self.get_active_account()
             .ok()
@@ -139,10 +144,23 @@ impl Storage {
             .unwrap_or_else(|| super::LOGGED_OUT_ACCOUNT_ID.to_string())
     }
 
-    pub fn add_bookmark(&self, work_id: u64, note: Option<&str>, sync_to_ao3: bool) -> Result<(), AppError> {
+    fn active_bookmark_id(&self, target: BookmarkTarget) -> Option<i64> {
+        self.bookmarks_cache.id_of(&self.active_account_id(), target)
+    }
+
+    /// Bookmark a work or series, optionally attaching a note. The target
+    /// must already be cached (works/series row) — the database trigger
+    /// rejects a dangling bookmark. Returns the row id.
+    pub fn add_bookmark_for(&self, target: BookmarkTarget, note: Option<&str>, sync_to_ao3: bool)
+        -> Result<i64, AppError>
+    {
         let acct = self.active_account_id();
-        self.bookmarks_cache.add(&self.conn, &acct, work_id, note.unwrap_or(""),
+        self.bookmarks_cache.add(&self.conn, &acct, target, note.unwrap_or(""),
                                  sync_to_ao3, &crate::timefmt::now_utc_datetime())
+    }
+
+    pub fn add_bookmark(&self, work_id: u64, note: Option<&str>, sync_to_ao3: bool) -> Result<(), AppError> {
+        self.add_bookmark_for(BookmarkTarget::Work(work_id), note, sync_to_ao3).map(|_| ())
     }
 
     /// Cache a bookmark seen in a fetched listing, keyed by the byline
@@ -150,58 +168,116 @@ impl Storage {
     /// account is (or later becomes) active sees precisely its own rows.
     /// An existing row only refreshes its AO3 id: locally edited details
     /// stay put, pull_bookmarks remains the explicit overwrite path. An
-    /// unattributed blurb (no byline) can't be keyed and isn't cached.
+    /// unattributed blurb (no byline) can't be keyed and isn't cached
+    /// (returns None). The target must already be cached.
+    pub fn cache_fetched_bookmark_for(&self, bookmarker: &str, target: BookmarkTarget,
+                                      ao3_bookmark_id: u64, note: &str,
+                                      tag_string: &str, rec: bool) -> Result<Option<i64>, AppError> {
+        if bookmarker.is_empty() {
+            return Ok(None);
+        }
+        let acct = super::account_id_for(bookmarker);
+        self.bookmarks_cache.cache_fetched(&self.conn, &acct, target, ao3_bookmark_id,
+                                           note, tag_string, rec,
+                                           &crate::timefmt::now_utc_datetime())
+            .map(Some)
+    }
+
     pub fn cache_fetched_bookmark(&self, bookmarker: &str, work_id: u64,
                                   ao3_bookmark_id: u64, note: &str,
                                   tag_string: &str, rec: bool) -> Result<(), AppError> {
-        if bookmarker.is_empty() {
-            return Ok(());
+        self.cache_fetched_bookmark_for(bookmarker, BookmarkTarget::Work(work_id),
+                                        ao3_bookmark_id, note, tag_string, rec).map(|_| ())
+    }
+
+    pub fn update_bookmark_note_for(&self, target: BookmarkTarget, note: &str) -> Result<(), AppError> {
+        match self.active_bookmark_id(target) {
+            Some(id) => self.bookmarks_cache.update_note(&self.conn, id, note),
+            None => Ok(()),
         }
-        let acct = super::account_id_for(bookmarker);
-        self.bookmarks_cache.cache_fetched(&self.conn, &acct, work_id, ao3_bookmark_id,
-                                           note, tag_string, rec,
-                                           &crate::timefmt::now_utc_datetime())
     }
 
     pub fn update_bookmark_note(&self, work_id: u64, note: &str) -> Result<(), AppError> {
-        let acct = self.active_account_id();
-        self.bookmarks_cache.update_note(&self.conn, &acct, work_id, note)
+        self.update_bookmark_note_for(BookmarkTarget::Work(work_id), note)
     }
 
     /// Update the full AO3 bookmark object (notes, own tags, collections,
     /// private/rec flags).
+    pub fn update_bookmark_details_for(&self, target: BookmarkTarget, note: &str, tag_string: &str,
+                                       collection_names: &str, private: bool, rec: bool) -> Result<(), AppError> {
+        match self.active_bookmark_id(target) {
+            Some(id) => self.bookmarks_cache.update_details(&self.conn, id, note, tag_string,
+                                                            collection_names, private, rec),
+            None => Ok(()),
+        }
+    }
+
     pub fn update_bookmark_details(&self, work_id: u64, note: &str, tag_string: &str,
                                    collection_names: &str, private: bool, rec: bool) -> Result<(), AppError> {
-        let acct = self.active_account_id();
-        self.bookmarks_cache.update_details(&self.conn, &acct, work_id, note, tag_string,
-                                            collection_names, private, rec)
+        self.update_bookmark_details_for(BookmarkTarget::Work(work_id), note, tag_string,
+                                         collection_names, private, rec)
     }
 
     /// Full bookmark row: (note, tag_string, collection_names, private, rec,
     /// sync_to_ao3, ao3_bookmark_id).
     #[allow(clippy::type_complexity)]
-    pub fn get_bookmark_details(&self, work_id: u64)
+    pub fn get_bookmark_details_for(&self, target: BookmarkTarget)
         -> Result<Option<(String, String, String, bool, bool, bool, Option<u64>)>, AppError> {
         let acct = self.active_account_id();
-        Ok(self.bookmarks_cache.get(&acct, work_id).map(|e| (
+        Ok(self.bookmarks_cache.get(&acct, target).map(|e| (
             e.note.clone(), e.tag_string.clone(), e.collection_names.clone(),
             e.private, e.rec, e.sync_to_ao3, e.ao3_bookmark_id,
         )))
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn get_bookmark_details(&self, work_id: u64)
+        -> Result<Option<(String, String, String, bool, bool, bool, Option<u64>)>, AppError> {
+        self.get_bookmark_details_for(BookmarkTarget::Work(work_id))
+    }
+
+    /// The active account's bookmark row id for a target, if any.
+    pub fn get_bookmark_id(&self, target: BookmarkTarget) -> Result<Option<i64>, AppError> {
+        Ok(self.active_bookmark_id(target))
+    }
+
+    pub fn update_bookmark_sync_for(&self, target: BookmarkTarget, sync: bool) -> Result<(), AppError> {
+        match self.active_bookmark_id(target) {
+            Some(id) => self.bookmarks_cache.update_sync(&self.conn, id, sync),
+            None => Ok(()),
+        }
+    }
+
     pub fn update_bookmark_sync(&self, work_id: u64, sync: bool) -> Result<(), AppError> {
-        let acct = self.active_account_id();
-        self.bookmarks_cache.update_sync(&self.conn, &acct, work_id, sync)
+        self.update_bookmark_sync_for(BookmarkTarget::Work(work_id), sync)
+    }
+
+    pub fn remove_bookmark_for(&self, target: BookmarkTarget) -> Result<(), AppError> {
+        let Some(id) = self.active_bookmark_id(target) else { return Ok(()) };
+        self.bookmarks_cache.remove(&self.conn, id)?;
+        // collection_bookmarks rows cascaded via their foreign key.
+        self.collections_cache.purge_bookmarks(&[id]);
+        Ok(())
     }
 
     pub fn remove_bookmark(&self, work_id: u64) -> Result<(), AppError> {
-        let acct = self.active_account_id();
-        self.bookmarks_cache.remove(&self.conn, &acct, work_id)
+        self.remove_bookmark_for(BookmarkTarget::Work(work_id))
     }
 
-    pub fn get_bookmarks(&self) -> Result<Vec<u64>, AppError> {
+    /// The active account's bookmark targets, newest first.
+    pub fn get_bookmark_targets(&self) -> Result<Vec<BookmarkTarget>, AppError> {
         let acct = self.active_account_id();
-        Ok(self.bookmarks_cache.for_account(&acct).into_iter().map(|e| e.work_id).collect())
+        Ok(self.bookmarks_cache.for_account(&acct).into_iter().map(|e| e.target).collect())
+    }
+
+    /// The active account's bookmarked work ids, newest first.
+    pub fn get_bookmarks(&self) -> Result<Vec<u64>, AppError> {
+        Ok(self.get_bookmark_targets()?.into_iter().filter_map(|t| t.work_id()).collect())
+    }
+
+    /// The active account's bookmarked series ids, newest first.
+    pub fn get_bookmarked_series(&self) -> Result<Vec<u64>, AppError> {
+        Ok(self.get_bookmark_targets()?.into_iter().filter_map(|t| t.series_id()).collect())
     }
 
     pub fn get_bookmarks_full(&self) -> Result<Vec<(u64, String, bool)>, AppError> {
@@ -209,45 +285,108 @@ impl Storage {
         Ok(self.bookmarks_cache
             .for_account(&acct)
             .into_iter()
-            .map(|e| (e.work_id, e.note.clone(), e.sync_to_ao3))
+            .filter_map(|e| e.target.work_id().map(|w| (w, e.note.clone(), e.sync_to_ao3)))
             .collect())
     }
 
-    pub fn get_synced_bookmarks(&self) -> Result<Vec<(u64, String)>, AppError> {
+    /// (target, note) for every bookmark the active account syncs to AO3.
+    pub fn get_synced_bookmarks(&self) -> Result<Vec<(BookmarkTarget, String)>, AppError> {
         let acct = self.active_account_id();
         Ok(self.bookmarks_cache
             .for_account(&acct)
             .into_iter()
             .filter(|e| e.sync_to_ao3)
-            .map(|e| (e.work_id, e.note.clone()))
+            .map(|e| (e.target, e.note.clone()))
             .collect())
     }
 
-    pub fn is_bookmarked(&self, work_id: u64) -> Result<bool, AppError> {
-        let acct = self.active_account_id();
-        Ok(self.bookmarks_cache.get(&acct, work_id).is_some())
+    pub fn is_bookmarked_for(&self, target: BookmarkTarget) -> Result<bool, AppError> {
+        Ok(self.active_bookmark_id(target).is_some())
     }
 
-    pub fn get_bookmark_full(&self, work_id: u64) -> Result<Option<(String, bool, Option<u64>)>, AppError> {
+    pub fn is_bookmarked(&self, work_id: u64) -> Result<bool, AppError> {
+        self.is_bookmarked_for(BookmarkTarget::Work(work_id))
+    }
+
+    /// (note, sync_to_ao3, ao3_bookmark_id) for the active account's
+    /// bookmark of a target.
+    pub fn get_bookmark_full_for(&self, target: BookmarkTarget)
+        -> Result<Option<(String, bool, Option<u64>)>, AppError>
+    {
         let acct = self.active_account_id();
         Ok(self.bookmarks_cache
-            .get(&acct, work_id)
+            .get(&acct, target)
             .map(|e| (e.note.clone(), e.sync_to_ao3, e.ao3_bookmark_id)))
     }
 
+    pub fn get_bookmark_full(&self, work_id: u64) -> Result<Option<(String, bool, Option<u64>)>, AppError> {
+        self.get_bookmark_full_for(BookmarkTarget::Work(work_id))
+    }
+
+    pub fn set_ao3_bookmark_id_for(&self, target: BookmarkTarget, ao3_id: u64) -> Result<(), AppError> {
+        match self.active_bookmark_id(target) {
+            Some(id) => self.bookmarks_cache.set_ao3_id(&self.conn, id, ao3_id),
+            None => Ok(()),
+        }
+    }
+
     pub fn set_ao3_bookmark_id(&self, work_id: u64, ao3_id: u64) -> Result<(), AppError> {
+        self.set_ao3_bookmark_id_for(BookmarkTarget::Work(work_id), ao3_id)
+    }
+
+    pub fn get_ao3_bookmark_id_for(&self, target: BookmarkTarget) -> Result<Option<u64>, AppError> {
         let acct = self.active_account_id();
-        self.bookmarks_cache.set_ao3_id(&self.conn, &acct, work_id, ao3_id)
+        Ok(self.bookmarks_cache.get(&acct, target).and_then(|e| e.ao3_bookmark_id))
     }
 
     pub fn get_ao3_bookmark_id(&self, work_id: u64) -> Result<Option<u64>, AppError> {
+        self.get_ao3_bookmark_id_for(BookmarkTarget::Work(work_id))
+    }
+
+    pub fn is_bookmark_synced_for(&self, target: BookmarkTarget) -> Result<bool, AppError> {
         let acct = self.active_account_id();
-        Ok(self.bookmarks_cache.get(&acct, work_id).and_then(|e| e.ao3_bookmark_id))
+        Ok(self.bookmarks_cache.get(&acct, target).map(|e| e.sync_to_ao3).unwrap_or(false))
     }
 
     pub fn is_bookmark_synced(&self, work_id: u64) -> Result<bool, AppError> {
-        let acct = self.active_account_id();
-        Ok(self.bookmarks_cache.get(&acct, work_id).map(|e| e.sync_to_ao3).unwrap_or(false))
+        self.is_bookmark_synced_for(BookmarkTarget::Work(work_id))
+    }
+
+    /// A bookmark row as a listing hit — its own fields plus the cached
+    /// target blurb. None when the target isn't cached (the trigger makes
+    /// that impossible for live rows; defensive for cache resyncs).
+    fn hit_for_entity(&self, e: &BookmarkEntity) -> Option<BookmarkHit> {
+        let (work, series) = match e.target {
+            BookmarkTarget::Work(id) => (Some(self.get_work(id).ok().flatten()?), None),
+            BookmarkTarget::Series(id) => (None, Some((*self.series_cache.get(id)?).clone())),
+        };
+        Some(BookmarkHit {
+            id: e.id,
+            target: e.target,
+            bookmarker: e.account_id.clone(),
+            note: e.note.clone(),
+            tags: e.tag_string.split(',')
+                .map(str::trim).filter(|t| !t.is_empty())
+                .map(str::to_string).collect(),
+            rec: e.rec,
+            // Date part only — the timestamp is display noise.
+            date_bookmarked: e.created_at.chars().take(10).collect(),
+            // Library hits are always real cached targets — mystery stubs
+            // are never cached.
+            mystery: false,
+            mystery_collection_name: String::new(),
+            mystery_collection_title: String::new(),
+            work,
+            series,
+        })
+    }
+
+    /// Bookmark rows by id, in the given order (unknown ids skipped).
+    pub fn get_bookmark_hits_by_ids(&self, ids: &[i64]) -> Result<Vec<BookmarkHit>, AppError> {
+        Ok(ids.iter()
+            .filter_map(|id| self.bookmarks_cache.get_by_id(*id))
+            .filter_map(|e| self.hit_for_entity(&e))
+            .collect())
     }
 
     // -------------------------------------------------------------------
@@ -487,21 +626,20 @@ impl Storage {
             .map(|e| self.collections_cache.hydrate(&e, &self.tag_cache))
             .collect())
     }
-
-    /// The bookmark-search form evaluated against the cached bookmark rows —
-    /// the library-scoped twin of AO3's /bookmarks/search. Every cached
-    /// bookmark is searched (the active account's own plus any seen in
-    /// fetched listings); each hit carries the bookmark's own fields plus
-    /// its cached work blurb. Blank criteria match everything. `limit` of 0
-    /// means no limit.
+    /// Cached bookmarks matching the full bookmark-search form — every
+    /// cached bookmark row (any bookmarker), each hit carrying the
+    /// bookmark's own fields plus its target's blurb. Blank criteria match
+    /// everything. `limit` of 0 means no limit.
     ///
     /// Local mappings where the cache differs from AO3:
-    /// * only work bookmarks are cached, so a Series / External Work type
-    ///   filter matches nothing;
+    /// * external-work bookmarks are never cached, so that type filter
+    ///   matches nothing;
     /// * the bookmarker (filter and hit field) is the row's account key —
     ///   the lowercased username;
     /// * language compares against the work's language *name* — callers
-    ///   pass the display label ("English"), not AO3's code;
+    ///   pass the display label ("English"), not AO3's code; series carry
+    ///   no language, so a language filter excludes them;
+    /// * work-tag filters apply to works only (series blurbs carry none);
     /// * Date Bookmarked is the row's created_at — for bookmarks seen in
     ///   fetched listings that's when the app first cached them, not AO3's
     ///   own date.
@@ -510,44 +648,42 @@ impl Storage {
         c: &crate::models::BookmarkSearchCriteria,
         limit: u32,
     ) -> Result<Vec<crate::models::BookmarkHit>, AppError> {
-        if !c.bookmarkable_type.is_empty() && c.bookmarkable_type != "Work" {
-            return Ok(Vec::new());
-        }
+        let type_filter = match c.bookmarkable_type.as_str() {
+            "" => None,
+            "Work" => Some("work"),
+            "Series" => Some("series"),
+            _ => return Ok(Vec::new()),
+        };
         // Every cached bookmark, newest first — from the bookmarks cache.
         let mut all = self.bookmarks_cache.all();
-        all.sort_by(|a, b| {
-            b.created_at.cmp(&a.created_at).then_with(|| a.work_id.cmp(&b.work_id))
-        });
+        all.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
 
-        // Pass 1: bookmark-side criteria — they need no work lookup.
-        let mut candidates: Vec<(String, u64, String, Vec<String>, bool, String)> = Vec::new();
+        // Pass 1: bookmark-side criteria — they need no target lookup.
+        let mut candidates: Vec<std::sync::Arc<BookmarkEntity>> = Vec::new();
         for e in all {
-            let (bookmarker, work_id, note, tag_string, rec, created_at) = (
-                e.account_id.clone(), e.work_id, e.note.clone(),
-                e.tag_string.clone(), e.rec, e.created_at.clone(),
-            );
-            if c.rec && !rec { continue; }
-            if c.with_notes && note.trim().is_empty() { continue; }
+            if type_filter.is_some_and(|k| k != e.target.kind()) { continue; }
+            if c.rec && !e.rec { continue; }
+            if c.with_notes && e.note.trim().is_empty() { continue; }
             let notes_q = c.bookmark_notes.trim();
-            if !notes_q.is_empty() && !Self::contains_ci(&note, notes_q) { continue; }
+            if !notes_q.is_empty() && !Self::contains_ci(&e.note, notes_q) { continue; }
             let who = c.bookmarker.trim();
-            if !who.is_empty() && !Self::contains_ci(&bookmarker, who) { continue; }
-            let own_tags: Vec<String> = tag_string.split(',')
+            if !who.is_empty() && !Self::contains_ci(&e.account_id, who) { continue; }
+            let own_tags: Vec<String> = e.tag_string.split(',')
                 .map(str::trim).filter(|t| !t.is_empty())
                 .map(str::to_string).collect();
             if !Self::names_match(&c.other_bookmark_tag_names, &own_tags) { continue; }
             let bq = c.bookmark_query.trim();
             if !bq.is_empty()
-                && !Self::contains_ci(&note, bq)
+                && !Self::contains_ci(&e.note, bq)
                 && !Self::any_ci(&own_tags, bq)
-                && !Self::contains_ci(&bookmarker, bq) { continue; }
-            if !Self::revised_matches(&c.date, &created_at) { continue; }
-            candidates.push((bookmarker, work_id, note, own_tags, rec, created_at));
+                && !Self::contains_ci(&e.account_id, bq) { continue; }
+            if !Self::revised_matches(&c.date, &e.created_at) { continue; }
+            candidates.push(e);
         }
 
-        // One batched hydration for every surviving work — the work-side
+        // One batched hydration for every surviving work — the target-side
         // pass must not cost one query per bookmark.
-        let mut ids: Vec<u64> = candidates.iter().map(|cand| cand.1).collect();
+        let mut ids: Vec<u64> = candidates.iter().filter_map(|e| e.target.work_id()).collect();
         ids.sort_unstable();
         ids.dedup();
         let works_by_id: std::collections::HashMap<u64, crate::models::WorkSummary> = self
@@ -556,53 +692,71 @@ impl Storage {
             .map(|w| (w.id, w))
             .collect();
 
-        // Pass 2: work-side criteria, mirroring the works-form matcher.
+        // Pass 2: target-side criteria, mirroring the works-form matcher.
+        let wq = c.bookmarkable_query.trim();
+        let language = c.language_id.trim();
         let mut hits: Vec<(crate::models::BookmarkHit, String)> = Vec::new();
-        for (bookmarker, work_id, note, own_tags, rec, created_at) in candidates {
-            let Some(w) = works_by_id.get(&work_id) else { continue };
-            let wq = c.bookmarkable_query.trim();
-            if !wq.is_empty() {
-                let hit = Self::contains_ci(&w.title, wq)
-                    || Self::any_ci(&w.authors, wq)
-                    || Self::any_ci(&w.fandoms, wq)
-                    || Self::any_ci(&w.relationships, wq)
-                    || Self::any_ci(&w.characters, wq)
-                    || Self::any_ci(&w.tags, wq)
-                    || Self::contains_ci(&w.summary, wq);
-                if !hit { continue; }
-            }
-            // "Work tags" spans every tag category on the work.
-            let all_tags: Vec<String> = w.fandoms.iter()
-                .chain(&w.characters).chain(&w.relationships).chain(&w.tags)
-                .cloned().collect();
-            if !Self::names_match(&c.other_tag_names, &all_tags) { continue; }
-            if !Self::range_matches(&c.word_count, w.word_count) { continue; }
-            let language = c.language_id.trim();
-            if !language.is_empty() && !w.language.eq_ignore_ascii_case(language) { continue; }
-            if !Self::revised_matches(&c.bookmarkable_date, &w.date_updated) { continue; }
-
-            let hit = crate::models::BookmarkHit {
-                bookmarker,
-                note,
-                tags: own_tags,
-                rec,
-                // Date part only — the timestamp is display noise.
-                date_bookmarked: created_at.chars().take(10).collect(),
-                // Library hits are always real cached works — mystery
-                // stubs are never cached.
-                mystery: false,
-                mystery_collection_name: String::new(),
-                mystery_collection_title: String::new(),
-                work: w.clone(),
+        for e in candidates {
+            let (work, series) = match e.target {
+                BookmarkTarget::Work(id) => {
+                    let Some(w) = works_by_id.get(&id) else { continue };
+                    if !wq.is_empty() {
+                        let hit = Self::contains_ci(&w.title, wq)
+                            || Self::any_ci(&w.authors, wq)
+                            || Self::any_ci(&w.fandoms, wq)
+                            || Self::any_ci(&w.relationships, wq)
+                            || Self::any_ci(&w.characters, wq)
+                            || Self::any_ci(&w.tags, wq)
+                            || Self::contains_ci(&w.summary, wq);
+                        if !hit { continue; }
+                    }
+                    // "Work tags" spans every tag category on the work.
+                    let all_tags: Vec<String> = w.fandoms.iter()
+                        .chain(&w.characters).chain(&w.relationships).chain(&w.tags)
+                        .cloned().collect();
+                    if !Self::names_match(&c.other_tag_names, &all_tags) { continue; }
+                    if !Self::range_matches(&c.word_count, w.word_count) { continue; }
+                    if !language.is_empty() && !w.language.eq_ignore_ascii_case(language) { continue; }
+                    if !Self::revised_matches(&c.bookmarkable_date, &w.date_updated) { continue; }
+                    (Some(w.clone()), None)
+                }
+                BookmarkTarget::Series(id) => {
+                    let Some(sr) = self.series_cache.get(id) else { continue };
+                    if !wq.is_empty() {
+                        let hit = Self::contains_ci(&sr.name, wq)
+                            || Self::any_ci(&sr.authors, wq)
+                            || Self::contains_ci(&sr.summary, wq);
+                        if !hit { continue; }
+                    }
+                    if !Self::names_match(&c.other_tag_names, &[]) { continue; }
+                    if !Self::range_matches(&c.word_count, sr.word_count) { continue; }
+                    if !language.is_empty() { continue; }
+                    if !Self::revised_matches(&c.bookmarkable_date, &sr.date_updated) { continue; }
+                    (None, Some((*sr).clone()))
+                }
             };
+            let created_at = e.created_at.clone();
+            let mut hit = match self.hit_for_entity(&e) { Some(h) => h, None => continue };
+            hit.work = work;
+            hit.series = series;
             hits.push((hit, created_at));
         }
 
         // "Best Match" has no local meaning — it and unknown columns fall
         // back to Date Bookmarked, descending like AO3's default.
+        let updated = |h: &crate::models::BookmarkHit| -> String {
+            h.work.as_ref().map(|w| w.date_updated.clone())
+                .or_else(|| h.series.as_ref().map(|s| s.date_updated.clone()))
+                .unwrap_or_default()
+        };
+        let words = |h: &crate::models::BookmarkHit| -> u64 {
+            h.work.as_ref().map(|w| w.word_count)
+                .or_else(|| h.series.as_ref().map(|s| s.word_count))
+                .unwrap_or(0)
+        };
         match c.sort_column.as_str() {
-            "bookmarkable_date" => hits.sort_by(|a, b| b.0.work.date_updated.cmp(&a.0.work.date_updated)),
-            SORT_KEY_WORD_COUNT => hits.sort_by(|a, b| b.0.work.word_count.cmp(&a.0.work.word_count)),
+            "bookmarkable_date" => hits.sort_by(|a, b| updated(&b.0).cmp(&updated(&a.0))),
+            SORT_KEY_WORD_COUNT => hits.sort_by(|a, b| words(&b.0).cmp(&words(&a.0))),
             _ => hits.sort_by(|a, b| b.1.cmp(&a.1)),
         }
         let mut out: Vec<_> = hits.into_iter().map(|(hit, _)| hit).collect();
@@ -724,43 +878,36 @@ impl Storage {
         Ok(works)
     }
 
-    /// Record works seen in a collection's /bookmarks listing. Accumulates
-    /// across pages like add_collection_works; join rows cascade away with
-    /// the work or collection.
-    pub fn add_collection_bookmarks(&self, name: &str, work_ids: &[u64]) -> Result<(), AppError> {
+    /// Record bookmarks seen in a collection's /bookmarks listing (by
+    /// bookmark row id). Accumulates across pages like
+    /// add_collection_works; link rows cascade away with the bookmark or
+    /// the collection.
+    pub fn add_collection_bookmarks(&self, name: &str, bookmark_ids: &[i64]) -> Result<(), AppError> {
         // Same deep-link stub as add_collection_works — the listing can
         // arrive before any blurb or profile cached the collection row.
         let stub = self.collections_cache.ensure_stub(&self.conn, name)?;
-        let inserted = self.collections_cache.add_bookmarks(&self.conn, name, work_ids)?;
+        let inserted = self.collections_cache.add_bookmarks(&self.conn, name, bookmark_ids)?;
         crate::log_debug!(LOG_TAG_COLLECTIONS,
-            "add_collection_bookmarks '{}': {} work id(s) in, {} new link(s), {} already linked{}",
-            name, work_ids.len(), inserted, work_ids.len() - inserted,
+            "add_collection_bookmarks '{}': {} bookmark id(s) in, {} new link(s), {} already linked{}",
+            name, bookmark_ids.len(), inserted, bookmark_ids.len() - inserted,
             if stub { " — collection row was missing, stub created" } else { "" });
         Ok(())
     }
 
-    /// The cached works seen in a collection's /bookmarks listing, in
+    /// The cached bookmarks seen in a collection's /bookmarks listing, in
     /// listing order — the library-mode view of a collection's bookmarked
-    /// items. No network; only what fetches already recorded. One id query;
-    /// the works themselves hydrate from the works cache.
-    pub fn get_collection_bookmarks(&self, name: &str) -> Result<Vec<crate::models::WorkSummary>, AppError> {
-        let ids: Vec<u64> = self.collections_cache
+    /// items. No network; only what fetches already recorded.
+    pub fn get_collection_bookmarks(&self, name: &str) -> Result<Vec<BookmarkHit>, AppError> {
+        let ids: Vec<i64> = self.collections_cache
             .get(name)
-            .map(|e| e.bookmark_work_ids.clone())
+            .map(|e| e.bookmark_ids.clone())
             .unwrap_or_default();
-        let works = self.get_works_by_ids_ordered(&ids)?;
+        let hits = self.get_bookmark_hits_by_ids(&ids)?;
         crate::log_debug!(LOG_TAG_COLLECTIONS,
-            "get_collection_bookmarks '{}': {} link row(s), {} work(s) returned", name, ids.len(), works.len());
-        if ids.len() != works.len() {
-            crate::log_error!(LOG_TAG_COLLECTIONS,
-                "get_collection_bookmarks '{}': {} link(s) have no matching works row — those works were never cached",
-                name, ids.len() - works.len());
-        }
-        Ok(works)
+            "get_collection_bookmarks '{}': {} link row(s), {} hit(s) returned", name, ids.len(), hits.len());
+        Ok(hits)
     }
 
-    /// The cached work ids for a collection, in the order they were seen.
-    /// Answered from the collections cache.
     pub fn get_collection_work_ids(&self, name: &str) -> Result<Vec<u64>, AppError> {
         Ok(self.collections_cache
             .get(name)

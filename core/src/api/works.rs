@@ -2,7 +2,31 @@ use super::*;
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
+
+/// A direct work fetch is authoritative about the work's presence on AO3:
+/// a 404 (or 410) flags it `gone_from_ao3`; a successful fetch clears the
+/// flag (the cached copy is retained either way). Other failures say
+/// nothing about presence and pass through untouched.
+async fn note_work_presence<T>(storage: &Arc<Mutex<Storage>>, work_id: u64, result: Result<T, AO3Error>)
+    -> Result<T, AO3Error>
+{
+    match &result {
+        Ok(_) => {
+            let s = storage.lock().await;
+            log_db("set_works_gone", s.set_works_gone(&[work_id], false));
+        }
+        Err(AO3Error::Http { kind: crate::client::FailureKind::Http { code: 404 | 410 }, .. }) => {
+            let s = storage.lock().await;
+            log_info!("works", "Work {work_id} is no longer on AO3 (HTTP not found) — flagged gone, cached copy retained");
+            log_db("set_works_gone", s.set_works_gone(&[work_id], true));
+        }
+        Err(_) => {}
+    }
+    result
+}
+
 #[uniffi::export]
+
 impl AO3App {
     pub async fn fetch_search_form(&self) -> Result<Vec<UFormField>, AO3Error> {
         self.run_on_runtime(|client, storage| async move {
@@ -215,10 +239,10 @@ impl AO3App {
     /// The cached works seen in a collection's /bookmarks listing, in
     /// listing order — the library-mode view of a collection's bookmarked
     /// items, no network.
-    pub fn get_library_collection_bookmarks(&self, name: String) -> Result<Vec<UWorkSummary>, AO3Error> {
+    pub fn get_library_collection_bookmarks(&self, name: String) -> Result<Vec<UBookmarkHit>, AO3Error> {
         let s = self.storage.blocking_lock();
         Ok(s.get_collection_bookmarks(&name).map_err(AO3Error::from)?
-            .into_iter().map(UWorkSummary::from).collect())
+            .into_iter().map(UBookmarkHit::from).collect())
     }
 
     /// Cached collections matching the full collections sort/filter form —
@@ -270,14 +294,14 @@ impl AO3App {
         }).await
     }
 
-    /// One page of a collection's bookmarked items (series/external
-    /// bookmarks are skipped by the parser). Everything the listing showed
-    /// is cached: the works like every other listing, the bookmark rows
-    /// themselves (scoped to whoever made them — only the active user's
-    /// own land in the Bookmarks view), and the collection↔work rows in
-    /// collection_bookmarks, so library mode can replay the listing.
+    /// One page of a collection's bookmarked items. Everything the listing
+    /// showed is cached: the targets (works and series) like every other
+    /// listing, the bookmark rows themselves (scoped to whoever made them —
+    /// only the active user's own land in the Bookmarks view), and the
+    /// collection↔bookmark links in collection_bookmarks, so library mode
+    /// can replay the listing. Mystery blurbs display but never cache.
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
-    pub async fn fetch_collection_bookmarks(&self, name: String, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
+    pub async fn fetch_collection_bookmarks(&self, name: String, page: u32, op_id: Option<u64>) -> Result<UPagedBookmarks, AO3Error> {
         let slug = name.clone();
         self.run_on_runtime(move |client, storage| async move {
             let (listings, has_next, total, found) = with_recovery_as(
@@ -293,45 +317,32 @@ impl AO3App {
             let listing_count = listings.len();
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            let mut works = Vec::new();
-            // Ids to link into collection_bookmarks — cached works only.
+            let mut hits = Vec::new();
             let mut cached_ids = Vec::new();
             for l in listings {
-                let Some(w) = l.work_summary else { continue };
-                // Mystery stubs display in the returned page but are never
-                // cached, and never linked into collection_bookmarks —
-                // there is no real work data behind them until the reveal.
-                if l.mystery {
-                    works.push(w);
-                    continue;
-                }
-                log_db("save_work", s.save_work(&w));
-                log_db("cache_fetched_bookmark",
-                       s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
-                                                &l.note, &l.tags.join(", "), l.rec));
-                cached_ids.push(w.id);
-                works.push(w);
+                let id = cache_bookmark_listing(&s, &l);
+                if let Some(id) = id { cached_ids.push(id); }
+                hits.push(hit_from_listing(l, id));
             }
             log_debug!("collections",
-                "fetch_collection_bookmarks '{slug}' page {page}: parsed {listing_count} listing(s), {} with a work blurb ({} skipped: series/external/deleted) (has_next={has_next}, total_pages={total}) — saving works + bookmark rows + collection_bookmarks links",
-                works.len(), listing_count - works.len());
+                "fetch_collection_bookmarks '{slug}' page {page}: parsed {listing_count} listing(s), {} cached (has_next={has_next}, total_pages={total}) — saving targets + bookmark rows + collection_bookmarks links",
+                cached_ids.len());
             log_db("save_collection_bookmarks", s.add_collection_bookmarks(&slug, &cached_ids));
             log_db("commit listing save", tx.commit());
-            Ok(UPagedWorks {
-                works: works.into_iter().map(UWorkSummary::from).collect(),
+            Ok(UPagedBookmarks {
+                bookmarks: hits.into_iter().map(UBookmarkHit::from).collect(),
                 has_next_page: has_next,
                 total_pages: total,
-                total_works: found,
+                total_found: found,
             })
         }).await
     }
 
     /// One page of AO3's /bookmarks/search under the bookmark_search[...]
     /// criteria — full bookmark hits (bookmarker, their tags, note, rec,
-    /// date) with the work blurb embedded. Everything the listing showed is
-    /// cached like every other listing: the works, and the bookmark rows
-    /// attributed to whoever made them (series/external bookmarks are
-    /// skipped by the parser).
+    /// date) with the target blurb embedded. Everything the listing showed
+    /// is cached like every other listing: the targets (works and series),
+    /// and the bookmark rows attributed to whoever made them.
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn search_bookmarks(&self, criteria: UBookmarkSearchCriteria, page: u32, op_id: Option<u64>) -> Result<UPagedBookmarks, AO3Error> {
         let criteria: BookmarkSearchCriteria = criteria.into();
@@ -350,32 +361,14 @@ impl AO3App {
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             let mut hits = Vec::new();
+            let mut cached = 0usize;
             for l in listings {
-                let Some(w) = l.work_summary else { continue };
-                // Mystery hits display but never cache: the work stub has
-                // no real data, and cache-forever would keep showing
-                // "Mystery Work" long after the collection reveals it.
-                if !l.mystery {
-                    log_db("save_work", s.save_work(&w));
-                    log_db("cache_fetched_bookmark",
-                           s.cache_fetched_bookmark(&l.bookmarker, l.work_id, l.ao3_bookmark_id,
-                                                    &l.note, &l.tags.join(", "), l.rec));
-                }
-                hits.push(BookmarkHit {
-                    bookmarker: l.bookmarker,
-                    note: l.note,
-                    tags: l.tags,
-                    rec: l.rec,
-                    date_bookmarked: l.date_bookmarked,
-                    mystery: l.mystery,
-                    mystery_collection_name: l.mystery_collection_name,
-                    mystery_collection_title: l.mystery_collection_title,
-                    work: w,
-                });
+                let id = cache_bookmark_listing(&s, &l);
+                if id.is_some() { cached += 1; }
+                hits.push(hit_from_listing(l, id));
             }
             log_debug!("search",
-                "search_bookmarks page {page}: parsed {listing_count} listing(s), {} with a work blurb ({} skipped: series/external/deleted) (has_next={has_next}, total_pages={total}) — saving works + bookmark rows",
-                hits.len(), listing_count - hits.len());
+                "search_bookmarks page {page}: parsed {listing_count} listing(s), {cached} cached (has_next={has_next}, total_pages={total}) — saving targets + bookmark rows");
             log_db("commit listing save", tx.commit());
             Ok(UPagedBookmarks {
                 bookmarks: hits.into_iter().map(UBookmarkHit::from).collect(),
@@ -449,13 +442,14 @@ impl AO3App {
     /// (the core assigns an internal id).
     pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (summary, chapters, kudos_names) = super::with_recovery_as(
+            let fetched = super::with_recovery_as(
                 client, storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
                     client.read().await.get_work(work_id).await.map_err(AO3Error::from)
-                }).await?;
+                }).await;
+            let (summary, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
             let s = storage.lock().await;
             // Work + series + chapters land atomically.
             let tx = s.begin_tx().map_err(AO3Error::from)?;
@@ -475,13 +469,14 @@ impl AO3App {
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let (_, chapters, kudos_names) = super::with_recovery_as(
+            let fetched = super::with_recovery_as(
                 client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
                     client.read().await.get_work(work_id).await.map_err(AO3Error::from)
-                }).await?;
+                }).await;
+            let (_, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
             let c = client.read().await;
             let s = storage.lock().await;
             record_kudos_if_listed(&s, work_id, &kudos_names);

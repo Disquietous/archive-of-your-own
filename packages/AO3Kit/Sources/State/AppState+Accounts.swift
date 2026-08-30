@@ -24,6 +24,7 @@ extension AppState {
 
         // Reload per-account data from storage
         bookmarkedWorkIDs = Set(bridge.getBookmarkedWorkIds().map { String($0) })
+        bookmarkedSeriesIDs = Set(bridge.getBookmarkedSeriesIds().map { String($0) })
 
         let progressEntries = bridge.getAllProgress()
         progressMap = [:]
