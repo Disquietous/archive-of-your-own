@@ -89,7 +89,7 @@ final class MainSplitViewController: NSSplitViewController {
     // Esc exits immersive mode (popovers handle their own dismissal).
     override func cancelOperation(_ sender: Any?) {
         if model.immersive {
-            model.immersive = false
+            model.exitImmersive()
         }
     }
 }

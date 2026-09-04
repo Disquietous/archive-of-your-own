@@ -142,7 +142,9 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         case .search: works = model.works(for: .search)
         case .subscriptionWorks: works = model.filteredSubscriptionWorks
         case .authorWorks: works = model.filteredAuthorWorks
-        case .authorBookmarks: works = model.authorBookmarksList
+        // The Bookmarks pane is a BookmarkResultsViewController now; this
+        // context only remains so the pane switch never shows stale rows.
+        case .authorBookmarks: works = []
         case .authorCollections: works = []
         case .fandomWorks: works = model.fandomLibraryWorks
         case .readingListWorks: works = model.filteredReadingListWorks
@@ -209,22 +211,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = nil
             }
         case .authorBookmarks:
-            let who = model.authorUsername ?? "this user"
-            if model.isLoadingAuthorBookmarks && works.isEmpty {
-                overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: "Fetching \(who)’s bookmarks…",
-                                                  detail: "Requests are rate-limited to be kind to the archive.",
-                                                  otherActivity: otherActivity(excluding: "bookmarks")))
-            } else if let error = model.authorBookmarksError, works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                title: "Couldn’t load bookmarks", message: error))
-            } else if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
-                                                title: "No bookmarks in your library",
-                                                message: "Press ↻ above to fetch \(who)’s public bookmarks from AO3."))
-            } else {
-                overlay = nil
-            }
+            overlay = nil
         case .authorCollections:
             // Not shown in this context — the pane hosts AuthorCollectionsView.
             overlay = nil

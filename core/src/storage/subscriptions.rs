@@ -301,30 +301,12 @@ impl Storage {
     }
 
     // -------------------------------------------------------------------
-    // Subscription works cache
+    // Subscription works (derived from the works table)
     // -------------------------------------------------------------------
 
-    pub fn save_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
-        self.with_savepoint(Savepoint::SubWorks, || {
-            self.conn.execute(
-                "DELETE FROM subscription_works WHERE sub_type = ?1 AND sub_id = ?2",
-                params![sub_type, sub_id],
-            ).map_err(map_sql)?;
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO subscription_works (sub_type, sub_id, work_id) VALUES (?1, ?2, ?3)"
-            ).map_err(map_sql)?;
-            for id in work_ids {
-                stmt.execute(params![sub_type, sub_id, *id as i64]).map_err(map_sql)?;
-            }
-            Ok(())
-        })
-    }
-
-    /// Add works to a subscription's cached set without dropping existing
     /// Every cached work that belongs to an author or series subscription,
     /// answered from the works table (author bylines / series memberships)
-    /// — the set the census reconciles against. Other subscription kinds
-    /// (author-bookmarks) still read the explicit `subscription_works` set.
+    /// — the set the census reconciles against.
     pub fn get_subscription_member_ids(&self, sub_type: &str, sub_id: &str) -> Result<Vec<u64>, AppError> {
         Ok(self.subscription_member_entities(sub_type, sub_id)?
             .into_iter()
@@ -352,17 +334,7 @@ impl Storage {
                     .filter(|e| e.summary.series.iter().any(|m| m.series_id == series_id))
                     .collect())
             }
-            _ => {
-                let mut stmt = self.conn.prepare_cached(
-                    "SELECT work_id FROM subscription_works
-                     WHERE sub_type = ?1 AND sub_id = ?2 ORDER BY rowid ASC"
-                ).map_err(map_sql)?;
-                let rows = stmt.query_map(params![sub_type, sub_id], |row| row.get::<_, i64>(0))
-                    .map_err(map_sql)?;
-                Ok(rows.filter_map(|r| r.ok())
-                    .filter_map(|id| self.works_cache.get(id as u64))
-                    .collect())
-            }
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -382,19 +354,6 @@ impl Storage {
             .filter(|e| e.gone_from_ao3)
             .map(|e| e.summary.id)
             .collect())
-    }
-
-    /// associations (unlike save_subscription_works, which replaces the set).
-    pub fn add_subscription_works(&self, sub_type: &str, sub_id: &str, work_ids: &[u64]) -> Result<(), AppError> {
-        self.with_savepoint(Savepoint::AddSubWorks, || {
-            let mut stmt = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO subscription_works (sub_type, sub_id, work_id) VALUES (?1, ?2, ?3)"
-            ).map_err(map_sql)?;
-            for id in work_ids {
-                stmt.execute(params![sub_type, sub_id, *id as i64]).map_err(map_sql)?;
-            }
-            Ok(())
-        })
     }
 
     /// Works of a subscription. Author/series come from the works table

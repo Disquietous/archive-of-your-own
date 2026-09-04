@@ -788,11 +788,14 @@ impl Storage {
     /// delete cascades enforced by triggers (one column can't carry two
     /// REFERENCES). `collection_bookmarks` links collections to bookmark
     /// rows instead of works — its rows are dropped (one cached collection;
-    /// Refresh re-fetches) rather than re-pointed.
+    /// Refresh re-fetches) rather than re-pointed. `subscription_works`
+    /// goes: author/series membership derives from works (v14) and a
+    /// user's bookmarks are bookmark rows keyed by that user.
     fn migrate_v15(&self) -> Result<(), AppError> {
         self.conn
             .execute_batch(
-                "CREATE TABLE IF NOT EXISTS series (
+                "DROP TABLE IF EXISTS subscription_works;
+                 CREATE TABLE IF NOT EXISTS series (
                     id           INTEGER PRIMARY KEY,
                     name         TEXT NOT NULL DEFAULT '',
                     authors_json TEXT NOT NULL DEFAULT '[]',
@@ -864,8 +867,8 @@ impl Storage {
     }
 
     /// v14: author and series membership is derived from the works table
-    /// (bylines / series_json) — drop the explicit rows. Only the
-    /// author-bookmarks cache still uses `subscription_works`.
+    /// (bylines / series_json) — drop the explicit rows (v15 drops the
+    /// table).
     fn migrate_v14(&self) -> Result<(), AppError> {
         self.conn
             .execute_batch(

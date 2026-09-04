@@ -404,7 +404,7 @@ final class MacAppModel {
     @discardableResult
     func escapeInnermost() -> Bool {
         if immersive {
-            immersive = false
+            exitImmersive()
             return true
         }
         if readerOpen {
@@ -512,6 +512,17 @@ final class MacAppModel {
         readerOpen = false
         immersive = false
         readerReturnPoint = nil
+    }
+
+    /// Leave immersive reading. When immersive is the user's default reading
+    /// view there is no single-pane reader to fall back to, so backing out
+    /// closes the reader and returns to the work details view.
+    func exitImmersive() {
+        if theme.fullscreenReading {
+            closeReader()
+        } else {
+            immersive = false
+        }
     }
 
     /// Remove one work from Currently Reading; if it's showing in the reading
@@ -1039,8 +1050,9 @@ final class MacAppModel {
     /// author's first non-empty one once the profile's counts arrive.
     private var authorPaneAutoSelect = false
 
-    /// The author's public bookmarks, accumulated page by page.
-    var authorBookmarksList: [Work] = []
+    /// The author's public bookmarks (work and series hits), accumulated
+    /// page by page.
+    var authorBookmarksList: [UBookmarkHit] = []
     var authorBookmarksPage: UInt32 = 0
     var authorBookmarksHasNext = false
     var isLoadingAuthorBookmarks = false
@@ -1091,11 +1103,11 @@ final class MacAppModel {
             break
         case .bookmarks:
             if authorBookmarksList.isEmpty {
-                let cachedBookmarks = appState.bridge.getSubscriptionWorks(subType: "author-bookmarks",
-                                                                           subId: username)
-                let bookmarkWorks = cachedBookmarks.map(AppState.workFromSummary)
-                for work in bookmarkWorks { appState.fetchedWorks[work.id] = work }
-                authorBookmarksList = bookmarkWorks
+                let cached = appState.bridge.getLibraryUserBookmarks(username: username)
+                for work in cached.compactMap(\.work).map(AppState.workFromSummary) {
+                    appState.fetchedWorks[work.id] = work
+                }
+                authorBookmarksList = cached
             }
         case .collections:
             if authorCollections.isEmpty {
@@ -1167,19 +1179,15 @@ final class MacAppModel {
             let result = try await appState.bridge.fetchUserBookmarksPage(username: username, page: page,
                                                                           opID: opID)
             guard authorUsername == username else { return nil }
-            // This pane is a works list; series bookmarks (cached by the
-            // core) have no row here.
-            let works = result.bookmarks.compactMap(\.work).map(AppState.workFromSummary)
-            for work in works { appState.fetchedWorks[work.id] = work }
-            let existing = Set(authorBookmarksList.map(\.id))
-            authorBookmarksList.append(contentsOf: works.filter { !existing.contains($0.id) })
+            // The core cached the targets and bookmark rows; reopening the
+            // author replays them from the library without touching AO3.
+            for work in result.bookmarks.compactMap(\.work).map(AppState.workFromSummary) {
+                appState.fetchedWorks[work.id] = work
+            }
+            let existing = Set(authorBookmarksList.map(\.targetKey))
+            authorBookmarksList.append(contentsOf: result.bookmarks.filter { !existing.contains($0.targetKey) })
             authorBookmarksPage = page
             authorBookmarksHasNext = result.hasNextPage
-            // Persist the list membership so reopening the author shows
-            // these bookmarks without touching AO3.
-            appState.bridge.saveSubscriptionWorks(
-                subType: "author-bookmarks", subId: username,
-                workIds: authorBookmarksList.compactMap { UInt64($0.id) })
             return result.hasNextPage
         } catch {
             if authorUsername == username, !error.isCancellation {

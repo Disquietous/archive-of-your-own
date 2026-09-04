@@ -5,9 +5,16 @@ import SwiftUI
 /// an AppKit table of BookmarkRowCellViews, with loading/empty overlays.
 /// Pagination and the header filter live in the pane toolbar.
 final class BookmarkResultsViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    /// Which hit list this table shows: the bookmark-scope search results,
+    /// or an author profile's public bookmarks.
+    enum Source {
+        case search, authorBookmarks
+    }
+
     private let theme: AppTheme
     private let appState: AppState
     private let model: MacAppModel
+    private let source: Source
 
     private let scrollView = NSScrollView()
     private let tableView = KeyNavTableView()
@@ -22,10 +29,11 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
     private var lastLayoutWidth: CGFloat = 0
     private lazy var sizingCell = BookmarkRowCellView(theme: theme)
 
-    init(theme: AppTheme, appState: AppState, model: MacAppModel) {
+    init(theme: AppTheme, appState: AppState, model: MacAppModel, source: Source = .search) {
         self.theme = theme
         self.appState = appState
         self.model = model
+        self.source = source
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -86,12 +94,32 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
             renderedHitIDs = []
         }
         let search = model.search
-        hits = search.filteredBookmarkHits
+        switch source {
+        case .search: hits = search.filteredBookmarkHits
+        case .authorBookmarks: hits = model.authorBookmarksList
+        }
 
         overlayHost?.removeFromSuperview()
         overlayHost = nil
         let overlay: AnyView?
-        if appState.isSearching && hits.isEmpty {
+        if source == .authorBookmarks {
+            let who = model.authorUsername ?? "this user"
+            if model.isLoadingAuthorBookmarks && hits.isEmpty {
+                overlay = AnyView(LoadingStateMac(theme: theme,
+                                                  message: "Fetching \(who)’s bookmarks…",
+                                                  detail: "Requests are rate-limited to be kind to the archive.",
+                                                  otherActivity: []))
+            } else if let error = model.authorBookmarksError, hits.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                                title: "Couldn’t load bookmarks", message: error))
+            } else if hits.isEmpty {
+                overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
+                                                title: "No bookmarks in your library",
+                                                message: "Press ↻ above to fetch \(who)’s public bookmarks from AO3."))
+            } else {
+                overlay = nil
+            }
+        } else if appState.isSearching && hits.isEmpty {
             overlay = AnyView(LoadingStateMac(theme: theme, message: "Searching…",
                                               detail: "Requests are rate-limited to be kind to the archive.",
                                               otherActivity: []))

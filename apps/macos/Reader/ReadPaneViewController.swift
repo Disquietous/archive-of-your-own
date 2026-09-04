@@ -34,6 +34,9 @@ final class ReadPaneViewController: NSViewController {
 
     private let readerController: ReaderViewController
     private var resultsController: SearchResultsViewController?
+    /// The author profile's Bookmarks pane — bookmark hits (works and
+    /// series), not a works list.
+    private var authorBookmarksController: BookmarkResultsViewController?
     private var collectionSplitController: NSSplitViewController?
     private var pagerHost: NSHostingView<SearchPagerView>?
     private var resultsBackButton: ToolButton!
@@ -41,7 +44,7 @@ final class ReadPaneViewController: NSViewController {
     private var emptyHost: NSHostingView<AnyView>?
 
     private enum Mode: Equatable {
-        case empty, searchForm, searchResults, subscriptionWorks(String),
+        case empty, searchForm, searchResults, subscriptionWorks(String), authorBookmarks(String),
              authorCollections(String), detail(String), reading(String, Int), inboxThread(UInt64),
              settings, scopeForm, scopeResults, collectionSplit
     }
@@ -804,7 +807,7 @@ final class ReadPaneViewController: NSViewController {
                 }
                 trailing.append(authorBookmarksRefreshButton())
                 toolbar.setTrailing(trailing)
-                show(mode: .subscriptionWorks(author))
+                show(mode: .authorBookmarks(author))
             case .collections:
                 let count = model.authorCollections.count
                 let sub = model.isLoadingAuthorCollections
@@ -1023,8 +1026,25 @@ final class ReadPaneViewController: NSViewController {
         if mode != .collectionSplit {
             collectionSplitController?.view.removeFromSuperview()
         }
+        if case .authorBookmarks = mode {} else {
+            authorBookmarksController?.view.removeFromSuperview()
+        }
 
         switch mode {
+        case .authorBookmarks:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            detailHost?.removeFromSuperview()
+            detailHost = nil
+            emptyHost?.removeFromSuperview()
+            if authorBookmarksController == nil {
+                let controller = BookmarkResultsViewController(
+                    theme: theme, appState: appState, model: model, source: .authorBookmarks)
+                addChild(controller)
+                authorBookmarksController = controller
+            }
+            pin(authorBookmarksController!.view)
+
         case .collectionSplit:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
@@ -1265,7 +1285,7 @@ final class ReadPaneViewController: NSViewController {
     }
 
     @objc private func exitImmersive() {
-        model.immersive = false
+        model.exitImmersive()
     }
 
     private func toggleChaptersPopover() {

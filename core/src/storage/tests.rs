@@ -1181,12 +1181,19 @@ fn test_subscription_member_ids() {
     ids.sort();
     assert_eq!(ids, vec![1, 2]);
     assert_eq!(db.get_subscription_member_ids("author", "bob").unwrap(), vec![3]);
+    assert!(db.get_subscription_member_ids("other", "alice").unwrap().is_empty());
 
-    db.add_subscription_works("author-bookmarks", "alice", &[3]).unwrap();
-    db.add_subscription_works("author-bookmarks", "alice", &[3, 1]).unwrap();
-    let mut ids = db.get_subscription_member_ids("author-bookmarks", "alice").unwrap();
-    ids.sort();
-    assert_eq!(ids, vec![1, 3]);
+    // A user's cached bookmarks (any target) come from the bookmarks table.
+    db.cache_fetched_bookmark("Alice", 3, 501, "", "", false).unwrap();
+    let mine = db.get_user_bookmarks("alice").unwrap();
+    assert_eq!(mine.iter().map(|h| h.target.id()).collect::<Vec<_>>(), vec![3]);
+    // An app-only bookmark (no AO3 id) is not one of the user's AO3 bookmarks.
+    db.create_account("alice", "Alice", "").unwrap();
+    db.set_active_account("alice").unwrap();
+    db.add_bookmark(1, None, false).unwrap();
+    let mine = db.get_user_bookmarks("alice").unwrap();
+    assert_eq!(mine.iter().map(|h| h.target.id()).collect::<Vec<_>>(), vec![3]);
+    assert!(db.get_user_bookmarks("nobody").unwrap().is_empty());
 }
 
 #[test]

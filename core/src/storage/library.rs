@@ -381,6 +381,20 @@ impl Storage {
         })
     }
 
+    /// Every cached AO3 bookmark attributed to `username` (any account's
+    /// rows, keyed the way fetched listings key them), newest first — the
+    /// library-mode view of a user's public bookmarks. App-only bookmarks
+    /// (no `ao3_bookmark_id`) are not on AO3 and are excluded, even when
+    /// the user is the signed-in account.
+    pub fn get_user_bookmarks(&self, username: &str) -> Result<Vec<BookmarkHit>, AppError> {
+        let acct = super::account_id_for(username);
+        Ok(self.bookmarks_cache.for_account(&acct)
+            .iter()
+            .filter(|e| e.ao3_bookmark_id.is_some())
+            .filter_map(|e| self.hit_for_entity(e))
+            .collect())
+    }
+
     /// Bookmark rows by id, in the given order (unknown ids skipped).
     pub fn get_bookmark_hits_by_ids(&self, ids: &[i64]) -> Result<Vec<BookmarkHit>, AppError> {
         Ok(ids.iter()

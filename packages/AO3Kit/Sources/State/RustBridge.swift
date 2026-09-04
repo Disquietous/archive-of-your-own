@@ -1089,8 +1089,10 @@ final class RustBridge {
         (try? app?.getPersistedSubscriptions()) ?? []
     }
 
-    func saveSubscriptionWorks(subType: String, subId: String, workIds: [UInt64]) {
-        try? app?.saveSubscriptionWorks(subType: subType, subId: subId, workIds: workIds)
+    /// Every cached bookmark attributed to a user (works and series),
+    /// newest first — the library-mode view of their public bookmarks.
+    func getLibraryUserBookmarks(username: String) -> [UBookmarkHit] {
+        (try? app?.getLibraryUserBookmarks(username: username)) ?? []
     }
 
     func getSubscriptionWorks(subType: String, subId: String) -> [UWorkSummary] {

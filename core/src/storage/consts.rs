@@ -24,9 +24,7 @@ pub(crate) enum Savepoint {
     CanonicalTags,
     SaveCollections,
     SaveCollectionProfile,
-    SubWorks,
     WorksGone,
-    AddSubWorks,
     NewWorkIds,
     SaveSeries,
 }
@@ -39,9 +37,7 @@ impl Savepoint {
             Self::CanonicalTags => "canonical_tags",
             Self::SaveCollections => "save_collections",
             Self::SaveCollectionProfile => "save_collection_profile",
-            Self::SubWorks => "sub_works",
             Self::WorksGone => "works_gone",
-            Self::AddSubWorks => "add_sub_works",
             Self::NewWorkIds => "new_work_ids",
             Self::SaveSeries => "save_series",
         }

@@ -454,11 +454,16 @@ impl AO3App {
             .collect())
     }
 
-    pub fn save_subscription_works(&self, sub_type: String, sub_id: String, work_ids: Vec<u64>) -> Result<(), AO3Error> {
+    /// Every cached bookmark attributed to a user, newest first — the
+    /// library-mode view of their public bookmarks, no network.
+    pub fn get_library_user_bookmarks(&self, username: String) -> Result<Vec<UBookmarkHit>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.save_subscription_works(&sub_type, &sub_id, &work_ids).map_err(AO3Error::from)
+        Ok(s.get_user_bookmarks(&username).map_err(AO3Error::from)?
+            .into_iter().map(UBookmarkHit::from).collect())
     }
 
+    /// A subscription's cached works, derived from the works table
+    /// (author bylines / series memberships).
     pub fn get_subscription_works(&self, sub_type: String, sub_id: String) -> Result<Vec<UWorkSummary>, AO3Error> {
         let s = self.storage.blocking_lock();
         let works = s.get_subscription_works(&sub_type, &sub_id).map_err(AO3Error::from)?;
