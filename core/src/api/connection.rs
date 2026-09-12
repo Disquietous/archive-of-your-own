@@ -49,6 +49,7 @@ impl AO3App {
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
             active_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ops: Default::default(),
             tor_connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             socks_port: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             route_timeouts,
@@ -87,6 +88,7 @@ impl AO3App {
             timeout_secs: previous.timeout_secs.clone(),
             active_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            ops: Default::default(),
             tor_connected: previous.tor_connected.clone(),
             socks_port: previous.socks_port.clone(),
             // Same DB file, same overrides — and the shared client already
@@ -278,6 +280,17 @@ impl AO3App {
             for (_, handle) in tasks.drain() {
                 handle.abort();
             }
+        }
+    }
+
+    /// Abort only the task(s) running under one UI operation id (a
+    /// `new_operation_id` the caller passed into a tracking-aware fetch).
+    /// Every other in-flight operation keeps running — the per-surface
+    /// counterpart of the global `cancel_request`.
+    pub fn cancel_operation(&self, op_id: u64) {
+        let n = self.ops.cancel(op_id);
+        if n > 0 {
+            log_info!("cancel", "Cancelled operation {} ({} task(s))", op_id, n);
         }
     }
 

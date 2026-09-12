@@ -2367,3 +2367,38 @@ fn users_cache_matches_rows_after_each_mutation() {
     let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 2);
 }
+
+#[test]
+fn test_save_comment_in_place_keeps_thread_context() {
+    use crate::models::Comment;
+    let db = open_test_db();
+    let user = |name: &str| AO3User {
+        id: name.to_string(), username: name.to_string(), profile_url: None, avatar_url: None,
+    };
+    let comment = |id: u64, who: &str, replies: Vec<Comment>| Comment {
+        id, author: user(who), posted_at: "1 Jan 2026".into(),
+        content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
+        replies,
+    };
+    // A fetched thread: root 10 by ann, reply 11 by bob, cached under
+    // work 7 / chapter 70.
+    db.save_comment(7, 70, &comment(10, "ann", vec![comment(11, "bob", vec![])])).unwrap();
+    assert_eq!(db.comment_context(11).unwrap(), Some((7, 70, 10)));
+
+    // The reply's parent as parsed from AO3's post-reply page: no thread
+    // context of its own, one new reply (12) beneath it.
+    let parsed_parent = comment(11, "bob", vec![comment(12, "ann", vec![])]);
+    assert!(db.save_comment_in_place(&parsed_parent).unwrap());
+    assert_eq!(db.comment_context(12).unwrap(), Some((7, 70, 11)));
+    assert_eq!(db.comment_context(11).unwrap(), Some((7, 70, 10)), "parent keeps its context");
+
+    // The whole thread is reachable from the new reply.
+    let root = db.get_comment_thread(12).unwrap().expect("thread");
+    assert_eq!(root.id, 10);
+    assert_eq!(root.replies[0].id, 11);
+    assert_eq!(root.replies[0].replies[0].id, 12);
+
+    // A parent that was never cached can't be placed.
+    assert!(!db.save_comment_in_place(&comment(99, "zed", vec![])).unwrap());
+    assert!(db.get_comment_thread(99).unwrap().is_none());
+}

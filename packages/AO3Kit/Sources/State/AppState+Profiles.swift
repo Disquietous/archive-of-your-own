@@ -91,22 +91,42 @@ extension AppState {
         }
     }
 
-    func toggleAuthorSubscription(_ username: String) {
+    /// Last failure message for a subscribe/block/mute action on this
+    /// user, or nil when the most recent attempt succeeded.
+    func userActionError(_ kind: String, _ username: String) -> String? {
+        userActionErrors["\(kind):\(Self.profileKey(username))"]
+    }
+
+    /// Subscribe to or unsubscribe from an author on AO3 — the exact
+    /// action the user confirmed, never a flip of the local mirror. On
+    /// success the subscriptions list and cached profile are refreshed;
+    /// on failure the message is recorded for inline display.
+    func setAuthorSubscription(_ username: String, subscribed: Bool) {
         let username = Self.canonicalAuthorUsername(username)
         let key = "sub:\(username.lowercased())"
         guard !userProfileToggling.contains(key) else { return }
         userProfileToggling.insert(key)
+        userActionErrors[key] = nil
         Task { @MainActor in
-            if let newState = try? await bridge.toggleUserSubscription(
-                target: username, username: ao3Username) {
+            do {
+                let newState = try await bridge.setUserSubscription(
+                    target: username, subscribe: subscribed, username: ao3Username)
                 subscriptions = bridge.getPersistedSubscriptions()
                 if var p = userProfiles[username.lowercased()] {
                     p.subscribed = newState
                     userProfiles[username.lowercased()] = p
                 }
+            } catch {
+                userActionErrors[key] = Self.readableError(error)
+                NSLog("[profile] subscription change for %@ failed: %@", username, "\(error)")
             }
             userProfileToggling.remove(key)
         }
+    }
+
+    /// Flip the AO3 subscription relative to the local mirror.
+    func toggleAuthorSubscription(_ username: String) {
+        setAuthorSubscription(username, subscribed: !isSubscribedToAuthor(username))
     }
 
     func toggleAuthorBlock(_ username: String) {

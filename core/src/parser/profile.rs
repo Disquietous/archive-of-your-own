@@ -173,8 +173,9 @@ pub fn parse_user_profile(html: &str) -> Result<UserProfile, AppError> {
     let mut subscription_ao3_id = None;
     if let Some(form) = parse_work_subscription_form(html) {
         viewer_signed_in = true;
-        // A profile page's #new_subscription form is always the user-
-        // subscription form; the destroy variant omits subscribable_type.
+        // A profile page's subscription form is always the user-
+        // subscription form (#new_subscription, or #edit_subscription_{id}
+        // once subscribed).
         subscribed = form.subscribed;
         if form.subscribed {
             subscription_ao3_id = path_record_id(&form.action, "");

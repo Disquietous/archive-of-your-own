@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile};
@@ -455,6 +455,28 @@ impl Storage {
 
     pub fn save_comment(&self, work_id: u64, chapter_id: u64, comment: &Comment) -> Result<(), AppError> {
         self.save_comment_recursive(work_id, chapter_id, 0, comment)
+    }
+
+    /// Re-save a cached comment (and its reply tree) in place: the row keeps
+    /// the work/chapter/parent context it was first stored under, so new
+    /// replies parsed from a thread page land in the same thread. None
+    /// when the comment has never been cached.
+    pub fn save_comment_in_place(&self, comment: &Comment) -> Result<bool, AppError> {
+        let Some((work_id, chapter_id, parent_id)) = self.comment_context(comment.id)? else {
+            return Ok(false);
+        };
+        self.save_comment_recursive(work_id, chapter_id, parent_id, comment)?;
+        Ok(true)
+    }
+
+    /// (work_id, chapter_id, parent_id) of a cached comment.
+    pub fn comment_context(&self, comment_id: u64) -> Result<Option<(u64, u64, u64)>, AppError> {
+        self.conn.query_row(
+            "SELECT work_id, chapter_id, parent_id FROM comments WHERE id = ?1",
+            params![comment_id as i64],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64,
+                      row.get::<_, i64>(2)? as u64)),
+        ).optional().map_err(map_sql)
     }
 
     /// Record a sighting of an AO3 user. `user.username` is the byline as

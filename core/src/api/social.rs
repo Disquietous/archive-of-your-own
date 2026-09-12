@@ -68,7 +68,7 @@ impl AO3App {
                         (endpoint.clone(), controller, form_page.clone(), comment.clone());
                     async move {
                         client.read().await.post_comment_direct(&endpoint, controller, &form_page, &comment)
-                            .await.map_err(AO3Error::from)
+                            .await.map(|body| body.is_some()).map_err(AO3Error::from)
                     }
                 }).await?;
             let c = client.read().await;
@@ -138,10 +138,44 @@ impl AO3App {
                         client.read().await.post_reply(parent_comment_id, &comment).await.map_err(AO3Error::from)
                     }
                 }).await?;
-            let c = client.read().await;
-            let s = storage.lock().await;
-            persist_posting_credentials(&c, &s);
-            Ok(posted)
+            {
+                let c = client.read().await;
+                let s = storage.lock().await;
+                persist_posting_credentials(&c, &s);
+            }
+            let Some(page) = posted else { return Ok(false) };
+
+            // The reply is live on AO3. Fold it into the cached thread so the
+            // next view of that thread — inbox or work comments — shows it
+            // without another request. AO3 redirects to the thread page the
+            // reply belongs to, which normally carries the parent; when it
+            // landed on a page without it, the parent's own thread page is
+            // one fetch.
+            let mut parent = find_comment(&page, parent_comment_id);
+            if parent.is_none() {
+                let subtree = with_recovery(client.clone(), storage.clone(),
+                    OpKind::Fetch { label: "comment thread".to_string() }, RetrySafety::Idempotent,
+                    move |client| async move {
+                        client.read().await.fetch_comment_subtree(parent_comment_id).await.map_err(AO3Error::from)
+                    }).await?;
+                parent = find_comment(&subtree, parent_comment_id);
+            }
+            match parent {
+                Some(parent) => {
+                    let s = storage.lock().await;
+                    match s.save_comment_in_place(&parent) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            log_info!("comment", "Reply to {parent_comment_id} posted; parent not cached, thread not updated");
+                        }
+                        Err(e) => log_db::<(), _>("save_comment_in_place", Err(e)),
+                    }
+                }
+                None => {
+                    log_info!("comment", "Reply to {parent_comment_id} posted; parent not found on the thread page");
+                }
+            }
+            Ok(true)
         }).await
     }
 
@@ -364,22 +398,36 @@ impl AO3App {
         }).await
     }
 
-    /// Toggle the AO3 subscription for a user and mirror the result into
-    /// the local subscriptions table (sub_type "author", so it shows under
-    /// Subscriptions → Following immediately). Prefers the direct one-POST
-    /// paths and falls back to the intent-aware profile-page path.
+    /// Toggle the AO3 subscription for a user based on the local mirror.
     /// Returns the new state: true = now subscribed.
     pub async fn toggle_user_subscription(&self, target: String, username: Option<String>)
         -> Result<bool, AO3Error> {
+        let (canonical, _) = split_author_byline(&target);
+        let locally_subscribed = {
+            let s = self.storage.lock().await;
+            s.has_subscription("author", &canonical).unwrap_or(false)
+        };
+        self.set_user_subscription(target, !locally_subscribed, username).await
+    }
+
+    /// Set the AO3 subscription for a user to exactly `subscribe` and mirror
+    /// the result into the local subscriptions table (sub_type "author", so
+    /// it shows under Subscriptions → Following immediately). Intent is
+    /// explicit — a confirmed "Subscribe to X" never becomes an unsubscribe
+    /// because the local mirror was stale. Prefers the direct one-POST
+    /// paths and falls back to the intent-aware profile-page path, which
+    /// is a harmless no-op when AO3 already has the desired state.
+    /// Returns the new state: true = now subscribed.
+    pub async fn set_user_subscription(&self, target: String, subscribe: bool, username: Option<String>)
+        -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let (target, _) = split_author_byline(&target);
-            let (locally_subscribed, stored_ao3_id, numeric_id) = {
+            let (stored_ao3_id, numeric_id) = {
                 let s = storage.lock().await;
-                (s.has_subscription("author", &target).unwrap_or(false),
-                 s.get_subscription_ao3_id("author", &target).unwrap_or(None),
+                (s.get_subscription_ao3_id("author", &target).unwrap_or(None),
                  s.get_user_profile(&target).ok().flatten().and_then(|p| p.numeric_id))
             };
-            let want = !locally_subscribed;
+            let want = subscribe;
 
             let c = client.read().await;
             let mut outcome: Option<(bool, Option<String>)> = None;
@@ -476,9 +524,20 @@ impl AO3App {
         Ok(works.into_iter().map(UWorkSummary::from).collect())
     }
 
-    /// Fetch a comment thread from AO3 (or cache) for display in the reading pane.
-    /// Checks the local DB first; if the comment isn't cached, paginates
-    /// through the work's comment pages until found.
+    /// The cached thread (root comment and every reply under it) that
+    /// contains `comment_id`, as the inbox thread JSON — `thread` is null
+    /// when the comment has never been fetched. No network.
+    pub fn get_cached_comment_thread(&self, comment_id: u64) -> Result<String, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let root = s.get_comment_thread(comment_id).map_err(AO3Error::from)?;
+        Ok(thread_json(root.as_ref(), comment_id))
+    }
+
+    /// Fetch a comment's thread from AO3 — always a request: this is the
+    /// inbox's explicit refresh, and the first load of a thread not yet in
+    /// the cache (see `get_cached_comment_thread`). Paginates through the
+    /// work's comment pages until the comment is found, caching every
+    /// thread on the pages read along the way.
     pub async fn fetch_comment_thread(&self, work_url: String, comment_id: u64) -> Result<String, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let work_id: u64 = work_url.split('/')
@@ -491,43 +550,10 @@ impl AO3App {
             }
 
             fn find_root_thread(comments: &[Comment], target_id: u64) -> Option<Comment> {
-                fn contains(comment: &Comment, id: u64) -> bool {
-                    if comment.id == id { return true; }
-                    comment.replies.iter().any(|r| contains(r, id))
-                }
-                for comment in comments {
-                    if contains(comment, target_id) {
-                        return Some(comment.clone());
-                    }
-                }
-                None
+                comments.iter().find(|c| find_comment(std::slice::from_ref(*c), target_id).is_some()).cloned()
             }
 
-            fn comment_to_json(comment: &Comment) -> serde_json::Value {
-                serde_json::json!({
-                    "id": comment.id,
-                    "author": comment.author.username,
-                    "author_url": comment.author.profile_url.as_deref().unwrap_or(""),
-                    "avatar_url": comment.author.avatar_url.as_deref().unwrap_or(""),
-                    "posted_at": comment.posted_at,
-                    "content_json": serde_json::to_string(&comment.content).unwrap_or("[]".to_string()),
-                    "replies": comment.replies.iter().map(comment_to_json).collect::<Vec<_>>(),
-                })
-            }
-
-            // 1. Check DB cache first
-            {
-                let s = storage.lock().await;
-                if let Ok(Some(root)) = s.get_comment_thread(comment_id) {
-                    let result = serde_json::json!({
-                        "thread": comment_to_json(&root),
-                        "target_comment_id": comment_id,
-                    });
-                    return Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()));
-                }
-            }
-
-            // 2. Not cached — paginate through comment pages until found
+            // Paginate through comment pages until found
             let mut page = 1u32;
             let mut total_pages = 1u32;
             let mut found_thread: Option<Comment> = None;
@@ -557,9 +583,9 @@ impl AO3App {
                 page += 1;
             }
 
-            // 3. If we paginated through everything and found nothing in the
-            //    parsed trees, the comment might have been persisted during
-            //    pagination as a child — check the DB one more time.
+            // If we paginated through everything and found nothing in the
+            // parsed trees, the comment might have been persisted during
+            // pagination as a child — check the DB one more time.
             if found_thread.is_none() {
                 let s = storage.lock().await;
                 if let Ok(Some(root)) = s.get_comment_thread(comment_id) {
@@ -567,11 +593,7 @@ impl AO3App {
                 }
             }
 
-            let result = serde_json::json!({
-                "thread": found_thread.as_ref().map(comment_to_json),
-                "target_comment_id": comment_id,
-            });
-            Ok(serde_json::to_string(&result).unwrap_or("{}".to_string()))
+            Ok(thread_json(found_thread.as_ref(), comment_id))
         }).await
     }
 
@@ -623,4 +645,37 @@ impl AO3App {
             Ok(bytes)
         }).await
     }
+}
+
+/// The comment with `id` anywhere in the trees, with its replies.
+fn find_comment(comments: &[Comment], id: u64) -> Option<Comment> {
+    for c in comments {
+        if c.id == id { return Some(c.clone()); }
+        if let Some(found) = find_comment(&c.replies, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn comment_to_json(comment: &Comment) -> serde_json::Value {
+    serde_json::json!({
+        "id": comment.id,
+        "author": comment.author.username,
+        "author_url": comment.author.profile_url.as_deref().unwrap_or(""),
+        "avatar_url": comment.author.avatar_url.as_deref().unwrap_or(""),
+        "posted_at": comment.posted_at,
+        "content_json": serde_json::to_string(&comment.content).unwrap_or("[]".to_string()),
+        "replies": comment.replies.iter().map(comment_to_json).collect::<Vec<_>>(),
+    })
+}
+
+/// The inbox thread payload: the root thread (null when unknown) and the
+/// comment the inbox message pointed at.
+fn thread_json(root: Option<&Comment>, target_comment_id: u64) -> String {
+    let result = serde_json::json!({
+        "thread": root.map(comment_to_json),
+        "target_comment_id": target_comment_id,
+    });
+    serde_json::to_string(&result).unwrap_or("{}".to_string())
 }

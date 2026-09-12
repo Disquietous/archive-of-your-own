@@ -2,13 +2,18 @@
 set -euo pipefail
 
 # Build the Rust core library and generate Swift bindings.
-# Usage: ./scripts/build-rust.sh [--release] [--mac-only]
+# Usage: ./scripts/build-rust.sh [--release] [--mac-only | --ios-only | --sim-only]
 #
-# --mac-only builds just the macOS slice (the everyday loop while testing
-# the Mac app) and repackages the XCFramework with the existing iOS libs —
-# those go stale until the next full run, so do a full build before iOS
-# work. Bindings are regenerated either way, from whichever library was
-# just built.
+# Slice selection — pick the one matching the OS you are working on:
+#   (none)      all three slices (iOS device, iOS simulator, macOS)
+#   --mac-only  macOS slice only         (everyday loop for the Mac app)
+#   --ios-only  iOS device + simulator   (everyday loop for the iOS app)
+#   --sim-only  iOS simulator only       (fastest iOS loop; no device runs)
+# Slices that are not rebuilt are reused from the previous build and go
+# stale until the next run that includes them — run the matching flag (or a
+# full build) before switching to the other OS. Bindings are regenerated
+# either way, from whichever library was just built (the API surface is
+# identical across targets).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -20,7 +25,11 @@ GENERATED_DIR="$ROOT_DIR/packages/AO3Kit/Sources/Generated"
 
 PROFILE="debug"
 PROFILE_FLAG=""
-MAC_ONLY=0
+# Which slices to build (1 = build, 0 = reuse the existing lib).
+BUILD_DEVICE=1
+BUILD_SIM=1
+BUILD_MAC=1
+SLICE_LABEL=""
 for arg in "$@"; do
     case "$arg" in
         --release)
@@ -28,7 +37,13 @@ for arg in "$@"; do
             PROFILE_FLAG="--release"
             ;;
         --mac-only)
-            MAC_ONLY=1
+            BUILD_DEVICE=0; BUILD_SIM=0; BUILD_MAC=1; SLICE_LABEL="macOS only"
+            ;;
+        --ios-only)
+            BUILD_DEVICE=1; BUILD_SIM=1; BUILD_MAC=0; SLICE_LABEL="iOS only"
+            ;;
+        --sim-only)
+            BUILD_DEVICE=0; BUILD_SIM=1; BUILD_MAC=0; SLICE_LABEL="iOS simulator only"
             ;;
         *)
             echo "Unknown argument: $arg" >&2
@@ -43,7 +58,7 @@ phase() {
     PHASE_T0=$SECONDS
 }
 
-echo "==> Building Rust core ($PROFILE$( [[ $MAC_ONLY == 1 ]] && echo ", macOS only" ))..."
+echo "==> Building Rust core ($PROFILE${SLICE_LABEL:+, $SLICE_LABEL})..."
 
 cd "$CORE_DIR"
 
@@ -63,27 +78,47 @@ DEVICE_LIB="target/aarch64-apple-ios/$PROFILE/libao3_core.a"
 SIM_LIB="target/aarch64-apple-ios-sim/$PROFILE/libao3_core.a"
 MACOS_LIB="target/aarch64-apple-darwin/$PROFILE/libao3_core.a"
 
-if [[ $MAC_ONLY == 0 ]]; then
-    echo "  Building for iOS device (aarch64-apple-ios)..."
-    cargo build --lib --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor
+# The library the bindgen step reads; set to whichever slice was built last.
+BINDGEN_LIB=""
 
-    echo "  Building for iOS simulator (aarch64-apple-ios-sim)..."
-    cargo build --lib --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor
+if [[ $BUILD_DEVICE == 1 ]]; then
+    echo "  Building for iOS device (aarch64-apple-ios)..."
+    PHASE_T0=$SECONDS
+    cargo build --lib --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor
+    phase "iOS device compile done"
+    BINDGEN_LIB="$DEVICE_LIB"
 fi
 
-echo "  Building for macOS (aarch64-apple-darwin)..."
-PHASE_T0=$SECONDS
-cargo build --lib --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor
-phase "macOS compile done"
+if [[ $BUILD_SIM == 1 ]]; then
+    echo "  Building for iOS simulator (aarch64-apple-ios-sim)..."
+    PHASE_T0=$SECONDS
+    cargo build --lib --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor
+    phase "iOS simulator compile done"
+    BINDGEN_LIB="$SIM_LIB"
+fi
 
-if [[ $MAC_ONLY == 1 ]]; then
-    for lib in "$DEVICE_LIB" "$SIM_LIB"; do
-        if [[ ! -f "$lib" ]]; then
-            echo "!! $lib missing — run a full build (no --mac-only) first." >&2
-            exit 1
-        fi
-    done
-    echo "  (reusing existing iOS libs — stale until the next full build)"
+if [[ $BUILD_MAC == 1 ]]; then
+    echo "  Building for macOS (aarch64-apple-darwin)..."
+    PHASE_T0=$SECONDS
+    cargo build --lib --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor
+    phase "macOS compile done"
+    BINDGEN_LIB="$MACOS_LIB"
+fi
+
+# Slices that were skipped must already exist so the XCFramework can be
+# repackaged; they are stale until a run that includes them.
+REUSED=()
+[[ $BUILD_DEVICE == 0 ]] && REUSED+=("$DEVICE_LIB")
+[[ $BUILD_SIM == 0 ]] && REUSED+=("$SIM_LIB")
+[[ $BUILD_MAC == 0 ]] && REUSED+=("$MACOS_LIB")
+for lib in "${REUSED[@]}"; do
+    if [[ ! -f "$lib" ]]; then
+        echo "!! $lib missing — run a full build (no slice flag) first." >&2
+        exit 1
+    fi
+done
+if [[ ${#REUSED[@]} -gt 0 ]]; then
+    echo "  (reusing ${#REUSED[@]} existing slice(s) — stale until the next build that includes them)"
 fi
 
 # Cargo never garbage-collects target/, and stray debug invocations with
@@ -98,19 +133,19 @@ for triple in aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin; do
     rm -rf "target/$triple/debug"
 done
 
-# Generate Swift bindings — from the macOS library, which is always fresh
-# (the API surface is identical across targets).
-echo "==> Generating Swift bindings..."
+# Generate Swift bindings — from whichever library was just built (the API
+# surface is identical across targets, so any fresh slice will do).
+echo "==> Generating Swift bindings (from $BINDGEN_LIB)..."
 mkdir -p "$GENERATED_DIR"
 
 cargo run --bin uniffi-bindgen --features bindgen-cli generate \
-    --library "$MACOS_LIB" \
+    --library "$BINDGEN_LIB" \
     --language swift \
     --out-dir "$GENERATED_DIR" 2>/dev/null || {
     # If the bindgen binary doesn't exist, use cargo-uniffi
     cargo install uniffi-bindgen-cli 2>/dev/null || true
     uniffi-bindgen generate \
-        --library "$MACOS_LIB" \
+        --library "$BINDGEN_LIB" \
         --language swift \
         --out-dir "$GENERATED_DIR"
 }

@@ -5,6 +5,7 @@ import Observation
 /// the encrypted database, re-scraped on demand) and paged results shown in
 /// the reading pane.
 @Observable
+@MainActor
 final class MacSearchModel {
     /// Stable session key so the form survives launches in the DB cache table.
     private static let dbSessionID = "persistent"

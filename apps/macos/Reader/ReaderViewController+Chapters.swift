@@ -46,7 +46,7 @@ extension ReaderViewController {
         loadError = nil
         renderChapter()
         do {
-            let fetched = try await appState.chapterFetchOp.run(appState.bridge) { opID in
+            let fetched = try await session.chapterFetchOp.run(appState.bridge) { opID in
                 try await appState.retryOnTimeout(task: chapterTask, using: appState.bridge) {
                     try await self.appState.bridge.fetchChapters(workId, opID: opID)
                 }
@@ -57,7 +57,7 @@ extension ReaderViewController {
             // the last real one rather than an empty page.
             if !fetched.isEmpty, chapterIndex >= fetched.count {
                 chapterIndex = fetched.count - 1
-                model.readerChapter = chapterIndex
+                session.chapter = chapterIndex
             }
         } catch {
             if !chapterTask.isCancelled && !error.isCancellation {
@@ -85,10 +85,15 @@ extension ReaderViewController {
         Task { await loadChapters(force: true) }
     }
 
+    /// Abort this reader's chapter fetch — only this one; other windows'
+    /// fetches, subscription checks and searches keep running — and hand
+    /// the reader back to its host.
     func cancelLoad() {
         chapterTask.cancel()
-        appState.bridge.cancelRequest()
-        model.closeReader()
+        if let id = session.chapterFetchOp.opID {
+            appState.bridge.cancelOperation(id)
+        }
+        session.requestClose()
     }
 
     // MARK: - Chapter navigation & progress
@@ -99,7 +104,7 @@ extension ReaderViewController {
 
     @objc func openNextWorkInSeries() {
         guard let next = work?.nextInSeries?.nextWorkID else { return }
-        model.openNextWorkInSeries(next)
+        session.openNextWork(next)
     }
 
     /// Keyboard navigation entry point (← / → in the reading pane).
@@ -113,7 +118,7 @@ extension ReaderViewController {
         guard target >= 0, target < postedChapterCount else { return }
         // Remember the position being left so the footer's return control
         // can take the reader back (in-memory only).
-        model.stashReturnPoint(chapter: chapterIndex, pos: anchorOffset ?? 0)
+        session.stashReturnPoint(chapter: chapterIndex, pos: anchorOffset ?? 0)
         // Progress follows the chapter being entered (recorded below) — a
         // debounced persist from the old chapter is obsolete.
         pendingPersist?.cancel()
@@ -123,7 +128,7 @@ extension ReaderViewController {
         anchorOffset = nil
         expectedTopLine = nil
         verifyGeneration += 1
-        model.readerChapter = target
+        session.chapter = target
         appState.pushHistory(work.id)
         appState.markWorkRead(work.id)
         // Reaching a chapter records it even if the reader never scrolls.
@@ -210,7 +215,7 @@ extension ReaderViewController {
         footer.update(chapterPct: chapterPct, bookPct: bookPct,
                       canGoBack: chapterIndex > 0,
                       canGoForward: chapterIndex < postedChapterCount - 1,
-                      returnChapter: model.readerReturnPoint.map { $0.chapter + 1 })
+                      returnChapter: session.returnPoint.map { $0.chapter + 1 })
     }
 
     // MARK: - Chapter-embedded images

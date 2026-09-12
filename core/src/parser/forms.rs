@@ -12,9 +12,11 @@ use super::{sel, text};
 /// - `/users/{name}/pseuds` or `/users/{name}` => author subscription
 /// - `/works/{id}` => work subscription
 /// - `/series/{id}` => series subscription
-/// The work page's subscribe form (form#new_subscription): where to POST,
+/// The subscribe form on a work or user profile page: where to POST,
 /// whether the user is currently subscribed (the form flips into a delete
 /// with the subscription id in its action), and the CSRF token to submit.
+/// Work pages keep `id="new_subscription"` in both states; user profile
+/// pages render the subscribed state as `id="edit_subscription_{id}"`.
 /// None when logged out — AO3 renders no subscription form for guests.
 pub struct SubscriptionForm {
     pub action: String,
@@ -26,7 +28,7 @@ pub struct SubscriptionForm {
 
 pub fn parse_work_subscription_form(html: &str) -> Option<SubscriptionForm> {
     let doc = Html::parse_document(html);
-    let form = doc.select(&sel("form#new_subscription")).next()?;
+    let form = doc.select(&sel("form#new_subscription, form[id^='edit_subscription_']")).next()?;
     let action = form.value().attr("action")?.to_string();
     let token = form.select(&sel("input[name='authenticity_token']")).next()
         .and_then(|i| i.value().attr("value"))

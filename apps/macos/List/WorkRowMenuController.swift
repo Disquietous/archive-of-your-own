@@ -32,6 +32,7 @@ final class WorkRowMenuController: NSObject {
         menu.addItem(item("Open", #selector(menuOpenWork(_:)), row))
         menu.addItem(item(started ? "Continue Reading" : "Start Reading",
                           #selector(menuReadWork(_:)), row))
+        menu.addItem(item("Open in New Window", #selector(menuReadWorkInWindow(_:)), row))
         menu.addItem(.separator())
         menu.addItem(item(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
                           #selector(menuToggleBookmark(_:)), row))
@@ -121,6 +122,14 @@ final class WorkRowMenuController: NSObject {
         guard let work = clickedWork(sender) else { return }
         let chapter = max(0, (appState.progressMap[work.id]?.chapter ?? 1) - 1)
         model.openReader(work.id, chapter: chapter)
+    }
+
+    /// Same starting chapter as Start/Continue Reading, in its own window
+    /// (or the window that already has it, brought forward).
+    @objc private func menuReadWorkInWindow(_ sender: NSMenuItem) {
+        guard let work = clickedWork(sender) else { return }
+        let chapter = max(0, (appState.progressMap[work.id]?.chapter ?? 1) - 1)
+        model.windows.open(work.id, chapter: chapter, at: nil)
     }
 
     @objc private func menuToggleBookmark(_ sender: NSMenuItem) {

@@ -22,7 +22,9 @@ import SwiftUI
 final class ReaderViewController: NSViewController {
     let theme: AppTheme
     let appState: AppState
-    let model: MacAppModel
+    /// This reader's navigation state (chapter, resume position, return
+    /// point). Owned by the host — the pane's model or a work window.
+    let session: ReaderSession
 
     let scrollView = NSScrollView()
     private let column = NSStackView()
@@ -56,13 +58,14 @@ final class ReaderViewController: NSViewController {
     var chapterImageStatus: [String: String] = [:]
     var loadingChapterImages: Set<String> = []
 
-    init(theme: AppTheme, appState: AppState, model: MacAppModel) {
+    init(theme: AppTheme, appState: AppState, session: ReaderSession) {
         self.theme = theme
         self.appState = appState
-        self.model = model
+        self.session = session
         self.textView = SelfSizingTextView(usingTextLayoutManager: true)
         self.footer = ReadFooterView(theme: theme)
         super.init(nibName: nil, bundle: nil)
+        session.flushPersist = { [weak self] in self?.flushPendingPersist() }
     }
 
     required init?(coder: NSCoder) {
@@ -180,7 +183,7 @@ final class ReaderViewController: NSViewController {
 
         footer.onPrevious = { [weak self] in self?.goChapter(-1) }
         footer.onNext = { [weak self] in self?.goChapter(1) }
-        footer.onReturn = { [weak self] in self?.model.returnToPreviousPosition() }
+        footer.onReturn = { [weak self] in self?.session.returnToPreviousPosition() }
 
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         footer.translatesAutoresizingMaskIntoConstraints = false
@@ -212,7 +215,7 @@ final class ReaderViewController: NSViewController {
             guard let self else { return }
             // Reading settings that require re-render.
             _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure,
-                 theme.readHyphenation, theme.readJustified, model.immersive)
+                 theme.readHyphenation, theme.readJustified, session.immersive)
             DispatchQueue.main.async { self.renderChapter() }
         }
     }
@@ -285,9 +288,9 @@ final class ReaderViewController: NSViewController {
         anchorOffset = nil
         expectedTopLine = nil
         verifyGeneration += 1
-        pendingRestorePos = model.readerResumePos > 0 ? model.readerResumePos : nil
-        posLog("show work=\(work.id) ch=\(chapterIndex) resumePos=\(model.readerResumePos)")
-        model.readerResumePos = 0
+        pendingRestorePos = session.resumePos > 0 ? session.resumePos : nil
+        posLog("show work=\(work.id) ch=\(chapterIndex) resumePos=\(session.resumePos)")
+        session.resumePos = 0
         renderChapter()
         scrollToTop()
         Task { await loadChapters() }

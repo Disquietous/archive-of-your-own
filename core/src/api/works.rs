@@ -468,7 +468,7 @@ impl AO3App {
 
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime_for(op_id, move |client, storage| async move {
             let fetched = super::with_recovery_as(
                 client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),

@@ -124,8 +124,10 @@ impl AO3Client {
     /// comment[pseud_id], controller_name, comment[comment_content], commit.
     /// If credentials are missing or the archive rejects them, `form_page`
     /// is fetched ONCE (which re-harvests both) and the POST retried.
+    /// Returns the page AO3 redirected to on success (the thread, with the
+    /// new comment rendered in it), None when the archive rejected the post.
     pub async fn post_comment_direct(&self, endpoint: &str, controller_name: &str,
-                                     form_page: &str, content: &str) -> Result<bool, AppError> {
+                                     form_page: &str, content: &str) -> Result<Option<String>, AppError> {
         let mut refreshed = false;
         loop {
             let (token, pseud) = (self.cached_csrf_token(), self.cached_pseud_id());
@@ -147,7 +149,7 @@ impl AO3Client {
             ];
             let body = self.post_form_raw(endpoint, params).await?;
             if comment_post_succeeded(&body, content) {
-                return Ok(true);
+                return Ok(Some(body));
             }
             if !refreshed {
                 // Stale token (session changed since it was harvested) —
@@ -158,7 +160,7 @@ impl AO3Client {
             }
             log_info!("comment", "Rejected POST to {endpoint}: {}",
                       body.chars().take(300).collect::<String>());
-            return Ok(false);
+            return Ok(None);
         }
     }
 

@@ -392,6 +392,12 @@ final class RustBridge {
         app?.cancelRequest()
     }
 
+    /// Abort only the task(s) behind one tracked operation id — the
+    /// per-surface counterpart of `cancelRequest`, which aborts everything.
+    func cancelOperation(_ opID: UInt64) {
+        app?.cancelOperation(opId: opID)
+    }
+
     /// Every operation the recovery engine currently has in flight or is
     /// actively recovering — the authoritative snapshot a view asks for on
     /// mount instead of replaying events it may have missed.
@@ -845,10 +851,11 @@ final class RustBridge {
         return try await app.fetchUserProfile(username: username)
     }
 
-    /// Toggle the AO3 subscription for a user; returns the new state.
-    func toggleUserSubscription(target: String, username: String?) async throws -> Bool {
+    /// Set the AO3 subscription for a user to exactly `subscribe`; returns
+    /// the new state.
+    func setUserSubscription(target: String, subscribe: Bool, username: String?) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.toggleUserSubscription(target: target, username: username)
+        return try await app.setUserSubscription(target: target, subscribe: subscribe, username: username)
     }
 
     /// Toggle blocking a user on AO3; returns the new state.
@@ -1285,6 +1292,15 @@ final class RustBridge {
         return (try? app.getCachedInbox(page: page)) ?? "{}"
     }
 
+    /// The cached thread containing a comment; `thread` is null when it has
+    /// never been fetched. No network.
+    func getCachedCommentThread(commentId: UInt64) -> String {
+        guard let app else { return "{}" }
+        return (try? app.getCachedCommentThread(commentId: commentId)) ?? "{}"
+    }
+
+    /// Always a request to AO3 — the explicit refresh, or the first load of
+    /// a thread not in the cache.
     func fetchCommentThread(workUrl: String, commentId: UInt64) async throws -> String {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchCommentThread(workUrl: workUrl, commentId: commentId)

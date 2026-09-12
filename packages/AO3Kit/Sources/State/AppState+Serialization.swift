@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Work Cache Serialization
 
 extension AppState {
-    static func workFromSummary(_ s: UWorkSummary) -> Work {
+    nonisolated static func workFromSummary(_ s: UWorkSummary) -> Work {
         Work(
             id: String(s.id),
             title: s.title,
@@ -43,7 +43,7 @@ extension AppState {
         )
     }
 
-    private static func ratingFromString(_ s: String) -> Rating {
+    nonisolated private static func ratingFromString(_ s: String) -> Rating {
         switch s {
         case "General": .general
         case "Teen": .teen

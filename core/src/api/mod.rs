@@ -45,6 +45,53 @@ pub use self::recovery::RetrySafety;
 pub use crate::events::OpKind;
 use self::helpers::*;
 
+/// Abort handles for in-flight tasks, keyed by the UI operation id that
+/// requested them. One operation may spawn more than one task over its
+/// life (a retry after reconnect), so each id holds a small list keyed
+/// by the internal task id. Entries leave the map when their task
+/// finishes; cancellation aborts and drops every task under the id.
+#[derive(Default, Clone)]
+pub(crate) struct OperationRegistry {
+    inner: Arc<std::sync::Mutex<std::collections::HashMap<u64, Vec<(u64, tokio::task::AbortHandle)>>>>,
+}
+
+impl OperationRegistry {
+    /// Track `handle` under `op_id`; returns the pair to hand back to
+    /// `finished` once the task resolves.
+    pub(crate) fn register(&self, op_id: u64, task_id: u64, handle: tokio::task::AbortHandle) -> (u64, u64) {
+        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        m.entry(op_id).or_default().push((task_id, handle));
+        (op_id, task_id)
+    }
+
+    pub(crate) fn finished(&self, op_id: u64, task_id: u64) {
+        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tasks) = m.get_mut(&op_id) {
+            tasks.retain(|(id, _)| *id != task_id);
+            if tasks.is_empty() { m.remove(&op_id); }
+        }
+    }
+
+    /// Abort every task registered under `op_id`. Returns how many were
+    /// aborted (0 when the operation had already finished).
+    pub(crate) fn cancel(&self, op_id: u64) -> usize {
+        let mut m = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match m.remove(&op_id) {
+            Some(tasks) => {
+                let n = tasks.len();
+                for (_, handle) in tasks { handle.abort(); }
+                n
+            }
+            None => 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_tracking(&self, op_id: u64) -> bool {
+        self.inner.lock().unwrap().contains_key(&op_id)
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct AO3App {
     client: Arc<tokio::sync::RwLock<AO3Client>>,
@@ -56,6 +103,11 @@ pub struct AO3App {
     /// latest was tracked) and `is_request_active` inaccurate.
     active_tasks: Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::task::AbortHandle>>>,
     next_task_id: Arc<std::sync::atomic::AtomicU64>,
+    /// In-flight tasks keyed by the caller's operation id, so one UI
+    /// surface can cancel exactly its own fetch (`cancel_operation`)
+    /// without aborting every other in-flight task the way
+    /// `cancel_request` does.
+    ops: OperationRegistry,
     /// Lock-free mirrors of connection facts the UI polls constantly.
     /// `blocking_read()` on the client RwLock can stall the main thread:
     /// tokio's RwLock is write-preferring, so a queued writer
@@ -156,6 +208,18 @@ impl AO3App {
         F: FnOnce(Arc<tokio::sync::RwLock<AO3Client>>, Arc<Mutex<Storage>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T, AO3Error>> + Send + 'static,
     {
+        self.run_on_runtime_for(None, f).await
+    }
+
+    /// `run_on_runtime` for a UI-tracked operation: with `op_id` present the
+    /// task is also registered under that id so `cancel_operation(op_id)`
+    /// aborts it — and only it.
+    async fn run_on_runtime_for<T, F, Fut>(&self, op_id: Option<u64>, f: F) -> Result<T, AO3Error>
+    where
+        T: Send + 'static,
+        F: FnOnce(Arc<tokio::sync::RwLock<AO3Client>>, Arc<Mutex<Storage>>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, AO3Error>> + Send + 'static,
+    {
         let _timeout_secs = self.timeout_secs.load(std::sync::atomic::Ordering::Relaxed);
         let client = self.client.clone();
         let storage = self.storage.clone();
@@ -168,11 +232,13 @@ impl AO3App {
         let abort = handle.abort_handle();
         let task_id = self.next_task_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         { self.active_tasks.lock().unwrap().insert(task_id, abort); }
+        let op_entry = op_id.map(|id| self.ops.register(id, task_id, handle.abort_handle()));
 
         // Await the JoinHandle — this works from any async context
         let result = handle.await;
 
         { self.active_tasks.lock().unwrap().remove(&task_id); }
+        if let Some((id, task)) = op_entry { self.ops.finished(id, task); }
 
         // Persist any requests this operation made (durable audit log).
         self.flush_request_log();
@@ -226,5 +292,59 @@ impl AO3App {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod operation_registry_tests {
+    use super::OperationRegistry;
+    use std::time::Duration;
+
+    /// Two tracked operations in flight; cancelling one aborts only that
+    /// one — the other runs to completion and the registry forgets both.
+    #[tokio::test]
+    async fn cancel_operation_aborts_only_its_own_task() {
+        let ops = OperationRegistry::default();
+
+        let slow = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            "slow"
+        });
+        let quick = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            "quick"
+        });
+        let slow_entry = ops.register(1, 100, slow.abort_handle());
+        let quick_entry = ops.register(2, 101, quick.abort_handle());
+        assert!(ops.is_tracking(1) && ops.is_tracking(2));
+
+        assert_eq!(ops.cancel(1), 1);
+        assert!(!ops.is_tracking(1), "cancelled op leaves the registry");
+        assert!(ops.is_tracking(2), "the other op is untouched");
+
+        let slow_result = slow.await;
+        assert!(slow_result.as_ref().err().map_or(false, |e| e.is_cancelled()),
+                "cancelled op's task is aborted");
+        ops.finished(slow_entry.0, slow_entry.1);
+
+        assert_eq!(quick.await.unwrap(), "quick", "other op completes normally");
+        ops.finished(quick_entry.0, quick_entry.1);
+        assert!(!ops.is_tracking(2));
+
+        assert_eq!(ops.cancel(2), 0, "cancelling a finished op is a no-op");
+    }
+
+    /// An operation whose task was replaced (retry) keeps both handles
+    /// until each finishes; cancel covers all of them.
+    #[tokio::test]
+    async fn cancel_covers_every_task_under_the_operation() {
+        let ops = OperationRegistry::default();
+        let a = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(30)).await; });
+        let b = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(30)).await; });
+        ops.register(7, 1, a.abort_handle());
+        ops.register(7, 2, b.abort_handle());
+        assert_eq!(ops.cancel(7), 2);
+        assert!(a.await.unwrap_err().is_cancelled());
+        assert!(b.await.unwrap_err().is_cancelled());
     }
 }

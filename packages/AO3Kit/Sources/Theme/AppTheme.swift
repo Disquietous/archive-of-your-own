@@ -70,6 +70,11 @@ final class AppTheme {
     var fullscreenReading: Bool {
         didSet { UserDefaults.standard.set(fullscreenReading, forKey: "fullscreenReading") }
     }
+    /// macOS: Start/Continue Reading opens the work in its own window
+    /// instead of the reading pane. Default off.
+    var openWorksInWindow: Bool {
+        didSet { UserDefaults.standard.set(openWorksInWindow, forKey: "openWorksInWindow") }
+    }
     /// Per-image download cap in megabytes; 0 = no limit. Default 2 MB.
     var imageMaxMB: Int {
         didSet { UserDefaults.standard.set(imageMaxMB, forKey: "imageMaxMB") }
@@ -134,6 +139,7 @@ final class AppTheme {
         readJustified = d.object(forKey: "readJustified") as? Bool ?? false
         imageAutoLoad = d.object(forKey: "imageAutoLoad") as? Bool ?? false
         fullscreenReading = d.object(forKey: "fullscreenReading") as? Bool ?? true
+        openWorksInWindow = d.object(forKey: "openWorksInWindow") as? Bool ?? false
         imageMaxMB = d.object(forKey: "imageMaxMB") as? Int ?? 2
     }
 

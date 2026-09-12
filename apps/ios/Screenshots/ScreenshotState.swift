@@ -2,6 +2,7 @@ import Foundation
 
 enum ScreenshotState {
 
+    @MainActor
     static func makePopulatedState() -> AppState {
         let state = AppState()
 

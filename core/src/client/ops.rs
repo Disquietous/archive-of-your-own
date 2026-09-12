@@ -370,11 +370,24 @@ impl AO3Client {
         Ok(bytes.to_vec())
     }
 
-    pub async fn post_reply(&self, parent_comment_id: u64, comment: &str) -> Result<bool, AppError> {
+    /// Post a reply under a comment. On success returns the comment trees
+    /// parsed from the page AO3 redirected to — the parent's thread with the
+    /// new reply in it — so the caller can persist the reply as the archive
+    /// rendered it. None when the archive rejected the post.
+    pub async fn post_reply(&self, parent_comment_id: u64, comment: &str) -> Result<Option<Vec<Comment>>, AppError> {
         let endpoint = format!("{BASE_URL}/comments/{parent_comment_id}/comments");
         // Credential-refresh page on failure: the parent comment's thread.
         let form_page = format!("{BASE_URL}/comments/{parent_comment_id}");
-        self.post_comment_direct(&endpoint, "comments", &form_page, comment).await
+        Ok(self.post_comment_direct(&endpoint, "comments", &form_page, comment).await?
+            .map(|body| parser::parse_comments(&body).comments))
+    }
+
+    /// The thread page for one comment (/comments/{id}): that comment with
+    /// every reply nested under it.
+    pub async fn fetch_comment_subtree(&self, comment_id: u64) -> Result<Vec<Comment>, AppError> {
+        let url = format!("{BASE_URL}/comments/{comment_id}");
+        let html = self.fetch(&url).await?;
+        Ok(parser::parse_comments(&html).comments)
     }
 
     // -- Bookmark operations -------------------------------------------------

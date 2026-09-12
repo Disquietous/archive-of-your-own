@@ -32,9 +32,9 @@ extension ReaderViewController {
         // once the new layout exists.
         let restoreAfterRender = anchorOffset != nil && pendingRestorePos == nil
         if restoreAfterRender { scheduleAnchorRestore() }
-        posLog("render immersive=\(model.immersive) anchor=\(anchorOffset ?? -1) restoreAfter=\(restoreAfterRender)")
+        posLog("render immersive=\(session.immersive) anchor=\(anchorOffset ?? -1) restoreAfter=\(restoreAfterRender)")
         let bodySize = CGFloat(theme.fontSize)
-        columnCap.isActive = !model.immersive
+        columnCap.isActive = !session.immersive
         columnCap.constant = CGFloat(theme.measure)
         view.layer?.backgroundColor = theme.nsBg.cgColor
 

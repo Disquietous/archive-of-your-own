@@ -109,13 +109,18 @@ struct ReadingSettingsView: View {
             }
 
             group("Layout") {
-                HStack(spacing: 14) {
+                // One toggle per row, each at its intrinsic width — the
+                // column is narrower than four labels side by side, and a
+                // wrapped checkbox label reads as two options.
+                VStack(alignment: .leading, spacing: 8) {
                     Toggle("Hyphenation", isOn: $theme.readHyphenation)
                     Toggle("Justify text", isOn: $theme.readJustified)
                     Toggle("Fullscreen Reading", isOn: $theme.fullscreenReading)
                         .help("Start/Continue Reading opens chapters in the immersive view")
-                    Spacer()
+                    Toggle("Open in New Window", isOn: $theme.openWorksInWindow)
+                        .help("Start/Continue Reading opens works in their own windows instead of the reading pane")
                 }
+                .fixedSize()
                 .toggleStyle(.checkbox)
                 .font(Font(MacFont.ui(12.5, weight: .medium)))
                 .foregroundStyle(theme.ink2)
@@ -124,6 +129,7 @@ struct ReadingSettingsView: View {
             group("Images") {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Load images automatically", isOn: $theme.imageAutoLoad)
+                        .fixedSize()
                         .toggleStyle(.checkbox)
                         .font(Font(MacFont.ui(12.5, weight: .medium)))
                         .foregroundStyle(theme.ink2)
@@ -258,6 +264,12 @@ struct ReadingSettingsView: View {
             Text(label)
                 .font(Font(MacFont.ui(12.5, weight: .semibold)))
                 .foregroundStyle(on ? theme.ink : theme.ink3)
+                // Never below the label's own width: the three segments
+                // share the column, and an equal third is narrower than
+                // "Comfortable" — the others give up space instead.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 10)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 7)
                 .background(on ? theme.surface : .clear)

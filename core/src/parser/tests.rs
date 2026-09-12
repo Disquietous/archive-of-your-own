@@ -411,6 +411,43 @@ mod subscription_tests {
         assert!(!form.subscribed);
         assert_eq!(form.action, "/users/RestlessIntimacy/subscriptions");
 
+        // Profile page, unsubscribed: create action carrying the numeric
+        // user id and subscribable_type=User.
+        let user_create = r#"
+        <html><body>
+        <form class="ajax-create-destroy" id="new_subscription" action="/users/RestlessIntimacy/subscriptions" method="post"><input type="hidden" name="authenticity_token" value="TOKEN789">
+          <input type="hidden" value="4567890" name="subscription[subscribable_id]">
+          <input type="hidden" value="User" name="subscription[subscribable_type]">
+          <input type="submit" name="commit" value="Subscribe">
+        </form>
+        </body></html>
+        "#;
+        let form = parse_work_subscription_form(user_create).expect("form parses");
+        assert!(!form.subscribed);
+        assert_eq!(form.action, "/users/RestlessIntimacy/subscriptions");
+        assert_eq!(form.token, "TOKEN789");
+        assert_eq!(form.subscribable_id, "4567890");
+        assert_eq!(form.subscribable_type, "User");
+
+        // Profile page, subscribed: AO3 renders the destroy variant as
+        // #edit_subscription_{id} (not #new_subscription) — the id, the
+        // record id in the action, and the numeric user id all still parse.
+        let user_destroy = r#"
+        <html><body>
+        <form class="ajax-create-destroy" id="edit_subscription_1234567890" data-create-value="Subscribe" data-destroy-value="Unsubscribe" action="/users/RestlessIntimacy/subscriptions/1234567890" accept-charset="UTF-8" method="post"><input type="hidden" name="_method" value="delete" autocomplete="off" /><input type="hidden" name="authenticity_token" value="TOKENABC" autocomplete="off" />
+          <input autocomplete="off" type="hidden" value="4567890" name="subscription[subscribable_id]" id="subscription_subscribable_id" />
+          <input autocomplete="off" type="hidden" value="User" name="subscription[subscribable_type]" id="subscription_subscribable_type" />
+          <input type="submit" name="commit" value="Unsubscribe" />
+        </form>
+        </body></html>
+        "#;
+        let form = parse_work_subscription_form(user_destroy).expect("form parses");
+        assert!(form.subscribed);
+        assert_eq!(form.action, "/users/RestlessIntimacy/subscriptions/1234567890");
+        assert_eq!(form.token, "TOKENABC");
+        assert_eq!(form.subscribable_id, "4567890");
+        assert_eq!(form.subscribable_type, "User");
+
         // Logged out: no form at all.
         assert!(parse_work_subscription_form("<html><body><p>none</p></body></html>").is_none());
     }
@@ -658,9 +695,11 @@ mod comment_tests {
             <h2 class="heading">SomeAuthor</h2>
             <ul class="navigation actions">
               <li>
-                <form class="ajax-create-destroy" id="new_subscription" action="/users/Me/subscriptions/456" method="post">
-                  <input type="hidden" name="authenticity_token" value="tok" />
+                <form class="ajax-create-destroy" id="edit_subscription_456" action="/users/Me/subscriptions/456" method="post">
                   <input type="hidden" name="_method" value="delete" />
+                  <input type="hidden" name="authenticity_token" value="tok" />
+                  <input type="hidden" value="424242" name="subscription[subscribable_id]" />
+                  <input type="hidden" value="User" name="subscription[subscribable_type]" />
                   <input type="submit" name="commit" value="Unsubscribe" />
                 </form>
               </li>

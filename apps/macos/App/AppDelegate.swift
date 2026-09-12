@@ -1,6 +1,7 @@
 import AppKit
 import UserNotifications
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let theme = AppTheme()
     let appState = AppState()
@@ -39,6 +40,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
             }
         }
+        // Locking tears down the core; work windows would keep rendering
+        // against a dead bridge, so they close with it — remembered, so the
+        // unlock puts them back where they were, on what they were showing.
+        // (Positions were flushed before the lock — see lockIfIdle.)
+        ObservationRelay.track { [weak self] in
+            guard let self else { return }
+            let initialized = appState.bridge.isInitialized
+            DispatchQueue.main.async {
+                if initialized {
+                    self.model.windows.restoreAfterUnlock()
+                } else {
+                    self.model.windows.suspendForLock()
+                }
+            }
+        }
         // Database creation/unlock is handled by the launch gate — first
         // launch shows Protect Your Library, a password-protected library
         // shows the unlock screen.
@@ -53,8 +69,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification, object: mainWindow, queue: .main
             ) { [weak self] _ in
-                self?.requestLogWindowController?.close()
-                self?.debugLogWindowController?.close()
+                // Delivered on the main queue (queue: .main above).
+                MainActor.assumeIsolated {
+                    self?.requestLogWindowController?.close()
+                    self?.debugLogWindowController?.close()
+                    self?.model.windows.closeAll()
+                }
             }
         }
 
@@ -166,7 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Coarse check: worst case adds ~15 s past the configured span,
         // which is fine for minute-granular timeouts.
         idleCheckTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            self?.lockIfIdle()
+            // Scheduled on the main run loop, so this fires on the main thread.
+            MainActor.assumeIsolated { self?.lockIfIdle() }
         }
     }
 
@@ -176,6 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               appState.bridge.isInitialized,
               appState.bridge.hasDbPassword,
               Date().timeIntervalSince(lastActivity) >= Double(minutes) * 60 else { return }
+        // Debounced scroll persists in every reader land before the
+        // bridge goes away — after lock, saveProgress is a silent no-op.
+        model.windows.flushAll()
         appState.lockNow()
     }
 
@@ -184,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        model.windows.flushAll()
         if appState.historyMode == .clearOnClose {
             appState.clearHistory()
         }
@@ -271,15 +296,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - EPUB export
 
+    /// The work File-menu commands act on: the key window's work when
+    /// that is a work window, else the main window's selection.
+    private var exportableWork: Work? {
+        if let controller = NSApp.keyWindow?.windowController as? WorkWindowController {
+            return controller.work
+        }
+        return model.selectedWork
+    }
+
     @objc private func exportSelectedWork() {
-        guard let work = model.selectedWork else { return }
+        guard let work = exportableWork else { return }
         EpubExporter.export(work: work, appState: appState)
     }
 
     /// Grey out Export when there's no exportable (real, numeric-ID) selection.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(exportSelectedWork) {
-            guard let work = model.selectedWork, UInt64(work.id) != nil else { return false }
+            guard let work = exportableWork, UInt64(work.id) != nil else { return false }
             return true
         }
         return true

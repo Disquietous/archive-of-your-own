@@ -1,6 +1,7 @@
 import SwiftUI
 
 @Observable
+@MainActor
 final class AppState {
     let bridge = RustBridge()
     let sessionId = UUID().uuidString
@@ -259,6 +260,10 @@ final class AppState {
     /// Action keys ("sub:name", "block:name", "mute:name") with a toggle
     /// in flight — disables the corresponding button.
     var userProfileToggling: Set<String> = []
+    /// Last failure per action key ("sub:name", …) — shown inline beside
+    /// the control so a failed AO3 change never fails silently. Cleared
+    /// when the same action next starts.
+    var userActionErrors: [String: String] = [:]
 
     /// Session cache of avatar bytes by username.
     var authorAvatars: [String: Data] = [:]

@@ -30,6 +30,8 @@ final class ReadPaneViewController: NSViewController {
     private var kudosButton: ToolButton!
     private var workCommentsButton: ToolButton!
     private var editBookmarkButton: ToolButton!
+    /// Both modes: move the selected work into its own window.
+    private var detachButton: ToolButton!
     private var readingListPopover: NSPopover?
 
     private let readerController: ReaderViewController
@@ -56,7 +58,7 @@ final class ReadPaneViewController: NSViewController {
         self.appState = appState
         self.model = model
         self.toolbar = PaneToolbarView(theme: theme)
-        self.readerController = ReaderViewController(theme: theme, appState: appState, model: model)
+        self.readerController = ReaderViewController(theme: theme, appState: appState, session: model.paneReader)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -120,6 +122,10 @@ final class ReadPaneViewController: NSViewController {
         editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
                                         tooltip: "Edit bookmark — notes, tags, sync to AO3") { [weak self] in
             self?.showBookmarkEditSheet()
+        }
+        detachButton = ToolButton(theme: theme, symbol: "macwindow",
+                                  tooltip: "Open in separate window") { [weak self] in
+            self?.detachToWindow()
         }
 
         addChild(readerController)
@@ -350,6 +356,7 @@ final class ReadPaneViewController: NSViewController {
     private var subscriptionRefreshBtn: LabelToolButton?
     private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
     private var detailRefreshBtn: ToolButton?
+    private var inboxThreadRefreshBtn: ToolButton?
 
     /// The pager, hosted for the toolbar. The toolbar sits in the window's
     /// titlebar band (fullSizeContentView), and an NSHostingView there
@@ -420,6 +427,19 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    /// Inbox thread header: fetch the thread from AO3 again. Threads are
+    /// cached forever once fetched, so this is the only way to pick up
+    /// replies posted since.
+    private func inboxThreadRefreshButton() -> ToolButton {
+        let button = inboxThreadRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
+                                                         tooltip: "Refresh thread from AO3") { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in await self.appState.refreshInboxThread() }
+        }
+        inboxThreadRefreshBtn = button
+        return button
+    }
+
     private func subscriptionCloseButton() -> ToolButton {
         let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
             self?.model.closeSubscriptionWorks()
@@ -443,21 +463,25 @@ final class ReadPaneViewController: NSViewController {
     /// pass so the cached buttons' closures always target the current author.
     private var drillInAuthorUsername: String?
 
-    /// Bell button for the author drill-ins: subscribe/unsubscribe on AO3.
+    /// Envelope button for the author drill-ins: subscribe/unsubscribe on
+    /// AO3, confirmed by a sheet before any request. Same glyph pair and
+    /// behaviour as the author details card; the follow bells are local.
     /// Symbol and tooltip track the live subscription state each render.
     private func authorSubscribeButton(username: String) -> ToolButton {
-        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "bell",
-                                                      tooltip: "Subscribe") { [weak self] in
+        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "envelope",
+                                                      tooltip: "Subscribe on AO3") { [weak self] in
             guard let self, let user = drillInAuthorUsername else { return }
-            appState.toggleAuthorSubscription(user)
+            let subscribe = !appState.isSubscribedToAuthor(user)
+            AuthorSubscriptionConfirmation.present(in: view.window, username: user,
+                                                   subscribe: subscribe) { [weak self] in
+                self?.appState.setAuthorSubscription(user, subscribed: subscribe)
+            }
         }
         authorSubscribeBtn = button
         let subscribed = appState.isSubscribedToAuthor(username)
-        button.setSymbol(subscribed ? "bell.fill" : "bell")
+        button.setSymbol(subscribed ? "envelope.fill" : "envelope")
         button.tintOverride = subscribed ? theme.nsAccent : nil
-        button.toolTip = subscribed
-            ? "Unsubscribe from \(username) on AO3"
-            : "Subscribe to \(username) on AO3"
+        button.toolTip = subscribed ? "Subscribed on AO3" : "Subscribe on AO3"
         button.isEnabled = !appState.isUserActionBusy("sub", username)
         return button
     }
@@ -962,7 +986,7 @@ final class ReadPaneViewController: NSViewController {
         if model.section == .inbox, let item = appState.selectedInboxItem {
             toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
             toolbar.setLeading([])
-            toolbar.setTrailing([])
+            toolbar.setTrailing([inboxThreadRefreshButton()])
             let mode = Mode.inboxThread(item.commentId)
             show(mode: mode)
             if case .inboxThread = renderedMode, let host = detailHost {
@@ -988,21 +1012,21 @@ final class ReadPaneViewController: NSViewController {
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
         // Kudos posts from either mode's toolbar, so its op shows in both.
         requestOverlayOpID = appState.kudosOp.opID
-            ?? (reading ? appState.chapterFetchOp.opID : appState.workRefreshOp.opID)
+            ?? (reading ? model.paneReader.chapterFetchOp.opID : appState.workRefreshOp.opID)
         toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         if reading {
-            toolbar.setTrailing([settingsButton, immersiveButton, chaptersButton,
+            toolbar.setTrailing([detachButton, settingsButton, immersiveButton, chaptersButton,
                                  readerRefreshButton(), commentsButton, bookmarkButton])
         } else {
             refreshDetailActionButtons(for: work, bookmarked: bookmarked)
             toolbar.setAfterTitle([startReadingButton])
             var trailing: [NSView] = [ao3Button(url: ExternalLinkOpener.ao3WorkURL(work.id),
                                                 tooltip: "Open this work on AO3 in your browser"),
-                                      settingsButton, detailRefreshButton(),
+                                      detachButton, settingsButton, detailRefreshButton(),
                                       downloadButton, readingListButton, subscribeButton,
                                       kudosButton, workCommentsButton]
             if bookmarked { trailing.append(editBookmarkButton) }
@@ -1271,17 +1295,26 @@ final class ReadPaneViewController: NSViewController {
 
     // MARK: - Actions
 
-    /// Reading settings as a window sheet — a popover this wide would hang
-    /// outside the window's visual bounds when anchored to the toolbar.
     private func toggleSettingsPopover() {
-        guard presentedViewControllers?.isEmpty != false else { return }
-        var dismissRef: () -> Void = {}
-        let view = ReadingSettingsView(theme: theme, onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak self, weak hosting] in
-            if let hosting { self?.dismiss(hosting) }
+        ReaderToolbarActions.presentReadingSettings(theme: theme, presenter: self)
+    }
+
+    /// Move the selected work into its own window. While reading, the
+    /// window picks up exactly where the pane was (chapter + anchored
+    /// line) and the pane goes back to the details — a move, not a copy,
+    /// so the work still has exactly one reader.
+    private func detachToWindow() {
+        guard let id = model.selectedWorkID else { return }
+        if model.readerOpen {
+            readerController.flushPendingPersist()
+            let chapter = readerController.chapterIndex
+            let pos = readerController.anchorOffset ?? 0
+            model.closeReader()
+            model.windows.open(id, chapter: chapter, at: pos)
+        } else {
+            let chapter = max(0, (appState.progressMap[id]?.chapter ?? 1) - 1)
+            model.windows.open(id, chapter: chapter, at: nil)
         }
-        presentAsSheet(hosting)
     }
 
     @objc private func exitImmersive() {
@@ -1295,17 +1328,12 @@ final class ReadPaneViewController: NSViewController {
             return
         }
         guard let work = model.selectedWork else { return }
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: ChapterListPopover(theme: theme, appState: appState, model: model,
-                                         workID: work.id,
-                                         onSelect: { [weak self] in
-                                             self?.chaptersPopover?.close()
-                                             self?.chaptersPopover = nil
-                                         }))
-        popover.show(relativeTo: chaptersButton.bounds, of: chaptersButton, preferredEdge: .maxY)
-        chaptersPopover = popover
+        chaptersPopover = ReaderToolbarActions.chaptersPopover(
+            theme: theme, appState: appState, session: model.paneReader,
+            workID: work.id, anchor: chaptersButton) { [weak self] in
+                self?.chaptersPopover?.close()
+                self?.chaptersPopover = nil
+            }
     }
 
     private func toggleReadingListPopover() {
@@ -1326,55 +1354,19 @@ final class ReadPaneViewController: NSViewController {
     /// Comments for the whole work (detail-mode toolbar), as a sheet.
     private func showWorkComments() {
         guard let work = model.selectedWork else { return }
-        var dismissRef: () -> Void = {}
-        let view = MacCommentsView(theme: theme, appState: appState,
-                                   workID: work.id,
-                                   chapterID: nil,
-                                   title: work.title,
-                                   subtitle: nil,
-                                   onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak self, weak hosting] in
-            if let hosting { self?.dismiss(hosting) }
-        }
-        presentAsSheet(hosting)
+        ReaderToolbarActions.presentWorkComments(theme: theme, appState: appState, work: work, presenter: self)
     }
 
     private func showBookmarkEditSheet() {
         guard let work = model.selectedWork else { return }
-        var dismissRef: () -> Void = {}
-        let view = MacBookmarkEditView(theme: theme, appState: appState,
-                                       workID: work.id,
-                                       workTitle: work.title,
-                                       onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak self, weak hosting] in
-            if let hosting { self?.dismiss(hosting) }
-        }
-        presentAsSheet(hosting)
+        ReaderToolbarActions.presentBookmarkEdit(theme: theme, appState: appState, work: work, presenter: self)
     }
 
     /// Comments for the chapter currently open in the reader, as a sheet.
     private func showChapterComments() {
         guard let work = model.selectedWork else { return }
-        let chapterIndex = model.readerChapter
-        var chapterId: UInt64?
-        if let chapters = appState.chaptersForWork(work.id), chapterIndex < chapters.count {
-            let id = chapters[chapterIndex].chapterId
-            chapterId = id > 0 ? UInt64(id) : nil
-        }
-        var dismissRef: () -> Void = {}
-        let view = MacCommentsView(theme: theme, appState: appState,
-                                   workID: work.id,
-                                   chapterID: chapterId,
-                                   title: work.title,
-                                   subtitle: "Chapter \(chapterIndex + 1)",
-                                   onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak self, weak hosting] in
-            if let hosting { self?.dismiss(hosting) }
-        }
-        presentAsSheet(hosting)
+        ReaderToolbarActions.presentChapterComments(theme: theme, appState: appState, work: work,
+                                                    chapterIndex: model.readerChapter, presenter: self)
     }
 }
 
@@ -1383,7 +1375,7 @@ final class ReadPaneViewController: NSViewController {
 struct ChapterListPopover: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
-    @Bindable var model: MacAppModel
+    @Bindable var session: ReaderSession
     let workID: String
     let onSelect: () -> Void
 
@@ -1405,17 +1397,17 @@ struct ChapterListPopover: View {
                 }
                 .padding(.vertical, 6)
             }
-            .onAppear { proxy.scrollTo(model.readerChapter, anchor: .center) }
+            .onAppear { proxy.scrollTo(session.chapter, anchor: .center) }
         }
         .frame(width: 300, height: 360)
         .background(theme.surface)
     }
 
     private func chapterRow(index: Int, chapter: UChapter) -> some View {
-        let current = index == model.readerChapter
+        let current = index == session.chapter
         let title = chapter.title.isEmpty ? "Chapter \(index + 1)" : chapter.title
         return Button {
-            model.openReader(workID, chapter: index)
+            session.open(workID, chapter: index)
             onSelect()
         } label: {
             HStack(spacing: 10) {

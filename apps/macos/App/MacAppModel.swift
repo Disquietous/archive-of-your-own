@@ -5,6 +5,7 @@ import Observation
 /// all library data, network fetching, and persistence live in the shared
 /// AppState/RustBridge, exactly as on iOS.
 @Observable
+@MainActor
 final class MacAppModel {
     enum Section: String, CaseIterable {
         case reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
@@ -19,9 +20,28 @@ final class MacAppModel {
     /// The app opens on Currently Reading — the primary use case.
     var section: Section = .reading
     var selectedWorkID: String?
-    var readerOpen = false
-    var readerChapter = 0
-    var immersive = false
+
+    /// The reading pane's reader state. Work windows own their own
+    /// sessions; this one belongs to the main window's pane.
+    @ObservationIgnored let paneReader: ReaderSession
+    /// Every open work window, keyed by work id — the single authority on
+    /// "is this work open somewhere other than the pane".
+    @ObservationIgnored let windows: WorkWindowRegistry
+
+    /// The pane reader is showing a work. Setting false closes it; there
+    /// is no "open" without a work — use `openReader`.
+    var readerOpen: Bool {
+        get { paneReader.workID != nil }
+        set { if !newValue { paneReader.close() } }
+    }
+    var readerChapter: Int {
+        get { paneReader.chapter }
+        set { paneReader.chapter = newValue }
+    }
+    var immersive: Bool {
+        get { paneReader.immersive }
+        set { paneReader.immersive = newValue }
+    }
     /// Reading list shown in the list pane when a collection is selected.
     var selectedReadingListID: Int64?
     /// Title line for search results driven by a tag (tag pill, fandom
@@ -37,6 +57,10 @@ final class MacAppModel {
         self.appState = appState
         self.theme = theme
         self.search = MacSearchModel()
+        self.paneReader = ReaderSession(appState: appState, theme: theme, layout: .pane)
+        self.windows = WorkWindowRegistry(theme: theme, appState: appState)
+        paneReader.host = self
+        windows.model = self
         // A new query throws away the previous results, so the filter that
         // targeted them goes too — the same rule every other list follows.
         search.onNewQuery = { [weak self] in
@@ -266,15 +290,11 @@ final class MacAppModel {
         selectedReadingListID = snap.selectedReadingListID
         selectedWorkID = snap.selectedWorkID
         readerChapter = snap.readerChapter
-        if snap.readerOpen, let id = snap.selectedWorkID {
+        if snap.readerOpen, let id = snap.selectedWorkID, !windows.isOpen(id) {
             // Reopening the reader lands where it was — stash the saved
-            // position exactly like openReader does.
-            if let progress = appState.progressMap[id], progress.chapter == snap.readerChapter + 1 {
-                readerResumePos = progress.pos
-            } else {
-                readerResumePos = 0
-            }
-            readerOpen = true
+            // position exactly like openReader does. A work that moved to
+            // its own window while this section was away stays there.
+            paneReader.restore(id, chapter: snap.readerChapter)
         } else {
             readerOpen = false
         }
@@ -300,6 +320,7 @@ final class MacAppModel {
         case .subscriptions:
             Task { await appState.loadSubscriptions() }
         case .whatsNew:
+            resetWhatsNewPins()
             appState.loadNotifications()
         case .inbox:
             appState.loadCachedInbox()
@@ -394,6 +415,9 @@ final class MacAppModel {
             }
             // Restricted/deleted next work: stay where we are.
             guard appState.work(byID: id) != nil else { return }
+            // Already reading it in a window: surface that window and
+            // leave the pane on the finished work.
+            if windows.show(id) { return }
             selectWork(id)
             openReader(id, chapter: 0)
         }
@@ -442,76 +466,52 @@ final class MacAppModel {
         Task { await appState.fetchWorkMetadata(id) }
     }
 
+    /// Start/Continue Reading. A work is open in at most one place — if a
+    /// window already has it, that window comes forward instead and the
+    /// pane is left as it is (the detail view may still show it; only a
+    /// reader tracks progress). With the Open in New Window setting on, a
+    /// fresh open goes to a window; chapter changes inside a work the pane
+    /// is already reading stay in the pane.
     func openReader(_ id: String, chapter: Int, at pos: Int? = nil) {
-        // A chapter change within the open work remembers where the reader
-        // was, so the footer's return control can take them back. A fresh
-        // open starts with no return point — only this chapter has been seen.
-        if readerOpen && selectedWorkID == id {
-            if chapter != readerChapter {
-                let stored = appState.progressMap[id]
-                stashReturnPoint(chapter: readerChapter,
-                                 pos: stored?.chapter == readerChapter + 1 ? stored?.pos ?? 0 : 0)
-            }
-        } else {
-            readerReturnPoint = nil
-            // A fresh open lands in the user's preferred reading view;
-            // chapter changes inside an open work keep whatever view the
-            // reader is already in.
-            immersive = theme.fullscreenReading
+        if windows.show(id) { return }
+        if theme.openWorksInWindow, !(readerOpen && selectedWorkID == id) {
+            windows.open(id, chapter: chapter, at: pos)
+            return
         }
-        // Stash the in-chapter position — the reader consumes this to land
-        // back on the anchored line. An explicit `pos` (the return control)
-        // wins over the saved progress.
-        if let pos {
-            readerResumePos = pos
-        } else if let existing = appState.progressMap[id], existing.chapter == chapter + 1 {
-            readerResumePos = existing.pos
-        } else {
-            readerResumePos = 0
-        }
-        aoyoPosLog("openReader work=\(id) ch=\(chapter) existing=\(appState.progressMap[id].map { "ch\($0.chapter)@\($0.pos)" } ?? "nil") stash=\(readerResumePos)")
+        openReaderInPane(id, chapter: chapter, at: pos)
+    }
+
+    /// Open `id` in the pane reader regardless of the window setting — the
+    /// path a window uses to hand its work back to the main window.
+    func openReaderInPane(_ id: String, chapter: Int, at pos: Int? = nil) {
+        if windows.show(id) { return }
         selectedWorkID = id
-        readerChapter = chapter
-        readerOpen = true
-        appState.pushHistory(id)
-        appState.markWorkRead(id)
-        // Opening a chapter enrolls the work in Currently Reading immediately —
-        // scrolling only refines the position. Re-recording the stashed
-        // position keeps the saved place intact until the reader actually
-        // moves; a chapter never visited starts at its top.
-        appState.setProgress(id, chapter: chapter + 1, pos: readerResumePos)
+        paneReader.open(id, chapter: chapter, at: pos)
     }
 
     /// Saved position (character offset) for the chapter being opened;
     /// consumed by the reader on its first successful render.
-    var readerResumePos: Int = 0
-
-    /// Where the reader was before the last chapter change — UI memory only,
-    /// never persisted. Backs the footer's "return to previous position"
-    /// control; empty on a fresh open and cleared when the work is left.
-    struct ReaderReturnPoint: Equatable {
-        /// 0-based chapter index.
-        let chapter: Int
-        /// Character offset within that chapter.
-        let pos: Int
+    var readerResumePos: Int {
+        get { paneReader.resumePos }
+        set { paneReader.resumePos = newValue }
     }
-    var readerReturnPoint: ReaderReturnPoint?
+
+    typealias ReaderReturnPoint = ReaderSession.ReturnPoint
+    var readerReturnPoint: ReaderReturnPoint? {
+        get { paneReader.returnPoint }
+        set { paneReader.returnPoint = newValue }
+    }
 
     func stashReturnPoint(chapter: Int, pos: Int) {
-        readerReturnPoint = ReaderReturnPoint(chapter: chapter, pos: pos)
+        paneReader.stashReturnPoint(chapter: chapter, pos: pos)
     }
 
     func returnToPreviousPosition() {
-        guard readerOpen, let point = readerReturnPoint, let id = selectedWorkID else { return }
-        // openReader stashes the chapter being left, so the control swaps
-        // between the two positions rather than consuming itself.
-        openReader(id, chapter: point.chapter, at: point.pos)
+        paneReader.returnToPreviousPosition()
     }
 
     func closeReader() {
-        readerOpen = false
-        immersive = false
-        readerReturnPoint = nil
+        paneReader.close()
     }
 
     /// Leave immersive reading. When immersive is the user's default reading
@@ -1308,10 +1308,45 @@ final class MacAppModel {
     }
 
     func works(for section: Section) -> [Work] {
-        filterAndSort(rawWorks(for: section),
-                      query: query(for: section, sectionFilters: true, listFilter: true,
-                                   sort: workSort(for: section)),
-                      section: section)
+        let sorted = filterAndSort(rawWorks(for: section),
+                                   query: query(for: section, sectionFilters: true, listFilter: true,
+                                                sort: workSort(for: section)),
+                                   section: section)
+        return section == .whatsNew ? whatsNewPinnedFirst(sorted) : sorted
+    }
+
+    // MARK: - What's New: unopened entries first
+
+    /// Entries held above the rest of the What's New list: the ones unseen
+    /// when the section was entered, plus any that arrive from a check
+    /// while it's showing. Frozen per visit so selecting a row (which
+    /// marks it seen and drops its badge) doesn't yank it down the list
+    /// under the pointer; the next visit re-sorts. Bookkeeping, not render
+    /// state.
+    @ObservationIgnored private var whatsNewPinned: Set<String> = []
+    @ObservationIgnored private var whatsNewPinnedForIDs: [String]?
+
+    private func resetWhatsNewPins() {
+        whatsNewPinnedForIDs = nil
+    }
+
+    /// Stable partition: pinned entries first, each group keeping the
+    /// user's chosen sort order.
+    private func whatsNewPinnedFirst(_ works: [Work]) -> [Work] {
+        let ids = appState.newWorkIDs
+        if whatsNewPinnedForIDs != ids {
+            // First evaluation of a visit: exactly the unseen entries. A
+            // later membership change (a check landed) adds its unseen
+            // arrivals and keeps what was already pinned.
+            let unseen = appState.unseenNewWorkIDs
+            whatsNewPinned = whatsNewPinnedForIDs == nil
+                ? unseen.intersection(ids)
+                : whatsNewPinned.union(unseen).intersection(ids)
+            whatsNewPinnedForIDs = ids
+        }
+        guard !whatsNewPinned.isEmpty else { return works }
+        return works.filter { whatsNewPinned.contains($0.id) }
+            + works.filter { !whatsNewPinned.contains($0.id) }
     }
 
     private func rawWorks(for section: Section) -> [Work] {
@@ -1549,5 +1584,17 @@ final class MacAppModel {
         return LocalStats(wordsRead: wordsRead, worksFinished: finished,
                           inLibrary: appState.cachedWorks.count,
                           downloaded: appState.downloadedWorkIDs.count)
+    }
+}
+
+// MARK: - Pane reader host
+
+extension MacAppModel: ReaderSessionHost {
+    func readerSessionDidClose(_ session: ReaderSession) {
+        closeReader()
+    }
+
+    func readerSession(_ session: ReaderSession, openNextWork id: String) {
+        openNextWorkInSeries(id)
     }
 }

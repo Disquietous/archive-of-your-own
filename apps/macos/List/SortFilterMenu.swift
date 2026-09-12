@@ -3,6 +3,7 @@ import AppKit
 /// Builds and presents the sort & filter menu shared by every work list —
 /// the middle-pane sections and the reading-pane drill-ins. Sort, completion,
 /// and rating choices are all per-section and persisted.
+@MainActor
 final class SortFilterMenuController: NSObject {
     private let theme: AppTheme
     private let model: MacAppModel
