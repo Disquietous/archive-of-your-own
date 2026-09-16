@@ -9,6 +9,7 @@ set -euo pipefail
 #   --mac-only  macOS slice only         (everyday loop for the Mac app)
 #   --ios-only  iOS device + simulator   (everyday loop for the iOS app)
 #   --sim-only  iOS simulator only       (fastest iOS loop; no device runs)
+#   --device-only  iOS device only       (testing on a real iPhone/iPad)
 # Slices that are not rebuilt are reused from the previous build and go
 # stale until the next run that includes them — run the matching flag (or a
 # full build) before switching to the other OS. Bindings are regenerated
@@ -44,6 +45,9 @@ for arg in "$@"; do
             ;;
         --sim-only)
             BUILD_DEVICE=0; BUILD_SIM=1; BUILD_MAC=0; SLICE_LABEL="iOS simulator only"
+            ;;
+        --device-only)
+            BUILD_DEVICE=1; BUILD_SIM=0; BUILD_MAC=0; SLICE_LABEL="iOS device only"
             ;;
         *)
             echo "Unknown argument: $arg" >&2

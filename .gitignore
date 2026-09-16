@@ -53,6 +53,9 @@ venv.bak/
 # Environment variables
 .env
 .env.*
+
+# Per-developer signing team (see Local.xcconfig.example)
+Local.xcconfig
 !.env.example
 
 # Node

@@ -17,9 +17,9 @@ struct AuthorFollowBell: View {
     var size: CGFloat = 12
 
     var body: some View {
-        let state = model.authorFollowState(author)
+        let state = model.follows.authorFollowState(author)
         Button {
-            model.toggleAuthorFollow(author)
+            model.follows.toggleAuthorFollow(author)
         } label: {
             Image(systemName: state.shaded ? "bell.fill" : "bell")
                 .font(.system(size: size, weight: .medium))
@@ -269,7 +269,7 @@ struct FollowedFandomsView: View {
 
     /// Library work counts per fandom, shown inline on each followed row.
     private var libraryCounts: [String: Int] {
-        Dictionary(uniqueKeysWithValues: model.libraryFandoms.map { ($0.name, $0.count) })
+        Dictionary(uniqueKeysWithValues: model.appState.libraryFandoms.map { ($0.name, $0.count) })
     }
 
     private var followTerm: String {
@@ -281,9 +281,9 @@ struct FollowedFandomsView: View {
     }
 
     private var filteredFandoms: [String] {
-        let needle = model.fandomsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return model.followedFandoms }
-        return model.followedFandoms.filter { $0.lowercased().contains(needle) }
+        let needle = model.lists.fandomsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return model.follows.followedFandoms }
+        return model.follows.followedFandoms.filter { $0.lowercased().contains(needle) }
     }
 
     var body: some View {
@@ -293,7 +293,7 @@ struct FollowedFandomsView: View {
                 followField
                     .padding(.init(top: 12, leading: 16, bottom: 2, trailing: 16))
 
-                if model.followedFandoms.isEmpty {
+                if model.follows.followedFandoms.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "flame")
                             .font(.system(size: 30, weight: .light))
@@ -428,7 +428,7 @@ struct FollowedFandomsView: View {
         }
         localSuggestions = model.appState.bridge
             .searchLocalTags(tagType: "fandom", term: followTerm)
-            .filter { !model.followedFandoms.contains($0) }
+            .filter { !model.follows.followedFandoms.contains($0) }
     }
 
     private func lookUpOnAO3() {
@@ -443,7 +443,7 @@ struct FollowedFandomsView: View {
                     lookupError = "No matching fandoms on AO3."
                 } else {
                     remoteSuggestions = names.filter {
-                        !model.followedFandoms.contains($0) && !localSuggestions.contains($0)
+                        !model.follows.followedFandoms.contains($0) && !localSuggestions.contains($0)
                     }
                 }
             } catch {
@@ -456,7 +456,7 @@ struct FollowedFandomsView: View {
     private func follow(_ name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        model.followFandom(trimmed)
+        model.follows.followFandom(trimmed)
         newFandom = ""
         localSuggestions = []
         remoteSuggestions = []
@@ -492,7 +492,7 @@ struct FollowedFandomsView: View {
                 }
                 Spacer()
                 Button {
-                    model.unfollowFandom(name)
+                    model.follows.unfollowFandom(name)
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
@@ -529,12 +529,12 @@ struct AuthorCollectionsView: View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(spacing: 0) {
-                if model.authorCollections.isEmpty {
-                    if model.isLoadingAuthorCollections {
+                if model.author.collections.isEmpty {
+                    if model.author.isLoadingCollections {
                         LoadingStateMac(theme: theme, message: "Loading collections…",
                                         detail: "Requests are rate-limited to be kind to the archive.")
                             .frame(minHeight: 260)
-                    } else if let error = model.authorCollectionsError {
+                    } else if let error = model.author.collectionsError {
                         VStack(spacing: 12) {
                             EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                           title: "Couldn’t reach the archive", message: error)
@@ -545,11 +545,11 @@ struct AuthorCollectionsView: View {
                     } else {
                         EmptyStateMac(theme: theme, icon: "square.grid.2x2",
                                       title: "No collections in your library",
-                                      message: "Press ↻ above to fetch \(model.authorUsername ?? "this user")’s collections from AO3.")
+                                      message: "Press ↻ above to fetch \(model.author.username ?? "this user")’s collections from AO3.")
                             .frame(minHeight: 260)
                     }
                 } else {
-                    ForEach(model.authorCollections, id: \.name) { collection in
+                    ForEach(model.author.collections, id: \.name) { collection in
                         collectionRow(collection)
                     }
                     footer
@@ -560,7 +560,7 @@ struct AuthorCollectionsView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if model.isLoadingAuthorCollections {
+        if model.author.isLoadingCollections {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text("Loading more…")
@@ -569,7 +569,7 @@ struct AuthorCollectionsView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
-        } else if let error = model.authorCollectionsError {
+        } else if let error = model.author.collectionsError {
             VStack(spacing: 8) {
                 Text(error)
                     .font(Font(MacFont.ui(12)))
@@ -580,7 +580,7 @@ struct AuthorCollectionsView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
             .padding(.horizontal, 16)
-        } else if model.authorCollectionsHasNext {
+        } else if model.author.collectionsHasNext {
             loadButton("Load More")
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
@@ -589,7 +589,7 @@ struct AuthorCollectionsView: View {
 
     private func loadButton(_ label: String) -> some View {
         Button {
-            model.loadMoreAuthorCollections()
+            model.author.loadMoreCollections()
         } label: {
             Text(label)
                 .font(Font(MacFont.ui(12.5, weight: .semibold)))
@@ -682,18 +682,18 @@ struct AuthorsList: View {
     private var authors: [(name: String, username: String, source: String)] {
         var seen = Set<String>()
         var result: [(String, String, String)] = []
-        if model.authorsIncludeFollowed {
-            for name in model.followedAuthorNames where seen.insert(name).inserted {
+        if model.lists.authorsIncludeFollowed {
+            for name in model.follows.followedAuthorNames where seen.insert(name).inserted {
                 result.append((name, name, "Followed"))
             }
         }
-        if model.authorsIncludeSubscribed {
-            for sub in model.followedAuthors where seen.insert(sub.name).inserted {
+        if model.lists.authorsIncludeSubscribed {
+            for sub in model.appState.followedAuthors where seen.insert(sub.name).inserted {
                 result.append((sub.name, sub.id, "Subscribed on AO3"))
             }
         }
         result.sort { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
-        let needle = model.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        let needle = model.lists.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
         guard !needle.isEmpty else { return result }
         return result.filter { $0.0.lowercased().contains(needle) || $0.1.lowercased().contains(needle) }
     }
@@ -702,12 +702,12 @@ struct AuthorsList: View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if model.showFollowAuthorField {
+                if model.lists.showFollowAuthorField {
                     followField
                         .padding(.init(top: 12, leading: 16, bottom: 2, trailing: 16))
                 }
                 usernameFilterField
-                    .padding(.init(top: model.showFollowAuthorField ? 0 : 12,
+                    .padding(.init(top: model.lists.showFollowAuthorField ? 0 : 12,
                                    leading: 16, bottom: 2, trailing: 16))
 
                 if authors.isEmpty {
@@ -737,9 +737,9 @@ struct AuthorsList: View {
                 .font(Font(MacFont.ui(12.5)))
                 .foregroundStyle(theme.ink)
                 .onSubmit {
-                    model.followAuthor(newAuthor)
+                    model.follows.followAuthor(newAuthor)
                     newAuthor = ""
-                    model.showFollowAuthorField = false
+                    model.lists.showFollowAuthorField = false
                 }
         }
         .padding(.horizontal, 10)
@@ -755,14 +755,14 @@ struct AuthorsList: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(theme.ink3)
             TextField("Filter by username", text: Binding(
-                get: { model.authorsListFilter },
-                set: { model.authorsListFilter = $0 }))
+                get: { model.lists.authorsListFilter },
+                set: { model.lists.authorsListFilter = $0 }))
                 .textFieldStyle(.plain)
                 .font(Font(MacFont.ui(12.5)))
                 .foregroundStyle(theme.ink)
-            if !model.authorsListFilter.isEmpty {
+            if !model.lists.authorsListFilter.isEmpty {
                 Button {
-                    model.authorsListFilter = ""
+                    model.lists.authorsListFilter = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
@@ -805,7 +805,7 @@ struct AuthorsList: View {
     private func authorRow(_ name: String, username: String, source: String) -> some View {
         // Same selection treatment as the work lists: accent-soft fill
         // with a 3pt accent bar on the leading edge.
-        let selected = model.authorUsername == username
+        let selected = model.author.username == username
         // All author checks run under sub_type "author" whether the row is a
         // local follow or an AO3 subscription.
         let lastChecked = appState.subscriptionLastChecked["author:\(username)"]
@@ -859,7 +859,7 @@ struct StatsView: View {
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
-        let stats = model.localStats
+        let stats = model.appState.localStats
         ScrollView {
             VStack(spacing: 14) {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 11), GridItem(.flexible())], spacing: 11) {

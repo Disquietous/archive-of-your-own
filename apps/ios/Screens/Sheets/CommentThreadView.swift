@@ -121,11 +121,29 @@ struct CommentThreadView: View {
             .padding(.bottom, 12)
     }
 
+    /// Every loaded comment including nested replies — the list
+    /// accumulates (Load more appends), so pages are a fetch detail.
+    private var loadedCommentCount: Int {
+        func count(_ list: [ParsedComment]) -> Int {
+            list.reduce(0) { $0 + 1 + count($1.replies) }
+        }
+        return count(comments)
+    }
+
     private var header: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text("Comments")
                 .font(Typography.sheetTitle())
                 .foregroundStyle(theme.ink)
+
+            if !comments.isEmpty {
+                Text(currentPage < totalPages
+                     ? "\(loadedCommentCount) shown · more on AO3"
+                     : "\(loadedCommentCount) comment\(loadedCommentCount == 1 ? "" : "s")")
+                    .font(Typography.uiSmall())
+                    .foregroundStyle(theme.ink3)
+                    .lineLimit(1)
+            }
 
             Spacer()
 

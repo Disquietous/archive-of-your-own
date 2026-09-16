@@ -973,6 +973,58 @@ final class RustBridge {
         (try? app?.getFollowed(kind: kind)) ?? []
     }
 
+    // MARK: - iCloud library sync + backups (CloudLibrarySync is the transport)
+
+    func cloudSyncStatus() -> UCloudSyncStatus? {
+        (try? app?.cloudSyncStatus()) ?? nil
+    }
+
+    func setCloudSyncEnabled(_ enabled: Bool) {
+        try? app?.setCloudSyncEnabled(enabled: enabled)
+    }
+
+    func cloudSyncEvaluate(manifestJson: String?) throws -> UCloudVerdict? {
+        try app?.cloudSyncEvaluate(manifestJson: manifestJson)
+    }
+
+    func cloudSyncExport(stagingPath: String, cloudKey: String, deviceName: String) throws -> UCloudExport? {
+        try app?.cloudSyncExport(stagingPath: stagingPath, cloudKey: cloudKey, deviceName: deviceName)
+    }
+
+    func cloudSyncMarkPushed(generation: Int64) {
+        try? app?.cloudSyncMarkPushed(generation: generation)
+    }
+
+    func cloudSyncDismiss(generation: Int64) {
+        try? app?.cloudSyncDismiss(generation: generation)
+    }
+
+    func cloudSyncAdopt(stagedPath: String, cloudKey: String, expectedGeneration: Int64) throws -> UBackupInfo? {
+        try app?.cloudSyncAdopt(stagedPath: stagedPath, cloudKey: cloudKey, expectedGeneration: expectedGeneration)
+    }
+
+    func cloudSyncStashForeignCopy(stagedPath: String, cloudKey: String, expectedGeneration: Int64) throws -> UBackupInfo? {
+        try app?.cloudSyncStashForeignCopy(stagedPath: stagedPath, cloudKey: cloudKey, expectedGeneration: expectedGeneration)
+    }
+
+    func backupsList() -> [UBackupInfo] {
+        (try? app?.backupsList()) ?? []
+    }
+
+    func backupRestore(id: String) throws -> UBackupInfo? {
+        try app?.backupRestore(id: id)
+    }
+
+    func backupDelete(id: String) throws {
+        try app?.backupDelete(id: id)
+    }
+
+    /// Directory the core keeps its files in (database, sync sidecar,
+    /// Backups/) — where the transport stages files for it.
+    static func stateDirectory() -> URL {
+        URL(fileURLWithPath: databasePath()).deletingLastPathComponent()
+    }
+
     func addFollowed(kind: String, name: String) {
         try? app?.addFollowed(kind: kind, name: name)
     }

@@ -10,8 +10,8 @@ import AppKit
 /// state, so the highlight always reflects the model (never local state).
 final class ScopeTabsView: NSView {
     private let theme: AppTheme
-    private var segments: [(scope: MacSearchModel.SearchScope, button: NSButton)] = []
-    var onSelect: ((MacSearchModel.SearchScope) -> Void)?
+    private var segments: [(scope: SearchModel.SearchScope, button: NSButton)] = []
+    var onSelect: ((SearchModel.SearchScope) -> Void)?
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -32,7 +32,7 @@ final class ScopeTabsView: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        for (index, scope) in MacSearchModel.SearchScope.allCases.enumerated() {
+        for (index, scope) in SearchModel.SearchScope.allCases.enumerated() {
             if index > 0 {
                 let divider = NSView()
                 divider.wantsLayer = true
@@ -70,11 +70,11 @@ final class ScopeTabsView: NSView {
 
     /// Reflect the model's scope: the selected segment gets the raised
     /// surface and full-ink title, the rest sit muted on the track.
-    func configure(selected: MacSearchModel.SearchScope) {
+    func configure(selected: SearchModel.SearchScope) {
         applyTheme(selected: selected)
     }
 
-    private func applyTheme(selected: MacSearchModel.SearchScope) {
+    private func applyTheme(selected: SearchModel.SearchScope) {
         layer?.backgroundColor = theme.nsSurface2.cgColor
         for (scope, button) in segments {
             let active = scope == selected

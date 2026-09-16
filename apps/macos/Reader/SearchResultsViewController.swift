@@ -20,7 +20,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         if let fixedContext { return fixedContext }
         switch model.section {
         case .authors, .authorWorks:
-            switch model.authorPane {
+            switch model.author.pane {
             case .works: return .authorWorks
             case .bookmarks: return .authorBookmarks
             // The collections pane replaces this table with its own view,
@@ -177,13 +177,13 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = nil
             }
         case .subscriptionWorks:
-            let who = model.subscriptionWorksTitle ?? "this author"
-            if model.isLoadingSubscriptionWorks && works.isEmpty {
+            let who = model.subscriptionWorks.title ?? "this author"
+            if model.subscriptionWorks.isLoading && works.isEmpty {
                 overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: model.subscriptionWorksFetchStatus ?? "Fetching works by \(who)…",
+                                                  message: model.subscriptionWorks.fetchStatus ?? "Fetching works by \(who)…",
                                                   detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
                                                   otherActivity: otherActivity(excluding: "Fetching \(who)")))
-            } else if let error = model.subscriptionWorksError, works.isEmpty {
+            } else if let error = model.subscriptionWorks.error, works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load works", message: error))
             } else if works.isEmpty {
@@ -194,13 +194,13 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 overlay = nil
             }
         case .authorWorks:
-            let who = model.authorUsername ?? "this author"
-            if model.isLoadingAuthor && works.isEmpty {
+            let who = model.author.username ?? "this author"
+            if model.author.isLoadingWorks && works.isEmpty {
                 overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: model.authorFetchStatus ?? "Fetching works by \(who)…",
+                                                  message: model.author.worksFetchStatus ?? "Fetching works by \(who)…",
                                                   detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
                                                   otherActivity: otherActivity(excluding: "Fetching \(who)")))
-            } else if let error = model.authorError, works.isEmpty {
+            } else if let error = model.author.worksError, works.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load works", message: error))
             } else if works.isEmpty {
@@ -263,7 +263,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         // Follow-bell inputs, read on every render path so the relay
         // re-renders the moment a follow or AO3 subscription toggles
         // (see ListPaneViewController.showWorksContent).
-        _ = model.followedAuthorNames
+        _ = model.follows.followedAuthorNames
         _ = appState.subscriptions
 
         // Content-aware signature — data refreshes must repaint rows even
@@ -284,7 +284,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
-                cell.setFollowState(model.authorFollowState(works[row].author))
+                cell.setFollowState(model.follows.authorFollowState(works[row].author))
             }
         }
         renderedWorkIDs = ids
@@ -315,11 +315,11 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
 
     private func configureCell(_ cell: WorkRowCellView, with work: Work, tableWidth: CGFloat) {
         cell.configure(with: work,
-                       progress: model.progress(for: work),
+                       progress: model.appState.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
-                       followState: model.authorFollowState(work.author),
+                       followState: model.follows.authorFollowState(work.author),
                        summaryExpanded: true,
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: max(100, tableWidth - 45))
@@ -333,7 +333,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             self?.model.openAuthorProfile(work.author)
         }
         cell.onToggleFollow = { [weak self] in
-            self?.model.toggleAuthorFollow(work.author)
+            self?.model.follows.toggleAuthorFollow(work.author)
         }
     }
 

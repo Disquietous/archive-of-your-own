@@ -1,22 +1,41 @@
 import SwiftUI
 
+/// Scroll-target identity of one top-level chapter block in the reader —
+/// the unit the SwiftUI reader anchors reading position on (D2: block
+/// index, since `Text` exposes no character geometry). Stable across font
+/// and size changes because block identity is.
+struct ReaderBlockID: Hashable {
+    let chapter: Int
+    let block: Int
+}
+
 struct ContentBlockView: View {
     @Environment(AppTheme.self) private var theme
 
     let blocks: [ParsedContentBlock]
     var compact: Bool = false
     var highlightedIndex: Int?
+    /// When set, top-level blocks carry `ReaderBlockID`s for this chapter
+    /// so the reader can track and restore its anchored block. Nested
+    /// blocks (quotes, list items) keep their local string ids.
+    var anchorChapter: Int? = nil
 
     var body: some View {
         ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-            blockView(block, isFirst: index == 0, previousBlock: index > 0 ? blocks[index - 1] : nil)
-                .id("block-\(index)")
+            let styled = blockView(block, isFirst: index == 0, previousBlock: index > 0 ? blocks[index - 1] : nil)
                 .padding(.vertical, highlightedIndex == index ? 2 : 0)
                 .background(
                     highlightedIndex == index
                         ? RoundedRectangle(cornerRadius: 4).fill(theme.accentSoft)
                         : RoundedRectangle(cornerRadius: 4).fill(.clear)
                 )
+            // The id's static type matters: the reader's scroll-target
+            // visibility tracking filters by `ReaderBlockID`.
+            if let anchorChapter {
+                styled.id(ReaderBlockID(chapter: anchorChapter, block: index))
+            } else {
+                styled.id("block-\(index)")
+            }
         }
     }
 
@@ -36,12 +55,25 @@ struct ContentBlockView: View {
     private func blockView(_ block: ParsedContentBlock, isFirst: Bool, previousBlock: ParsedContentBlock? = nil) -> some View {
         switch block {
         case .paragraph(let inlines):
-            Text(buildAttributedInlines(inlines))
-                .font(compact ? Typography.uiBody() : theme.readingBodyFont)
-                .lineSpacing(compact ? 4 : theme.readingLineSpacing)
-                .foregroundStyle(theme.ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, !compact && !isFirst && !previousBlockAddsSpace(previousBlock) ? theme.readingLineSpacing * 1.0 : 0)
+            if trimmedInlines(inlines).isEmpty {
+                // Whitespace-only paragraphs are intentional blank space —
+                // <p><br><br></p> scene breaks, <p>&nbsp;</p> spacers. One
+                // empty line per <br> (at least one). Genuinely empty
+                // <p></p> never gets here: the parser emits no block for a
+                // paragraph with no inline content at all.
+                let blankLines = max(lineBreakCount(inlines), 1)
+                Text(String(repeating: "\n", count: blankLines - 1))
+                    .font(compact ? Typography.uiBody() : theme.readingBodyFont)
+                    .lineSpacing(compact ? 4 : theme.readingLineSpacing)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(buildAttributedInlines(inlines))
+                    .font(compact ? Typography.uiBody() : theme.readingBodyFont)
+                    .lineSpacing(compact ? 4 : theme.readingLineSpacing)
+                    .foregroundStyle(theme.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, !compact && !isFirst && !previousBlockAddsSpace(previousBlock) ? theme.readingLineSpacing * 1.0 : 0)
+            }
 
         case .heading(let level, let text):
             Text(text)
@@ -124,12 +156,63 @@ struct ContentBlockView: View {
         return result
     }
 
+    /// Recursive count of explicit line breaks in an inline tree.
+    private func lineBreakCount(_ inlines: [ParsedInlineContent]) -> Int {
+        inlines.reduce(0) { total, inline in
+            switch inline {
+            case .lineBreak:
+                return total + 1
+            case .bold(let content), .italic(let content), .strikethrough(let content),
+                 .superscript(let content), .link(_, let content):
+                return total + lineBreakCount(content)
+            case .text:
+                return total
+            }
+        }
+    }
+
+    /// AO3 authors separate lines with <br><br>; a browser shows that as a
+    /// single blank line. Each run of 2+ breaks (whitespace-only text
+    /// between them is invisible) collapses to exactly one blank line.
+    private func collapseDoubleBreaks(_ inlines: [ParsedInlineContent]) -> [ParsedInlineContent] {
+        var out: [ParsedInlineContent] = []
+        var i = 0
+        while i < inlines.count {
+            guard case .lineBreak = inlines[i] else {
+                out.append(inlines[i])
+                i += 1
+                continue
+            }
+            var breaks = 1
+            var lastBreak = i
+            var j = i + 1
+            scan: while j < inlines.count {
+                switch inlines[j] {
+                case .lineBreak:
+                    breaks += 1
+                    lastBreak = j
+                    j += 1
+                case .text(let value) where value.trimmingCharacters(in: .whitespaces).isEmpty:
+                    j += 1
+                default:
+                    break scan
+                }
+            }
+            out.append(.lineBreak)
+            if breaks >= 2 {
+                out.append(.lineBreak)
+            }
+            i = lastBreak + 1
+        }
+        return out
+    }
+
     private func buildAttributedInlines(_ inlines: [ParsedInlineContent]) -> AttributedString {
         var result = AttributedString()
         if !compact {
             result.append(AttributedString("\u{2002}\u{2002}\u{2002}\u{2002}"))
         }
-        for inline in trimmedInlines(inlines) {
+        for inline in collapseDoubleBreaks(trimmedInlines(inlines)) {
             result.append(attributedString(for: inline))
         }
         return result
@@ -167,103 +250,14 @@ struct ContentBlockView: View {
             return s
 
         case .superscript(let content):
+            // Raised and reduced, like the macOS renderer's baseline offset.
             var s = AttributedString()
             for c in content { s.append(attributedString(for: c)) }
+            let size = compact ? 11.0 : CGFloat(theme.fontSize) * 0.7
+            s.font = compact ? .system(size: size) : .custom(theme.readingFont.fontName, size: size)
+            s.baselineOffset = size * 0.45
             return s
 
-        case .lineBreak:
-            return AttributedString("\n")
-        }
-    }
-}
-
-struct DropCapParagraphView: View {
-    @Environment(AppTheme.self) private var theme
-
-    let inlines: [ParsedInlineContent]
-
-    var body: some View {
-        let fullText = plainText(from: inlines)
-        if let first = fullText.first {
-            HStack(alignment: .top, spacing: 0) {
-                Text(String(first))
-                    .font(.custom("Newsreader", size: CGFloat(Int(3.1 * 19))).weight(.semibold))
-                    .foregroundStyle(theme.accent)
-                    .lineLimit(1)
-                    .padding(.trailing, 4)
-                    .offset(y: -4)
-
-                Text(buildAttributedInlines(Array(inlines.dropFirst(0)), skipFirst: true))
-                    .font(theme.readingBodyFont)
-                    .lineSpacing(theme.readingLineSpacing)
-                    .foregroundStyle(theme.ink)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            EmptyView()
-        }
-    }
-
-    private func plainText(from inlines: [ParsedInlineContent]) -> String {
-        inlines.map { inlineToString($0) }.joined()
-    }
-
-    private func inlineToString(_ inline: ParsedInlineContent) -> String {
-        switch inline {
-        case .text(let v): v
-        case .bold(let c), .italic(let c), .link(_, let c),
-             .strikethrough(let c), .superscript(let c): c.map { inlineToString($0) }.joined()
-        case .lineBreak: "\n"
-        }
-    }
-
-    private func buildAttributedInlines(_ inlines: [ParsedInlineContent], skipFirst: Bool) -> AttributedString {
-        var result = AttributedString()
-        var skipped = false
-        for inline in inlines {
-            if skipFirst && !skipped {
-                if case .text(let v) = inline {
-                    let trimmed = String(v.dropFirst())
-                    if !trimmed.isEmpty {
-                        result.append(AttributedString(trimmed))
-                    }
-                    skipped = true
-                    continue
-                }
-            }
-            result.append(attributedString(for: inline))
-        }
-        return result
-    }
-
-    private func attributedString(for inline: ParsedInlineContent) -> AttributedString {
-        switch inline {
-        case .text(let value):
-            return AttributedString(value)
-        case .bold(let content):
-            var s = AttributedString()
-            for c in content { s.append(attributedString(for: c)) }
-            s.inlinePresentationIntent = .stronglyEmphasized
-            return s
-        case .italic(let content):
-            var s = AttributedString()
-            for c in content { s.append(attributedString(for: c)) }
-            s.inlinePresentationIntent = .emphasized
-            return s
-        case .link(let href, let content):
-            var s = AttributedString()
-            for c in content { s.append(attributedString(for: c)) }
-            if let url = URL(string: href) { s.link = url }
-            return s
-        case .strikethrough(let content):
-            var s = AttributedString()
-            for c in content { s.append(attributedString(for: c)) }
-            s.strikethroughStyle = .single
-            return s
-        case .superscript(let content):
-            var s = AttributedString()
-            for c in content { s.append(attributedString(for: c)) }
-            return s
         case .lineBreak:
             return AttributedString("\n")
         }

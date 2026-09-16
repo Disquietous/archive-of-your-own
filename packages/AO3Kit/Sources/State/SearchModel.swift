@@ -2,14 +2,12 @@ import Foundation
 import Observation
 
 /// State for AO3 search: the criteria form (scraped from AO3, persisted in
-/// the encrypted database, re-scraped on demand) and paged results shown in
-/// the reading pane.
+/// the encrypted database, re-scraped on demand) and paged results. Shared by
+/// both apps; each renders it in its own containers.
 @Observable
 @MainActor
-final class MacSearchModel {
+final class SearchModel {
     /// Stable session key so the form survives launches in the DB cache table.
-    private static let dbSessionID = "persistent"
-    private static let dbFormKey = "searchFormFields"
 
     var formFields: [UFormField] = []
     var fieldValues: [String: String] = [:]
@@ -423,8 +421,7 @@ final class MacSearchModel {
     @discardableResult
     func loadCachedFormIfAvailable(_ appState: AppState) -> Bool {
         guard formFields.isEmpty else { return true }
-        guard let json = appState.bridge.getSessionCache(key: Self.dbFormKey, sessionId: Self.dbSessionID),
-              let fields = Self.decodeForm(json), !fields.isEmpty else { return false }
+        guard let fields = SearchFormCache.load(appState.bridge) else { return false }
         formFields = fields
         applyDefaultLanguageIfUnset()
         return true
@@ -469,9 +466,7 @@ final class MacSearchModel {
             }
             formFields = fields
             applyDefaultLanguageIfUnset()
-            if let json = Self.encodeForm(fields) {
-                appState.bridge.setSessionCache(key: Self.dbFormKey, data: json, sessionId: Self.dbSessionID)
-            }
+            SearchFormCache.store(fields, appState.bridge)
         } catch {
             if !appState.searchTask.isCancelled && !error.isCancellation {
                 formError = error.localizedDescription
@@ -1113,39 +1108,5 @@ final class MacSearchModel {
             parts.append(filterCount == 1 ? "1 filter" : "\(filterCount) filters")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    // MARK: - Form JSON (same shape the iOS cache uses)
-
-    private static func encodeForm(_ fields: [UFormField]) -> String? {
-        let data: [[String: Any]] = fields.map { f in
-            [
-                "name": f.name, "label": f.label, "fieldType": f.fieldType,
-                "placeholder": f.placeholder,
-                "options": f.options.map { ["value": $0.value, "label": $0.label, "selected": $0.selected] },
-            ]
-        }
-        guard let json = try? JSONSerialization.data(withJSONObject: data) else { return nil }
-        return String(data: json, encoding: .utf8)
-    }
-
-    private static func decodeForm(_ json: String) -> [UFormField]? {
-        guard let data = json.data(using: .utf8),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return nil }
-        let fields = arr.compactMap { dict -> UFormField? in
-            guard let name = dict["name"] as? String,
-                  let label = dict["label"] as? String,
-                  let fieldType = dict["fieldType"] as? String,
-                  let placeholder = dict["placeholder"] as? String,
-                  let optArr = dict["options"] as? [[String: Any]] else { return nil }
-            let options = optArr.compactMap { o -> UFormOption? in
-                guard let value = o["value"] as? String,
-                      let label = o["label"] as? String,
-                      let selected = o["selected"] as? Bool else { return nil }
-                return UFormOption(value: value, label: label, selected: selected)
-            }
-            return UFormField(name: name, label: label, fieldType: fieldType, placeholder: placeholder, options: options)
-        }
-        return fields.isEmpty ? nil : fields
     }
 }

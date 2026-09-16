@@ -33,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.onNewWorksFound = { [weak self] count in
             self?.notifyNewWorks(count)
         }
+        // Another device's library turned up in iCloud: the user decides,
+        // in a sheet on the main window (or a standalone alert when none).
+        appState.cloudSync.presentConflict = { [weak self] conflict in
+            self?.presentCloudConflict(conflict)
+        }
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             let count = appState.newUnviewedWorkCount
@@ -207,8 +212,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    private func presentCloudConflict(_ conflict: CloudLibrarySync.Conflict) {
+        let sync = appState.cloudSync
+        let alert = NSAlert()
+        alert.messageText = "iCloud has \(conflict.deviceName)'s library"
+        let when = RelativeDateTimeFormatter().localizedString(for: conflict.writtenAt, relativeTo: Date())
+        alert.informativeText = "It was updated \(when). Use it on this Mac (this Mac's library is kept as a backup), or replace the iCloud copy with this Mac's library (the iCloud copy is kept as a backup)."
+        alert.addButton(withTitle: "Use iCloud Copy")
+        alert.addButton(withTitle: "Replace iCloud Copy")
+        alert.addButton(withTitle: "Not Now")
+        let handle: (NSApplication.ModalResponse) -> Void = { response in
+            switch response {
+            case .alertFirstButtonReturn: sync.resolve(.useCloudCopy)
+            case .alertSecondButtonReturn: sync.resolve(.overwriteCloudCopy)
+            default: sync.resolve(.notNow)
+            }
+        }
+        if let window = mainWindowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model.windows.flushAll()
+        appState.cloudSync.flush()
         if appState.historyMode == .clearOnClose {
             appState.clearHistory()
         }

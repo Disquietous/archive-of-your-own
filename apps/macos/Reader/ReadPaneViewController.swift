@@ -271,7 +271,7 @@ final class ReadPaneViewController: NSViewController {
 
     private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
         let button = filterButton(key: "works-\(section)",
-                                  active: model.workListFilter(for: section).isActive) { [theme, model] in
+                                  active: model.lists.workListFilter(for: section).isActive) { [theme, model] in
             AnyView(WorkListFilterView(theme: theme, model: model, section: section))
         }
         if section == .search {
@@ -556,7 +556,7 @@ final class ReadPaneViewController: NSViewController {
     }
 
     /// Split collection subtitle: the two listings' own totals, once known.
-    private func splitCollectionSubtitle(_ search: MacSearchModel) -> String? {
+    private func splitCollectionSubtitle(_ search: SearchModel) -> String? {
         var parts: [String] = []
         if let works = search.totalWorks {
             parts.append(works == 1 ? "1 work" : "\(works) works")
@@ -569,7 +569,7 @@ final class ReadPaneViewController: NSViewController {
 
     /// Results subtitle per scope: works-style results reuse the pager
     /// subtitle; the others report their own hit counts.
-    private func scopeResultsSubtitle(_ search: MacSearchModel) -> String? {
+    private func scopeResultsSubtitle(_ search: SearchModel) -> String? {
         switch search.scope {
         case .works:
             let parts = [model.searchDisplayTitle, search.resultsSubtitle].compactMap { $0 }
@@ -649,7 +649,7 @@ final class ReadPaneViewController: NSViewController {
     private func authorBookmarksMoreButton() -> ToolButton {
         let button = authorBookmarksMoreBtn ?? ToolButton(theme: theme, symbol: "arrow.down.circle",
                                                           tooltip: "Load more bookmarks") { [weak self] in
-            self?.model.loadMoreAuthorBookmarks()
+            self?.model.author.loadMoreBookmarks()
         }
         authorBookmarksMoreBtn = button
         return button
@@ -661,7 +661,7 @@ final class ReadPaneViewController: NSViewController {
     private func authorBookmarksRefreshButton() -> ToolButton {
         let button = authorBookmarksRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                              tooltip: "Refresh bookmarks from AO3") { [weak self] in
-            self?.model.refreshAuthorBookmarks()
+            self?.model.author.refreshBookmarks()
         }
         authorBookmarksRefreshBtn = button
         return button
@@ -671,7 +671,7 @@ final class ReadPaneViewController: NSViewController {
     private func authorCollectionsRefreshButton() -> ToolButton {
         let button = authorCollectionsRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                                tooltip: "Refresh collections from AO3") { [weak self] in
-            self?.model.refreshAuthorCollections()
+            self?.model.author.refreshCollections()
         }
         authorCollectionsRefreshBtn = button
         return button
@@ -717,17 +717,17 @@ final class ReadPaneViewController: NSViewController {
         if forAuthor {
             button = authorRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
                 guard let model = self?.model else { return }
-                model.isLoadingAuthor ? model.cancelAuthorWorksRefresh() : model.refreshAuthorWorks()
+                model.author.isLoadingWorks ? model.author.cancelWorksRefresh() : model.author.refreshWorks()
             }
             authorRefreshBtn = button
         } else {
             button = subscriptionRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
                 guard let model = self?.model else { return }
-                model.isLoadingSubscriptionWorks ? model.cancelSubscriptionWorksRefresh() : model.refreshSubscriptionWorks()
+                model.subscriptionWorks.isLoading ? model.subscriptionWorks.cancelRefresh() : model.subscriptionWorks.refresh()
             }
             subscriptionRefreshBtn = button
         }
-        let loading = forAuthor ? model.isLoadingAuthor : model.isLoadingSubscriptionWorks
+        let loading = forAuthor ? model.author.isLoadingWorks : model.subscriptionWorks.isLoading
         button.configure(title: loading ? "Cancel" : "Refresh Works",
                          symbol: loading ? "xmark" : "arrow.clockwise",
                          tooltip: loading
@@ -778,15 +778,15 @@ final class ReadPaneViewController: NSViewController {
 
         // Subscriptions drill-in: an author subscription's works, without
         // ever leaving the Subscriptions section.
-        if model.section == .subscriptions, let title = model.subscriptionWorksTitle, model.selectedWork == nil {
-            let isAuthor = model.subscriptionWorksSubType == "author"
-            let author = model.subscriptionWorksSubId ?? title
-            let sub = model.isLoadingSubscriptionWorks
-                ? (model.subscriptionWorksFetchStatus ?? "Fetching works from AO3…")
+        if model.section == .subscriptions, let title = model.subscriptionWorks.title, model.selectedWork == nil {
+            let isAuthor = model.subscriptionWorks.subType == "author"
+            let author = model.subscriptionWorks.subId ?? title
+            let sub = model.subscriptionWorks.isLoading
+                ? (model.subscriptionWorks.fetchStatus ?? "Fetching works from AO3…")
                 : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
-                                      crawledAt: model.subscriptionWorksCrawledAt)
+                                      crawledAt: model.subscriptionWorks.crawledAt)
             toolbar.configure(title: title, sub: sub)
-            requestOverlayOpID = model.subscriptionRefreshOp.opID
+            requestOverlayOpID = model.subscriptionWorks.refreshOp.opID
             toolbar.setLeading([subscriptionCloseButton()])
             var trailing: [NSView] = [sortFilterMenu.makeButton(for: .subscriptions),
                                       worksFilterButton(for: .subscriptions),
@@ -802,39 +802,39 @@ final class ReadPaneViewController: NSViewController {
         // Authors drill-in: one of the author's lists (works, bookmarks,
         // or collections) in this pane — their profile sits in the list
         // pane, and its buttons pick which list shows here.
-        if model.section == .authors, let author = model.authorUsername, model.selectedWork == nil {
-            switch model.authorPane {
+        if model.section == .authors, let author = model.author.username, model.selectedWork == nil {
+            switch model.author.pane {
             case .works:
-                let sub = model.isLoadingAuthor
-                    ? (model.authorFetchStatus ?? "Fetching works from AO3…")
+                let sub = model.author.isLoadingWorks
+                    ? (model.author.worksFetchStatus ?? "Fetching works from AO3…")
                     : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
-                                          crawledAt: model.authorWorksCrawledAt)
+                                          crawledAt: model.author.worksCrawledAt)
                 toolbar.configure(title: "Works", sub: sub)
-                requestOverlayOpID = model.authorRefreshOp.opID
+                requestOverlayOpID = model.author.worksRefreshOp.opID
                 toolbar.setLeading([])
                 toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
                                      worksFilterButton(for: .authors),
                                      refreshWorksButton(forAuthor: true)])
                 show(mode: .subscriptionWorks(author))
             case .bookmarks:
-                let count = model.authorBookmarksList.count
-                let sub = model.isLoadingAuthorBookmarks
+                let count = model.author.bookmarks.count
+                let sub = model.author.isLoadingBookmarks
                     ? (count == 0 ? "Fetching bookmarks from AO3…"
                                   : "Fetching bookmarks from AO3… \(count) so far")
                     : count == 1 ? "1 bookmark" : "\(count) bookmarks"
                 toolbar.configure(title: "Bookmarks", sub: sub)
-                requestOverlayOpID = model.authorBookmarksRefreshOp.opID
+                requestOverlayOpID = model.author.bookmarksRefreshOp.opID
                 toolbar.setLeading([])
                 var trailing: [NSView] = []
-                if model.authorBookmarksHasNext {
+                if model.author.bookmarksHasNext {
                     trailing.append(authorBookmarksMoreButton())
                 }
                 trailing.append(authorBookmarksRefreshButton())
                 toolbar.setTrailing(trailing)
                 show(mode: .authorBookmarks(author))
             case .collections:
-                let count = model.authorCollections.count
-                let sub = model.isLoadingAuthorCollections
+                let count = model.author.collections.count
+                let sub = model.author.isLoadingCollections
                     ? "Fetching collections from AO3…"
                     : count == 1 ? "1 collection" : "\(count) collections"
                 toolbar.configure(title: "Collections", sub: sub)
@@ -1005,8 +1005,8 @@ final class ReadPaneViewController: NSViewController {
 
         let reading = model.readerOpen
         let cameFromResults = model.section == .search
-            || (model.section == .subscriptions && model.subscriptionWorksTitle != nil)
-            || (model.section == .authors && model.authorUsername != nil)
+            || (model.section == .subscriptions && model.subscriptionWorks.title != nil)
+            || (model.section == .authors && model.author.username != nil)
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
@@ -1250,7 +1250,7 @@ final class ReadPaneViewController: NSViewController {
     /// Symbols, tints, and enabled states for the detail-mode work action
     /// buttons — re-run on every render, like the bookmark button.
     private func refreshDetailActionButtons(for work: Work, bookmarked: Bool) {
-        let started = model.progress(for: work) > 0
+        let started = model.appState.progress(for: work) > 0
         let currentChapter = appState.progressMap[work.id]?.chapter ?? 1
         startReadingButton.isOn = true
         startReadingButton.toolTip = started

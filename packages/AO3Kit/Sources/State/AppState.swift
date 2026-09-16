@@ -5,6 +5,22 @@ import SwiftUI
 final class AppState {
     let bridge = RustBridge()
     let sessionId = UUID().uuidString
+    /// iCloud transport for the core's whole-file library sync and the
+    /// backups it makes; attached once the library is open (see
+    /// loadPersistedState).
+    let cloudSync = CloudLibrarySync()
+
+    /// Platform hook run after the library file underneath the core was
+    /// swapped (iCloud copy adopted, backup restored): the per-platform
+    /// models reload what they cache from the database.
+    @ObservationIgnored var onLibraryReplaced: (() -> Void)?
+
+    /// The core replaced its database file. Everything derived from it is
+    /// re-read exactly as at unlock, then the platform hook runs.
+    func libraryWasReplaced() {
+        loadPersistedState()
+        onLibraryReplaced?()
+    }
 
     var bookmarkedWorkIDs: Set<String> = []
 
@@ -97,6 +113,22 @@ final class AppState {
     var autoLockMinutes: Int = UserDefaults.standard.object(forKey: "autoLockMinutes") as? Int ?? 5 {
         didSet { UserDefaults.standard.set(autoLockMinutes, forKey: "autoLockMinutes") }
     }
+
+    /// iOS: lock as soon as the app leaves the foreground, regardless of
+    /// `autoLockMinutes`. Only applies when a library password is set.
+    var lockOnBackground: Bool = UserDefaults.standard.bool(forKey: "lockOnBackground") {
+        didSet { UserDefaults.standard.set(lockOnBackground, forKey: "lockOnBackground") }
+    }
+
+    /// iOS: opt-in background subscription check (a Tor bootstrap per run,
+    /// so off by default — the minimal-traffic policy says no unrequested
+    /// refresh). Foreground checks are unaffected.
+    var backgroundCheckEnabled: Bool = UserDefaults.standard.bool(forKey: "backgroundCheckEnabled") {
+        didSet { UserDefaults.standard.set(backgroundCheckEnabled, forKey: "backgroundCheckEnabled") }
+    }
+
+    /// When the app last left the foreground (iOS); nil while active.
+    @ObservationIgnored var backgroundedAt: Date?
 
     func lockNow() {
         bridge.lock()
@@ -308,7 +340,10 @@ final class AppState {
     var lastSearchKeys: [String] = []
     var lastSearchValues: [String] = []
 
-    func loadPersistedState() {
+    /// Re-read every library-derived collection from the encrypted DB.
+    /// Runs at unlock and again whenever the library file is replaced
+    /// underneath the UI.
+    func reloadLibraryFromStorage() {
         guard bridge.isInitialized else { return }
 
         // Load cached works
@@ -346,6 +381,24 @@ final class AppState {
         // Kudos already left on AO3 (permanent — keeps the heart truthful)
         kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
 
+        // Load reading lists
+        refreshReadingLists()
+
+        // Persisted subscriptions (no network needed)
+        if ao3Username != nil {
+            let persisted = bridge.getPersistedSubscriptions()
+            if !persisted.isEmpty {
+                subscriptions = persisted
+                subscriptionsLoadedForAccount = ao3Username
+            }
+        }
+    }
+
+    func loadPersistedState() {
+        guard bridge.isInitialized else { return }
+
+        reloadLibraryFromStorage()
+
         // Log upkeep settings (defaults when never set match the Rust
         // trim task's own fallbacks).
         logTrimIntervalValue = Int(bridge.getPref(key: "log_trim_interval_value") ?? "") ?? 1
@@ -363,9 +416,6 @@ final class AppState {
             bridge.purgeStaleChapters()
         }
 
-        // Load reading lists
-        refreshReadingLists()
-
         // Restore AO3 session. Login state is whatever the stored account
         // says — never probed. If AO3 rejects a request later, the Rust
         // layer purges the token and needsReauth surfaces the sign-in prompt.
@@ -377,14 +427,18 @@ final class AppState {
         loadNewWorks()
         loadSubscriptionLastChecked()
 
-        // Load persisted subscriptions (no network needed)
-        if ao3Username != nil {
+        // Persisted subscriptions load inside reloadLibraryFromStorage, but
+        // the username only became known just above.
+        if ao3Username != nil, subscriptionsLoadedForAccount != ao3Username {
             let persisted = bridge.getPersistedSubscriptions()
             if !persisted.isEmpty {
                 subscriptions = persisted
                 subscriptionsLoadedForAccount = ao3Username
             }
         }
+
+        // iCloud sync starts once the library is readable (no-op when off).
+        cloudSync.attach(self)
 
         // Auto-check subscriptions when due. Rust decides per row: any
         // subscription whose own last-checked stamp is missing or stale

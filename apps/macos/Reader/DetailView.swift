@@ -8,11 +8,11 @@ struct DetailView: View {
     @Bindable var model: MacAppModel
     let work: Work
 
-    private var progress: Double { model.progress(for: work) }
+    private var progress: Double { model.appState.progress(for: work) }
     private var started: Bool { progress > 0 }
     private var currentChapter: Int { appState.progressMap[work.id]?.chapter ?? 1 }
     private var warnOK: Bool { work.warnings.contains("No Archive") }
-    private var followingAuthor: Bool { model.followedAuthorNames.contains(work.author) }
+    private var followingAuthor: Bool { model.follows.followedAuthorNames.contains(work.author) }
 
     @State private var selectedChapter = 0
     /// Chapter titles for the dropdown — session cache first, then the
@@ -40,9 +40,9 @@ struct DetailView: View {
                     .help("View \(work.author)’s profile")
                     Button {
                         if followingAuthor {
-                            model.unfollowAuthor(work.author)
+                            model.follows.unfollowAuthor(work.author)
                         } else {
-                            model.followAuthor(work.author)
+                            model.follows.followAuthor(work.author)
                         }
                     } label: {
                         Image(systemName: followingAuthor ? "bell.fill" : "bell")

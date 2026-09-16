@@ -32,7 +32,7 @@ final class SortFilterMenuController: NSObject {
         menu.autoenablesItems = false
 
         menu.addItem(header("Sort By"))
-        let currentSort = model.workSort(for: section)
+        let currentSort = model.lists.workSort(for: section)
         for sort in MacAppModel.WorkSort.allCases {
             let item = NSMenuItem(title: sort.label, action: #selector(sortChosen(_:)), keyEquivalent: "")
             item.target = self
@@ -48,7 +48,7 @@ final class SortFilterMenuController: NSObject {
             let item = NSMenuItem(title: filter.label, action: #selector(completionChosen(_:)), keyEquivalent: "")
             item.target = self
             item.isEnabled = true
-            item.state = filter == model.completionFilter(for: section) ? .on : .off
+            item.state = filter == model.lists.completionFilter(for: section) ? .on : .off
             item.representedObject = filter.rawValue
             menu.addItem(item)
         }
@@ -58,13 +58,13 @@ final class SortFilterMenuController: NSObject {
         let anyRating = NSMenuItem(title: "All Ratings", action: #selector(ratingChosen(_:)), keyEquivalent: "")
         anyRating.target = self
         anyRating.isEnabled = true
-        anyRating.state = model.ratingFilter(for: section) == nil ? .on : .off
+        anyRating.state = model.lists.ratingFilter(for: section) == nil ? .on : .off
         menu.addItem(anyRating)
         for rating in Rating.allCases {
             let item = NSMenuItem(title: rating.rawValue, action: #selector(ratingChosen(_:)), keyEquivalent: "")
             item.target = self
             item.isEnabled = true
-            item.state = model.ratingFilter(for: section) == rating ? .on : .off
+            item.state = model.lists.ratingFilter(for: section) == rating ? .on : .off
             item.representedObject = rating.rawValue
             menu.addItem(item)
         }
@@ -81,16 +81,16 @@ final class SortFilterMenuController: NSObject {
     @objc private func sortChosen(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let sort = MacAppModel.WorkSort(rawValue: raw) else { return }
-        model.setWorkSort(sort, for: section)
+        model.lists.setWorkSort(sort, for: section)
     }
 
     @objc private func completionChosen(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let filter = MacAppModel.CompletionFilter(rawValue: raw) else { return }
-        model.setCompletionFilter(filter, for: section)
+        model.lists.setCompletionFilter(filter, for: section)
     }
 
     @objc private func ratingChosen(_ sender: NSMenuItem) {
-        model.setRatingFilter((sender.representedObject as? String).flatMap(Rating.init(rawValue:)), for: section)
+        model.lists.setRatingFilter((sender.representedObject as? String).flatMap(Rating.init(rawValue:)), for: section)
     }
 }

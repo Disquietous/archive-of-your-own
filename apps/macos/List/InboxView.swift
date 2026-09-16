@@ -19,7 +19,7 @@ struct InboxView: View {
                               message: "Comment threads from your AO3 inbox appear here.")
             } else {
                 LazyVStack(spacing: 0) {
-                    ForEach(model.filteredInboxMessages) { item in
+                    ForEach(model.lists.filteredInboxMessages) { item in
                         messageRow(item)
                     }
                 }

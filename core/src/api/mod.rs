@@ -33,6 +33,7 @@ mod prefs;
 mod records;
 mod recovery;
 mod social;
+mod cloud_sync;
 mod upkeep;
 mod whats_new;
 mod works;

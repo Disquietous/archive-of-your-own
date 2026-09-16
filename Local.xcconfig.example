@@ -1,0 +1,6 @@
+// Per-developer build settings. Copy to Local.xcconfig (gitignored) and
+// fill in your Apple Developer team ID — Xcode › Settings › Accounts, or
+// the Membership page at developer.apple.com. Both app targets read this
+// file for every configuration; scripts/build-app.sh creates it from this
+// example when it is missing.
+DEVELOPMENT_TEAM =

@@ -28,7 +28,7 @@ extension ListPaneViewController {
     func authorProfileRefreshButton(username: String) -> ToolButton {
         let button = authorProfileRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                            tooltip: "Refresh profile from AO3") { [weak self] in
-            guard let self, let user = model.authorUsername else { return }
+            guard let self, let user = model.author.username else { return }
             Task { @MainActor in await self.appState.loadUserProfile(user, forceRefresh: true) }
         }
         authorProfileRefreshBtn = button
@@ -39,7 +39,7 @@ extension ListPaneViewController {
     /// Author view: open the user's AO3 profile in the configured link app.
     func authorAO3Button(username: String) -> LabelToolButton {
         let button = authorAO3Btn ?? LabelToolButton(theme: theme) { [weak self] in
-            guard let self, let user = model.authorUsername,
+            guard let self, let user = model.author.username,
                   let url = ExternalLinkOpener.ao3UserURL(user) else { return }
             ExternalLinkOpener.open(url, bridge: appState.bridge)
         }
@@ -53,15 +53,15 @@ extension ListPaneViewController {
     /// toggles the device-local follow that lists the author under Authors.
     func authorFollowButton(username: String) -> ToolButton {
         let button = authorFollowBtn ?? ToolButton(theme: theme, symbol: "bell", tooltip: "Follow") { [weak self] in
-            guard let self, let user = model.authorUsername else { return }
-            if model.followedAuthorNames.contains(user) {
-                model.unfollowAuthor(user)
+            guard let self, let user = model.author.username else { return }
+            if model.follows.followedAuthorNames.contains(user) {
+                model.follows.unfollowAuthor(user)
             } else {
-                model.followAuthor(user)
+                model.follows.followAuthor(user)
             }
         }
         authorFollowBtn = button
-        let following = model.followedAuthorNames.contains(username)
+        let following = model.follows.followedAuthorNames.contains(username)
         button.setSymbol(following ? "bell.fill" : "bell")
         button.tintOverride = following ? theme.nsAccent : nil
         button.toolTip = following ? "Unfollow" : "Follow"
@@ -214,7 +214,7 @@ extension ListPaneViewController {
 
     func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
         filterButton(key: "works-\(section)",
-                     active: model.workListFilter(for: section).isActive) { [theme, model] in
+                     active: model.lists.workListFilter(for: section).isActive) { [theme, model] in
             AnyView(WorkListFilterView(theme: theme, model: model, section: section))
         }
     }

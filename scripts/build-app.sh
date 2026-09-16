@@ -49,6 +49,12 @@ if [[ $RUST == 1 ]]; then
     esac
 fi
 
+# Per-developer signing team lives in the gitignored Local.xcconfig; a
+# fresh clone gets the blank template so the project still generates.
+if [[ ! -f "$ROOT_DIR/Local.xcconfig" ]]; then
+    cp "$ROOT_DIR/Local.xcconfig.example" "$ROOT_DIR/Local.xcconfig"
+fi
+
 # The .xcodeproj is gitignored and regenerated from project.yml.
 if [[ ! -d "$PROJECT" ]] || [[ "$ROOT_DIR/project.yml" -nt "$PROJECT/project.pbxproj" ]]; then
     echo "==> Generating Xcode project..."

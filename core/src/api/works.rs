@@ -679,6 +679,11 @@ struct LibrarySearchEntry {
 const LIBRARY_SEARCH_CAP: usize = 8;
 
 impl LibrarySearchCache {
+    /// Drop every held result set — the library underneath was replaced.
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     pub(super) fn insert(&mut self, ids: Vec<u64>) -> u64 {
         if self.entries.len() >= LIBRARY_SEARCH_CAP {
             if let Some(oldest) = self

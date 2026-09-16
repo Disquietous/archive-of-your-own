@@ -308,7 +308,7 @@ struct SearchFormView: View {
 private struct SavedSearchField: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
-    @Bindable var search: MacSearchModel
+    @Bindable var search: SearchModel
 
     @State private var input = ""
     @FocusState private var focused: Bool
@@ -412,7 +412,7 @@ private struct SavedSearchSuggestionRow: View {
                         .font(Font(MacFont.ui(12, weight: .medium)))
                         .foregroundStyle(theme.ink)
                         .lineLimit(1)
-                    if let summary = MacSearchModel.summary(of: saved) {
+                    if let summary = SearchModel.summary(of: saved) {
                         Text(summary)
                             .font(Font(MacFont.ui(11)))
                             .foregroundStyle(theme.ink3)

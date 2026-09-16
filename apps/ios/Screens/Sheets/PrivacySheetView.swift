@@ -15,6 +15,7 @@ struct PrivacySheetView: View {
     @State private var showLogoutConfirm = false
     @State private var isLoggingOut = false
     @State private var showDisconnectConfirm = false
+    @State private var requestingNewNodes = false
 
     private var isInProgress: Bool {
         state.bridge.torStatus == .connecting || state.isTestingCircuit || state.isResolvingCloudflare
@@ -256,14 +257,85 @@ struct PrivacySheetView: View {
 
                 Spacer()
 
-                Text(statusSubtitle)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
+                if isPrivate, !state.bridge.circuitHops.isEmpty {
+                    hopChips
+                } else {
+                    Text(statusSubtitle)
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+
+                newNodesShield
             }
             .padding(.horizontal, theme.pad)
 
             TorCircuitView(showsPathNote: true)
                 .padding(.horizontal, theme.pad + 8)
+        }
+    }
+
+    /// The live path as one chip per node: role icon plus the relay's
+    /// country code ("--" when GeoIP has no entry — never invented).
+    private var hopChips: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(state.bridge.circuitHops.enumerated()), id: \.offset) { _, hop in
+                HStack(spacing: 3) {
+                    Image(systemName: Self.roleIcon(hop.role))
+                        .font(.system(size: 8, weight: .semibold))
+                    Text(hop.country.isEmpty ? "--" : hop.country.uppercased())
+                        .font(.custom("HankenGrotesk", size: 10).weight(.bold))
+                        .kerning(0.3)
+                }
+                .foregroundStyle(theme.ink2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(theme.ink.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+            }
+        }
+    }
+
+    /// The shield stands for the connection mode: sage = Private (routed
+    /// through relays), red = Public (direct). When private, tapping asks
+    /// for a fresh set of relay nodes without a full reconnect; when
+    /// public, it connects.
+    @ViewBuilder
+    private var newNodesShield: some View {
+        if isInProgress || requestingNewNodes {
+            ProgressView()
+                .controlSize(.small)
+                .tint(theme.sage)
+                .frame(width: 30, height: 30)
+        } else {
+            Button {
+                if isPrivate {
+                    requestingNewNodes = true
+                    Task { @MainActor in
+                        _ = await state.newCircuitNow()
+                        state.bridge.refreshCircuitHops()
+                        requestingNewNodes = false
+                    }
+                } else {
+                    Task { await state.connectTorNow() }
+                }
+            } label: {
+                Image(systemName: isPrivate ? "checkmark.shield" : "xmark.shield")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(isPrivate ? theme.sage : Color(hex: "CE514D"))
+                    .frame(width: 30, height: 30)
+                    .background((isPrivate ? theme.sage : Color(hex: "CE514D")).opacity(0.12))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(IconButtonPressStyle())
+            .accessibilityLabel(isPrivate ? "Request new relay nodes" : "Connect via Tor")
+        }
+    }
+
+    private static func roleIcon(_ role: String) -> String {
+        switch role {
+        case "Guard": "shield.lefthalf.filled"
+        case "Exit": "arrow.up.forward"
+        default: "arrow.triangle.swap"
         }
     }
 
@@ -426,20 +498,6 @@ struct PrivacySheetView: View {
         case .disconnected: return "Not routed through Tor"
         case .error(let msg): return msg
         }
-    }
-}
-
-private struct SpinModifier: ViewModifier {
-    @State private var rotation: Double = 0
-
-    func body(content: Content) -> some View {
-        content
-            .rotationEffect(.degrees(rotation))
-            .onAppear {
-                withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
-                    rotation = 360
-                }
-            }
     }
 }
 

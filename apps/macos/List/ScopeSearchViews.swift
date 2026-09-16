@@ -95,7 +95,7 @@ struct ScopeSearchFormView: View {
         [("", "Either"), ("true", "Yes"), ("false", "No")]
 
     @ViewBuilder
-    private func collectionsCriteria(_ search: MacSearchModel) -> some View {
+    private func collectionsCriteria(_ search: SearchModel) -> some View {
         // Any-type tag tokens ("" tagType): suggestions come from the whole
         // library tag cache, like every other tag field in the app.
         TagTokenField(theme: theme, appState: appState,
@@ -126,7 +126,7 @@ struct ScopeSearchFormView: View {
     /// query; everything else follows the site's three fieldsets —
     /// bookmarked item, the bookmark itself, and sort.
     @ViewBuilder
-    private func bookmarksCriteria(_ search: MacSearchModel) -> some View {
+    private func bookmarksCriteria(_ search: SearchModel) -> some View {
         TagTokenField(theme: theme, appState: appState,
                       label: "Work tags", tagType: "",
                       value: Bindable(search).bookmarkWorkTags)
@@ -166,7 +166,7 @@ struct ScopeSearchFormView: View {
     /// language select (the two forms share AO3's language list). Hidden
     /// until the works criteria have been scraped at least once.
     @ViewBuilder
-    private func languageRow(_ search: MacSearchModel) -> some View {
+    private func languageRow(_ search: SearchModel) -> some View {
         if let field = search.formFields.first(where: { $0.name.contains("[language_id]") }) {
             let current = search.bookmarkLanguage
             let title = field.options.first { $0.value == current }
@@ -360,7 +360,7 @@ struct ScopeResultsView: View {
     }
 
     @ViewBuilder
-    private func resultRows(_ search: MacSearchModel) -> some View {
+    private func resultRows(_ search: SearchModel) -> some View {
         switch search.scope {
         case .tags:
             if search.tagHits.isEmpty { emptyState }

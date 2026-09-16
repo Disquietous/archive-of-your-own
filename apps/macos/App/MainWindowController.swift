@@ -71,6 +71,15 @@ final class MainWindowController: NSWindowController {
                 // kick the initial section load (iOS does this via .task).
                 appState.loadPersistedState()
                 model.loadPersistedPrefs()
+                // The library file can be swapped underneath the core
+                // (iCloud copy adopted, backup restored): reload what the
+                // Mac model caches from it and redraw the current section.
+                appState.onLibraryReplaced = { [weak self] in
+                    guard let self else { return }
+                    model.loadPersistedPrefs()
+                    model.search.loadSavedSearches(appState)
+                    model.goSection(model.section)
+                }
                 // The global request timeout lives in UserDefaults (theme),
                 // but a fresh AO3App starts at the built-in 30s — push the
                 // user's setting into the core or it silently never applies.

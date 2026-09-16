@@ -96,20 +96,20 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         let search = model.search
         switch source {
         case .search: hits = search.filteredBookmarkHits
-        case .authorBookmarks: hits = model.authorBookmarksList
+        case .authorBookmarks: hits = model.author.bookmarks
         }
 
         overlayHost?.removeFromSuperview()
         overlayHost = nil
         let overlay: AnyView?
         if source == .authorBookmarks {
-            let who = model.authorUsername ?? "this user"
-            if model.isLoadingAuthorBookmarks && hits.isEmpty {
+            let who = model.author.username ?? "this user"
+            if model.author.isLoadingBookmarks && hits.isEmpty {
                 overlay = AnyView(LoadingStateMac(theme: theme,
                                                   message: "Fetching \(who)’s bookmarks…",
                                                   detail: "Requests are rate-limited to be kind to the archive.",
                                                   otherActivity: []))
-            } else if let error = model.authorBookmarksError, hits.isEmpty {
+            } else if let error = model.author.bookmarksError, hits.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load bookmarks", message: error))
             } else if hits.isEmpty {
@@ -155,7 +155,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         // Follow-bell inputs, read on every render path so the relay
         // re-renders the moment a follow or AO3 subscription toggles
         // (see ListPaneViewController.showWorksContent).
-        _ = model.followedAuthorNames
+        _ = model.follows.followedAuthorNames
         _ = appState.subscriptions
 
         // Content-aware signature — data refreshes must repaint rows even
@@ -172,7 +172,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                 guard let self,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? BookmarkRowCellView
                 else { return }
-                cell.updateFollowBells { self.model.authorFollowState($0) }
+                cell.updateFollowBells { self.model.follows.authorFollowState($0) }
             }
         }
         renderedHitIDs = ids
@@ -209,7 +209,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                        bookmarkerTagsExpanded: expandedBookmarkerTags.contains(key),
                        availableTextWidth: max(100, tableWidth - 45),
                        followState: { [weak self] in
-                           self?.model.authorFollowState($0) ?? .none
+                           self?.model.follows.authorFollowState($0) ?? .none
                        })
         cell.onToggleWorkTags = { [weak self] in
             self?.toggleTags(key: key, in: \.expandedWorkTags)
@@ -221,7 +221,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
             self?.model.openAuthorProfile(author)
         }
         cell.onToggleFollow = { [weak self] author in
-            self?.model.toggleAuthorFollow(author)
+            self?.model.follows.toggleAuthorFollow(author)
         }
     }
 

@@ -111,7 +111,7 @@ struct CollectionsBrowseView: View {
 }
 
 /// One collection blurb: title, status/type line, counts, short summary.
-private struct CollectionCardView: View {
+struct CollectionCardView: View {
     @Environment(AppTheme.self) private var theme
 
     let collection: UCollection

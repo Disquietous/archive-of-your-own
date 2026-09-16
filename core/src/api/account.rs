@@ -7,8 +7,15 @@ impl AO3App {
     // -- Local storage operations --
 
     pub fn change_db_password(&self, new_password: String) -> Result<(), AO3Error> {
-        let storage = self.storage.blocking_lock();
-        storage.change_passphrase(&new_password).map_err(AO3Error::from)
+        let old = {
+            let mut storage = self.storage.blocking_lock();
+            let old = storage.passphrase().to_string();
+            storage.change_passphrase(&new_password).map_err(AO3Error::from)?;
+            old
+        };
+        // Backups are keyed like the library; keep them openable.
+        self.rekey_backups(&old, &new_password);
+        Ok(())
     }
 
     // -- AO3 Account --

@@ -41,7 +41,7 @@ extension ListPaneViewController {
         // re-renders the moment a follow or AO3 subscription toggles (the
         // reload path configures cells lazily outside this tracked closure —
         // see the drill-in reads in showSubscriptionsContent).
-        _ = model.followedAuthorNames
+        _ = model.follows.followedAuthorNames
         _ = appState.subscriptions
 
         let sectionChanged = renderedSection != section
@@ -70,7 +70,7 @@ extension ListPaneViewController {
                 cell.setBookmarked(bookmarked.contains(works[row].id))
                 cell.setNew(unseen.contains(works[row].id))
                 cell.setRemoved(gone.contains(works[row].id))
-                cell.setFollowState(model.authorFollowState(works[row].author))
+                cell.setFollowState(model.follows.authorFollowState(works[row].author))
             }
         }
         renderedWorkIDs = ids
@@ -118,9 +118,9 @@ extension ListPaneViewController {
         // happens lazily outside this tracked closure, so without these reads
         // a reload render left the relay blind to selection changes — the
         // highlight then waited for cells to scroll off-screen and re-make.
-        let activeID = model.subscriptionWorksSubId
-        let activeType = model.subscriptionWorksSubType
-        let loadingID = model.loadingSubscriptionID
+        let activeID = model.subscriptionWorks.subId
+        let activeType = model.subscriptionWorks.subType
+        let loadingID = model.subscriptionWorks.loadingSubscriptionID
 
         let sectionChanged = renderedSection != section
         let ids = displayedSubscriptions.map(\.id)

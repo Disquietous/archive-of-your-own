@@ -30,9 +30,9 @@ struct SidebarView: View {
                 VStack(spacing: 6) {
                     topGroup
                     group("Discover") {
-                        item(.fandoms, "flame", "Fandoms", count: model.followedFandoms.count)
+                        item(.fandoms, "flame", "Fandoms", count: model.follows.followedFandoms.count)
                         item(.authors, "person", "Authors",
-                             count: model.followedAuthorNames.count + model.followedAuthors.count)
+                             count: model.follows.followedAuthorNames.count + model.appState.followedAuthors.count)
                     }
                     group("Following") {
                         item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)
@@ -75,7 +75,7 @@ struct SidebarView: View {
 
     private var topGroup: some View {
         VStack(spacing: 1) {
-            item(.reading, "book", "Currently Reading", count: model.currentlyReading.count)
+            item(.reading, "book", "Currently Reading", count: model.appState.currentlyReading.count)
             item(.search, "magnifyingglass", "Search")
             item(.history, "clock", "History")
         }

@@ -1,76 +1,33 @@
 import SwiftUI
 
+/// The Browse tab: AO3's latest-works listing, ordered and filtered by the
+/// shared list model under the tab's own persisted Sort & Filter prefs and
+/// session list filter — the same controls every work list carries.
 struct BrowseView: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
     @Environment(NavigationState.self) private var nav
+    @Environment(LibraryListModel.self) private var lists
 
-    @State private var sortBy: SortOption = .latest
-    @State private var filterRating: RatingFilter = .all
-    @State private var filterComplete: CompleteFilter = .all
-    @State private var showFilters = false
-
-    enum SortOption: String, CaseIterable {
-        case latest = "Latest"
-        case kudos = "Kudos"
-        case hits = "Hits"
-        case words = "Words"
-    }
-
-    enum RatingFilter: String, CaseIterable {
-        case all = "All Ratings"
-        case general = "General"
-        case teen = "Teen"
-        case mature = "Mature"
-        case explicit = "Explicit"
-    }
-
-    enum CompleteFilter: String, CaseIterable {
-        case all = "All"
-        case complete = "Complete"
-        case wip = "In Progress"
-    }
+    @State private var showFilterSheet = false
+    @State private var newListFor: Work?
+    @State private var newListName = ""
+    @State private var exportedEpub: EpubExporter.Exported?
+    @State private var exportError: String?
 
     private var displayedWorks: [Work] {
-        var results = state.browseResults
+        lists.works(for: .browse, raw: state.browseResults)
+    }
 
-        if state.hideExplicit {
-            results = results.filter { $0.rating != .explicit }
-        }
-
-        switch filterRating {
-        case .all: break
-        case .general: results = results.filter { $0.rating == .general }
-        case .teen: results = results.filter { $0.rating == .teen }
-        case .mature: results = results.filter { $0.rating == .mature }
-        case .explicit: results = results.filter { $0.rating == .explicit }
-        }
-
-        switch filterComplete {
-        case .all: break
-        case .complete: results = results.filter { $0.complete }
-        case .wip: results = results.filter { !$0.complete }
-        }
-
-        switch sortBy {
-        case .latest: break
-        case .kudos: results.sort { $0.kudos > $1.kudos }
-        case .hits: results.sort { $0.hits > $1.hits }
-        case .words: results.sort { $0.words > $1.words }
-        }
-
-        return results
+    private var filterActive: Bool {
+        lists.workListFilter(for: .browse).isActive
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: theme.rowGap) {
                 masthead
-                filterBar.padding(.horizontal, theme.pad)
-
-                if showFilters {
-                    filterControls.padding(.horizontal, theme.pad)
-                }
+                statusBar.padding(.horizontal, theme.pad)
 
                 if state.isBrowsing && displayedWorks.isEmpty {
                     NetworkLoadingView(message: "Loading works…", task: state.browseTask, operation: "browse") {
@@ -82,22 +39,58 @@ struct BrowseView: View {
                         Task { await state.browseLatestWorks() }
                     })
                 } else if displayedWorks.isEmpty && !state.isBrowsing {
-                    EmptyStateView(
-                        systemImage: "book",
-                        title: "No works",
-                        subtitle: filterRating != .all || filterComplete != .all
-                            ? "Try changing your filters."
-                            : "Check your connection and try again."
-                    )
-                    .padding(.top, 40)
+                    if filterActive && !state.browseResults.isEmpty {
+                        VStack(spacing: 12) {
+                            EmptyStateView(systemImage: "line.3.horizontal.decrease.circle",
+                                           title: "Nothing matches",
+                                           subtitle: "No works in this list match the current filter.")
+                            Button("Clear Filter") { lists.workListFilters[.browse] = nil }
+                                .font(Typography.smallButtonLabel())
+                                .foregroundStyle(theme.accent)
+                                .buttonStyle(ButtonPressStyle())
+                        }
+                        .padding(.top, 40)
+                    } else {
+                        EmptyStateView(
+                            systemImage: "book",
+                            title: "No works",
+                            subtitle: "Check your connection and try again."
+                        )
+                        .padding(.top, 40)
+                    }
                 } else {
                     LazyVStack(spacing: theme.rowGap) {
                         ForEach(displayedWorks) { work in
                             WorkCardView(
                                 work: work,
                                 blurExplicit: state.hideExplicit && work.rating == .explicit,
+                                onAuthorTap: UInt64(work.id) != nil ? {
+                                    nav.browsePath.append(AppDestination.authorWorks(
+                                        username: AppState.canonicalAuthorUsername(work.author)))
+                                } : nil,
                                 onTap: { nav.openWork(work.id) }
                             )
+                            .contextMenu {
+                                WorkRowMenu(work: work, onNewReadingList: { newListFor = $0 },
+                                            onExportEpub: { exportEpub($0) })
+                            }
+                        }
+
+                        if !state.isBrowsing {
+                            Button {
+                                Task { await state.browseLatestWorks() }
+                            } label: {
+                                Text("Load more")
+                                    .font(Typography.smallButtonLabel())
+                                    .foregroundStyle(theme.accent)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 44)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: Radius.button)
+                                            .stroke(theme.line, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(ButtonPressStyle())
                         }
 
                         if state.isBrowsing {
@@ -122,27 +115,79 @@ struct BrowseView: View {
                 Task { await state.browseLatestWorks() }
             }
         }
+        .sheet(isPresented: $showFilterSheet) {
+            WorkListFilterSheet(section: .browse,
+                                availableTags: lists.availableTags(for: .browse, raw: state.browseResults),
+                                availableFandoms: lists.availableFandoms(for: .browse, raw: state.browseResults))
+                .environment(theme)
+                .environment(lists)
+        }
+        .sheet(item: $exportedEpub) { exported in
+            ShareSheet(items: [exported.url])
+                .presentationDetents([.medium, .large])
+        }
+        .alert("Couldn’t export EPUB", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } })) {
+            Button("OK", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
+        }
+        .alert("New Reading List", isPresented: Binding(
+            get: { newListFor != nil },
+            set: { if !$0 { newListFor = nil; newListName = "" } })) {
+            TextField("List name", text: $newListName)
+            Button("Create") {
+                let name = newListName.trimmingCharacters(in: .whitespaces)
+                if let work = newListFor, !name.isEmpty {
+                    let listId = state.createReadingList(name)
+                    if listId >= 0 { state.addToReadingList(listId, workId: work.id) }
+                }
+                newListFor = nil
+                newListName = ""
+            }
+            Button("Cancel", role: .cancel) { newListFor = nil; newListName = "" }
+        } message: {
+            if let work = newListFor {
+                Text("“\(work.title)” will be added to the new list.")
+            }
+        }
+    }
+
+    private func exportEpub(_ work: Work) {
+        do {
+            exportedEpub = try EpubExporter.export(work: work, appState: state)
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 
     private var masthead: some View {
-        HStack {
+        HStack(spacing: 8) {
             Text("Browse")
                 .font(Typography.browseTitle())
                 .foregroundStyle(theme.ink)
             Spacer()
-            Button {
+            ChromeIconButton(symbol: "arrow.clockwise", isBusy: state.isBrowsing) {
                 state.bridge.invalidateSessionCache(key: "browse")
                 state.browseResults = []
                 state.browseCurrentPage = 0
                 Task { await state.browseLatestWorks(force: true) }
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(theme.ink2)
-                    .frame(width: 32, height: 32)
             }
-            .buttonStyle(IconButtonPressStyle())
             .disabled(state.isBrowsing)
+            .accessibilityLabel("Reload latest works")
+            ChromeIconButton(symbol: state.hideExplicit ? "eye.slash" : "eye",
+                             tint: state.hideExplicit ? theme.accent : nil) {
+                state.hideExplicit.toggle()
+            }
+            .accessibilityLabel(state.hideExplicit ? "Show explicit works" : "Hide explicit works")
+            SortFilterMenu(section: .browse)
+            ChromeIconButton(symbol: filterActive ? "line.3.horizontal.decrease.circle.fill"
+                                                   : "line.3.horizontal.decrease.circle",
+                             tint: filterActive ? theme.accent : nil) {
+                showFilterSheet = true
+            }
+            .accessibilityLabel("Filter this list")
             PrivacyPillView {
                 nav.presentedSheet = .privacy
             }
@@ -151,15 +196,17 @@ struct BrowseView: View {
         .padding(.top, 8)
     }
 
-    @ViewBuilder
-    private var filterBar: some View {
+    private var statusBar: some View {
         HStack {
-            if state.isBrowsing {
+            if state.isBrowsing && displayedWorks.isEmpty {
                 Text("Loading…")
                     .font(Typography.uiBody())
                     .foregroundStyle(theme.ink3)
             } else {
-                Text("\(displayedWorks.count) works")
+                let count = displayedWorks.count
+                Text(filterActive
+                     ? "\(count) of \(state.browseResults.count) works"
+                     : (count == 1 ? "1 work" : "\(count) works"))
                     .font(Typography.uiBody())
                     .foregroundStyle(theme.ink2)
             }
@@ -184,108 +231,7 @@ struct BrowseView: View {
                 )
             }
             .buttonStyle(ChipPressStyle())
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showFilters.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Filter")
-                        .font(Typography.uiSmall())
-                }
-                .foregroundStyle(showFilters ? theme.accent : theme.ink3)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.chip)
-                        .fill(showFilters ? theme.accentSoft : theme.surface2)
-                )
-            }
-            .buttonStyle(ChipPressStyle())
         }
-    }
-
-    private var filterControls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Sort
-            HStack {
-                Text("Sort")
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-                Spacer()
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(SortOption.allCases, id: \.self) { option in
-                        ChipView(label: option.rawValue, isSelected: sortBy == option) {
-                            sortBy = option
-                        }
-                    }
-                }
-            }
-
-            // Rating
-            HStack {
-                Text("Rating")
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-                Spacer()
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(RatingFilter.allCases, id: \.self) { option in
-                        ChipView(label: option.rawValue, isSelected: filterRating == option) {
-                            filterRating = option
-                        }
-                    }
-                }
-            }
-
-            // Completion
-            HStack {
-                Text("Status")
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-                Spacer()
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(CompleteFilter.allCases, id: \.self) { option in
-                        ChipView(label: option.rawValue, isSelected: filterComplete == option) {
-                            filterComplete = option
-                        }
-                    }
-                }
-            }
-
-            // Hide explicit
-            HStack {
-                Button {
-                    state.hideExplicit.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: state.hideExplicit ? "eye.slash" : "eye")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(state.hideExplicit ? "Hiding explicit" : "Showing all")
-                            .font(Typography.uiSmall())
-                    }
-                    .foregroundStyle(state.hideExplicit ? theme.accent : theme.ink3)
-                    .padding(.horizontal, 12)
-                    .frame(height: 32)
-                    .background(
-                        RoundedRectangle(cornerRadius: Radius.chip)
-                            .fill(state.hideExplicit ? theme.accentSoft : theme.surface2)
-                    )
-                }
-                .buttonStyle(ChipPressStyle())
-                Spacer()
-            }
-        }
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 }
 

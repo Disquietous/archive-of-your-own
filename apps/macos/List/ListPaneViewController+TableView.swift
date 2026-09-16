@@ -36,9 +36,9 @@ extension ListPaneViewController {
             }
             let sub = displayedSubscriptions[row]
             cell.configure(with: sub,
-                           isLoading: model.loadingSubscriptionID == sub.id,
-                           isActive: model.subscriptionWorksSubId == sub.id
-                               && model.subscriptionWorksSubType == normalizedSubType(sub),
+                           isLoading: model.subscriptionWorks.loadingSubscriptionID == sub.id,
+                           isActive: model.subscriptionWorks.subId == sub.id
+                               && model.subscriptionWorks.subType == normalizedSubType(sub),
                            lastChecked: displayedLastChecked["\(sub.subType):\(sub.id)"])
             return cell
         }
@@ -53,11 +53,11 @@ extension ListPaneViewController {
         let work = works[row]
         let textWidth = max(100, tableView.bounds.width - 45)
         cell.configure(with: work,
-                       progress: model.progress(for: work),
+                       progress: model.appState.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
-                       followState: model.authorFollowState(work.author),
+                       followState: model.follows.authorFollowState(work.author),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        isRemoved: appState.goneWorkIDs.contains(work.id),
                        summaryExpanded: expandedSummaries.contains(work.id),
@@ -76,7 +76,7 @@ extension ListPaneViewController {
             self?.model.openAuthorProfile(work.author)
         }
         cell.onToggleFollow = { [weak self] in
-            self?.model.toggleAuthorFollow(work.author)
+            self?.model.follows.toggleAuthorFollow(work.author)
         }
         return cell
     }
@@ -153,7 +153,7 @@ extension ListPaneViewController {
         let work = works[row]
         let width = max(320, tableView.bounds.width)
         sizingCell.configure(with: work,
-                             progress: model.progress(for: work),
+                             progress: model.appState.progress(for: work),
                              downloaded: appState.downloadedWorkIDs.contains(work.id),
                              selected: false,
                              isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),

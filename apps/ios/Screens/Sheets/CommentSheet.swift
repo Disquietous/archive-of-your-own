@@ -88,6 +88,14 @@ struct CommentSheet: View {
             Text("Comment posted!")
                 .font(Typography.uiBody())
                 .foregroundStyle(theme.sage)
+
+            Button("Write another") {
+                success = false
+                commentText = ""
+            }
+            .font(Typography.smallButtonLabel())
+            .foregroundStyle(theme.accent)
+            .buttonStyle(ButtonPressStyle())
         }
     }
 

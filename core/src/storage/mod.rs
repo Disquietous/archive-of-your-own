@@ -12,6 +12,7 @@ use crate::models::Rating;
 mod accounts;
 mod consts;
 mod library;
+pub mod library_file;
 mod subscriptions;
 mod bookmarks_cache;
 mod collections_cache;
@@ -38,6 +39,14 @@ use works_cache::WorksCache;
 /// ContentBlock trees are stored as JSON in the `chapters.content_json` column.
 pub struct Storage {
     conn: Connection,
+    /// Filesystem path of the database (None for in-memory test stores).
+    /// Needed by the whole-file operations in library_file.rs (export a
+    /// copy, swap the file underneath a live connection).
+    path: Option<String>,
+    /// The SQLCipher passphrase this connection was opened with, kept so
+    /// the store can reopen itself after a file swap and key its own
+    /// backups. Never leaves the process.
+    passphrase: String,
     /// The tags table's in-memory mirror and single write authority — every
     /// post-open write to `tags` goes through its methods, which mutate map
     /// and database together (see tag_cache.rs for the invariant). A tag the
@@ -148,16 +157,37 @@ impl Storage {
     /// Open (or create) an encrypted database at the given filesystem path.
     pub fn open(path: &str, passphrase: &str) -> Result<Self, AppError> {
         let conn = Connection::open(path).map_err(map_sql)?;
-        Self::configure(conn, passphrase)
+        Self::configure(conn, Some(path.to_string()), passphrase)
     }
 
     /// Open an **in-memory** encrypted database — useful for tests.
     pub fn open_in_memory(passphrase: &str) -> Result<Self, AppError> {
         let conn = Connection::open_in_memory().map_err(map_sql)?;
-        Self::configure(conn, passphrase)
+        Self::configure(conn, None, passphrase)
     }
 
-    fn configure(conn: Connection, passphrase: &str) -> Result<Self, AppError> {
+    fn configure(conn: Connection, path: Option<String>, passphrase: &str) -> Result<Self, AppError> {
+        let conn = Self::prepare_connection(conn, passphrase)?;
+        let storage = Self {
+            conn,
+            path,
+            passphrase: passphrase.to_string(),
+            tag_cache: TagCache::default(),
+            works_cache: WorksCache::default(),
+            state_cache: StateCache::default(),
+            bookmarks_cache: BookmarksCache::default(),
+            collections_cache: CollectionsCache::default(),
+            users_cache: UsersCache::default(),
+            series_cache: SeriesCache::default(),
+        };
+        storage.migrate_and_load()?;
+        Ok(storage)
+    }
+
+    /// Key, pragmas, tracing, and SQL functions for a raw connection —
+    /// everything a `Storage` connection needs before the schema is
+    /// touched. Shared by open and by the post-swap reopen.
+    fn prepare_connection(conn: Connection, passphrase: &str) -> Result<Connection, AppError> {
         if !passphrase.is_empty() {
             conn.pragma_update(None, "key", passphrase).map_err(map_sql)?;
         }
@@ -195,38 +225,32 @@ impl Storage {
             |ctx| Ok(ctx.get::<String>(0)?.to_lowercase()),
         )
         .map_err(map_sql)?;
+        Ok(conn)
+    }
 
-        let storage = Self {
-            conn,
-            tag_cache: TagCache::default(),
-            works_cache: WorksCache::default(),
-            state_cache: StateCache::default(),
-            bookmarks_cache: BookmarksCache::default(),
-            collections_cache: CollectionsCache::default(),
-            users_cache: UsersCache::default(),
-            series_cache: SeriesCache::default(),
-        };
-        storage.migrate()?;
-        // Prime the in-memory caches (tags first — work and collection
-        // hydration resolve tag ids against it) before anything reads or
-        // harvests. Migrations are the one code path allowed to write these
-        // tables without the caches — they ran before these loads.
-        storage.tag_cache.load(&storage.conn)?;
-        storage.works_cache.load(&storage.conn)?;
-        storage.state_cache.load(&storage.conn)?;
-        storage.series_cache.load(&storage.conn)?;
-        storage.bookmarks_cache.load(&storage.conn)?;
-        storage.collections_cache.load(&storage.conn)?;
-        storage.users_cache.load(&storage.conn)?;
+    /// Bring the schema current and prime the in-memory caches (tags
+    /// first — work and collection hydration resolve tag ids against it)
+    /// before anything reads or harvests. Migrations are the one code
+    /// path allowed to write these tables without the caches — they run
+    /// before these loads.
+    fn migrate_and_load(&self) -> Result<(), AppError> {
+        self.migrate()?;
+        self.tag_cache.load(&self.conn)?;
+        self.works_cache.load(&self.conn)?;
+        self.state_cache.load(&self.conn)?;
+        self.series_cache.load(&self.conn)?;
+        self.bookmarks_cache.load(&self.conn)?;
+        self.collections_cache.load(&self.conn)?;
+        self.users_cache.load(&self.conn)?;
         // One-time: seed the tags table from works cached before it existed.
-        let _ = storage.backfill_tags();
-        Ok(storage)
+        let _ = self.backfill_tags();
+        Ok(())
     }
 
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    const SCHEMA_VERSION: u32 = 15;
+    pub(crate) const SCHEMA_VERSION: u32 = 17;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -279,6 +303,8 @@ impl Storage {
                 13 => self.migrate_v13(),
                 14 => self.migrate_v14(),
                 15 => self.migrate_v15(),
+                16 => self.drop_abandoned_sync_bookkeeping(),
+                17 => self.drop_abandoned_sync_bookkeeping(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -952,13 +978,61 @@ impl Storage {
         }
     }
 
-    pub fn change_passphrase(&self, new_passphrase: &str) -> Result<(), AppError> {
+    pub fn change_passphrase(&mut self, new_passphrase: &str) -> Result<(), AppError> {
         if new_passphrase.is_empty() {
             self.conn.pragma_update(None, PRAGMA_REKEY, "").map_err(map_sql)?;
         } else {
             self.conn.pragma_update(None, PRAGMA_REKEY, new_passphrase).map_err(map_sql)?;
         }
+        self.passphrase = new_passphrase.to_string();
         Ok(())
+    }
+
+    /// v16/v17 — remove the per-row cross-device sync bookkeeping an
+    /// unreleased build added (a `sync_meta`/`sync_log` pair, change
+    /// triggers on every synced table, and stable ids on reading lists).
+    /// Sync is now whole-file (see library_file.rs and api/cloud_sync.rs),
+    /// so none of it is read anywhere. Idempotent: v16 is the step for
+    /// databases that never saw the old bookkeeping, v17 re-runs it for
+    /// the dev databases that had already stamped v16 with it.
+    fn drop_abandoned_sync_bookkeeping(&self) -> Result<(), AppError> {
+        let triggers: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync\\_%' ESCAPE '\\'")
+                .map_err(map_sql)?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(map_sql)?;
+            rows.collect::<Result<_, _>>().map_err(map_sql)?
+        };
+        let mut sql = String::new();
+        for t in triggers {
+            sql.push_str(&format!("DROP TRIGGER IF EXISTS \"{t}\";\n"));
+        }
+        sql.push_str("DROP TABLE IF EXISTS sync_log; DROP TABLE IF EXISTS sync_meta;\n");
+        for (table, column) in [("reading_lists", "sync_id"), ("reading_list_items", "list_sync_id")] {
+            if self.column_exists(table, column)? {
+                sql.push_str(&format!("ALTER TABLE {table} DROP COLUMN {column};\n"));
+            }
+        }
+        self.conn.execute_batch(&sql).map_err(map_sql)
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .map_err(map_sql)?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(map_sql)?;
+        for n in names {
+            if n.map_err(map_sql)? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     // -------------------------------------------------------------------

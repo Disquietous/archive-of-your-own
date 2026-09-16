@@ -35,84 +35,44 @@ enum ScreenshotState {
 
         state.unreadNotificationCount = 3
 
-        cacheSearchForm()
 
         return state
     }
 
-    // MARK: - Search Form Cache
+    // MARK: - Search Form
 
-    static func cacheSearchForm() {
-        let fields: [[String: Any]] = [
-            [
-                "name": "work_search[query]",
-                "label": "Any field",
-                "fieldType": "text",
-                "placeholder": "Search by keyword",
-                "options": [] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[title]",
-                "label": "Title",
-                "fieldType": "text",
-                "placeholder": "",
-                "options": [] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[creators]",
-                "label": "Author/Artist",
-                "fieldType": "text",
-                "placeholder": "",
-                "options": [] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[fandom_names]",
-                "label": "Fandom",
-                "fieldType": "text",
-                "placeholder": "",
-                "options": [] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[rating_ids]",
-                "label": "Rating",
-                "fieldType": "select",
-                "placeholder": "",
-                "options": [
-                    ["value": "", "label": "Any", "selected": true],
-                    ["value": "10", "label": "General Audiences", "selected": false],
-                    ["value": "11", "label": "Teen And Up Audiences", "selected": false],
-                    ["value": "12", "label": "Mature", "selected": false],
-                    ["value": "13", "label": "Explicit", "selected": false],
-                ] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[complete]",
-                "label": "Completion status",
-                "fieldType": "select",
-                "placeholder": "",
-                "options": [
-                    ["value": "", "label": "All works", "selected": true],
-                    ["value": "T", "label": "Complete works only", "selected": false],
-                    ["value": "F", "label": "Works in progress only", "selected": false],
-                ] as [[String: Any]],
-            ],
-            [
-                "name": "work_search[sort_column]",
-                "label": "Sort by",
-                "fieldType": "select",
-                "placeholder": "",
-                "options": [
-                    ["value": "revised_at", "label": "Date Updated", "selected": true],
-                    ["value": "kudos_count", "label": "Kudos", "selected": false],
-                    ["value": "hits", "label": "Hits", "selected": false],
-                    ["value": "word_count", "label": "Word Count", "selected": false],
-                ] as [[String: Any]],
-            ],
-        ]
-        if let json = try? JSONSerialization.data(withJSONObject: fields) {
-            UserDefaults.standard.set(json, forKey: "cachedSearchForm")
-        }
-    }
+    /// Criteria fields for the Search screenshot, in place of a scraped form.
+    static let sampleSearchForm: [UFormField] = [
+        UFormField(name: "work_search[query]", label: "Any field", fieldType: "text",
+                   placeholder: "Search by keyword", options: []),
+        UFormField(name: "work_search[title]", label: "Title", fieldType: "text",
+                   placeholder: "", options: []),
+        UFormField(name: "work_search[creators]", label: "Author/Artist", fieldType: "text",
+                   placeholder: "", options: []),
+        UFormField(name: "work_search[fandom_names]", label: "Fandom", fieldType: "text",
+                   placeholder: "", options: []),
+        UFormField(name: "work_search[rating_ids]", label: "Rating", fieldType: "select",
+                   placeholder: "", options: [
+                       UFormOption(value: "", label: "Any", selected: true),
+                       UFormOption(value: "10", label: "General Audiences", selected: false),
+                       UFormOption(value: "11", label: "Teen And Up Audiences", selected: false),
+                       UFormOption(value: "12", label: "Mature", selected: false),
+                       UFormOption(value: "13", label: "Explicit", selected: false),
+                   ]),
+        UFormField(name: "work_search[complete]", label: "Completion status", fieldType: "select",
+                   placeholder: "", options: [
+                       UFormOption(value: "", label: "All works", selected: true),
+                       UFormOption(value: "T", label: "Complete works only", selected: false),
+                       UFormOption(value: "F", label: "Works in progress only", selected: false),
+                   ]),
+        UFormField(name: "work_search[sort_column]", label: "Sort by", fieldType: "select",
+                   placeholder: "", options: [
+                       UFormOption(value: "revised_at", label: "Date Updated", selected: true),
+                       UFormOption(value: "kudos_count", label: "Kudos", selected: false),
+                       UFormOption(value: "hits", label: "Hits", selected: false),
+                       UFormOption(value: "word_count", label: "Word Count", selected: false),
+                   ]),
+    ]
 
     // MARK: - Mock Comments
 

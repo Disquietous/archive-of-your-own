@@ -3,6 +3,7 @@ import SwiftUI
 struct ReadingSettingsSheetView: View {
     @Environment(AppTheme.self) private var theme
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         VStack(spacing: 20) {
@@ -38,6 +39,27 @@ struct ReadingSettingsSheetView: View {
 
                     // Spacing
                     spacingSection
+
+                    // Column width — iPad / wide layouts only; a phone's
+                    // width is the measure (D7).
+                    if sizeClass == .regular {
+                        Divider()
+                            .foregroundStyle(theme.line)
+
+                        measureSection
+                    }
+
+                    Divider()
+                        .foregroundStyle(theme.line)
+
+                    // Layout
+                    layoutSection
+
+                    Divider()
+                        .foregroundStyle(theme.line)
+
+                    // Images
+                    imagesSection
                 }
                 .padding(.horizontal, theme.pad)
             }
@@ -75,11 +97,9 @@ struct ReadingSettingsSheetView: View {
                 .tracking(0.08 * 13)
                 .foregroundStyle(theme.ink3)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(PresetThemes.all) { preset in
-                        themeSwatch(preset)
-                    }
+            FlowLayout(spacing: 12) {
+                ForEach(PresetThemes.all) { preset in
+                    themeSwatch(preset)
                 }
             }
         }
@@ -243,6 +263,135 @@ struct ReadingSettingsSheetView: View {
                 .lineSpacing(theme.readingLineSpacing)
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
+        }
+    }
+
+    // MARK: - Measure Section (iPad)
+
+    private var measureSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("COLUMN WIDTH")
+                .font(Typography.sectionHeader())
+                .tracking(0.08 * 13)
+                .foregroundStyle(theme.ink3)
+
+            HStack(spacing: 16) {
+                stepButton("minus", enabled: theme.measure > 560) {
+                    theme.measure = max(560, theme.measure - 20)
+                }
+
+                VStack(spacing: 2) {
+                    Text("\(theme.measure)")
+                        .font(Typography.sheetTitle())
+                        .foregroundStyle(theme.ink)
+                    Text("pt")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+                .frame(maxWidth: .infinity)
+
+                stepButton("plus", enabled: theme.measure < 860) {
+                    theme.measure = min(860, theme.measure + 20)
+                }
+            }
+        }
+    }
+
+    private func stepButton(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(enabled ? theme.ink2 : theme.ink3.opacity(0.4))
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.iconButton)
+                        .fill(theme.surface2)
+                )
+        }
+        .buttonStyle(IconButtonPressStyle())
+        .disabled(!enabled)
+    }
+
+    // MARK: - Layout Section
+
+    private var layoutSection: some View {
+        @Bindable var theme = theme
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("LAYOUT")
+                .font(Typography.sectionHeader())
+                .tracking(0.08 * 13)
+                .foregroundStyle(theme.ink3)
+
+            Toggle(isOn: $theme.fullscreenReading) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Open reader with chrome hidden")
+                        .font(Typography.uiBody())
+                        .foregroundStyle(theme.ink)
+                    Text("Start/Continue Reading opens chapters immersively; tap the page to show the controls.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+            }
+            .tint(theme.accent)
+
+            if WorkWindowValue.isSupported {
+                Toggle(isOn: $theme.openWorksInWindow) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Open works in a new window")
+                            .font(Typography.uiBody())
+                            .foregroundStyle(theme.ink)
+                        Text("Start/Continue Reading opens works in their own windows instead of the reading column.")
+                            .font(Typography.uiSmall())
+                            .foregroundStyle(theme.ink3)
+                    }
+                }
+                .tint(theme.accent)
+            }
+        }
+    }
+
+    // MARK: - Images Section
+
+    private var imagesSection: some View {
+        @Bindable var theme = theme
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("IMAGES")
+                .font(Typography.sectionHeader())
+                .tracking(0.08 * 13)
+                .foregroundStyle(theme.ink3)
+
+            Toggle(isOn: $theme.imageAutoLoad) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Load images automatically")
+                        .font(Typography.uiBody())
+                        .foregroundStyle(theme.ink)
+                    Text("Off = images show as tap-to-load placeholders. Every image is fetched over your private connection either way.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+            }
+            .tint(theme.accent)
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Size limit")
+                        .font(Typography.uiBody())
+                        .foregroundStyle(theme.ink)
+                    Text("Images over the limit aren’t downloaded — the placeholder stays.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+                Spacer()
+                Picker("Size limit", selection: $theme.imageMaxMB) {
+                    Text("1 MB").tag(1)
+                    Text("2 MB").tag(2)
+                    Text("5 MB").tag(5)
+                    Text("10 MB").tag(10)
+                    Text("No limit").tag(0)
+                }
+                .labelsHidden()
+                .tint(theme.accent)
+            }
         }
     }
 

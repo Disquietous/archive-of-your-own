@@ -9,15 +9,15 @@ struct WorkListFilterView: View {
     let section: MacAppModel.Section
 
     private var filter: Binding<MacAppModel.WorkListFilter> {
-        Binding(get: { model.workListFilter(for: section) },
-                set: { model.workListFilters[section] = $0 })
+        Binding(get: { model.lists.workListFilter(for: section) },
+                set: { model.lists.workListFilters[section] = $0 })
     }
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         VStack(alignment: .leading, spacing: 10) {
             header("Filter Works", clearEnabled: filter.wrappedValue.isActive) {
-                model.workListFilters[section] = nil
+                model.lists.workListFilters[section] = nil
             }
             filterField("Title, author, or summary", text: filter.text)
             HStack(spacing: 8) {
@@ -49,7 +49,7 @@ struct BookmarkListFilterView: View {
     @Bindable var theme: AppTheme
     @Bindable var model: MacAppModel
 
-    private var filter: Binding<MacSearchModel.BookmarkListFilter> {
+    private var filter: Binding<SearchModel.BookmarkListFilter> {
         Binding(get: { model.search.bookmarkListFilter },
                 set: { model.search.bookmarkListFilter = $0 })
     }
@@ -59,7 +59,7 @@ struct BookmarkListFilterView: View {
         VStack(alignment: .leading, spacing: 10) {
             ListFilterHeader(theme: theme, title: "Filter Bookmarks",
                              clearEnabled: filter.wrappedValue.isActive) {
-                model.search.bookmarkListFilter = MacSearchModel.BookmarkListFilter()
+                model.search.bookmarkListFilter = SearchModel.BookmarkListFilter()
             }
             FilterTextField(theme: theme, placeholder: "Title, author, or summary",
                             text: filter.text)
@@ -108,12 +108,12 @@ struct FilterRetentionToggle: View {
 
     var body: some View {
         Toggle("Keep filter across lists", isOn: Binding(
-            get: { model.retainListFilters },
-            set: { model.setRetainListFilters($0) }))
+            get: { model.lists.retainListFilters },
+            set: { model.lists.setRetainListFilters($0) }))
             .toggleStyle(.checkbox)
             .font(Font(MacFont.ui(11.5, weight: .medium)))
             .foregroundStyle(theme.ink3)
-            .help(model.retainListFilters
+            .help(model.lists.retainListFilters
                   ? "Filters stay put as you move between authors, fandoms, and searches."
                   : "A filter clears itself when the list it was set on closes or changes.")
             .padding(.top, 2)
@@ -252,14 +252,15 @@ struct AuthorsSourceFilterView: View {
 
     var body: some View {
         let _ = theme.uiFontScale
+        @Bindable var lists = model.lists
         VStack(alignment: .leading, spacing: 10) {
             header(theme: theme, title: "Filter Authors",
-                   clearEnabled: !(model.authorsIncludeFollowed && model.authorsIncludeSubscribed)) {
-                model.authorsIncludeFollowed = true
-                model.authorsIncludeSubscribed = true
+                   clearEnabled: !(model.lists.authorsIncludeFollowed && model.lists.authorsIncludeSubscribed)) {
+                model.lists.authorsIncludeFollowed = true
+                model.lists.authorsIncludeSubscribed = true
             }
-            Toggle("Include Followed", isOn: $model.authorsIncludeFollowed)
-            Toggle("Include Subscribed", isOn: $model.authorsIncludeSubscribed)
+            Toggle("Include Followed", isOn: $lists.authorsIncludeFollowed)
+            Toggle("Include Subscribed", isOn: $lists.authorsIncludeSubscribed)
             FilterRetentionToggle(theme: theme, model: model)
         }
         .toggleStyle(.checkbox)
@@ -277,20 +278,21 @@ struct InboxFilterView: View {
     @Bindable var model: MacAppModel
 
     private var anyActive: Bool {
-        !model.inboxFilterAuthor.isEmpty || !model.inboxFilterWork.isEmpty || !model.inboxFilterText.isEmpty
+        !model.lists.inboxFilterAuthor.isEmpty || !model.lists.inboxFilterWork.isEmpty || !model.lists.inboxFilterText.isEmpty
     }
 
     var body: some View {
         let _ = theme.uiFontScale
+        @Bindable var lists = model.lists
         VStack(alignment: .leading, spacing: 10) {
             header(theme: theme, title: "Filter Inbox", clearEnabled: anyActive) {
-                model.inboxFilterAuthor = ""
-                model.inboxFilterWork = ""
-                model.inboxFilterText = ""
+                model.lists.inboxFilterAuthor = ""
+                model.lists.inboxFilterWork = ""
+                model.lists.inboxFilterText = ""
             }
-            FilterTextField(theme: theme, placeholder: "From user", text: $model.inboxFilterAuthor)
-            FilterTextField(theme: theme, placeholder: "Work title", text: $model.inboxFilterWork)
-            FilterTextField(theme: theme, placeholder: "Message text", text: $model.inboxFilterText)
+            FilterTextField(theme: theme, placeholder: "From user", text: $lists.inboxFilterAuthor)
+            FilterTextField(theme: theme, placeholder: "Work title", text: $lists.inboxFilterWork)
+            FilterTextField(theme: theme, placeholder: "Message text", text: $lists.inboxFilterText)
             FilterRetentionToggle(theme: theme, model: model)
         }
         .padding(14)

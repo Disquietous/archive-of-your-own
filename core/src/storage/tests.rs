@@ -1334,7 +1334,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 15);
+    assert_eq!(db.schema_version().unwrap(), 17);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1499,7 +1499,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 15);
+    assert_eq!(db.schema_version().unwrap(), 17);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1569,7 +1569,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 15);
+    assert_eq!(db.schema_version().unwrap(), 17);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1951,6 +1951,7 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("subscriptions.rs", include_str!("subscriptions.rs")),
         ("accounts.rs", include_str!("accounts.rs")),
         ("consts.rs", include_str!("consts.rs")),
+        ("library_file.rs", include_str!("library_file.rs")),
     ];
     let write_markers = [
         "INSERT INTO tags", "INSERT OR IGNORE INTO tags", "INSERT OR REPLACE INTO tags",
@@ -2401,4 +2402,146 @@ fn test_save_comment_in_place_keeps_thread_context() {
     // A parent that was never cached can't be placed.
     assert!(!db.save_comment_in_place(&comment(99, "zed", vec![])).unwrap());
     assert!(db.get_comment_thread(99).unwrap().is_none());
+}
+
+// ===========================================================================
+// Whole-file operations (storage/library_file.rs)
+// ===========================================================================
+
+fn temp_db_path(tag: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("ao3_{tag}_{}.db", std::process::id()));
+    library_file::remove_file_set(&p);
+    p
+}
+
+#[test]
+fn export_copy_is_a_complete_rekeyed_library_with_embedded_stamps() {
+    let src_path = temp_db_path("export_src");
+    let copy_path = temp_db_path("export_copy");
+    let db = Storage::open(src_path.to_str().unwrap(), "local-key").unwrap();
+    db.save_work(&sample_work(1)).unwrap();
+    db.set_state("pref:theme", "dusk").unwrap();
+
+    let size = db.export_copy(&copy_path, "cloud-key", &[("cloud:generation", "7"), ("cloud:device_name", "Mac")]).unwrap();
+    assert!(size > 0);
+    // Source keeps working and still enforces foreign keys.
+    assert!(db.get_work(1).unwrap().is_some());
+    let fk: i64 = db.conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+    assert_eq!(fk, 1);
+
+    // Wrong key is rejected; right key sees the same library plus stamps.
+    assert!(library_file::open_closed(&copy_path, "local-key").is_err());
+    let conn = library_file::open_closed(&copy_path, "cloud-key").unwrap();
+    assert_eq!(library_file::user_version(&conn).unwrap(), Storage::SCHEMA_VERSION);
+    let embedded = library_file::read_embedded(&conn).unwrap();
+    assert_eq!(embedded.get("cloud:generation").map(String::as_str), Some("7"));
+    assert_eq!(embedded.get("cloud:device_name").map(String::as_str), Some("Mac"));
+    drop(conn);
+    let copy = Storage::open(copy_path.to_str().unwrap(), "cloud-key").unwrap();
+    assert_eq!(copy.get_work(1).unwrap().unwrap().title, sample_work(1).title);
+    assert_eq!(copy.get_state("pref:theme").unwrap().as_deref(), Some("dusk"));
+
+    drop(copy);
+    drop(db);
+    library_file::remove_file_set(&src_path);
+    library_file::remove_file_set(&copy_path);
+}
+
+#[test]
+fn replace_with_swaps_file_backs_up_old_and_rebuilds_caches() {
+    let live_path = temp_db_path("replace_live");
+    let incoming_path = temp_db_path("replace_incoming");
+    let backup_path = std::env::temp_dir().join(format!("ao3_replace_backup_{}/old.db", std::process::id()));
+    let _ = std::fs::remove_dir_all(backup_path.parent().unwrap());
+
+    let mut live = Storage::open(live_path.to_str().unwrap(), "k").unwrap();
+    live.save_work(&sample_work(1)).unwrap();
+    live.set_state("who", "old").unwrap();
+
+    {
+        let other = Storage::open(incoming_path.to_str().unwrap(), "other-key").unwrap();
+        other.save_work(&sample_work(2)).unwrap();
+        other.save_work(&sample_work(3)).unwrap();
+        other.set_state("who", "new").unwrap();
+    }
+    library_file::rekey_file(&incoming_path, "other-key", "k").unwrap();
+
+    live.replace_with(&incoming_path, &backup_path).unwrap();
+    // Live store now serves the replacement, caches included.
+    assert!(live.get_work(1).unwrap().is_none());
+    assert!(live.get_work(2).unwrap().is_some());
+    assert_eq!(live.get_state("who").unwrap().as_deref(), Some("new"));
+    assert_eq!(live.get_all_works().unwrap().len(), 2);
+    assert!(!incoming_path.exists());
+    // The old library is intact in the backup, under the same key.
+    let old = Storage::open(backup_path.to_str().unwrap(), "k").unwrap();
+    assert!(old.get_work(1).unwrap().is_some());
+    assert_eq!(old.get_state("who").unwrap().as_deref(), Some("old"));
+    // Writes after the swap land in the new file.
+    live.save_work(&sample_work(9)).unwrap();
+    drop(live);
+    let reopened = Storage::open(live_path.to_str().unwrap(), "k").unwrap();
+    assert!(reopened.get_work(9).unwrap().is_some());
+
+    drop(old);
+    drop(reopened);
+    library_file::remove_file_set(&live_path);
+    let _ = std::fs::remove_dir_all(backup_path.parent().unwrap());
+}
+
+#[test]
+fn replace_with_unopenable_file_restores_the_original() {
+    let live_path = temp_db_path("replace_bad_live");
+    let incoming_path = temp_db_path("replace_bad_incoming");
+    let backup_path = std::env::temp_dir().join(format!("ao3_replace_bad_backup_{}/old.db", std::process::id()));
+    let _ = std::fs::remove_dir_all(backup_path.parent().unwrap());
+
+    let mut live = Storage::open(live_path.to_str().unwrap(), "k").unwrap();
+    live.save_work(&sample_work(1)).unwrap();
+    // Keyed differently: the reopen under "k" must fail.
+    Storage::open(incoming_path.to_str().unwrap(), "wrong").unwrap();
+
+    assert!(live.replace_with(&incoming_path, &backup_path).is_err());
+    assert!(live.get_work(1).unwrap().is_some(), "original library is back in service");
+    assert!(!backup_path.exists(), "no backup left behind for a swap that didn't happen");
+
+    drop(live);
+    library_file::remove_file_set(&live_path);
+    library_file::remove_file_set(&incoming_path);
+    let _ = std::fs::remove_dir_all(backup_path.parent().unwrap());
+}
+
+#[test]
+fn abandoned_sync_bookkeeping_is_dropped_on_migrate() {
+    let path = temp_db_path("drop_sync");
+    {
+        let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+        // Simulate the unreleased v16 bookkeeping on a database stamped v16.
+        db.conn
+            .execute_batch(
+                "CREATE TABLE sync_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE sync_log (tbl TEXT, key TEXT, ts INTEGER, origin TEXT, deleted INTEGER, PRIMARY KEY (tbl, key));
+                 ALTER TABLE reading_lists ADD COLUMN sync_id TEXT NOT NULL DEFAULT '';
+                 CREATE TRIGGER sync_works_ai AFTER INSERT ON works BEGIN
+                     INSERT OR REPLACE INTO sync_log VALUES ('w', NEW.id, 0, '', 0);
+                 END;
+                 PRAGMA user_version = 16;",
+            )
+            .unwrap();
+    }
+    let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+    assert_eq!(db.schema_version().unwrap(), 17);
+    let leftovers: i64 = db
+        .conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('sync_meta', 'sync_log', 'sync_works_ai')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftovers, 0);
+    assert!(!db.column_exists("reading_lists", "sync_id").unwrap());
+    db.save_work(&sample_work(1)).unwrap();
+    drop(db);
+    library_file::remove_file_set(&path);
 }

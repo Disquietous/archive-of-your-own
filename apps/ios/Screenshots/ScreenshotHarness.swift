@@ -2,8 +2,15 @@ import SwiftUI
 
 struct ScreenshotHarness: View {
     @State private var theme = AppTheme()
-    @State private var state = ScreenshotState.makePopulatedState()
+    @State private var state: AppState
+    @State private var models: AppModels
     @State private var nav = NavigationState()
+
+    init() {
+        let state = ScreenshotState.makePopulatedState()
+        _state = State(initialValue: state)
+        _models = State(initialValue: AppModels(appState: state))
+    }
 
     @State private var currentScene: ScreenshotScene = .library
     @State private var running = false
@@ -31,6 +38,12 @@ struct ScreenshotHarness: View {
                 .environment(theme)
                 .environment(state)
                 .environment(nav)
+                .environment(models.lists)
+                .environment(models.follows)
+                .environment(models.author)
+                .environment(models.subscriptionWorks)
+                .environment(models.search)
+                .environment(models.ops)
                 .preferredColorScheme(theme.preferredColorScheme)
         }
         .task {
@@ -89,16 +102,13 @@ struct ScreenshotHarness: View {
 
     private var searchContent: some View {
         ScreenshotTabView(selectedTab: .search) {
-            SearchView(initialShowFilters: true)
+            SearchView(initialShowFilters: true, initialFormFields: ScreenshotState.sampleSearchForm)
         }
     }
 
     private var subscriptionsContent: some View {
         ScreenshotTabView(selectedTab: .library) {
-            LibraryView(
-                initialTab: .subscriptions,
-                initialExpandedSections: ["Authors", "Works", "Series"]
-            )
+            SubscriptionsScreen(initialExpandedSections: ["Authors", "Works", "Series"])
         }
     }
 

@@ -4,30 +4,39 @@ struct InboxView: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
     @Environment(NavigationState.self) private var nav
-    @Environment(\.dismiss) private var dismiss
+    @Environment(LibraryListModel.self) private var lists
 
-    @State private var items: [InboxItem] = []
-    @State private var currentPage: UInt32 = 1
-    @State private var hasNextPage = false
-    @State private var isLoading = false
-    @State private var loadError: String?
-    @State private var inboxTask = NetworkTask()
     @State private var avatarCache: [String: UIImage] = [:]
+    @State private var showFilter = false
+
+    private var items: [InboxItem] { lists.filteredInboxMessages }
+
+    private var filterActive: Bool {
+        !lists.inboxFilterAuthor.isEmpty || !lists.inboxFilterWork.isEmpty || !lists.inboxFilterText.isEmpty
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                Spacer().frame(height: 56)
-
-                if items.isEmpty && isLoading {
-                    NetworkLoadingView(message: "Loading inbox…", task: inboxTask, operation: "inbox") {
-                        inboxTask.cancel()
-                        isLoading = false
+                if items.isEmpty && filterActive {
+                    VStack(spacing: 12) {
+                        EmptyStateView(systemImage: "line.3.horizontal.decrease.circle",
+                                       title: "Nothing matches",
+                                       subtitle: "No messages on this page match the filter.")
+                        Button("Clear Filter") { clearFilter() }
+                            .font(Typography.smallButtonLabel())
+                            .foregroundStyle(theme.accent)
+                            .buttonStyle(ButtonPressStyle())
                     }
-                } else if items.isEmpty && !isLoading {
-                    if let loadError {
-                        NetworkErrorView(message: loadError, onRetry: {
-                            Task { await loadPage(1, replace: true) }
+                    .padding(.top, 40)
+                } else if items.isEmpty && state.isCheckingInbox {
+                    NetworkLoadingView(message: "Checking inbox…", task: state.inboxCheckTask, operation: "inbox") {
+                        state.inboxCheckTask.cancel()
+                    }
+                } else if items.isEmpty {
+                    if let message = state.inboxCheckTask.statusMessage, !message.isEmpty {
+                        NetworkErrorView(message: message, onRetry: {
+                            Task { await state.checkInbox() }
                         })
                     } else {
                         EmptyStateView(
@@ -42,90 +51,100 @@ struct InboxView: View {
                         ForEach(items) { item in
                             inboxItemView(item)
                         }
-
-                        if isLoading {
-                            NetworkLoadingView(message: "Loading more…", task: inboxTask, operation: "inbox") {
-                                inboxTask.cancel()
-                                isLoading = false
-                            }
-                        }
-
-                        if hasNextPage && !isLoading {
-                            Button {
-                                Task { await loadPage(currentPage + 1, replace: false) }
-                            } label: {
-                                Text("Load more")
-                                    .font(Typography.smallButtonLabel())
-                                    .foregroundStyle(theme.ink)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 40)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: Radius.button)
-                                            .stroke(theme.line, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(ButtonPressStyle())
-                            .padding(.horizontal, theme.pad)
-                            .padding(.top, 16)
-                        }
                     }
+
+                    pager
+                        .padding(.horizontal, theme.pad)
+                        .padding(.top, 16)
                 }
 
                 Spacer().frame(height: 32)
             }
         }
-        .background(theme.bg)
-        .navigationBarBackButtonHidden(true)
-        .toolbar(.hidden, for: .tabBar)
-        .toolbar(.hidden, for: .navigationBar)
+        .contentMargins(.top, ScreenChromeMetrics.height, for: .scrollContent)
+        .libraryScreen()
         .overlay(alignment: .top) { topChrome }
-        .task {
-            await loadPage(1, replace: true)
+        .sheet(isPresented: $showFilter) {
+            InboxFilterSheet()
+                .environment(theme)
+                .environment(lists)
         }
+        .task {
+            // Cached pages render at once; the check only goes to AO3 for
+            // messages newer than the cache.
+            state.loadCachedInbox()
+            await state.checkInbox()
+        }
+    }
+
+    // MARK: - Pager (cached pages only; no request)
+
+    private var pager: some View {
+        HStack(spacing: 12) {
+            pagerButton(symbol: "chevron.left", enabled: state.inboxPage > 1) {
+                state.loadCachedInbox(page: state.inboxPage - 1)
+            }
+            Text("Page \(state.inboxPage)")
+                .font(Typography.smallButtonLabel())
+                .foregroundStyle(theme.ink2)
+                .frame(maxWidth: .infinity)
+            pagerButton(symbol: "chevron.right", enabled: state.inboxHasMore) {
+                state.loadCachedInbox(page: state.inboxPage + 1)
+            }
+        }
+    }
+
+    private func pagerButton(symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(enabled ? theme.ink : theme.ink3)
+                .frame(width: 40, height: 40)
+                .background(
+                    RoundedRectangle(cornerRadius: Radius.button)
+                        .stroke(theme.line, lineWidth: 1)
+                )
+        }
+        .buttonStyle(ButtonPressStyle())
+        .disabled(!enabled)
     }
 
     // MARK: - Top Chrome
 
     private var topChrome: some View {
-        HStack(spacing: 10) {
-            Button { dismiss() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(theme.ink)
-                    .frame(width: 36, height: 36)
+        ScreenChrome(title: "Inbox",
+                     subtitle: state.inboxUnreadCount > 0 ? "\(state.inboxUnreadCount) unread" : nil) {
+            ChromeIconButton(symbol: filterActive ? "line.3.horizontal.decrease.circle.fill"
+                                                   : "line.3.horizontal.decrease.circle",
+                             tint: filterActive ? theme.accent : nil) {
+                showFilter = true
             }
-            .buttonStyle(IconButtonPressStyle())
-
-            Button { nav.goHome() } label: {
-                Image(systemName: "house")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(theme.ink2)
-                    .frame(width: 36, height: 36)
+            ChromeIconButton(symbol: "arrow.clockwise", isBusy: state.isCheckingInbox) {
+                Task { await state.checkInbox() }
             }
-            .buttonStyle(IconButtonPressStyle())
-
-            Text("Inbox")
-                .font(Typography.browseTitle())
-                .foregroundStyle(theme.ink)
-
-            Spacer()
-
-            PrivacyPillView {
-                nav.presentedSheet = .privacy
-            }
+            .disabled(state.isCheckingInbox)
         }
-        .padding(.horizontal, theme.pad)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .background(
-            theme.bg.opacity(0.95)
-                .shadow(.drop(color: .black.opacity(0.05), radius: 4, y: 2))
-        )
+    }
+
+    private func clearFilter() {
+        lists.inboxFilterAuthor = ""
+        lists.inboxFilterWork = ""
+        lists.inboxFilterText = ""
     }
 
     // MARK: - Inbox Item
 
     private func inboxItemView(_ item: InboxItem) -> some View {
+        Button {
+            state.selectInboxMessage(item)
+            nav.openInboxThread()
+        } label: {
+            inboxItemBody(item)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func inboxItemBody(_ item: InboxItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 10) {
                 // Avatar
@@ -172,6 +191,7 @@ struct InboxView: View {
         .padding(.horizontal, theme.pad)
         .padding(.vertical, 12)
         .background(item.isUnread ? theme.accentSoft.opacity(0.3) : .clear)
+        .contentShape(Rectangle())
         .overlay(alignment: .bottom) {
             Divider().foregroundStyle(theme.line)
         }
@@ -212,34 +232,47 @@ struct InboxView: View {
             }
         } catch {}
     }
+}
 
-    // MARK: - Loading
+/// Inbox filter: sender, work, and message text as separate fields.
+struct InboxFilterSheet: View {
+    @Environment(AppTheme.self) private var theme
+    @Environment(LibraryListModel.self) private var lists
+    @Environment(\.dismiss) private var dismiss
 
-    private func loadPage(_ page: UInt32, replace: Bool) async {
-        guard let username = state.ao3Username else { return }
-        isLoading = true
-        loadError = nil
-        inboxTask.reset()
-        do {
-            let json = try await state.retryOnTimeout(task: inboxTask, using: state.bridge) {
-                try await self.state.bridge.fetchInbox(username: username, page: page)
-            }
-            if let data = json.data(using: .utf8),
-               let response = try? JSONDecoder().decode(InboxResponse.self, from: data) {
-                if replace {
-                    items = response.items
-                } else {
-                    items.append(contentsOf: response.items)
+    var body: some View {
+        @Bindable var lists = lists
+        let anyActive = !lists.inboxFilterAuthor.isEmpty || !lists.inboxFilterWork.isEmpty
+            || !lists.inboxFilterText.isEmpty
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    FilterTextField(placeholder: "From user", text: $lists.inboxFilterAuthor)
+                    FilterTextField(placeholder: "Work title", text: $lists.inboxFilterWork)
+                    FilterTextField(placeholder: "Message text", text: $lists.inboxFilterText)
+                    FilterRetentionToggle()
                 }
-                currentPage = page
-                hasNextPage = response.hasNextPage
-                state.inboxUnreadCount = Int(response.unreadCount)
+                .padding(theme.pad)
             }
-        } catch {
-            if !inboxTask.isCancelled && !error.isCancellation {
-                loadError = error.localizedDescription
+            .background(theme.bg)
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("Filter Inbox")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Clear") {
+                        lists.inboxFilterAuthor = ""
+                        lists.inboxFilterWork = ""
+                        lists.inboxFilterText = ""
+                    }
+                    .disabled(!anyActive)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
-        isLoading = false
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
     }
 }

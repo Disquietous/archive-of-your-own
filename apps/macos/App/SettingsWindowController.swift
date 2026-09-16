@@ -15,6 +15,7 @@ struct SettingsRootView: View {
         case reading = "Reading"
         case requests = "Requests"
         case privacy = "Privacy"
+        case sync = "Sync"
 
         var icon: String {
             switch self {
@@ -22,6 +23,7 @@ struct SettingsRootView: View {
             case .reading: "textformat.size"
             case .requests: "network"
             case .privacy: "shield.lefthalf.filled"
+            case .sync: "icloud"
             }
         }
     }
@@ -45,6 +47,8 @@ struct SettingsRootView: View {
                         RequestsSettingsPane(theme: theme, appState: appState)
                     case .privacy:
                         PrivacySettingsPane(theme: theme, appState: appState, model: model)
+                    case .sync:
+                        CloudSyncSettingsPane(theme: theme, appState: appState)
                     }
                 }
                 .frame(maxWidth: 560)

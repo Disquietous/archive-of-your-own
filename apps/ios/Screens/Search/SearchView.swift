@@ -1,282 +1,573 @@
 import SwiftUI
 
+/// The Search tab, driven by the shared `SearchModel`: a wrapping scope
+/// control (Works / Collections / Bookmarks / Tags / Users), a Library |
+/// AO3 source control, the scope's criteria form, and — once a query runs
+/// — the results state with its back arrow, pager, list filter and
+/// server-side sort. Tag pills anywhere in the app land here through
+/// `NavigationState.openTag`.
 struct SearchView: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
     @Environment(NavigationState.self) private var nav
+    @Environment(SearchModel.self) private var search
+    @Environment(LibraryListModel.self) private var lists
 
-    @State private var formFields: [UFormField] = []
-    @State private var fieldValues: [String: String] = [:]
-    @State private var checkboxValues: [String: Set<String>] = [:]
-    @State private var isLoadingForm = false
-    @State private var formError: String?
-    @State private var hasSearched = false
-    @State private var showFilters = false
     var initialShowFilters: Bool = false
+    /// Screenshot harness only: seed the criteria fields without a library.
+    var initialFormFields: [UFormField]? = nil
+
+    @State private var showFilters = false
     @State private var didApplyInitialFilters = false
-    @State private var searchTask: Task<Void, Never>?
-    @State private var savedSearches: [USavedSearch] = []
-    @State private var showSaveDialog = false
-    @State private var saveSearchName = ""
-
-    private var textFields: [UFormField] {
-        formFields.filter { $0.fieldType == "text" }
-    }
-
-    private var selectFields: [UFormField] {
-        formFields.filter { $0.fieldType == "select" }
-    }
-
-    private var checkboxFields: [UFormField] {
-        formFields.filter { $0.fieldType == "checkboxes" }
-    }
-
-    private var primaryField: UFormField? {
-        textFields.first { $0.name.contains("[query]") }
-    }
-
-    private var filterFields: [UFormField] {
-        formFields.filter { f in
-            f.name != primaryField?.name && f.fieldType != "hidden"
-        }
-    }
-
-    private var displayedWorks: [Work] {
-        var results = state.searchResults
-        if state.hideExplicit {
-            results = results.filter { $0.rating != .explicit }
-        }
-        return results
-    }
+    @State private var showFilterSheet = false
+    @State private var showBookmarkFilterSheet = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                masthead
-
-                if !savedSearches.isEmpty && !hasSearched {
-                    savedSearchesSection
-                        .padding(.horizontal, theme.pad)
-                        .padding(.bottom, 12)
+        VStack(spacing: 0) {
+            header
+            if search.showingResults, let opID = search.searchFetchOp.opID,
+               search.splitCollectionName == nil {
+                RequestProgressBanner(opID: opID) {
+                    state.searchTask.cancel()
+                    state.bridge.cancelOperation(opID)
                 }
-
-                if isLoadingForm {
-                    NetworkLoadingView(message: "Loading search form…", task: state.searchTask, operation: "search") {
-                        state.searchTask.cancel()
-                        isLoadingForm = false
-                    }
-                } else if let error = formError {
-                    NetworkErrorView(message: error, onRetry: {
-                        formError = nil
-                        Task { await loadForm() }
-                    })
-                } else if formFields.isEmpty {
-                    EmptyStateView(
-                        systemImage: "magnifyingglass",
-                        title: "Search AO3",
-                        subtitle: "Loading search options…"
-                    )
-                    .padding(.top, 60)
-                } else {
-                    searchForm
-                        .padding(.horizontal, theme.pad)
-
-                    searchResults
-                }
+                .padding(.horizontal, theme.pad)
+                .padding(.bottom, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .padding(.bottom, 32)
+            if search.showingResults {
+                SearchResultsView()
+            } else {
+                formScroll
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: search.searchFetchOp.opID)
         .background { ThemeBackgroundView() }
         .task {
             if !didApplyInitialFilters {
                 showFilters = initialShowFilters
                 didApplyInitialFilters = true
             }
-            if formFields.isEmpty {
-                if let cached = Self.loadCachedForm() {
-                    formFields = cached
-                } else if state.bridge.isInitialized {
-                    await loadForm()
-                }
+            if let seeded = initialFormFields, search.formFields.isEmpty {
+                search.formFields = seeded
+            } else if state.bridge.isInitialized {
+                await search.loadFormIfNeeded(state)
             }
-            savedSearches = state.bridge.getSavedSearches()
-        }
-        .alert("Save Search", isPresented: $showSaveDialog) {
-            TextField("Search name", text: $saveSearchName)
-            Button("Save") { saveCurrentSearch() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Give this search a name to find it quickly later.")
+            search.loadSavedSearches(state)
+            consumePendingQueries()
         }
         .onChange(of: state.bridge.isInitialized) { _, initialized in
-            if initialized && formFields.isEmpty {
-                Task { await loadForm() }
+            if initialized && search.formFields.isEmpty {
+                Task { await search.loadFormIfNeeded(state) }
             }
+        }
+        .onChange(of: nav.pendingTagQuery) { consumePendingQueries() }
+        .onChange(of: nav.pendingAO3TagListing) { consumePendingQueries() }
+        .sheet(isPresented: $showFilterSheet) {
+            WorkListFilterSheet(section: .search,
+                                availableTags: lists.availableTags(for: .search, raw: state.searchResults),
+                                availableFandoms: lists.availableFandoms(for: .search, raw: state.searchResults))
+                .environment(theme)
+                .environment(lists)
+        }
+        .sheet(isPresented: $showBookmarkFilterSheet) {
+            BookmarkListFilterSheet()
+                .environment(theme)
+                .environment(search)
         }
     }
 
-    // MARK: - Masthead
+    /// Queries handed over from other tabs (tag pills, the Fandoms
+    /// drill-in's Search AO3) run the moment the tab shows them.
+    private func consumePendingQueries() {
+        if let tag = nav.pendingTagQuery {
+            nav.pendingTagQuery = nil
+            search.startTagQuery(tag, appState: state)
+        }
+        if let tag = nav.pendingAO3TagListing {
+            nav.pendingAO3TagListing = nil
+            search.startAO3TagListing(tag, appState: state)
+        }
+    }
 
-    private var masthead: some View {
-        HStack {
-            Text("Search")
-                .font(Typography.browseTitle())
-                .foregroundStyle(theme.ink)
-            Spacer()
-            if !formFields.isEmpty {
-                Button {
-                    Task { await fetchFormFromNetwork() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(theme.ink3)
-                        .frame(width: 32, height: 32)
+    // MARK: - Header
+
+    private var header: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                if search.showingResults {
+                    Button { goBack() } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(theme.ink)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(IconButtonPressStyle())
+                    .accessibilityLabel(backLabel)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(resultsTitle)
+                            .font(Typography.uiBody())
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(1)
+                        if let sub = resultsSubtitle {
+                            Text(sub)
+                                .font(.custom("HankenGrotesk", size: 11).weight(.medium))
+                                .foregroundStyle(theme.ink3)
+                                .lineLimit(1)
+                        }
+                    }
+                } else {
+                    Text("Search")
+                        .font(Typography.browseTitle())
+                        .foregroundStyle(theme.ink)
                 }
-                .buttonStyle(IconButtonPressStyle())
-                .disabled(isLoadingForm)
+
+                Spacer(minLength: 4)
+
+                if search.showingResults {
+                    resultsControls
+                } else {
+                    formControls
+                }
+
+                PrivacyPillView { nav.presentedSheet = .privacy }
             }
-            PrivacyPillView { nav.presentedSheet = .privacy }
+
+            if !search.showingResults {
+                scopeControl
+                sourceControl
+            }
         }
         .padding(.horizontal, theme.pad)
         .padding(.top, 8)
-        .padding(.bottom, 12)
+        .padding(.bottom, 10)
     }
 
-    // MARK: - Dynamic Form
+    /// Wrapping scope control — never a sideways strip.
+    private var scopeControl: some View {
+        SegmentedControlView(
+            selection: Binding(get: { search.scope }, set: { search.setScope($0) }),
+            items: SearchModel.SearchScope.allCases.map { (key: $0, label: $0.rawValue) }
+        )
+    }
 
-    private var searchForm: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let primary = primaryField {
-                dynamicField(primary)
-            }
+    /// Library | AO3. The model owns the flag; flipping it while results
+    /// show re-runs the query under the new source.
+    private var sourceControl: some View {
+        SegmentedControlView(
+            selection: Binding(get: { search.searchLibraryOnly },
+                               set: { if $0 != search.searchLibraryOnly { search.toggleSearchSource(state) } }),
+            items: [(key: true, label: "Library"), (key: false, label: "AO3")]
+        )
+    }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showFilters.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: showFilters ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .bold))
-                    Text(showFilters ? "Hide filters" : "More filters")
-                        .font(Typography.uiCaption())
-                }
-                .foregroundStyle(theme.accent)
+    @ViewBuilder
+    private var formControls: some View {
+        if search.scope == .works {
+            ChromeIconButton(symbol: "arrow.clockwise", isBusy: search.isLoadingForm) {
+                Task { await search.scrapeForm(state) }
             }
-
-            if showFilters {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(filterFields, id: \.name) { field in
-                        dynamicField(field)
-                    }
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            .disabled(search.isLoadingForm)
+            .accessibilityLabel("Reload search criteria from AO3")
+            ChromeIconButton(symbol: state.hideExplicit ? "eye.slash" : "eye",
+                             tint: state.hideExplicit ? theme.accent : nil) {
+                state.hideExplicit.toggle()
             }
-
-            Button { performSearch() } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("Search")
-                        .font(Typography.buttonLabel())
-                }
-                .foregroundStyle(theme.onAccent)
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(RoundedRectangle(cornerRadius: Radius.button).fill(theme.accent))
-            }
-            .buttonStyle(ButtonPressStyle())
-            .padding(.top, 4)
+            .accessibilityLabel(state.hideExplicit ? "Show explicit works" : "Hide explicit works")
         }
     }
 
     @ViewBuilder
-    private func dynamicField(_ field: UFormField) -> some View {
-        switch field.fieldType {
-        case "text":
-            textFieldView(field)
-        case "select":
-            selectFieldView(field)
-        case "checkboxes":
-            checkboxGroupView(field)
-        case "radio":
-            radioGroupView(field)
-        default:
-            EmptyView()
+    private var resultsControls: some View {
+        if search.splitCollectionName == nil {
+            if search.scope == .works {
+                if search.hasSearched, case .form = search.activeQuery, sortColumnField != nil {
+                    resultsSortMenu
+                }
+                if search.hasSearched {
+                    SortFilterMenu(section: .search)
+                    let active = lists.workListFilter(for: .search).isActive
+                    ChromeIconButton(symbol: active ? "line.3.horizontal.decrease.circle.fill"
+                                                   : "line.3.horizontal.decrease.circle",
+                                     tint: active ? theme.accent : nil) {
+                        showFilterSheet = true
+                    }
+                    .accessibilityLabel("Filter the fetched results (this page only)")
+                }
+            } else if search.scope == .bookmarks, search.hasSearched {
+                let active = search.bookmarkListFilter.isActive
+                ChromeIconButton(symbol: active ? "line.3.horizontal.decrease.circle.fill"
+                                               : "line.3.horizontal.decrease.circle",
+                                 tint: active ? theme.accent : nil) {
+                    showBookmarkFilterSheet = true
+                }
+                .accessibilityLabel("Filter the fetched results (this page only)")
+            }
+        } else if let name = search.splitCollectionName,
+                  let url = ExternalLinkOpener.ao3CollectionURL(name) {
+            ChromeIconButton(symbol: "arrow.up.right") {
+                ExternalLinkOpener.open(url, bridge: state.bridge)
+            }
+            .accessibilityLabel("Open this collection on AO3")
         }
+        // Source toggle: internaldrive = only the app's database, globe =
+        // full search on AO3. Flipping re-runs the showing results.
+        ChromeIconButton(symbol: search.searchLibraryOnly ? "internaldrive" : "globe",
+                         tint: search.searchLibraryOnly ? nil : theme.accent) {
+            search.toggleSearchSource(state)
+        }
+        .accessibilityLabel(search.searchLibraryOnly
+                            ? "Searching your library only — tap to search AO3"
+                            : "Searching AO3 — tap to search only your library")
+    }
+
+    private var backLabel: String {
+        if search.canReturnToCollectionHits { return "Back to collections results" }
+        if nav.searchReturnTab != nil { return "Back" }
+        return "Back to search criteria"
+    }
+
+    /// One level out: the collections hit list behind a drill-in, the tab
+    /// that triggered the search when it came from outside, the form
+    /// otherwise.
+    private func goBack() {
+        if search.splitCollectionName != nil {
+            search.closeSplitCollection()
+            return
+        }
+        if !search.canReturnToCollectionHits, let target = nav.searchReturnTab {
+            nav.searchReturnTab = nil
+            search.showingResults = false
+            nav.selectedTab = target
+            return
+        }
+        search.returnToForm()
+    }
+
+    private var resultsTitle: String {
+        if let title = search.splitCollectionTitle { return title }
+        if case .tag(let tag) = search.activeQuery { return tag }
+        if case .collection = search.activeQuery, search.canReturnToCollectionHits { return "Collection" }
+        return search.scope == .works ? "Results" : "\(search.scope.rawValue) results"
+    }
+
+    /// Results subtitle per scope: works-style results carry the page
+    /// position and total; the others report their hit counts.
+    private var resultsSubtitle: String? {
+        if search.splitCollectionName != nil {
+            var parts: [String] = []
+            if let works = search.totalWorks { parts.append(works == 1 ? "1 work" : "\(works) works") }
+            if let items = search.bookmarksTotal {
+                parts.append(items == 1 ? "1 bookmarked item" : "\(items) bookmarked items")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        }
+        switch search.scope {
+        case .works:
+            var parts: [String] = []
+            if let sub = search.resultsSubtitle { parts.append(sub) }
+            if lists.workListFilter(for: .search).isActive {
+                let shown = lists.works(for: .search, raw: state.searchResults).count
+                parts.append("\(shown) of \(state.searchResults.count) shown")
+            }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        case .bookmarks:
+            var parts: [String] = []
+            if case .bookmarkSearch = search.activeQuery {
+                parts.append(search.totalPages > 1
+                    ? "Page \(search.currentPage) of \(search.totalPages)"
+                    : "Page \(search.currentPage)")
+            }
+            if search.bookmarkListFilter.isActive {
+                parts.append("\(search.filteredBookmarkHits.count) of \(search.bookmarkHits.count) bookmarks")
+            } else {
+                let total = search.totalWorks.map(Int.init) ?? search.bookmarkHits.count
+                parts.append(total == 1 ? "1 bookmark" : "\(total) bookmarks")
+            }
+            return parts.joined(separator: " · ")
+        case .tags:
+            return search.tagHits.count == 1 ? "1 tag" : "\(search.tagHits.count) tags"
+        case .users:
+            return search.userHits.count == 1 ? "1 user" : "\(search.userHits.count) users"
+        case .collections:
+            let count = search.collectionHits.count == 1
+                ? "1 collection" : "\(search.collectionHits.count) collections"
+            if case .collectionsIndex = search.activeQuery, let sub = search.resultsSubtitle {
+                return "\(sub) · \(count)"
+            }
+            return count
+        }
+    }
+
+    // MARK: - Server-side sort (re-runs the active works request)
+
+    private var sortColumnField: UFormField? {
+        search.formFields.first { $0.name.hasSuffix("[sort_column]") }
+    }
+
+    private var sortDirectionField: UFormField? {
+        search.formFields.first { $0.name.hasSuffix("[sort_direction]") }
+    }
+
+    /// AO3 pre-selects a default when the field is unset in the request
+    /// behind the current results.
+    private func currentSortValue(of field: UFormField) -> String {
+        search.activeWorksRequest?.fieldValues[field.name]
+            ?? field.options.first { $0.selected }?.value ?? ""
+    }
+
+    @ViewBuilder
+    private var resultsSortMenu: some View {
+        if let sortField = sortColumnField {
+            Menu {
+                Picker("Sort By", selection: sortSelectionBinding(for: sortField)) {
+                    ForEach(sortField.options.filter { !$0.label.trimmingCharacters(in: .whitespaces).isEmpty },
+                            id: \.value) { option in
+                        Text(option.label.trimmingCharacters(in: .whitespaces)).tag(option.value)
+                    }
+                }
+                .pickerStyle(.inline)
+                if let directionField = sortDirectionField {
+                    Picker("Direction", selection: sortSelectionBinding(for: directionField)) {
+                        ForEach(directionField.options.filter { !$0.label.trimmingCharacters(in: .whitespaces).isEmpty },
+                                id: \.value) { option in
+                            Text(option.label.trimmingCharacters(in: .whitespaces)).tag(option.value)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                }
+            } label: {
+                Image(systemName: "arrow.up.arrow.down.square")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(theme.ink2)
+                    .frame(width: 36, height: 36)
+            }
+            .accessibilityLabel("Sort results (re-runs the search)")
+        }
+    }
+
+    private func sortSelectionBinding(for field: UFormField) -> Binding<String> {
+        Binding(
+            get: { currentSortValue(of: field) },
+            set: { search.updateWorksSearchField(field.name, value: $0, appState: state) }
+        )
+    }
+
+    // MARK: - Form
+
+    private var formScroll: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if search.scope == .works {
+                    worksForm
+                } else {
+                    ScopeSearchForm()
+                }
+            }
+            .padding(.horizontal, theme.pad)
+            .padding(.bottom, 32)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    @ViewBuilder
+    private var worksForm: some View {
+        SavedSearchField()
+
+        queryField
+
+        if search.isLoadingForm {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small).tint(theme.ink3)
+                Text("Loading criteria from the archive…")
+                    .font(Typography.uiSmall())
+                    .foregroundStyle(theme.ink3)
+            }
+        } else if let error = search.formError {
+            NetworkErrorView(message: error, onRetry: {
+                Task { await search.scrapeForm(state) }
+            })
+        } else if search.formFields.isEmpty {
+            Text("Search criteria haven’t been loaded yet. Use the ↻ button above to fetch them from AO3.")
+                .font(Typography.uiSmall())
+                .foregroundStyle(theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { showFilters.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showFilters ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(showFilters ? "Hide filters" : "More filters")
+                            .font(Typography.uiCaption())
+                    }
+                    .foregroundStyle(theme.accent)
+                }
+                Spacer()
+                if search.activeFilterCount > 0 {
+                    Text(search.activeFilterCount == 1
+                         ? "1 filter active" : "\(search.activeFilterCount) filters active")
+                        .font(Typography.uiCaption())
+                        .foregroundStyle(theme.accent)
+                    Button("Clear") { search.clearFilters() }
+                        .font(Typography.uiCaption())
+                        .foregroundStyle(theme.ink3)
+                }
+            }
+
+            if showFilters {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(search.filterFields, id: \.name) { field in
+                        fieldControl(field)
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+
+        Button { search.performScopedSearch(state) } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Search")
+                    .font(Typography.buttonLabel())
+            }
+            .foregroundStyle(theme.onAccent)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background(RoundedRectangle(cornerRadius: Radius.button).fill(theme.accent))
+        }
+        .buttonStyle(ButtonPressStyle())
+        .padding(.top, 4)
+
+        SearchSourceFooter()
+    }
+
+    private var queryField: some View {
+        @Bindable var search = search
+        return VStack(alignment: .leading, spacing: 4) {
+            fieldLabel("Query")
+            HStack(spacing: 8) {
+                Image(systemName: "text.magnifyingglass")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.ink3)
+                TextField("Any field — title, author, tags…", text: $search.queryText)
+                    .textFieldStyle(.plain)
+                    .font(.custom("HankenGrotesk", size: 15).weight(.medium))
+                    .foregroundStyle(theme.ink)
+                    .submitLabel(.search)
+                    .onSubmit { search.performScopedSearch(state) }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    /// AO3's canonical-tag inputs get the token field with local-cache
+    /// autocomplete; everything else renders by field type.
+    @ViewBuilder
+    private func fieldControl(_ field: UFormField) -> some View {
+        if let tagType = Self.tagType(for: field.name) {
+            TagTokenField(label: field.label, tagType: tagType, value: binding(for: field.name))
+        } else {
+            switch field.fieldType {
+            case "select":
+                selectFieldView(field, defaultValue: "")
+            case "radio":
+                // AO3 pre-checks the no-filter option; the scraped
+                // `selected` flag supplies that default.
+                selectFieldView(field, defaultValue: field.options.first { $0.selected }?.value
+                                ?? field.options.first?.value ?? "")
+            case "checkboxes":
+                checkboxGroupView(field)
+            case "hidden":
+                EmptyView()
+            default:
+                textFieldView(field)
+            }
+        }
+    }
+
+    static func tagType(for fieldName: String) -> String? {
+        switch fieldName {
+        case "work_search[fandom_names]": "fandom"
+        case "work_search[character_names]": "character"
+        case "work_search[relationship_names]": "relationship"
+        case "work_search[freeform_names]": "freeform"
+        case "work_search[creators]": "creator"
+        default: nil
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.custom("HankenGrotesk", size: 10.5).weight(.bold))
+            .tracking(0.6)
+            .foregroundStyle(theme.ink3)
+    }
+
+    /// AO3 selects mark their no-filter option with a blank label — surface
+    /// those as "Any" so the control always shows a value.
+    private static func optionTitle(_ label: String) -> String {
+        let trimmed = label.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "Any" : trimmed
     }
 
     private func textFieldView(_ field: UFormField) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            if !field.label.isEmpty {
-                Text(field.label)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-            }
-
-            TextField(field.placeholder.isEmpty ? field.label : field.placeholder,
-                      text: binding(for: field.name))
+            if !field.label.isEmpty { fieldLabel(field.label) }
+            TextField(Self.placeholderHint(for: field), text: binding(for: field.name))
                 .font(.custom("HankenGrotesk", size: 15).weight(.medium))
                 .foregroundStyle(theme.ink)
+                .autocorrectionDisabled()
                 .padding(.horizontal, 12)
                 .frame(height: 42)
                 .background(theme.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
-                .onSubmit { performSearch() }
+                .submitLabel(.search)
+                .onSubmit { search.performScopedSearch(state) }
         }
     }
 
-    private func selectFieldView(_ field: UFormField) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !field.label.isEmpty {
-                Text(field.label)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-            }
-
+    private func selectFieldView(_ field: UFormField, defaultValue: String) -> some View {
+        let current = search.fieldValues[field.name] ?? defaultValue
+        let title = Self.optionTitle(field.options.first { $0.value == current }?.label
+                                     ?? field.options.first?.label ?? "")
+        return VStack(alignment: .leading, spacing: 4) {
+            if !field.label.isEmpty { fieldLabel(field.label) }
             Menu {
                 ForEach(field.options, id: \.value) { option in
-                    Button(option.label.isEmpty ? "(any)" : option.label) {
-                        fieldValues[field.name] = option.value
+                    Button {
+                        search.fieldValues[field.name] = option.value
+                    } label: {
+                        if option.value == current {
+                            Label(Self.optionTitle(option.label), systemImage: "checkmark")
+                        } else {
+                            Text(Self.optionTitle(option.label))
+                        }
                     }
                 }
             } label: {
-                HStack {
-                    let currentValue = fieldValues[field.name] ?? ""
-                    let currentLabel = field.options.first { $0.value == currentValue }?.label ?? "(any)"
-                    Text(currentLabel.isEmpty ? "(any)" : currentLabel)
-                        .font(.custom("HankenGrotesk", size: 14).weight(.medium))
-                        .foregroundStyle(theme.ink)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.ink3)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 42)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                SearchDropdownLabel(title: title)
             }
         }
     }
 
     private func checkboxGroupView(_ field: UFormField) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !field.label.isEmpty {
-                Text(field.label)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-            }
-
-            FlowLayoutSimple(spacing: 6) {
+            if !field.label.isEmpty { fieldLabel(field.label) }
+            FlowLayout(spacing: 6) {
                 ForEach(field.options, id: \.value) { option in
-                    let selected = checkboxValues[field.name]?.contains(option.value) ?? false
+                    let selected = search.checkboxValues[field.name]?.contains(option.value) ?? false
                     Button {
-                        var set = checkboxValues[field.name] ?? []
-                        if selected { set.remove(option.value) }
-                        else { set.insert(option.value) }
-                        checkboxValues[field.name] = set
+                        var set = search.checkboxValues[field.name] ?? []
+                        if selected { set.remove(option.value) } else { set.insert(option.value) }
+                        search.checkboxValues[field.name] = set
                     } label: {
                         Text(option.label)
                             .font(.custom("HankenGrotesk", size: 12).weight(.semibold))
@@ -298,382 +589,151 @@ struct SearchView: View {
         }
     }
 
-    private func radioGroupView(_ field: UFormField) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !field.label.isEmpty {
-                Text(field.label)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .textCase(.uppercase)
-            }
+    /// AO3's stat fields silently accept range syntax; the scraped form
+    /// carries no placeholders, so surface the syntax here.
+    private static let rangeFieldSuffixes = [
+        "[word_count]", "[hits]", "[kudos_count]", "[comments_count]", "[bookmarks_count]",
+    ]
 
-            Menu {
-                ForEach(field.options, id: \.value) { option in
-                    Button(option.label.isEmpty ? "(any)" : option.label) {
-                        fieldValues[field.name] = option.value
-                    }
-                }
-            } label: {
-                HStack {
-                    let currentValue = fieldValues[field.name] ?? field.options.first { $0.selected }?.value ?? ""
-                    let currentLabel = field.options.first { $0.value == currentValue }?.label ?? field.options.first?.label ?? "(any)"
-                    Text(currentLabel.isEmpty ? "(any)" : currentLabel)
-                        .font(.custom("HankenGrotesk", size: 14).weight(.medium))
-                        .foregroundStyle(theme.ink)
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.ink3)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 42)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
+    private static func placeholderHint(for field: UFormField) -> String {
+        if !field.placeholder.isEmpty { return field.placeholder }
+        if rangeFieldSuffixes.contains(where: { field.name.hasSuffix($0) }) {
+            return ">1000 · <500 · 100-5000"
         }
-    }
-
-    // MARK: - Results
-
-    @ViewBuilder
-    private var searchResults: some View {
-        if state.isSearching {
-            NetworkLoadingView(message: "Searching…", task: state.searchTask, operation: "search") {
-                state.searchTask.cancel()
-            }
-        } else if hasSearched && displayedWorks.isEmpty && state.searchError == nil {
-            EmptyStateView(
-                systemImage: "magnifyingglass",
-                title: "No results",
-                subtitle: "Try different search terms or filters."
-            )
-            .padding(.top, 40)
-        } else if let error = state.searchError, hasSearched {
-            NetworkErrorView(message: error, onRetry: {
-                state.searchError = nil
-                performSearch()
-            })
-        } else if hasSearched {
-            HStack(spacing: 12) {
-                Text("\(displayedWorks.count) results")
-                    .font(Typography.uiBody())
-                    .foregroundStyle(theme.ink2)
-                Spacer()
-                resultsSortMenu
-                Button {
-                    showSaveDialog = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "bookmark")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("Save")
-                            .font(Typography.uiSmall())
-                    }
-                    .foregroundStyle(theme.accent)
-                }
-            }
-            .padding(.horizontal, theme.pad)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
-            LazyVStack(spacing: theme.rowGap) {
-                ForEach(displayedWorks) { work in
-                    WorkCardView(
-                        work: work,
-                        blurExplicit: state.hideExplicit && work.rating == .explicit,
-                        onTap: { nav.openWork(work.id) }
-                    )
-                }
-
-                if !state.isSearching {
-                    Button {
-                        Task { await state.searchAO3More() }
-                    } label: {
-                        Text("Load more")
-                            .font(Typography.smallButtonLabel())
-                            .foregroundStyle(theme.accent)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 44)
-                            .background(
-                                RoundedRectangle(cornerRadius: Radius.button)
-                                    .stroke(theme.line, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(ButtonPressStyle())
-                }
-
-                if state.isSearching && !displayedWorks.isEmpty {
-                    NetworkLoadingView(message: "Loading more...", task: state.searchTask, operation: "search") {
-                        state.searchTask.cancel()
-                    }
-                }
-            }
-            .padding(.horizontal, theme.pad)
+        if field.name.hasSuffix("[revised_at]") {
+            return "e.g. 2024, or < 2 weeks ago"
         }
+        return field.label
     }
-
-    // MARK: - Server-side sort
-
-    /// The scraped AO3 sort fields, when the form has them.
-    private var sortColumnField: UFormField? {
-        formFields.first { $0.name.hasSuffix("[sort_column]") }
-    }
-
-    private var sortDirectionField: UFormField? {
-        formFields.first { $0.name.hasSuffix("[sort_direction]") }
-    }
-
-    /// AO3 pre-selects a default when the field is unset locally.
-    private func currentSortValue(of field: UFormField) -> String {
-        fieldValues[field.name] ?? field.options.first { $0.selected }?.value ?? ""
-    }
-
-    /// Server-side sort for the results: picking a column or direction
-    /// rewrites the criteria and re-runs the query from page 1.
-    @ViewBuilder
-    private var resultsSortMenu: some View {
-        if let sortField = sortColumnField {
-            Menu {
-                Picker("Sort by", selection: sortSelectionBinding(for: sortField)) {
-                    ForEach(sortField.options.filter { !$0.label.isEmpty }, id: \.value) { option in
-                        Text(option.label).tag(option.value)
-                    }
-                }
-                .pickerStyle(.inline)
-                if let directionField = sortDirectionField {
-                    Picker("Direction", selection: sortSelectionBinding(for: directionField)) {
-                        ForEach(directionField.options.filter { !$0.label.isEmpty }, id: \.value) { option in
-                            Text(option.label).tag(option.value)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(sortField.options.first { $0.value == currentSortValue(of: sortField) }?.label ?? "Sort")
-                        .font(Typography.uiSmall())
-                }
-                .foregroundStyle(theme.accent)
-            }
-        }
-    }
-
-    private func sortSelectionBinding(for field: UFormField) -> Binding<String> {
-        Binding(
-            get: { currentSortValue(of: field) },
-            set: { newValue in
-                fieldValues[field.name] = newValue
-                performSearch()
-            }
-        )
-    }
-
-    // MARK: - Data
 
     private func binding(for name: String) -> Binding<String> {
         Binding(
-            get: { fieldValues[name] ?? "" },
-            set: { fieldValues[name] = $0 }
+            get: { search.fieldValues[name] ?? "" },
+            set: { search.fieldValues[name] = $0 }
         )
-    }
-
-    private func loadForm() async {
-        if let cached = Self.loadCachedForm() {
-            formFields = cached
-            return
-        }
-        await fetchFormFromNetwork()
-    }
-
-    private func fetchFormFromNetwork() async {
-        isLoadingForm = true
-        formError = nil
-        do {
-            let fields = try await state.retryOnTimeout(task: state.searchTask, using: state.bridge) {
-                try await self.state.bridge.fetchSearchForm()
-            }
-            formFields = fields
-            Self.cacheForm(fields)
-        } catch {
-            if !state.searchTask.isCancelled && !error.isCancellation {
-                formError = error.localizedDescription
-            }
-        }
-        isLoadingForm = false
-    }
-
-    private static func cacheForm(_ fields: [UFormField]) {
-        let data: [[String: Any]] = fields.map { f in
-            [
-                "name": f.name, "label": f.label, "fieldType": f.fieldType,
-                "placeholder": f.placeholder,
-                "options": f.options.map { ["value": $0.value, "label": $0.label, "selected": $0.selected] }
-            ]
-        }
-        if let json = try? JSONSerialization.data(withJSONObject: data) {
-            UserDefaults.standard.set(json, forKey: "cachedSearchForm")
-        }
-    }
-
-    private static func loadCachedForm() -> [UFormField]? {
-        guard let json = UserDefaults.standard.data(forKey: "cachedSearchForm"),
-              let arr = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else { return nil }
-        let fields = arr.compactMap { dict -> UFormField? in
-            guard let name = dict["name"] as? String,
-                  let label = dict["label"] as? String,
-                  let fieldType = dict["fieldType"] as? String,
-                  let placeholder = dict["placeholder"] as? String,
-                  let optArr = dict["options"] as? [[String: Any]] else { return nil }
-            let options = optArr.compactMap { o -> UFormOption? in
-                guard let value = o["value"] as? String,
-                      let label = o["label"] as? String,
-                      let selected = o["selected"] as? Bool else { return nil }
-                return UFormOption(value: value, label: label, selected: selected)
-            }
-            return UFormField(name: name, label: label, fieldType: fieldType, placeholder: placeholder, options: options)
-        }
-        return fields.isEmpty ? nil : fields
-    }
-
-    private func performSearch() {
-        hasSearched = true
-        searchTask?.cancel()
-
-        // Build key-value pairs from all dynamic form fields
-        var keys: [String] = []
-        var values: [String] = []
-
-        for (name, value) in fieldValues {
-            if !value.isEmpty {
-                keys.append(name)
-                values.append(value)
-            }
-        }
-
-        for (name, selectedValues) in checkboxValues {
-            for value in selectedValues {
-                keys.append(name)
-                values.append(value)
-            }
-        }
-
-        searchTask = Task {
-            await state.searchAO3Raw(keys: keys, values: values)
-        }
-    }
-
-    // MARK: - Saved Searches
-
-    private var savedSearchesSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("SAVED SEARCHES")
-                .font(Typography.sectionHeader())
-                .tracking(0.08 * 13)
-                .foregroundStyle(theme.ink3)
-
-            ForEach(savedSearches, id: \.id) { search in
-                HStack {
-                    Button {
-                        loadSavedSearch(search)
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(theme.accent)
-                            Text(search.name)
-                                .font(Typography.uiBody())
-                                .foregroundStyle(theme.ink)
-                                .lineLimit(1)
-                        }
-                    }
-
-                    Spacer()
-
-                    Button {
-                        state.bridge.deleteSavedSearch(search.id)
-                        savedSearches = state.bridge.getSavedSearches()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(theme.ink3)
-                    }
-                }
-                .padding(.vertical, 6)
-            }
-        }
-    }
-
-    private func currentParamsJson() -> String {
-        var dict: [String: Any] = [:]
-        dict["fields"] = fieldValues.filter { !$0.value.isEmpty }
-        dict["checkboxes"] = checkboxValues.mapValues { Array($0) }.filter { !$0.value.isEmpty }
-        return (try? JSONSerialization.data(withJSONObject: dict).base64EncodedString()) ?? ""
-    }
-
-    private func loadSavedSearch(_ search: USavedSearch) {
-        guard let data = Data(base64Encoded: search.paramsJson),
-              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-
-        if let fields = dict["fields"] as? [String: String] {
-            fieldValues = fields
-        }
-        if let checkboxes = dict["checkboxes"] as? [String: [String]] {
-            checkboxValues = checkboxes.mapValues { Set($0) }
-        }
-        performSearch()
-    }
-
-    private func saveCurrentSearch() {
-        guard !saveSearchName.isEmpty else { return }
-        let json = currentParamsJson()
-        state.bridge.saveSearch(name: saveSearchName, paramsJson: json)
-        savedSearches = state.bridge.getSavedSearches()
-        saveSearchName = ""
-        showSaveDialog = false
     }
 }
 
-private struct FlowLayoutSimple: Layout {
-    var spacing: CGFloat = 6
+/// Type-to-look-up field over the user's saved searches: typing filters
+/// the saved list by name — no network, the list is already loaded from
+/// the database. Picking one prefills the whole criteria form (ready to
+/// tweak and run); clearing the text only clears the field, never the
+/// form. Each suggestion row carries a × to delete that saved search. The
+/// Save button persists the current criteria under the typed name
+/// (Update when the name already exists).
+private struct SavedSearchField: View {
+    @Environment(AppTheme.self) private var theme
+    @Environment(AppState.self) private var state
+    @Environment(SearchModel.self) private var search
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
+    @State private var input = ""
+    @FocusState private var focused: Bool
 
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth && x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-
-        return CGSize(width: maxWidth, height: y + rowHeight)
+    private var term: String {
+        input.trimmingCharacters(in: .whitespaces)
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
+    /// Names are unique in the database (case-insensitively) — saving to an
+    /// existing name overwrites that search, so the button reads Update.
+    private var nameExists: Bool {
+        search.savedSearches.contains { $0.name.caseInsensitiveCompare(term) == .orderedSame }
+    }
 
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX && x > bounds.minX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
+    /// Saved searches are a short, already-loaded list — focusing shows
+    /// them all, typing narrows by name.
+    private var matches: [USavedSearch] {
+        guard !term.isEmpty else { return search.savedSearches }
+        return search.savedSearches.filter { $0.name.localizedCaseInsensitiveContains(term) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("SAVED SEARCH")
+                .font(.custom("HankenGrotesk", size: 10.5).weight(.bold))
+                .tracking(0.6)
+                .foregroundStyle(theme.ink3)
+            HStack(spacing: 8) {
+                Image(systemName: "star")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.ink3)
+                TextField("Type to find a saved search…", text: $input)
+                    .textFieldStyle(.plain)
+                    .font(.custom("HankenGrotesk", size: 15).weight(.medium))
+                    .foregroundStyle(theme.ink)
+                    .autocorrectionDisabled()
+                    .focused($focused)
+                    .submitLabel(.done)
+                    .onSubmit { save() }
+                Button(nameExists ? "Update" : "Save") { save() }
+                    .font(Typography.smallButtonLabel())
+                    .foregroundStyle(term.isEmpty ? theme.ink3 : theme.accent)
+                    .disabled(term.isEmpty)
+                    .fixedSize()
             }
-            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(focused ? theme.accent : theme.line, lineWidth: 1))
+
+            if focused && !matches.isEmpty {
+                suggestionList
+            }
         }
+    }
+
+    private func save() {
+        guard !term.isEmpty else { return }
+        search.saveCurrentSearch(named: term, appState: state)
+        focused = false
+    }
+
+    private var suggestionList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(matches, id: \.id) { saved in
+                HStack(spacing: 6) {
+                    Button {
+                        search.applySavedSearch(saved)
+                        input = saved.name
+                        focused = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(saved.name)
+                                .font(Typography.uiBody())
+                                .foregroundStyle(theme.ink)
+                                .lineLimit(1)
+                            if let summary = SearchModel.summary(of: saved) {
+                                Text(summary)
+                                    .font(Typography.uiSmall())
+                                    .foregroundStyle(theme.ink3)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        search.deleteSavedSearch(saved.id, appState: state)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.ink3)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete saved search \(saved.name)")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+        .padding(.vertical, 4)
+        .background(theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.line, lineWidth: 1))
     }
 }
 

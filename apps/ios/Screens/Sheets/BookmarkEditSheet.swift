@@ -1,5 +1,9 @@
 import SwiftUI
 
+/// Editor for the full AO3 bookmark object — notes, your tags, collections,
+/// private/rec flags — plus the per-bookmark sync opt-in. Saving is always
+/// local; the ONLY network action is the explicit sync, which pushes the
+/// bookmark to AO3 with the corrected form fields.
 struct BookmarkEditSheet: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
@@ -7,241 +11,183 @@ struct BookmarkEditSheet: View {
 
     let workID: String
 
-    @State private var noteText = ""
+    @State private var note = ""
+    @State private var tagString = ""
+    @State private var collectionNames = ""
+    @State private var isPrivate = true
+    @State private var rec = false
     @State private var syncToAO3 = false
-    @State private var isSaving = false
     @State private var isPushing = false
-    @State private var error: String?
-    @State private var pushSuccess = false
+    @State private var pushError: String?
+    @State private var pushSucceeded = false
+    @State private var loaded = false
 
-    private var isLoggedIn: Bool {
-        state.bridge.getCredentials() != nil
-    }
+    private var isLoggedIn: Bool { state.ao3Username != nil }
 
     var body: some View {
-        VStack(spacing: 0) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(theme.line2)
-                .frame(width: 36, height: 5)
-                .padding(.top, 10)
-                .padding(.bottom, 16)
-
-            Text("Edit Bookmark")
-                .font(Typography.sheetTitle())
-                .foregroundStyle(theme.ink)
-                .padding(.bottom, 4)
-
-            if let work = state.work(byID: workID) {
-                Text(work.title)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .lineLimit(1)
-                    .padding(.bottom, 12)
-            }
-
-            formView
-
-            Spacer(minLength: 12)
-
-            buttonsView
-                .padding(.horizontal, 20)
-                .padding(.bottom, 16)
-        }
-        .background(theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: Radius.sheet))
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.hidden)
-        .onAppear(perform: loadBookmark)
-    }
-
-    // MARK: - Form
-
-    private var formView: some View {
-        VStack(spacing: 12) {
-            TextEditor(text: $noteText)
-                .font(.custom("HankenGrotesk", size: 15).weight(.medium))
-                .foregroundStyle(theme.ink)
-                .scrollContentBackground(.hidden)
-                .padding(12)
-                .frame(minHeight: 100, maxHeight: 180)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .overlay(alignment: .topLeading) {
-                    if noteText.isEmpty {
-                        Text("Add a note...")
-                            .font(.custom("HankenGrotesk", size: 15).weight(.medium))
-                            .foregroundStyle(theme.ink3)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 20)
-                            .allowsHitTesting(false)
-                    }
-                }
-
-            // Sync toggle
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sync to AO3")
-                        .font(Typography.uiBody())
-                        .foregroundStyle(theme.ink)
-                    if syncToAO3 && !isLoggedIn {
-                        Text("Requires AO3 login")
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let work = state.work(byID: workID) {
+                        Text(work.title)
                             .font(Typography.uiSmall())
-                            .foregroundStyle(Color(hex: "CE514D"))
+                            .foregroundStyle(theme.ink3)
+                            .lineLimit(1)
                     }
-                }
-                Spacer()
-                Toggle("", isOn: $syncToAO3)
-                    .labelsHidden()
+
+                    section("Notes") {
+                        TextEditor(text: $note)
+                            .font(.custom("HankenGrotesk", size: 15))
+                            .foregroundStyle(theme.ink)
+                            .scrollContentBackground(.hidden)
+                            .padding(10)
+                            .frame(minHeight: 100, maxHeight: 160)
+                            .background(theme.surface2)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    TagTokenField(label: "Your Tags", tagType: "freeform", value: $tagString)
+
+                    section("Collections") {
+                        TextField("Collection names, comma separated", text: $collectionNames)
+                            .textFieldStyle(.plain)
+                            .font(.custom("HankenGrotesk", size: 14))
+                            .foregroundStyle(theme.ink)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .padding(.horizontal, 12)
+                            .frame(height: 40)
+                            .background(theme.surface2)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    VStack(spacing: 0) {
+                        Toggle("Private bookmark", isOn: $isPrivate)
+                            .padding(.vertical, 10)
+                        Divider()
+                        Toggle("Rec", isOn: $rec)
+                            .padding(.vertical, 10)
+                    }
+                    .font(.custom("HankenGrotesk", size: 15).weight(.medium))
+                    .foregroundStyle(theme.ink)
                     .tint(theme.accent)
-            }
-            .padding(.horizontal, 4)
 
-            if let error {
-                Text(error)
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(Color(hex: "CE514D"))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                    Divider()
 
-            if pushSuccess {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(theme.sage)
-                    Text("Pushed to AO3")
-                        .font(Typography.uiSmall())
-                        .foregroundStyle(theme.sage)
-                }
-            }
-        }
-        .padding(.horizontal, 20)
-    }
-
-    // MARK: - Buttons
-
-    private var buttonsView: some View {
-        VStack(spacing: 10) {
-            // Push to AO3 button (only if sync enabled and logged in)
-            if syncToAO3 && isLoggedIn {
-                Button {
-                    Task { await pushToAO3() }
-                } label: {
-                    Group {
-                        if isPushing {
-                            HStack(spacing: 10) {
-                                ProgressView()
-                                    .tint(theme.onAccent)
-                                Text("Pushing...")
-                                    .font(Typography.buttonLabel())
-                                    .foregroundStyle(theme.onAccent)
-                            }
-                        } else {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.up.circle")
-                                    .font(.system(size: 16, weight: .semibold))
-                                Text("Push to AO3")
-                                    .font(Typography.buttonLabel())
-                            }
-                            .foregroundStyle(theme.onAccent)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 48)
-                    .background(
-                        RoundedRectangle(cornerRadius: Radius.button)
-                            .fill(theme.sage)
-                    )
-                }
-                .buttonStyle(ButtonPressStyle())
-                .disabled(isPushing || isSaving)
-            }
-
-            // Save button
-            Button {
-                Task { await saveBookmark() }
-            } label: {
-                Group {
-                    if isSaving {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                                .tint(theme.onAccent)
-                            Text("Saving...")
-                                .font(Typography.buttonLabel())
-                                .foregroundStyle(theme.onAccent)
-                        }
+                    if isLoggedIn {
+                        Toggle("Sync this bookmark to AO3", isOn: $syncToAO3)
+                            .font(.custom("HankenGrotesk", size: 15).weight(.medium))
+                            .foregroundStyle(theme.ink)
+                            .tint(theme.accent)
+                        Text("Off = the bookmark stays on this device only. On = saving also creates it on your AO3 account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).")
+                            .font(.custom("HankenGrotesk", size: 12))
+                            .foregroundStyle(theme.ink3)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("Save")
-                            .font(Typography.buttonLabel())
-                            .foregroundStyle(theme.onAccent)
+                        Text("Sign in to AO3 in Settings to sync bookmarks to your account.")
+                            .font(.custom("HankenGrotesk", size: 12.5))
+                            .foregroundStyle(theme.ink3)
+                    }
+
+                    if let pushError {
+                        Text(pushError)
+                            .font(.custom("HankenGrotesk", size: 12.5))
+                            .foregroundStyle(Color(hex: "CE514D"))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if pushSucceeded {
+                        Label("Synced to AO3", systemImage: "checkmark.circle.fill")
+                            .font(.custom("HankenGrotesk", size: 12.5).weight(.semibold))
+                            .foregroundStyle(theme.sage)
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.button)
-                        .fill(theme.accent)
-                )
+                .padding(theme.pad)
+                .padding(.bottom, 24)
             }
-            .buttonStyle(ButtonPressStyle())
-            .disabled(isSaving || isPushing)
+            .background(theme.bg)
+            .scrollDismissesKeyboard(.interactively)
+            .navigationTitle("Edit Bookmark")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(isPushing)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        Task { await save() }
+                    } label: {
+                        if isPushing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Save").fontWeight(.semibold)
+                        }
+                    }
+                    .disabled(isPushing)
+                }
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .onAppear(perform: load)
+    }
 
-            Button { dismiss() } label: {
-                Text("Cancel")
-                    .font(Typography.smallButtonLabel())
-                    .foregroundStyle(theme.ink2)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 40)
-            }
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.custom("HankenGrotesk", size: 10.5).weight(.bold))
+                .tracking(0.6)
+                .foregroundStyle(theme.ink3)
+            content()
         }
     }
 
-    // MARK: - Actions
+    // MARK: - Data
 
-    private func loadBookmark() {
-        guard let workId = UInt64(workID) else { return }
-        if let bookmark = state.bridge.getBookmark(workId) {
-            noteText = bookmark.note
-            syncToAO3 = bookmark.syncToAo3
+    private func load() {
+        guard !loaded, let workId = UInt64(workID) else { return }
+        loaded = true
+        if let details = state.bridge.getBookmarkDetails(workId) {
+            note = details.note
+            tagString = details.tagString
+            collectionNames = details.collectionNames
+            isPrivate = details.private
+            rec = details.rec
+            syncToAO3 = details.syncToAo3
         }
     }
 
-    private func saveBookmark() async {
+    private func save() async {
         guard let workId = UInt64(workID) else {
-            error = "Invalid work ID."
+            dismiss()
             return
         }
-
-        isSaving = true
-        error = nil
-
-        state.bridge.updateBookmarkNote(workId, note: noteText.trimmingCharacters(in: .whitespacesAndNewlines))
+        // Ensure the bookmark row exists, then write the full object locally.
+        if !state.bookmarkedWorkIDs.contains(workID) {
+            state.bookmarkedWorkIDs.insert(workID)
+            state.bridge.addBookmark(workId, syncToAo3: false)
+        }
+        state.bridge.updateBookmarkDetails(workId, note: note, tagString: tagString,
+                                           collectionNames: collectionNames,
+                                           private: isPrivate, rec: rec)
         state.bridge.updateBookmarkSync(workId, sync: syncToAO3)
 
-        isSaving = false
-        dismiss()
-    }
-
-    private func pushToAO3() async {
-        guard let workId = UInt64(workID) else {
-            error = "Invalid work ID."
+        guard syncToAO3 else {
+            dismiss()
             return
         }
-
+        // Explicit network action: create/update the bookmark on AO3.
         isPushing = true
-        error = nil
-        pushSuccess = false
-
+        pushError = nil
+        pushSucceeded = false
         do {
-            let success = try await state.bridge.pushBookmark(workId: workId)
-            if success {
-                pushSuccess = true
-            } else {
-                error = "Failed to push bookmark to AO3."
-            }
+            _ = try await state.bridge.pushBookmark(workId: workId)
+            pushSucceeded = true
+            try? await Task.sleep(for: .milliseconds(800))
+            dismiss()
         } catch {
-            self.error = error.localizedDescription
+            pushError = "Couldn’t sync to AO3: \(error.localizedDescription) The bookmark is saved locally — try syncing again later."
         }
-
         isPushing = false
     }
 }

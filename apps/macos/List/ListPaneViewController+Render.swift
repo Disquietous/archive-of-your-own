@@ -23,7 +23,7 @@ extension ListPaneViewController {
         case .authorWorks:
             break
 
-        case .search, .settings:
+        case .search, .settings, .browse:
             // The list pane is collapsed for Search and Settings — the
             // reading pane hosts the whole flow. Nothing to render here.
             break
@@ -87,7 +87,7 @@ extension ListPaneViewController {
 
         case .subscriptions:
             do {
-                displayedSubscriptions = model.filteredSubscriptions
+                displayedSubscriptions = model.lists.filteredSubscriptions
                 displayedLastChecked = appState.subscriptionLastChecked
                 works = []
                 let subtitle: String
@@ -99,12 +99,12 @@ extension ListPaneViewController {
                     subtitle = "\(displayedSubscriptions.count) subscriptions"
                 }
                 toolbar.configure(title: "Following", sub: subtitle)
-                let followingFilter = filterButton(key: "following", active: !model.subscriptionListFilter.isEmpty) { [theme, model] in
+                let followingFilter = filterButton(key: "following", active: !model.lists.subscriptionListFilter.isEmpty) { [theme, model] in
                     AnyView(SingleFieldFilterView(theme: theme, model: model,
                                                   title: "Filter Following",
                                                   placeholder: "Name",
-                                                  text: Binding(get: { model.subscriptionListFilter },
-                                                                set: { model.subscriptionListFilter = $0 })))
+                                                  text: Binding(get: { model.lists.subscriptionListFilter },
+                                                                set: { model.lists.subscriptionListFilter = $0 })))
                 }
                 toolbar.setLeading([])
                 toolbar.setTrailing([followingFilter, ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
@@ -174,30 +174,30 @@ extension ListPaneViewController {
             }
             toolbar.configure(title: "Inbox", sub: sub)
             toolbar.setLeading([])
-            let inboxFilter = filterButton(key: "inbox", active: !model.inboxFilterAuthor.isEmpty
-                                               || !model.inboxFilterWork.isEmpty
-                                               || !model.inboxFilterText.isEmpty) { [theme, model] in
+            let inboxFilter = filterButton(key: "inbox", active: !model.lists.inboxFilterAuthor.isEmpty
+                                               || !model.lists.inboxFilterWork.isEmpty
+                                               || !model.lists.inboxFilterText.isEmpty) { [theme, model] in
                 AnyView(InboxFilterView(theme: theme, model: model))
             }
             toolbar.setTrailing([inboxFilter] + inboxToolbarButtons())
             showVariant(InboxView(theme: theme, appState: appState, model: model), section: section)
 
         case .fandoms:
-            toolbar.configure(title: "Fandoms", sub: "\(model.followedFandoms.count) followed")
+            toolbar.configure(title: "Fandoms", sub: "\(model.follows.followedFandoms.count) followed")
             toolbar.setLeading([])
-            toolbar.setTrailing([filterButton(key: "fandoms", active: !model.fandomsListFilter.isEmpty) { [theme, model] in
+            toolbar.setTrailing([filterButton(key: "fandoms", active: !model.lists.fandomsListFilter.isEmpty) { [theme, model] in
                 AnyView(SingleFieldFilterView(theme: theme, model: model,
                                               title: "Filter Fandoms",
                                               placeholder: "Fandom name",
-                                              text: Binding(get: { model.fandomsListFilter },
-                                                            set: { model.fandomsListFilter = $0 })))
+                                              text: Binding(get: { model.lists.fandomsListFilter },
+                                                            set: { model.lists.fandomsListFilter = $0 })))
             }])
             showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
 
         case .authors:
             // Drill-in: the author's profile replaces the list — their
             // works/bookmarks/collections render in the reading pane.
-            if let author = model.authorUsername {
+            if let author = model.author.username {
                 toolbar.configure(title: appState.userProfile(author)?.username ?? author,
                                   sub: appState.isLoadingUserProfile(author)
                                       ? "Fetching profile from AO3…" : "Author profile")
@@ -205,17 +205,17 @@ extension ListPaneViewController {
                 toolbar.setTrailing([authorAO3Button(username: author),
                                      authorProfileRefreshButton(username: author),
                                      authorFollowButton(username: author)])
-                showAuthorProfileContent(username: author, activePane: model.authorPane)
+                showAuthorProfileContent(username: author, activePane: model.author.pane)
                 break
             }
-            let count = model.followedAuthorNames.count + model.followedAuthors.count
+            let count = model.follows.followedAuthorNames.count + model.appState.followedAuthors.count
             toolbar.configure(title: "Authors", sub: "\(count) followed")
             toolbar.setLeading([])
             let followButton = ToolButton(theme: theme, symbol: "plus", tooltip: "Follow an author") { [model] in
-                model.showFollowAuthorField.toggle()
+                model.lists.showFollowAuthorField.toggle()
             }
-            followButton.isOn = model.showFollowAuthorField
-            let sourceFiltered = !(model.authorsIncludeFollowed && model.authorsIncludeSubscribed)
+            followButton.isOn = model.lists.showFollowAuthorField
+            let sourceFiltered = !(model.lists.authorsIncludeFollowed && model.lists.authorsIncludeSubscribed)
             toolbar.setTrailing([followButton,
                                  filterButton(key: "authors", active: sourceFiltered) { [theme, model] in
                 AnyView(AuthorsSourceFilterView(theme: theme, model: model))

@@ -37,7 +37,7 @@ struct NetworkLoadingView: View {
 
             HStack(spacing: 8) {
                 ProgressView().tint(theme.sage)
-                Text(recoveryMessage(recovery))
+                Text(OperationsModel.recoveryStatusText(recovery))
                     .font(Typography.uiSmall())
                     .foregroundStyle(theme.ink3)
                     .multilineTextAlignment(.center)
@@ -163,29 +163,6 @@ struct NetworkLoadingView: View {
 
     /// Names the remedy honestly instead of a generic "reconnecting…" —
     /// e.g. "Archive connection failed. Trying a new route… (2 of 3)".
-    private func recoveryMessage(_ recovery: AppState.RecoveryStatus) -> String {
-        let attempt = "(\(recovery.attempt) of \(recovery.maxAttempts))"
-        switch recovery.step {
-        case .earningClearance:
-            return "Passing the archive's connection check… \(attempt)"
-        case .backingOff(let seconds):
-            return "The archive is temporarily unavailable. Waiting \(seconds)s… \(attempt)"
-        case .reconnecting:
-            return "Rebuilding the Tor connection… \(attempt)"
-        case .rotatingCircuit, .retrying, nil:
-            break
-        }
-        switch recovery.remedy {
-        case .rotate, .rotateAndReclear:
-            return "Archive connection failed. Trying a new route… \(attempt)"
-        case .backoff:
-            return "The archive is temporarily unavailable. Retrying… \(attempt)"
-        case .reconnect:
-            return "Rebuilding the Tor connection… \(attempt)"
-        case .purge:
-            return "Session expired. Please sign in again."
-        }
-    }
 }
 
 struct NetworkErrorView: View {
