@@ -11,38 +11,36 @@ struct ReaderView: View {
     let workID: String
     let initialChapterIndex: Int
 
-    /// Where the reader was before the last chapter change — UI memory
-    /// only, never persisted. Backs the footer's "return to previous
-    /// position" control; empty on a fresh open.
-    private struct ReturnPoint: Equatable {
-        /// 0-based chapter index.
-        let chapter: Int
-        /// Block index within that chapter.
-        let pos: Int
-    }
-
     @State private var chapterIndex: Int
     @State private var entireWork: Bool
     @State private var chromeVisible: Bool = true
     @State private var didConfigure = false
     @State private var scrollProgress: Double = 0
-    @State private var lastScrollOffset: CGFloat = 0
     @State private var isLoading = false
     @State private var loadError: String?
     @State private var didCancel = false
     @State private var chapterTask = NetworkTask()
     @State private var visibleChapterIndex: Int = 0
-    @State private var scrollTarget: Int?
-    @State private var suppressVisibleTracking = false
     @State private var tts = TTSController()
+    @State private var ttsChapter: Int = 0
     @State private var showVoicePicker = false
 
-    // Block-index anchoring (D2): the topmost visible block is the reading
-    // position; it persists debounced and restores on the next open.
-    @State private var anchorBlock: Int = 0
-    @State private var pendingRestore: ReaderBlockID?
-    @State private var returnPoint: ReturnPoint?
-    @State private var persistTask: Task<Void, Never>?
+    // Text-anchored position: the column owns the anchor (character offset
+    // of the first visible line) and persists it debounced; the reader
+    // asks it to land somewhere through restore requests.
+    @State private var textHandle = ReaderTextHandle()
+    @State private var restoreRequest: ReaderRestoreRequest?
+    @State private var restoreCounter = 0
+    /// Where the reader was before the last chapter change — UI memory
+    /// only, never persisted. Backs the footer's "return to previous
+    /// position" control; empty on a fresh open.
+    @State private var returnPoint: ReaderPosition?
+
+    /// Chapter-embedded images fetched this work (src → image), the fetches
+    /// in flight, and per-image failure messages for the placeholder.
+    @State private var loadedImages: [String: UIImage] = [:]
+    @State private var imageStatus: [String: String] = [:]
+    @State private var loadingImages: Set<String> = []
 
     init(workID: String, chapterIndex: Int, entireWork: Bool = false) {
         self.workID = workID
@@ -90,19 +88,117 @@ struct ReaderView: View {
         chapterIndex >= postedChapterCount - 1
     }
 
-    /// iPad / wide layouts honor the measure setting as a maximum column
-    /// width; a phone's width is the measure.
-    private var columnMaxWidth: CGFloat {
-        sizeClass == .regular ? CGFloat(theme.measure) : .infinity
+    /// The chapter the reader is in: the one showing, or in entire-work
+    /// mode the one at the top of the viewport.
+    private var currentChapter: Int {
+        entireWork ? visibleChapterIndex : chapterIndex
+    }
+
+    // MARK: - Column inputs
+
+    /// What the text column shows: the open chapter, or every chapter.
+    /// nil while there is nothing renderable (loading, error).
+    private func textContent(_ work: Work) -> ReaderTextContent? {
+        guard let chapters = fetchedChapters, !chapters.isEmpty else { return nil }
+        let total = work.totalChapters
+        func section(_ index: Int) -> ReaderTextSection {
+            let ch = chapters[index]
+            return ReaderTextSection(
+                chapterIndex: index,
+                meta: "Ch \(index + 1) of \(total)",
+                title: ch.title.isEmpty ? "Chapter \(index + 1)" : ch.title,
+                blocks: ParsedContentBlock.fromJSON(ch.contentJson))
+        }
+        let sections: [ReaderTextSection]
+        if entireWork {
+            sections = chapters.indices.map(section)
+        } else {
+            guard contentBlocks != nil else { return nil }
+            sections = [section(chapterIndex)]
+        }
+        // In entire-work mode the document holds every chapter; moving
+        // between them must not rebuild it.
+        let key = "\(workID)|\(entireWork)|\(entireWork ? -1 : chapterIndex)|"
+            + chapters.map { "\($0.chapterId):\($0.contentJson.utf8.count)" }.joined(separator: ",")
+        return ReaderTextContent(key: key, workID: workID, sections: sections)
+    }
+
+    private var textStyle: ReaderTextStyle {
+        ReaderTextStyle(
+            themeID: theme.activeTheme.id,
+            fontName: theme.readingFont.fontName,
+            fontSize: theme.fontSize,
+            readLeading: theme.readLeading,
+            hyphenation: theme.readHyphenation,
+            justified: theme.readJustified,
+            measure: sizeClass == .regular ? CGFloat(theme.measure) : nil,
+            readMargin: theme.readMargin,
+            chromeTop: chromeVisible ? 60 : 24,
+            chromeBottom: chromeVisible ? (tts.isActive ? 130 : 80) : 32)
+    }
+
+    private var ttsHighlight: ReaderBlockRef? {
+        tts.highlightedBlockIndex.map { ReaderBlockRef(chapter: ttsChapter, block: $0) }
+    }
+
+    /// Ask the column to land on `position` (consumed once that chapter's
+    /// content is rendered).
+    private func requestRestore(_ position: ReaderPosition) {
+        restoreCounter += 1
+        restoreRequest = ReaderRestoreRequest(id: restoreCounter, position: position)
+    }
+
+    /// Where the reader is right now.
+    private var currentPosition: ReaderPosition {
+        textHandle.controller?.currentPosition ?? ReaderPosition(chapter: currentChapter, offset: 0)
     }
 
     var body: some View {
         if let work {
             ZStack(alignment: .top) {
-                if entireWork {
-                    entireWorkContent(work)
+                if let content = textContent(work) {
+                    ReaderTextView(
+                        theme: theme,
+                        content: content,
+                        style: textStyle,
+                        images: loadedImages,
+                        imageStatus: imageStatus,
+                        highlight: ttsHighlight,
+                        restore: restoreRequest,
+                        endView: AnyView(
+                            Group {
+                                if entireWork {
+                                    entireWorkEnd(work)
+                                } else {
+                                    chapterEnd
+                                }
+                            }
+                            .environment(theme)
+                            .environment(state)
+                            .environment(nav)
+                        ),
+                        handle: textHandle,
+                        onPersist: { position, length in
+                            state.setProgress(workID, chapter: position.chapter + 1,
+                                              pos: position.offset, chapterLen: length)
+                        },
+                        onScroll: handleScroll,
+                        onVisibleChapter: { visibleChapterIndex = $0 },
+                        onTap: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                chromeVisible.toggle()
+                            }
+                        },
+                        onImageTap: { src in
+                            imageStatus[src] = nil  // clear a stale error before retrying
+                            loadImage(src)
+                        },
+                        onLink: { url in
+                            ExternalLinkOpener.open(url, bridge: state.bridge)
+                        })
+                    .ignoresSafeArea()
                 } else {
-                    readerContent(work)
+                    statusContent(work)
                 }
 
                 VStack(spacing: 8) {
@@ -155,12 +251,23 @@ struct ReaderView: View {
                 // Opening a chapter enrolls the work in Currently Reading
                 // immediately — scrolling only refines the position.
                 let pos = savedPosition(for: chapterIndex)
-                pendingRestore = ReaderBlockID(chapter: chapterIndex, block: pos)
+                requestRestore(ReaderPosition(chapter: chapterIndex, offset: pos))
                 state.setProgress(workID, chapter: chapterIndex + 1, pos: pos)
             }
             .onDisappear {
-                flushPendingPersist()
+                textHandle.controller?.flushPendingPersist()
                 nav.readerImmersive = false
+            }
+            .onChange(of: textContent(work)?.key, initial: true) {
+                if let content = textContent(work) {
+                    primeAndLoadImages(in: content.sections.flatMap(\.blocks))
+                }
+            }
+            // The library file was replaced underneath the app (iCloud copy
+            // adopted, backup restored): move to the position the new
+            // library holds instead of persisting the old one over it.
+            .onChange(of: state.libraryGeneration) {
+                reanchorFromStorage()
             }
             .task(id: workID) {
                 if fetchedChapters == nil, UInt64(workID) != nil {
@@ -170,179 +277,67 @@ struct ReaderView: View {
         }
     }
 
-    // MARK: - Entire Work Content
+    // MARK: - Loading / error states
 
-    private func entireWorkContent(_ work: Work) -> some View {
-        GeometryReader { outerGeo in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Color.clear
-                            .frame(height: 0)
-                            .id("chapterTop")
+    /// Shown in place of the column while there is nothing to render.
+    private func statusContent(_ work: Work) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
+                Spacer()
+                    .frame(height: chromeVisible ? 80 : 50)
 
-                        if let chapters = fetchedChapters, !chapters.isEmpty {
-                            // Chapter headers and their blocks are direct
-                            // children of the lazy stack so every block is a
-                            // scroll target (visibility tracking by block).
-                            LazyVStack(alignment: .leading, spacing: 0) {
-                                Spacer()
-                                    .frame(height: chromeVisible ? 80 : 50)
+                if !entireWork {
+                    Text("Ch \(chapterIndex + 1) of \(work.totalChapters)")
+                        .font(Typography.uiCaption())
+                        .foregroundStyle(theme.ink3)
+                        .textCase(.uppercase)
+                        .tracking(0.3)
+                        .padding(.bottom, 4)
 
-                                ForEach(Array(chapters.enumerated()), id: \.offset) { index, ch in
-                                    entireWorkChapterHeader(work: work, chapter: ch, index: index)
-                                        .id("chapter-\(index)")
-                                        .onAppear {
-                                            if !suppressVisibleTracking {
-                                                visibleChapterIndex = index
-                                            }
-                                        }
-                                    let blocks = ParsedContentBlock.fromJSON(ch.contentJson)
-                                    if !blocks.isEmpty {
-                                        ContentBlockView(blocks: blocks,
-                                                         highlightedIndex: tts.highlightedBlockIndex,
-                                                         anchorChapter: index)
-                                    }
-                                }
+                    Text(fetchedChapter.map { $0.title.isEmpty ? "Chapter \(chapterIndex + 1)" : $0.title } ?? "Chapter \(chapterIndex + 1)")
+                        .font(Typography.readerChTitle())
+                        .foregroundStyle(theme.ink)
+                        .padding(.bottom, 8)
+                }
 
-                                entireWorkEnd(work)
-
-                                Spacer()
-                                    .frame(height: chromeVisible ? 80 : 50)
-                            }
-                            .scrollTargetLayout()
-                            .padding(.horizontal, theme.readMargin)
-                            .frame(maxWidth: columnMaxWidth)
-                            .frame(maxWidth: .infinity)
-                        } else if isLoading {
-                            loadingContent
-                                .padding(.horizontal, theme.readMargin)
-                        } else if let error = loadError {
-                            errorContent(error)
-                                .padding(.horizontal, theme.readMargin)
-                        } else if didCancel {
-                            cancelledContent
-                                .padding(.horizontal, theme.readMargin)
-                        } else if !hasFetched {
-                            loadingContent
-                                .padding(.horizontal, theme.readMargin)
-                        } else {
-                            errorContent("Chapter content could not be loaded.")
-                                .padding(.horizontal, theme.readMargin)
-                        }
+                if isLoading {
+                    NetworkLoadingView(message: entireWork ? "Loading work…" : "Loading chapter…", task: chapterTask) {
+                        cancelLoad()
                     }
-                    .background(
-                        GeometryReader { contentGeo in
-                            Color.clear
-                                .preference(
-                                    key: ScrollOffsetKey.self,
-                                    value: contentGeo.frame(in: .named("entireWorkScroll")).minY
-                                )
-                        }
-                    )
-                }
-                .coordinateSpace(name: "entireWorkScroll")
-                .onPreferenceChange(ScrollOffsetKey.self) { offset in
-                    handleEntireWorkScroll(offset: offset, viewHeight: outerGeo.size.height)
-                }
-                .onScrollTargetVisibilityChange(idType: ReaderBlockID.self, threshold: 0.0) { visible in
-                    handleVisibleBlocks(visible)
-                }
-                .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        chromeVisible.toggle()
+                } else if let error = loadError {
+                    NetworkErrorView(message: error, onRetry: {
+                        Task { await loadChapter() }
+                    }, onGoBack: { dismiss() })
+                } else if didCancel {
+                    NetworkErrorView(message: "Loading was cancelled.", onRetry: {
+                        didCancel = false
+                        Task { await loadChapter() }
+                    }, onGoBack: { dismiss() })
+                } else if !hasFetched {
+                    NetworkLoadingView(message: "Loading chapter…") {
+                        dismiss()
                     }
+                } else {
+                    NetworkErrorView(message: "Chapter content could not be loaded.", onRetry: {
+                        Task { await loadChapter(force: true) }
+                    })
                 }
-                .onAppear {
-                    restoreEntireWork(proxy)
-                }
-                .onChange(of: fetchedChapters?.count) {
-                    restoreEntireWork(proxy)
-                }
-                .onChange(of: pendingRestore) {
-                    restoreEntireWork(proxy)
-                }
-                .onChange(of: scrollTarget) { _, target in
-                    if let target {
-                        flushPendingPersist()
-                        stashReturnPoint()
-                        // The return control records the block to land on;
-                        // a plain chapter jump lands on the chapter top.
-                        let block = pendingRestore?.chapter == target ? (pendingRestore?.block ?? 0) : 0
-                        pendingRestore = nil
-                        suppressVisibleTracking = true
-                        visibleChapterIndex = target
-                        anchorBlock = block
-                        withAnimation {
-                            if block > 0 {
-                                proxy.scrollTo(ReaderBlockID(chapter: target, block: block), anchor: .top)
-                            } else {
-                                proxy.scrollTo("chapter-\(target)", anchor: .top)
-                            }
-                        }
-                        scrollTarget = nil
-                        state.setProgress(workID, chapter: target + 1, pos: block)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            suppressVisibleTracking = false
-                        }
-                    }
-                }
+
+                Spacer()
+                    .frame(height: chromeVisible ? 80 : 50)
+            }
+            .padding(.horizontal, theme.readMargin)
+            .frame(maxWidth: sizeClass == .regular ? CGFloat(theme.measure) : .infinity)
+            .frame(maxWidth: .infinity)
+        }
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                chromeVisible.toggle()
             }
         }
     }
 
-    /// Land on the opened chapter's saved block (or its top) once the
-    /// chapters are in.
-    private func restoreEntireWork(_ proxy: ScrollViewProxy) {
-        guard let restore = pendingRestore, fetchedChapters?.isEmpty == false else { return }
-        pendingRestore = nil
-        guard restore.chapter > 0 || restore.block > 0 else { return }
-        suppressVisibleTracking = true
-        visibleChapterIndex = restore.chapter
-        anchorBlock = restore.block
-        DispatchQueue.main.async {
-            if restore.block > 0 {
-                proxy.scrollTo(restore, anchor: .top)
-            } else {
-                proxy.scrollTo("chapter-\(restore.chapter)", anchor: .top)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                suppressVisibleTracking = false
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func entireWorkChapterHeader(work: Work, chapter: UChapter, index: Int) -> some View {
-        VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
-            if index > 0 {
-                chapterDivider
-            }
-
-            Text("Ch \(index + 1) of \(work.totalChapters)")
-                .font(Typography.uiCaption())
-                .foregroundStyle(theme.ink3)
-                .textCase(.uppercase)
-                .tracking(0.3)
-                .padding(.bottom, 4)
-
-            Text(chapter.title.isEmpty ? "Chapter \(index + 1)" : chapter.title)
-                .font(Typography.readerChTitle())
-                .foregroundStyle(theme.ink)
-                .padding(.bottom, 8)
-        }
-    }
-
-    private var chapterDivider: some View {
-        VStack(spacing: 24) {
-            Text("· · ·")
-                .font(Typography.detailTitle())
-                .foregroundStyle(theme.ink3)
-                .frame(maxWidth: .infinity)
-                .padding(.top, 32)
-                .padding(.bottom, 8)
-        }
-    }
+    // MARK: - Entire work end
 
     @ViewBuilder
     private func entireWorkEnd(_ work: Work) -> some View {
@@ -418,160 +413,6 @@ struct ReaderView: View {
         .buttonStyle(ButtonPressStyle())
     }
 
-    // MARK: - Reader Content (single chapter)
-
-    private func readerContent(_ work: Work) -> some View {
-        GeometryReader { outerGeo in
-            ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Color.clear
-                        .frame(height: 0)
-                        .id("chapterTop")
-
-                    VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
-                        Spacer()
-                            .frame(height: chromeVisible ? 80 : 50)
-
-                        Text("Ch \(chapterIndex + 1) of \(work.totalChapters)")
-                            .font(Typography.uiCaption())
-                            .foregroundStyle(theme.ink3)
-                            .textCase(.uppercase)
-                            .tracking(0.3)
-                            .padding(.bottom, 4)
-
-                        Text(fetchedChapter.map { $0.title.isEmpty ? "Chapter \(chapterIndex + 1)" : $0.title } ?? "Chapter \(chapterIndex + 1)")
-                            .font(Typography.readerChTitle())
-                            .foregroundStyle(theme.ink)
-                            .padding(.bottom, 8)
-
-                        if let blocks = contentBlocks {
-                            ContentBlockView(blocks: blocks, highlightedIndex: tts.highlightedBlockIndex,
-                                             anchorChapter: chapterIndex)
-                        } else if isLoading {
-                            NetworkLoadingView(message: "Loading chapter…", task: chapterTask) {
-                                cancelLoad()
-                            }
-                        } else if let error = loadError {
-                            NetworkErrorView(message: error, onRetry: {
-                                Task { await loadChapter() }
-                            }, onGoBack: { dismiss() })
-                        } else if didCancel {
-                            NetworkErrorView(message: "Loading was cancelled.", onRetry: {
-                                didCancel = false
-                                Task { await loadChapter() }
-                            }, onGoBack: { dismiss() })
-                        } else if !hasFetched {
-                            NetworkLoadingView(message: "Loading chapter…") {
-                                dismiss()
-                            }
-                        } else {
-                            NetworkErrorView(message: "Chapter content could not be loaded.", onRetry: {
-                                Task { await loadChapter(force: true) }
-                            })
-                        }
-
-                        chapterEnd
-
-                        Spacer()
-                            .frame(height: chromeVisible ? 80 : 50)
-                    }
-                    .scrollTargetLayout()
-                    .padding(.horizontal, theme.readMargin)
-                    .frame(maxWidth: columnMaxWidth)
-                    .frame(maxWidth: .infinity)
-                    .background(
-                        GeometryReader { contentGeo in
-                            Color.clear
-                                .preference(
-                                    key: ScrollOffsetKey.self,
-                                    value: contentGeo.frame(in: .named("readerScroll")).minY
-                                )
-                        }
-                    )
-                }
-            }
-            .coordinateSpace(name: "readerScroll")
-            .onPreferenceChange(ScrollOffsetKey.self) { offset in
-                handleScroll(offset: offset, viewHeight: outerGeo.size.height)
-            }
-            .onScrollTargetVisibilityChange(idType: ReaderBlockID.self, threshold: 0.0) { visible in
-                handleVisibleBlocks(visible)
-            }
-            .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    chromeVisible.toggle()
-                }
-            }
-            .onAppear {
-                restoreSingleChapter(proxy)
-            }
-            .onChange(of: contentBlocks) {
-                restoreSingleChapter(proxy)
-            }
-            .onChange(of: pendingRestore) {
-                restoreSingleChapter(proxy)
-            }
-            } // ScrollViewReader
-        }
-    }
-
-    /// Consume the pending restore once the chapter's blocks are rendered:
-    /// land on the anchored block, or the chapter top when there is none.
-    private func restoreSingleChapter(_ proxy: ScrollViewProxy) {
-        guard let blocks = contentBlocks, let restore = pendingRestore,
-              restore.chapter == chapterIndex else { return }
-        pendingRestore = nil
-        suppressVisibleTracking = true
-        // A saved position past the end (the chapter shrank, or a stale
-        // character-offset value) is a chapter top.
-        let block = restore.block < blocks.count ? restore.block : 0
-        anchorBlock = block
-        DispatchQueue.main.async {
-            if block > 0 {
-                proxy.scrollTo(ReaderBlockID(chapter: restore.chapter, block: block), anchor: .top)
-            } else {
-                proxy.scrollTo("chapterTop", anchor: .top)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                suppressVisibleTracking = false
-            }
-        }
-    }
-
-    // MARK: - Shared Loading/Error Views
-
-    private var loadingContent: some View {
-        VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-            NetworkLoadingView(message: "Loading work…", task: chapterTask) {
-                cancelLoad()
-            }
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-        }
-    }
-
-    private func errorContent(_ message: String) -> some View {
-        VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-            NetworkErrorView(message: message, onRetry: {
-                Task { await loadChapter() }
-            }, onGoBack: { dismiss() })
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-        }
-    }
-
-    private var cancelledContent: some View {
-        VStack(alignment: .leading, spacing: theme.readingLineSpacing) {
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-            NetworkErrorView(message: "Loading was cancelled.", onRetry: {
-                didCancel = false
-                Task { await loadChapter() }
-            }, onGoBack: { dismiss() })
-            Spacer().frame(height: chromeVisible ? 80 : 50)
-        }
-    }
-
     // MARK: - Loading
 
     /// Cache-first, then Tor. `force` bypasses the session and database
@@ -616,7 +457,8 @@ struct ReaderView: View {
             // the last real one rather than an empty page.
             if !chapters.isEmpty, chapterIndex >= chapters.count {
                 chapterIndex = chapters.count - 1
-                pendingRestore = ReaderBlockID(chapter: chapterIndex, block: 0)
+                visibleChapterIndex = chapterIndex
+                requestRestore(ReaderPosition(chapter: chapterIndex, offset: 0))
                 state.setProgress(workID, chapter: chapterIndex + 1, pos: 0)
             }
         } catch {
@@ -630,10 +472,11 @@ struct ReaderView: View {
     /// Refetch the work's chapters from AO3, bypassing the caches.
     private func refreshChaptersFromAO3() {
         guard UInt64(workID) != nil, !isLoading else { return }
-        flushPendingPersist()
+        textHandle.controller?.flushPendingPersist()
+        let position = currentPosition
         state.fetchedChapters[workID] = nil
         loadError = nil
-        pendingRestore = ReaderBlockID(chapter: chapterIndex, block: anchorBlock)
+        requestRestore(position)
         Task { await loadChapter(force: true) }
     }
 
@@ -648,9 +491,70 @@ struct ReaderView: View {
         isLoading = false
     }
 
+    // MARK: - Images
+
+    private static func imageSrcs(in blocks: [ParsedContentBlock]) -> [String] {
+        var srcs: [String] = []
+        func walk(_ blocks: [ParsedContentBlock]) {
+            for block in blocks {
+                switch block {
+                case .image(let src, _):
+                    if !srcs.contains(src) { srcs.append(src) }
+                case .blockquote(let inner):
+                    walk(inner)
+                case .list(_, let items):
+                    items.forEach(walk)
+                default:
+                    break
+                }
+            }
+        }
+        walk(blocks)
+        return srcs
+    }
+
+    /// Synchronously adopt already-cached images (downloaded works, earlier
+    /// taps this session), and start fetches for the rest when auto-load is
+    /// on. Tap-to-load is the default: uncached images stay placeholders.
+    private func primeAndLoadImages(in blocks: [ParsedContentBlock]) {
+        for src in Self.imageSrcs(in: blocks) where loadedImages[src] == nil {
+            if let data = state.bridge.cachedChapterImage(url: src),
+               let image = UIImage(data: data) {
+                loadedImages[src] = image
+            } else if theme.imageAutoLoad {
+                loadImage(src)
+            }
+        }
+    }
+
+    private func loadImage(_ src: String) {
+        guard !loadingImages.contains(src), loadedImages[src] == nil else { return }
+        loadingImages.insert(src)
+        imageStatus[src] = "Loading image…"
+        Task { @MainActor in
+            do {
+                let data = try await state.bridge.fetchChapterImage(url: src, maxBytes: theme.imageMaxBytes)
+                if let image = UIImage(data: data) {
+                    loadedImages[src] = image
+                    imageStatus[src] = nil
+                } else {
+                    let head = data.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                    state.bridge.writeLog(level: "ERROR", tag: "image",
+                        message: "UIImage decode failed for \(src): \(data.count) bytes, head [\(head)]")
+                    imageStatus[src] = "Couldn’t decode image — tap to retry"
+                }
+            } catch {
+                state.bridge.writeLog(level: "ERROR", tag: "image",
+                    message: "Fetch failed for \(src): \(error.localizedDescription)")
+                imageStatus[src] = "\(error.localizedDescription) — tap to retry"
+            }
+            loadingImages.remove(src)
+        }
+    }
+
     // MARK: - Chapter navigation & position
 
-    /// The saved block for a chapter: the stored progress when it is for
+    /// The saved offset for a chapter: the stored progress when it is for
     /// this chapter, else the top.
     private func savedPosition(for chapter: Int) -> Int {
         guard let p = state.progressMap[workID], p.chapter == chapter + 1 else { return 0 }
@@ -662,21 +566,20 @@ struct ReaderView: View {
     /// `pos` (the return control) wins over the saved progress.
     private func goToChapter(_ index: Int, at pos: Int? = nil) {
         let clamped = max(0, min(index, postedChapterCount - 1))
-        guard clamped != chapterIndex else { return }
-        flushPendingPersist()
+        guard clamped != currentChapter || pos != nil else { return }
+        textHandle.controller?.flushPendingPersist()
         stashReturnPoint()
         let target = pos ?? savedPosition(for: clamped)
         chapterIndex = clamped
-        anchorBlock = target
-        pendingRestore = ReaderBlockID(chapter: clamped, block: target)
+        visibleChapterIndex = clamped
+        requestRestore(ReaderPosition(chapter: clamped, offset: target))
         chromeVisible = true
         state.markWorkRead(workID)
         state.setProgress(workID, chapter: clamped + 1, pos: target)
     }
 
     private func stashReturnPoint() {
-        let chapter = entireWork ? visibleChapterIndex : chapterIndex
-        returnPoint = ReturnPoint(chapter: chapter, pos: anchorBlock)
+        returnPoint = currentPosition
     }
 
     /// The footer's ↩: swap back to the chapter left behind. `goToChapter`
@@ -684,56 +587,35 @@ struct ReaderView: View {
     /// positions rather than consuming itself.
     private func returnToPreviousPosition() {
         guard let point = returnPoint else { return }
-        if entireWork {
-            // The chapter-jump path does the scroll and the stash; the
-            // pending restore refines the landing to the recorded block.
-            pendingRestore = ReaderBlockID(chapter: point.chapter, block: point.pos)
-            scrollTarget = point.chapter
-        } else {
-            goToChapter(point.chapter, at: point.pos)
-        }
+        goToChapter(point.chapter, at: point.offset)
     }
 
-    /// The topmost visible block is the reading position.
-    private func handleVisibleBlocks(_ visible: [ReaderBlockID]) {
-        guard !suppressVisibleTracking, pendingRestore == nil,
-              let top = visible.min(by: { ($0.chapter, $0.block) < ($1.chapter, $1.block) }) else { return }
-        if entireWork {
-            visibleChapterIndex = top.chapter
-        } else if top.chapter != chapterIndex {
-            return
-        }
-        anchorBlock = top.block
-        schedulePersist()
+    /// The library was replaced: drop the debounced persist (it describes
+    /// the old library) and land wherever the new one says this work is.
+    /// A work the new library isn't reading stays put; the next scroll
+    /// re-enrolls it.
+    private func reanchorFromStorage() {
+        textHandle.controller?.cancelPendingPersist()
+        guard let progress = state.progressMap[workID] else { return }
+        let chapter = max(0, min(progress.chapter - 1, postedChapterCount - 1))
+        returnPoint = nil
+        chapterIndex = chapter
+        visibleChapterIndex = chapter
+        requestRestore(ReaderPosition(chapter: chapter, offset: max(0, progress.pos)))
+        aoyoPosLog("reanchor work=\(workID) -> ch\(progress.chapter)@\(progress.pos)")
     }
 
-    /// Scroll ticks arrive continuously; the write waits until the reader
-    /// has been still for a second.
-    private func schedulePersist() {
-        persistTask?.cancel()
-        persistTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled else { return }
-            persistTask = nil
-            persistProgressNow()
-        }
-    }
-
-    private func persistProgressNow() {
-        guard pendingRestore == nil, !suppressVisibleTracking, let chapters = fetchedChapters else { return }
-        let chapter = entireWork ? visibleChapterIndex : chapterIndex
-        guard chapter < chapters.count else { return }
-        let count = ParsedContentBlock.fromJSON(chapters[chapter].contentJson).count
-        state.setProgress(workID, chapter: chapter + 1, pos: anchorBlock, chapterLen: count)
-    }
-
-    /// Run any pending debounced persist immediately — before the reader is
-    /// repointed or left so the last position isn't lost.
-    private func flushPendingPersist() {
-        guard persistTask != nil else { return }
-        persistTask?.cancel()
-        persistTask = nil
-        persistProgressNow()
+    /// Move this reader into its own window — the window picks up
+    /// exactly where this one was (chapter + anchored line) and this
+    /// reader closes: a move, not a copy, so the work has one reader.
+    private func moveToWindow() {
+        textHandle.controller?.flushPendingPersist()
+        let position = currentPosition
+        state.setProgress(workID, chapter: position.chapter + 1, pos: position.offset)
+        openWindow(value: WorkWindowValue(workID: workID,
+                                          chapterIndex: position.chapter,
+                                          entireWork: entireWork))
+        dismiss()
     }
 
     // MARK: - Chapter End (single chapter mode)
@@ -858,7 +740,8 @@ struct ReaderView: View {
             Button {
                 if tts.isActive {
                     tts.stop()
-                } else if let blocks = contentBlocks {
+                } else if let blocks = ttsBlocks {
+                    ttsChapter = currentChapter
                     tts.setContent(blocks)
                     tts.play()
                 }
@@ -893,6 +776,13 @@ struct ReaderView: View {
             theme.bg.opacity(0.95)
                 .shadow(.drop(color: .black.opacity(0.05), radius: 4, y: 2))
         )
+    }
+
+    /// The blocks read aloud: the chapter the reader is in.
+    private var ttsBlocks: [ParsedContentBlock]? {
+        guard let chapters = fetchedChapters, currentChapter < chapters.count else { return nil }
+        let blocks = ParsedContentBlock.fromJSON(chapters[currentChapter].contentJson)
+        return blocks.isEmpty ? nil : blocks
     }
 
     /// Reader actions that don't earn a chrome button of their own.
@@ -980,18 +870,6 @@ struct ReaderView: View {
         .accessibilityHidden(true)
     }
 
-    /// Move this reader into its own window — the window picks up
-    /// exactly where this one was (chapter + anchored block) and this
-    /// reader closes: a move, not a copy, so the work has one reader.
-    private func moveToWindow() {
-        flushPendingPersist()
-        state.setProgress(workID, chapter: (entireWork ? visibleChapterIndex : chapterIndex) + 1, pos: anchorBlock)
-        openWindow(value: WorkWindowValue(workID: workID,
-                                          chapterIndex: entireWork ? visibleChapterIndex : chapterIndex,
-                                          entireWork: entireWork))
-        dismiss()
-    }
-
     // MARK: - Chapter Selector Menu
 
     private func chapterMenu(_ work: Work, currentIndex: Int, onSelect: @escaping (Int) -> Void) -> some View {
@@ -1052,20 +930,14 @@ struct ReaderView: View {
         Group {
             if postedChapterCount > 1 {
                 Button {
-                    flushPendingPersist()
-                    if entireWork {
-                        chapterIndex = visibleChapterIndex
-                        pendingRestore = ReaderBlockID(chapter: visibleChapterIndex, block: anchorBlock)
-                        entireWork = false
-                    } else {
-                        suppressVisibleTracking = true
-                        visibleChapterIndex = chapterIndex
-                        pendingRestore = ReaderBlockID(chapter: chapterIndex, block: anchorBlock)
-                        entireWork = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            suppressVisibleTracking = false
-                        }
-                    }
+                    // The column re-renders for the new mode and lands back
+                    // on the same line.
+                    textHandle.controller?.flushPendingPersist()
+                    let position = currentPosition
+                    entireWork.toggle()
+                    chapterIndex = position.chapter
+                    visibleChapterIndex = position.chapter
+                    requestRestore(position)
                 } label: {
                     Image(systemName: entireWork ? "book.pages" : "book.pages.fill")
                         .font(.system(size: 15, weight: .semibold))
@@ -1151,7 +1023,7 @@ struct ReaderView: View {
                 returnButton
 
                 chapterMenu(work, currentIndex: visibleChapterIndex) { selected in
-                    scrollTarget = selected
+                    goToChapter(selected)
                 }
 
                 Spacer()
@@ -1252,10 +1124,11 @@ struct ReaderView: View {
 
     // MARK: - Scroll Handling
 
-    private func handleScroll(offset: CGFloat, viewHeight: CGFloat) {
-        let delta = offset - lastScrollOffset
+    /// Reader movement from the column: hide the chrome scrolling down,
+    /// show it scrolling up; keep the progress track current.
+    private func handleScroll(delta: CGFloat, progress: Double) {
         if abs(delta) > 5 {
-            let scrollingDown = delta < 0
+            let scrollingDown = delta > 0
             if scrollingDown && chromeVisible {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     chromeVisible = false
@@ -1266,41 +1139,7 @@ struct ReaderView: View {
                 }
             }
         }
-        lastScrollOffset = offset
-
-        let totalScroll = abs(offset)
-        let progress = min(max(totalScroll / max(viewHeight, 1), 0), 1)
         scrollProgress = progress
-    }
-
-    private func handleEntireWorkScroll(offset: CGFloat, viewHeight: CGFloat) {
-        let delta = offset - lastScrollOffset
-        if abs(delta) > 5 {
-            let scrollingDown = delta < 0
-            if scrollingDown && chromeVisible {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    chromeVisible = false
-                }
-            } else if !scrollingDown && !chromeVisible {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    chromeVisible = true
-                }
-            }
-        }
-        lastScrollOffset = offset
-
-        let totalScroll = abs(offset)
-        let progress = min(max(totalScroll / max(viewHeight, 1), 0), 1)
-        scrollProgress = progress
-    }
-}
-
-// MARK: - Scroll Offset Preference Key
-
-private struct ScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
 

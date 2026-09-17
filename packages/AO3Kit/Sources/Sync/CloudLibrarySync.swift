@@ -230,6 +230,9 @@ final class CloudLibrarySync {
         let bridge = state.bridge
         busy = true
         status = .replacing
+        // From here until the maps are re-read, progress writes describe
+        // the library being replaced and must not reach the new file.
+        state.beginLibraryReplacement()
         Task { [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
                 do { _ = try bridge.backupRestore(id: id); return .success(()) } catch { return .failure(error) }
@@ -242,6 +245,7 @@ final class CloudLibrarySync {
                 status = enabled ? .attention("Library restored from a backup. Sync it to iCloud, or use the iCloud copy, when prompted.") : .off
                 if enabled { forceNext = true; requestCycle() }
             case .failure(let error):
+                appState?.endLibraryReplacement()
                 status = enabled ? .error(error.localizedDescription) : .off
             }
             refreshBackups()
@@ -249,10 +253,23 @@ final class CloudLibrarySync {
     }
 
     func deleteBackup(id: String) {
+        deleteBackups(ids: [id])
+    }
+
+    /// Delete several backups in one pass. Keeps going past a failure so
+    /// the rest are still removed; the first error is reported through
+    /// `status`.
+    func deleteBackups(ids: [String]) {
         guard let bridge = appState?.bridge, bridge.isInitialized else { return }
-        do {
-            try bridge.backupDelete(id: id)
-        } catch {
+        var firstError: Error?
+        for id in ids {
+            do {
+                try bridge.backupDelete(id: id)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        }
+        if let error = firstError {
             status = enabled ? .error(error.localizedDescription) : .off
         }
         refreshBackups()
@@ -332,6 +349,11 @@ final class CloudLibrarySync {
         let lastPush = lastPushedAt
         let dismissedConflict = pendingConflict
         if status == .off || status == .idle { status = .checking }
+        // This cycle may swap the library file underneath the UI (off the
+        // main thread, before we hear about it): hold progress writes for
+        // its whole duration so nothing stale lands in the adopted copy.
+        let mayReplaceLibrary = resolution?.0 == .useCloudCopy
+        if mayReplaceLibrary { appState?.beginLibraryReplacement() }
 
         Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
@@ -344,6 +366,8 @@ final class CloudLibrarySync {
             if result.libraryReplaced {
                 appState?.libraryWasReplaced()
                 refreshBackups()
+            } else if mayReplaceLibrary {
+                appState?.endLibraryReplacement()
             }
             if result.backupsChanged { refreshBackups() }
             if let at = result.pushedAt { lastPushedAt = at }

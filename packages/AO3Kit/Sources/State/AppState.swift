@@ -15,10 +15,33 @@ final class AppState {
     /// models reload what they cache from the database.
     @ObservationIgnored var onLibraryReplaced: (() -> Void)?
 
+    /// Bumped after every library replacement, once `progressMap` and the
+    /// other maps reflect the new file. Open readers watch it and re-anchor
+    /// to the position the new library holds for their work.
+    var libraryGeneration = 0
+
+    /// True from the moment a replacement is committed to (the sync cycle
+    /// that will adopt the iCloud copy, a backup restore) until the maps are
+    /// re-read from the new file. Progress writes are dropped meanwhile: a
+    /// debounced scroll persist firing inside that window would land the
+    /// old library's position in the new one.
+    @ObservationIgnored private(set) var isReplacingLibrary = false
+
+    func beginLibraryReplacement() {
+        isReplacingLibrary = true
+    }
+
+    /// The replacement did not happen after all (failed, deferred).
+    func endLibraryReplacement() {
+        isReplacingLibrary = false
+    }
+
     /// The core replaced its database file. Everything derived from it is
     /// re-read exactly as at unlock, then the platform hook runs.
     func libraryWasReplaced() {
         loadPersistedState()
+        isReplacingLibrary = false
+        libraryGeneration += 1
         onLibraryReplaced?()
     }
 

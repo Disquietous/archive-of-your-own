@@ -128,6 +128,14 @@ final class WorkWindowRegistry {
         }
     }
 
+    /// The library file was replaced: every window moves to the position
+    /// the new library holds for its work (see ReaderSession.reanchorFromStorage).
+    func reanchorAll() {
+        for controller in windows.values {
+            controller.reanchorFromStorage()
+        }
+    }
+
     func closeAll() {
         for controller in Array(windows.values) {
             controller.close()

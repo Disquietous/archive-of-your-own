@@ -287,6 +287,11 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
         session.flushPendingPersist()
     }
 
+    func reanchorFromStorage() {
+        session.reanchorFromStorage()
+        render()
+    }
+
     // MARK: - Actions
 
     private func toggleChaptersPopover() {

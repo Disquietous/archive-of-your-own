@@ -152,6 +152,10 @@ extension AppState {
     /// work's progress back to chapter 1. The chapter left behind lives only
     /// in the UI's in-memory return point, never here.
     func setProgress(_ id: String, chapter: Int, pos: Int, chapterLen: Int = 0) {
+        // A library replacement is in flight: whatever a reader wants to
+        // record now describes the library being replaced, not the one
+        // about to be read from. Readers re-anchor on libraryGeneration.
+        guard !isReplacingLibrary else { return }
         let existing = progressMap[id]
         // A caller that doesn't know the chapter's length (chapterLen 0)
         // must not wipe one a previous save recorded.

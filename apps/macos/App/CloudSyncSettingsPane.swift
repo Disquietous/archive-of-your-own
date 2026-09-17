@@ -10,8 +10,12 @@ struct CloudSyncSettingsPane: View {
     @State private var confirmRemove = false
     @State private var restoreCandidate: CloudLibrarySync.Backup?
     @State private var deleteCandidate: CloudLibrarySync.Backup?
+    @State private var selectedBackupIDs: Set<String> = []
+    @State private var confirmDeleteSelected = false
 
     private var sync: CloudLibrarySync { appState.cloudSync }
+
+    private static let destructiveTint = Color(hex: "CE514D")
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -53,6 +57,23 @@ struct CloudSyncSettingsPane: View {
                         }
                     }
                 }
+                if !selectedBackupIDs.isEmpty {
+                    actionButton(selectedBackupIDs.count == 1 ? "Delete 1 Selected Backup" : "Delete \(selectedBackupIDs.count) Selected Backups",
+                                 tint: Self.destructiveTint, enabled: !sync.busy) {
+                        confirmDeleteSelected = true
+                    }
+                    .confirmationDialog(selectedBackupIDs.count == 1 ? "Delete the selected backup?" : "Delete \(selectedBackupIDs.count) selected backups?",
+                                        isPresented: $confirmDeleteSelected, titleVisibility: .visible) {
+                        Button("Delete", role: .destructive) {
+                            let ids = sync.backups.map(\.id).filter { selectedBackupIDs.contains($0) }
+                            sync.deleteBackups(ids: ids)
+                            selectedBackupIDs.removeAll()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("The backup files are deleted. This can't be undone.")
+                    }
+                }
                 Text("Restoring a backup replaces this device's library with it; the library being replaced becomes a new backup first.")
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)
@@ -74,6 +95,11 @@ struct CloudSyncSettingsPane: View {
         }
         .padding(16)
         .onAppear { sync.refreshBackups() }
+        .onChange(of: sync.backups) { _, backups in
+            // Drop selections for backups that no longer exist.
+            let live = Set(backups.map(\.id))
+            selectedBackupIDs = selectedBackupIDs.intersection(live)
+        }
         .confirmationDialog("Restore this backup?", isPresented: Binding(
             get: { restoreCandidate != nil }, set: { if !$0 { restoreCandidate = nil } }
         ), titleVisibility: .visible) {
@@ -87,16 +113,18 @@ struct CloudSyncSettingsPane: View {
                 Text("This Mac's library will be replaced with the backup from \(Self.absolute(b.createdAt)). The current library is kept as a new backup.")
             }
         }
-        .confirmationDialog("Remove this backup?", isPresented: Binding(
+        .confirmationDialog("Delete this backup?", isPresented: Binding(
             get: { deleteCandidate != nil }, set: { if !$0 { deleteCandidate = nil } }
         ), titleVisibility: .visible) {
-            Button("Remove", role: .destructive) {
+            Button("Delete", role: .destructive) {
                 if let b = deleteCandidate { sync.deleteBackup(id: b.id) }
                 deleteCandidate = nil
             }
             Button("Cancel", role: .cancel) { deleteCandidate = nil }
         } message: {
-            Text("The backup file is deleted. This can't be undone.")
+            if let b = deleteCandidate {
+                Text("The backup from \(Self.absolute(b.createdAt)) is deleted. This can't be undone.")
+            }
         }
     }
 
@@ -124,7 +152,22 @@ struct CloudSyncSettingsPane: View {
     }
 
     private func backupRow(_ backup: CloudLibrarySync.Backup) -> some View {
-        HStack(spacing: 12) {
+        let selected = selectedBackupIDs.contains(backup.id)
+        return HStack(spacing: 12) {
+            Button {
+                toggleSelection(backup.id)
+            } label: {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16))
+                    .foregroundStyle(selected ? theme.sage : theme.ink3)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(selected ? "Deselect this backup" : "Select this backup")
+            .accessibilityLabel(selected ? "Deselect backup" : "Select backup")
+            .disabled(sync.busy)
+
             VStack(alignment: .leading, spacing: 1) {
                 Text(Self.absolute(backup.createdAt))
                     .font(Font(MacFont.ui(13.5, weight: .medium)))
@@ -133,15 +176,36 @@ struct CloudSyncSettingsPane: View {
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { toggleSelection(backup.id) }
+
             Spacer()
             Button("Restore") { restoreCandidate = backup }
                 .font(Font(MacFont.ui(12)))
                 .disabled(sync.busy)
-            Button("Remove") { deleteCandidate = backup }
-                .font(Font(MacFont.ui(12)))
-                .disabled(sync.busy)
+            Button {
+                deleteCandidate = backup
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 13))
+                    .foregroundStyle(sync.busy ? theme.ink3 : Self.destructiveTint)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Delete this backup")
+            .accessibilityLabel("Delete backup")
+            .disabled(sync.busy)
         }
         .padding(.vertical, 9)
+    }
+
+    private func toggleSelection(_ id: String) {
+        if selectedBackupIDs.contains(id) {
+            selectedBackupIDs.remove(id)
+        } else {
+            selectedBackupIDs.insert(id)
+        }
     }
 
     private func actionButton(_ title: String, tint: Color? = nil, enabled: Bool, action: @escaping () -> Void) -> some View {

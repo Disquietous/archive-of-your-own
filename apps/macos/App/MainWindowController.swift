@@ -79,6 +79,7 @@ final class MainWindowController: NSWindowController {
                     model.loadPersistedPrefs()
                     model.search.loadSavedSearches(appState)
                     model.goSection(model.section)
+                    model.reanchorOpenReaders()
                 }
                 // The global request timeout lives in UserDefaults (theme),
                 // but a fresh AO3App starts at the built-in 30s — push the

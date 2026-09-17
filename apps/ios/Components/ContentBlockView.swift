@@ -1,41 +1,22 @@
 import SwiftUI
 
-/// Scroll-target identity of one top-level chapter block in the reader —
-/// the unit the SwiftUI reader anchors reading position on (D2: block
-/// index, since `Text` exposes no character geometry). Stable across font
-/// and size changes because block identity is.
-struct ReaderBlockID: Hashable {
-    let chapter: Int
-    let block: Int
-}
-
 struct ContentBlockView: View {
     @Environment(AppTheme.self) private var theme
 
     let blocks: [ParsedContentBlock]
     var compact: Bool = false
     var highlightedIndex: Int?
-    /// When set, top-level blocks carry `ReaderBlockID`s for this chapter
-    /// so the reader can track and restore its anchored block. Nested
-    /// blocks (quotes, list items) keep their local string ids.
-    var anchorChapter: Int? = nil
 
     var body: some View {
         ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-            let styled = blockView(block, isFirst: index == 0, previousBlock: index > 0 ? blocks[index - 1] : nil)
+            blockView(block, isFirst: index == 0, previousBlock: index > 0 ? blocks[index - 1] : nil)
                 .padding(.vertical, highlightedIndex == index ? 2 : 0)
                 .background(
                     highlightedIndex == index
                         ? RoundedRectangle(cornerRadius: 4).fill(theme.accentSoft)
                         : RoundedRectangle(cornerRadius: 4).fill(.clear)
                 )
-            // The id's static type matters: the reader's scroll-target
-            // visibility tracking filters by `ReaderBlockID`.
-            if let anchorChapter {
-                styled.id(ReaderBlockID(chapter: anchorChapter, block: index))
-            } else {
-                styled.id("block-\(index)")
-            }
+                .id("block-\(index)")
         }
     }
 

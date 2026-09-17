@@ -51,6 +51,12 @@ final class ReaderSession {
     /// (the window registry moving a work out of the pane) land the last
     /// position before repointing or closing.
     @ObservationIgnored var flushPersist: (() -> Void)?
+    /// Installed by the reader view: drops its debounced scroll persist
+    /// without writing it (the position it holds is no longer true).
+    @ObservationIgnored var cancelPersist: (() -> Void)?
+    /// Installed by the reader view: re-land on `pos` within the chapter
+    /// it is already showing, as if that position had just been opened.
+    @ObservationIgnored var reanchor: ((Int) -> Void)?
 
     @ObservationIgnored private let appState: AppState
     @ObservationIgnored private let theme: AppTheme
@@ -134,6 +140,28 @@ final class ReaderSession {
     /// reader view is attached or nothing is pending).
     func flushPendingPersist() {
         flushPersist?()
+    }
+
+    /// The library file was replaced underneath the app: move this reader
+    /// to wherever the new library says the work is. The in-memory anchor
+    /// and any debounced persist describe the old library and are dropped,
+    /// never written. A work the new library isn't reading stays where the
+    /// reader is; its next scroll re-enrolls it.
+    func reanchorFromStorage() {
+        guard let id = workID else { return }
+        cancelPersist?()
+        guard let progress = appState.progressMap[id] else { return }
+        let target = max(0, progress.chapter - 1)
+        returnPoint = nil
+        if target != chapter {
+            // The chapter change re-shows the reader (pane mode / window
+            // render both key on it); the stash lands it on the line.
+            resumePos = progress.pos
+            chapter = target
+        } else {
+            reanchor?(progress.pos)
+        }
+        aoyoPosLog("reanchor work=\(id) -> ch\(progress.chapter)@\(progress.pos)")
     }
 
     /// Reset to closed. Pure state — the host decides what closing looks

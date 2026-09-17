@@ -208,6 +208,37 @@ extension ReaderViewController {
         persistProgressNow()
     }
 
+    /// Drop the pending debounced persist without writing it.
+    func cancelPendingPersist() {
+        pendingPersist?.cancel()
+        pendingPersist = nil
+    }
+
+    /// Land on `pos` in the chapter already showing — the library was
+    /// replaced and holds a different position for this chapter. Goes
+    /// through the same anchor machinery as an open, so it survives
+    /// whatever layout the text has today.
+    func reanchor(to pos: Int) {
+        cancelPendingPersist()
+        guard currentChapterContent != nil else {
+            // Still loading: the render that brings the content in
+            // consumes the stash exactly like an open would.
+            pendingRestorePos = pos > 0 ? pos : nil
+            return
+        }
+        posLog("reanchor consume pos=\(pos)")
+        if pos > 0 {
+            anchorOffset = pos
+            expectedTopLine = nil
+            scheduleAnchorRestore()
+        } else {
+            anchorOffset = nil
+            expectedTopLine = nil
+            scrollToTop()
+            refreshProgress(persist: true)
+        }
+    }
+
     func updateProgress() {
         guard let work else { return }
         let total = Double(Swift.max(1, work.complete ? work.totalChapters : postedChapterCount))

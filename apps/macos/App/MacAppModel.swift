@@ -354,6 +354,14 @@ final class MacAppModel {
         paneReader.close()
     }
 
+    /// The library file was replaced underneath the core: every open
+    /// reader (pane and windows) moves to the position the new library
+    /// holds for its work instead of persisting the old one over it.
+    func reanchorOpenReaders() {
+        paneReader.reanchorFromStorage()
+        windows.reanchorAll()
+    }
+
     /// Leave immersive reading. When immersive is the user's default reading
     /// view there is no single-pane reader to fall back to, so backing out
     /// closes the reader and returns to the work details view.

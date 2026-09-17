@@ -66,6 +66,8 @@ final class ReaderViewController: NSViewController {
         self.footer = ReadFooterView(theme: theme)
         super.init(nibName: nil, bundle: nil)
         session.flushPersist = { [weak self] in self?.flushPendingPersist() }
+        session.cancelPersist = { [weak self] in self?.cancelPendingPersist() }
+        session.reanchor = { [weak self] pos in self?.reanchor(to: pos) }
     }
 
     required init?(coder: NSCoder) {
