@@ -11,6 +11,7 @@ enum EpubExporter {
         var id: String { url.path }
     }
 
+    @MainActor
     static func export(work: Work, appState: AppState) throws -> Exported {
         guard let workId = UInt64(work.id) else {
             throw NSError(domain: "EpubExporter", code: 1,

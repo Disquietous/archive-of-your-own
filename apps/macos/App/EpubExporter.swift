@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// cached chapters, so works should be downloaded first — the error message
 /// says so when they aren't.
 enum EpubExporter {
+    @MainActor
     static func export(work: Work, appState: AppState) {
         guard let workId = UInt64(work.id) else { return }
 

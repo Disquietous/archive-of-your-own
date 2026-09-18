@@ -192,9 +192,10 @@ extension AppState {
     /// off the main thread; use `mergeCachedWorks` instead when the set of
     /// rewritten works is already known.
     func reloadCachedWorks() {
-        let bridge = self.bridge
+        // Snapshot the core handle here: the bridge is main-actor state.
+        guard let app = bridge.coreApp else { return }
         Task.detached(priority: .utility) {
-            let works = bridge.getAllCachedWorks().map(Self.workFromSummary)
+            let works = ((try? app.getAllCachedWorks()) ?? []).map(Self.workFromSummary)
             await MainActor.run { self.cachedWorks = works }
         }
     }

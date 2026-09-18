@@ -20,10 +20,22 @@ enum TorStatus: Equatable {
     }
 }
 
+/// The Swift face of the core. Main-actor isolated: every property here
+/// is observed by views, and `app` is swapped on lock/unlock, so nothing
+/// may read or write it off the main thread. Work that must leave the
+/// main thread (file copies, whole-library exports) takes an `Ao3App`
+/// snapshot via `coreApp` and calls the core directly — the handle is
+/// Sendable and keeps the library open for as long as the work holds it.
 @Observable
+@MainActor
 final class RustBridge {
     private var app: Ao3App?
     var isInitialized = false
+
+    /// The open core, for detached work that outlives a main-thread hop.
+    /// nil while locked or before the library exists. Callers snapshot it
+    /// on the main actor and never store it past the work at hand.
+    var coreApp: Ao3App? { app }
     var showingRecoveryKey = false
     var torStatus: TorStatus = .disconnected
     var connectionError: String?
@@ -54,7 +66,7 @@ final class RustBridge {
         torRequired && !torStatus.isConnected
     }
 
-    static var dbFileExists: Bool {
+    nonisolated static var dbFileExists: Bool {
         FileManager.default.fileExists(atPath: databasePath())
     }
 
@@ -771,11 +783,50 @@ final class RustBridge {
 
     // MARK: - Paths
 
-    static func databasePath() -> String {
+    nonisolated static func databasePath() -> String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = dir.appendingPathComponent("ArchiveOfYourOwn", isDirectory: true)
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("library.db").path
+    }
+
+    // MARK: - First-launch bootstrap (no library yet)
+
+    /// Backups still on disk beside where the library would be — left by
+    /// a library that vanished, or by an earlier install.
+    nonisolated static func bootstrapBackups() -> [UBackupInfo] {
+        libraryBootstrapBackups(dbPath: databasePath())
+    }
+
+    /// The auto key already in the Keychain, if any — read without
+    /// minting, so a probe for an old backup's key can't replace it.
+    static func existingAutoKey() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: autoKeyAccount,
+            kSecReturnData as String: true,
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// The passphrase a library started from iCloud or a backup will be
+    /// keyed with: the user's password, or a freshly minted auto key that
+    /// is stored now so `open()` finds it afterwards.
+    static func localKeyForNewLibrary(password: String?) -> String {
+        password ?? generateAndStoreAutoKey()
+    }
+
+    /// Open a library that a bootstrap just placed at the database path,
+    /// recording how it is protected exactly as the create paths do.
+    func openBootstrapped(password: String?) -> Bool {
+        guard open(userPassword: password) else { return false }
+        hasDbPassword = password != nil
+        Self.persistDbPasswordFlag(hasDbPassword)
+        if password != nil { Self.deleteAutoKey() }
+        return true
     }
 
 
@@ -1021,7 +1072,7 @@ final class RustBridge {
 
     /// Directory the core keeps its files in (database, sync sidecar,
     /// Backups/) — where the transport stages files for it.
-    static func stateDirectory() -> URL {
+    nonisolated static func stateDirectory() -> URL {
         URL(fileURLWithPath: databasePath()).deletingLastPathComponent()
     }
 

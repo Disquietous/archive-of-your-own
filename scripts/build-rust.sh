@@ -115,7 +115,9 @@ REUSED=()
 [[ $BUILD_DEVICE == 0 ]] && REUSED+=("$DEVICE_LIB")
 [[ $BUILD_SIM == 0 ]] && REUSED+=("$SIM_LIB")
 [[ $BUILD_MAC == 0 ]] && REUSED+=("$MACOS_LIB")
-for lib in "${REUSED[@]}"; do
+# `${arr[@]+"${arr[@]}"}`: an empty array trips `set -u` on bash < 4.4
+# (the full build reuses nothing), so expand it only when it has entries.
+for lib in ${REUSED[@]+"${REUSED[@]}"}; do
     if [[ ! -f "$lib" ]]; then
         echo "!! $lib missing — run a full build (no slice flag) first." >&2
         exit 1

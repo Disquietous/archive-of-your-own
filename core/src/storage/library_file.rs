@@ -31,6 +31,38 @@ fn remove_sidecars(path: &Path) {
     }
 }
 
+/// Exchange two files atomically: after the call `a` holds what `b` held
+/// and vice versa, and at no instant is either path missing. This is
+/// what makes a library replacement crash-safe — a rename pair leaves a
+/// window with no database on disk, and the next open would silently
+/// create an empty one.
+#[cfg(target_vendor = "apple")]
+pub fn swap_files(a: &Path, b: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let ca = CString::new(a.as_os_str().as_bytes())?;
+    let cb = CString::new(b.as_os_str().as_bytes())?;
+    // SAFETY: both pointers are valid NUL-terminated paths for the call.
+    let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_SWAP) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Best effort on platforms without an atomic exchange: the old file is
+/// briefly parked beside `a`, so a crash mid-way leaves it findable.
+#[cfg(not(target_vendor = "apple"))]
+pub fn swap_files(a: &Path, b: &Path) -> std::io::Result<()> {
+    let park = PathBuf::from(format!("{}.swap-parked", a.as_os_str().to_string_lossy()));
+    std::fs::rename(a, &park)?;
+    if let Err(e) = std::fs::rename(b, a) {
+        let _ = std::fs::rename(&park, a);
+        return Err(e);
+    }
+    std::fs::rename(&park, b)
+}
+
 impl Storage {
     /// `n` random bytes as lowercase hex, from SQLite's CSPRNG.
     pub fn random_hex(&self, n: u32) -> Result<String, AppError> {
@@ -118,10 +150,16 @@ impl Storage {
     }
 
     /// Replace the live database with `incoming` — a file already keyed
-    /// with this store's passphrase — moving the current file to
-    /// `backup_dest` first. The connection is closed for the swap and
-    /// reopened on the new file (migrations run if it is older), and every
+    /// with this store's passphrase — filing the current file under
+    /// `backup_dest`. The connection is closed for the swap and reopened
+    /// on the new file (migrations run if it is older), and every
     /// in-memory cache is rebuilt from it.
+    ///
+    /// The exchange is atomic (`swap_files`): the library path always
+    /// holds a complete database, before, during and after. A crash
+    /// between the exchange and the move into Backups/ leaves the old
+    /// library at `incoming`'s path rather than under Backups — a lost
+    /// backup entry, never a lost library.
     ///
     /// If the reopen fails the swap is undone so the store keeps working
     /// on what it had.
@@ -146,21 +184,30 @@ impl Storage {
         drop(old);
         remove_sidecars(&path);
 
-        std::fs::rename(&path, backup_dest).map_err(|e| io_err("move current library to backup", e))?;
-        if let Err(e) = std::fs::rename(incoming, &path) {
-            let _ = std::fs::rename(backup_dest, &path);
+        // One atomic step: the replacement is live, the old library sits
+        // where the replacement was.
+        if let Err(e) = swap_files(&path, incoming) {
             let _ = self.reopen(&path);
-            return Err(io_err("move replacement into place", e));
+            return Err(io_err("exchange library with replacement", e));
         }
         remove_sidecars(incoming);
+        if let Err(e) = std::fs::rename(incoming, backup_dest) {
+            // Couldn't file the old library away: undo and come back up
+            // on it rather than leave it at the staging path.
+            let _ = swap_files(&path, incoming);
+            remove_sidecars(&path);
+            let _ = self.reopen(&path);
+            return Err(io_err("move current library to backup", e));
+        }
 
         match self.reopen(&path) {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Put the old file back and come up on it.
-                let _ = std::fs::rename(&path, incoming);
+                let _ = std::fs::rename(backup_dest, incoming);
                 remove_sidecars(&path);
-                let _ = std::fs::rename(backup_dest, &path);
+                let _ = swap_files(&path, incoming);
+                remove_sidecars(&path);
                 let _ = self.reopen(&path);
                 Err(AppError::StorageError(format!("replacement library could not be opened: {e}")))
             }

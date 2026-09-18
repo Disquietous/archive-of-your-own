@@ -100,9 +100,14 @@ struct TokenFilterSection: View {
         guard !term.isEmpty else { return [] }
         return allOptions
             .filter { $0.localizedCaseInsensitiveContains(term) && !selected.contains($0) }
-            .prefix(8)
-            .map { $0 }
     }
+
+    /// Rows shown before the suggestion list scrolls.
+    private static let visibleSuggestionRows = 8
+
+    /// Fixed row height (tracks Dynamic Type) so the list can size to its
+    /// matches up to the visible cap, then scroll through the rest.
+    @ScaledMetric(relativeTo: .body) private var suggestionRowHeight: CGFloat = 38
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -122,26 +127,33 @@ struct TokenFilterSection: View {
                     if let first = suggestions.first { add(first) }
                 }
             if !suggestions.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(suggestions, id: \.self) { value in
-                        Button {
-                            add(value)
-                        } label: {
-                            Text(value)
-                                .font(.custom("HankenGrotesk", size: 14))
-                                .foregroundStyle(theme.ink)
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        if value != suggestions.last {
-                            Divider().padding(.leading, 12)
+                let matches = suggestions
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(matches, id: \.self) { value in
+                            Button {
+                                add(value)
+                            } label: {
+                                Text(value)
+                                    .font(.custom("HankenGrotesk", size: 14))
+                                    .foregroundStyle(theme.ink)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .frame(height: suggestionRowHeight)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .overlay(alignment: .bottom) {
+                                if value != matches.last {
+                                    Divider().padding(.leading, 12)
+                                }
+                            }
                         }
                     }
                 }
+                .frame(height: suggestionRowHeight
+                       * CGFloat(min(matches.count, Self.visibleSuggestionRows)))
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.line, lineWidth: 1))

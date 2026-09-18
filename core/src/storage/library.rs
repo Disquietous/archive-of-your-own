@@ -970,7 +970,7 @@ impl Storage {
 
     pub fn create_reading_list(&self, name: &str) -> Result<i64, AppError> {
         self.conn.execute(
-            "INSERT INTO reading_lists (name, sync_id) VALUES (?1, lower(hex(randomblob(16))))",
+            "INSERT INTO reading_lists (name) VALUES (?1)",
             params![name],
         ).map_err(map_sql)?;
         Ok(self.conn.last_insert_rowid())
@@ -1010,8 +1010,7 @@ impl Storage {
             params![list_id], |row| row.get(0),
         ).unwrap_or(-1);
         self.conn.execute(
-            "INSERT OR IGNORE INTO reading_list_items (list_id, work_id, sort_order, list_sync_id)
-             VALUES (?1, ?2, ?3, COALESCE((SELECT sync_id FROM reading_lists WHERE id = ?1), ''))",
+            "INSERT OR IGNORE INTO reading_list_items (list_id, work_id, sort_order) VALUES (?1, ?2, ?3)",
             params![list_id, work_id as i64, max_order + 1],
         ).map_err(map_sql)?;
         Ok(())

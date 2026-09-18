@@ -24,10 +24,12 @@ enum ExternalLinkOpener {
         }
     }
 
+    @MainActor
     static func mode(_ bridge: RustBridge) -> Mode {
         Mode(rawValue: bridge.getPref(key: prefKey) ?? "") ?? .system
     }
 
+    @MainActor
     static func setMode(_ mode: Mode, _ bridge: RustBridge) {
         bridge.setPref(key: prefKey, value: mode.rawValue)
     }

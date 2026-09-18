@@ -61,6 +61,7 @@ enum ExternalLinkOpener {
         return URL(string: "https://archiveofourown.org/tags/\(encoded)/works")
     }
 
+    @MainActor
     static func open(_ url: URL, bridge: RustBridge) {
         let chosen = bridge.getPref(key: prefKey) ?? ""
         guard !chosen.isEmpty,

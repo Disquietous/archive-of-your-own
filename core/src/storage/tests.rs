@@ -1334,7 +1334,7 @@ fn test_followed_items() {
 #[test]
 fn test_schema_version_fetched_at_and_author_index() {
     let db = open_test_db();
-    assert_eq!(db.schema_version().unwrap(), 17);
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
     db.save_work(&sample_work(1)).unwrap();
     // save_work stamps fetched_at with the DB-wide datetime encoding.
     let w = db.get_work(1).unwrap().unwrap();
@@ -1499,7 +1499,7 @@ fn test_migration_v1_to_v2() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 17);
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
     // v3: case-insensitive duplicates collapsed to the newest, and the
     // unique index exists — so the ON CONFLICT upsert actually works on a
     // migrated (not fresh-baseline) database.
@@ -1569,7 +1569,7 @@ fn test_migration_v1_to_v2() {
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 17);
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
     let _ = std::fs::remove_file(&path);
 }
 
@@ -2512,6 +2512,53 @@ fn replace_with_unopenable_file_restores_the_original() {
 }
 
 #[test]
+fn reading_lists_work_on_a_fresh_database() {
+    let db = Storage::open_in_memory("k").unwrap();
+    db.save_work(&sample_work(1)).unwrap();
+    db.save_work(&sample_work(2)).unwrap();
+    let id = db.create_reading_list("Later").unwrap();
+    db.add_to_reading_list(id, 1).unwrap();
+    db.add_to_reading_list(id, 2).unwrap();
+    assert_eq!(db.get_reading_list_items(id).unwrap(), vec![1, 2]);
+    assert_eq!(db.get_reading_lists_for_work(2).unwrap(), vec![id]);
+    let lists = db.get_reading_lists().unwrap();
+    assert_eq!(lists.len(), 1);
+    assert_eq!(lists[0].1, "Later");
+    assert_eq!(lists[0].2, 2);
+    db.remove_from_reading_list(id, 1).unwrap();
+    assert_eq!(db.get_reading_list_items(id).unwrap(), vec![2]);
+    db.delete_reading_list(id).unwrap();
+    assert!(db.get_reading_lists().unwrap().is_empty());
+}
+
+/// A dev database stamped v17 before the column drop landed still carried
+/// the abandoned sync columns; v18 drops them so both shapes converge.
+#[test]
+fn reading_lists_work_on_a_database_that_drifted_at_v17() {
+    let path = temp_db_path("rl_drift");
+    {
+        let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+        db.conn
+            .execute_batch(
+                "ALTER TABLE reading_lists ADD COLUMN sync_id TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE reading_list_items ADD COLUMN list_sync_id TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 17;",
+            )
+            .unwrap();
+    }
+    let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+    assert!(!db.column_exists("reading_lists", "sync_id").unwrap());
+    assert!(!db.column_exists("reading_list_items", "list_sync_id").unwrap());
+    db.save_work(&sample_work(1)).unwrap();
+    let id = db.create_reading_list("Drifted").unwrap();
+    db.add_to_reading_list(id, 1).unwrap();
+    assert_eq!(db.get_reading_list_items(id).unwrap(), vec![1]);
+    drop(db);
+    library_file::remove_file_set(&path);
+}
+
+#[test]
 fn abandoned_sync_bookkeeping_is_dropped_on_migrate() {
     let path = temp_db_path("drop_sync");
     {
@@ -2530,7 +2577,7 @@ fn abandoned_sync_bookkeeping_is_dropped_on_migrate() {
             .unwrap();
     }
     let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 17);
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
     let leftovers: i64 = db
         .conn
         .query_row(

@@ -139,8 +139,15 @@ private struct TokenFilterSection: View {
         guard !term.isEmpty else { return [] }
         return allOptions
             .filter { $0.localizedCaseInsensitiveContains(term) && !selected.contains($0) }
-            .prefix(8)
-            .map { $0 }
+    }
+
+    /// Rows shown before the suggestion list scrolls.
+    private static let visibleSuggestionRows = 8
+
+    /// Fixed row height so the list can size to its matches up to the
+    /// visible cap, then scroll through the rest.
+    private var suggestionRowHeight: CGFloat {
+        ceil(NSLayoutManager().defaultLineHeight(for: MacFont.ui(12))) + 8
     }
 
     var body: some View {
@@ -167,11 +174,16 @@ private struct TokenFilterSection: View {
                 if let first = suggestions.first { add(first) }
             }
         if !suggestions.isEmpty {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(suggestions, id: \.self) { value in
-                    suggestionRow(value)
+            let matches = suggestions
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(matches, id: \.self) { value in
+                        suggestionRow(value)
+                    }
                 }
             }
+            .frame(height: suggestionRowHeight
+                   * CGFloat(min(matches.count, Self.visibleSuggestionRows)))
             .padding(.vertical, 4)
             .background(theme.surface2)
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -214,7 +226,7 @@ private struct TokenFilterSection: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 9)
-                .padding(.vertical, 4)
+                .frame(height: suggestionRowHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

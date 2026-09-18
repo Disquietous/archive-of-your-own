@@ -161,11 +161,11 @@ final class CloudLibrarySync {
     /// the caller's thread and bounded to local work: the manifest is only
     /// read if iCloud already delivered it.
     func flush() {
-        guard enabled, !busy, let bridge = appState?.bridge, bridge.isInitialized,
+        guard enabled, !busy, let bridge = appState?.bridge, bridge.isInitialized, let app = bridge.coreApp,
               let dir = syncFolder(), let key = SyncKeychain.load() else { return }
         let manifest = Self.readManifest(in: dir, startDownload: false)
         guard case .available(let json) = manifest else { return }
-        guard let verdict = try? bridge.cloudSyncEvaluate(manifestJson: json) else { return }
+        guard let verdict = try? app.cloudSyncEvaluate(manifestJson: json) else { return }
         switch verdict {
         case .noCloudCopy, .owned(needsPush: true): break
         default: return
@@ -175,7 +175,7 @@ final class CloudLibrarySync {
         task = UIApplication.shared.beginBackgroundTask { UIApplication.shared.endBackgroundTask(task) }
         defer { UIApplication.shared.endBackgroundTask(task) }
         #endif
-        if (try? Self.push(bridge: bridge, deviceName: deviceName, folder: dir, key: key)) != nil {
+        if (try? Self.push(app: app, deviceName: deviceName, folder: dir, key: key)) != nil {
             lastPushedAt = Date()
         }
     }
@@ -226,8 +226,7 @@ final class CloudLibrarySync {
     /// Replace the library with a backup (the current library is filed as
     /// a new backup first). Reports failure through `status`.
     func restoreBackup(id: String) {
-        guard !busy, let state = appState, state.bridge.isInitialized else { return }
-        let bridge = state.bridge
+        guard !busy, let state = appState, state.bridge.isInitialized, let app = state.bridge.coreApp else { return }
         busy = true
         status = .replacing
         // From here until the maps are re-read, progress writes describe
@@ -235,7 +234,7 @@ final class CloudLibrarySync {
         state.beginLibraryReplacement()
         Task { [weak self] in
             let result: Result<Void, Error> = await Task.detached(priority: .userInitiated) {
-                do { _ = try bridge.backupRestore(id: id); return .success(()) } catch { return .failure(error) }
+                do { _ = try app.backupRestore(id: id); return .success(()) } catch { return .failure(error) }
             }.value
             guard let self else { return }
             busy = false
@@ -330,7 +329,11 @@ final class CloudLibrarySync {
 
     private func syncFolder() -> URL? {
         guard let containerURL else { return nil }
-        let dir = containerURL.appendingPathComponent(Self.folderName, isDirectory: true)
+        return Self.syncFolder(in: containerURL)
+    }
+
+    nonisolated static func syncFolder(in containerURL: URL) -> URL {
+        let dir = containerURL.appendingPathComponent(folderName, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
@@ -339,7 +342,11 @@ final class CloudLibrarySync {
     /// Cycles never overlap; a request during a running cycle queues
     /// exactly one more.
     private func requestCycle(mintKeyIfFirst: Bool = false) {
-        guard enabled, let bridge = appState?.bridge, bridge.isInitialized, let dir = syncFolder() else { return }
+        // The core handle is captured here, on the main actor: a lock that
+        // lands mid-cycle can't pull the library out from under the work,
+        // and a nil handle can never be mistaken for a successful swap.
+        guard enabled, let bridge = appState?.bridge, bridge.isInitialized, let app = bridge.coreApp,
+              let dir = syncFolder() else { return }
         if cycleRunning || busy { cycleQueued = true; return }
         cycleRunning = true
         let deviceName = self.deviceName
@@ -357,7 +364,7 @@ final class CloudLibrarySync {
 
         Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                Self.runCycle(bridge: bridge, deviceName: deviceName, folder: dir,
+                Self.runCycle(app: app, deviceName: deviceName, folder: dir,
                               mintKeyIfFirst: mintKeyIfFirst, force: force,
                               resolution: resolution, lastPush: lastPush)
             }.value
@@ -416,14 +423,14 @@ final class CloudLibrarySync {
         var resolutionDone = false
     }
 
-    private enum ManifestRead {
+    enum ManifestRead {
         /// `nil` json means iCloud holds no copy.
         case available(String?)
         case downloading
         case unreadable(String)
     }
 
-    nonisolated private static func runCycle(bridge: RustBridge, deviceName: String, folder: URL,
+    nonisolated private static func runCycle(app: Ao3App, deviceName: String, folder: URL,
                                              mintKeyIfFirst: Bool, force: Bool,
                                              resolution: (Resolution, Int64)?, lastPush: Date?) -> CycleResult {
         var result = CycleResult(outcome: .idle)
@@ -458,8 +465,7 @@ final class CloudLibrarySync {
 
         let verdict: UCloudVerdict
         do {
-            guard let v = try bridge.cloudSyncEvaluate(manifestJson: json) else { return result }
-            verdict = v
+            verdict = try app.cloudSyncEvaluate(manifestJson: json)
         } catch {
             result.outcome = .failed(error.localizedDescription)
             return result
@@ -467,12 +473,12 @@ final class CloudLibrarySync {
 
         switch verdict {
         case .noCloudCopy:
-            pushIfDue(&result, bridge: bridge, deviceName: deviceName, folder: folder, key: key, force: true, lastPush: lastPush)
+            pushIfDue(&result, app: app, deviceName: deviceName, folder: folder, key: key, force: true, lastPush: lastPush)
             result.resolutionDone = true
 
         case .owned(let needsPush):
             if needsPush {
-                pushIfDue(&result, bridge: bridge, deviceName: deviceName, folder: folder, key: key, force: force, lastPush: lastPush)
+                pushIfDue(&result, app: app, deviceName: deviceName, folder: folder, key: key, force: force, lastPush: lastPush)
             }
             result.resolutionDone = true
 
@@ -485,7 +491,7 @@ final class CloudLibrarySync {
                     result.outcome = .conflict(conflict)
                     return result
                 }
-                carryOut(choice, conflict: conflict, into: &result, bridge: bridge, deviceName: deviceName, folder: folder, key: key)
+                carryOut(choice, conflict: conflict, into: &result, app: app, deviceName: deviceName, folder: folder, key: key)
             } else if dismissed {
                 result.outcome = .dismissedConflict(name)
             } else {
@@ -501,11 +507,11 @@ final class CloudLibrarySync {
         return result
     }
 
-    nonisolated private static func pushIfDue(_ result: inout CycleResult, bridge: RustBridge, deviceName: String,
+    nonisolated private static func pushIfDue(_ result: inout CycleResult, app: Ao3App, deviceName: String,
                                               folder: URL, key: String, force: Bool, lastPush: Date?) {
         if !force, let lastPush, Date().timeIntervalSince(lastPush) < pushInterval { return }
         do {
-            _ = try push(bridge: bridge, deviceName: deviceName, folder: folder, key: key)
+            _ = try push(app: app, deviceName: deviceName, folder: folder, key: key)
             result.pushedAt = Date()
         } catch {
             result.outcome = .failed("Couldn't update the iCloud copy: \(error.localizedDescription)")
@@ -516,7 +522,7 @@ final class CloudLibrarySync {
     /// the cloud library file itself: adoption swaps it in, overwriting
     /// files it away as a backup first.
     nonisolated private static func carryOut(_ choice: Resolution, conflict: Conflict, into result: inout CycleResult,
-                                             bridge: RustBridge, deviceName: String, folder: URL, key: String) {
+                                             app: Ao3App, deviceName: String, folder: URL, key: String) {
         let staged: URL
         switch stageCloudLibrary(in: folder) {
         case .success(let url): staged = url
@@ -532,15 +538,15 @@ final class CloudLibrarySync {
         do {
             switch choice {
             case .useCloudCopy:
-                _ = try bridge.cloudSyncAdopt(stagedPath: staged.path, cloudKey: key, expectedGeneration: conflict.generation)
+                _ = try app.cloudSyncAdopt(stagedPath: staged.path, cloudKey: key, expectedGeneration: conflict.generation)
                 result.libraryReplaced = true
                 result.backupsChanged = true
                 result.pushedAt = Date()
                 result.resolutionDone = true
             case .overwriteCloudCopy:
-                _ = try bridge.cloudSyncStashForeignCopy(stagedPath: staged.path, cloudKey: key, expectedGeneration: conflict.generation)
+                _ = try app.cloudSyncStashForeignCopy(stagedPath: staged.path, cloudKey: key, expectedGeneration: conflict.generation)
                 result.backupsChanged = true
-                _ = try push(bridge: bridge, deviceName: deviceName, folder: folder, key: key)
+                _ = try push(app: app, deviceName: deviceName, folder: folder, key: key)
                 result.pushedAt = Date()
                 result.resolutionDone = true
             case .notNow:
@@ -559,25 +565,40 @@ final class CloudLibrarySync {
         }
     }
 
-    private enum StageFailure: Error { case downloading, failed(String) }
+    enum StageFailure: Error { case downloading, failed(String) }
 
-    /// Copy the cloud library file into the core's directory, coordinated,
-    /// once iCloud has it fully local.
-    nonisolated private static func stageCloudLibrary(in folder: URL) -> Result<URL, StageFailure> {
+    /// Where the cloud library file stands on this device. Asks iCloud to
+    /// download it when it isn't local yet.
+    enum CloudFileState { case local, downloading, missing }
+
+    nonisolated static func cloudLibraryFileState(in folder: URL) -> CloudFileState {
         let fm = FileManager.default
         let url = folder.appendingPathComponent(libraryFileName)
         let placeholder = folder.appendingPathComponent(".\(libraryFileName).icloud")
         if !fm.fileExists(atPath: url.path) {
             if fm.fileExists(atPath: placeholder.path) {
                 try? fm.startDownloadingUbiquitousItem(at: url)
-                return .failure(.downloading)
+                return .downloading
             }
-            return .failure(.failed("The iCloud copy's library file is missing."))
+            return .missing
         }
         if let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
            let s = values.ubiquitousItemDownloadingStatus, s != .current {
             try? fm.startDownloadingUbiquitousItem(at: url)
-            return .failure(.downloading)
+            return .downloading
+        }
+        return .local
+    }
+
+    /// Copy the cloud library file into the core's directory, coordinated,
+    /// once iCloud has it fully local.
+    nonisolated static func stageCloudLibrary(in folder: URL) -> Result<URL, StageFailure> {
+        let fm = FileManager.default
+        let url = folder.appendingPathComponent(libraryFileName)
+        switch cloudLibraryFileState(in: folder) {
+        case .downloading: return .failure(.downloading)
+        case .missing: return .failure(.failed("The iCloud copy's library file is missing."))
+        case .local: break
         }
         let staged = RustBridge.stateDirectory().appendingPathComponent("cloud-incoming.aoyodb")
         try? fm.removeItem(at: staged)
@@ -594,7 +615,7 @@ final class CloudLibrarySync {
     /// The manifest as iCloud currently has it. With `startDownload`, a
     /// not-yet-local manifest is requested and reported as downloading;
     /// without it (the quit-time flush) it simply isn't available.
-    nonisolated private static func readManifest(in folder: URL, startDownload: Bool) -> ManifestRead {
+    nonisolated static func readManifest(in folder: URL, startDownload: Bool) -> ManifestRead {
         let fm = FileManager.default
         let url = folder.appendingPathComponent(manifestFileName)
         let placeholder = folder.appendingPathComponent(".\(manifestFileName).icloud")
@@ -625,18 +646,16 @@ final class CloudLibrarySync {
     /// in that order, so a reader never pairs a new manifest with an old
     /// file for long — and only then tell the core the push happened.
     @discardableResult
-    nonisolated private static func push(bridge: RustBridge, deviceName: String, folder: URL, key: String) throws -> Int64 {
+    nonisolated private static func push(app: Ao3App, deviceName: String, folder: URL, key: String) throws -> Int64 {
         let staging = RustBridge.stateDirectory().appendingPathComponent("cloud-export.aoyodb")
         defer { try? FileManager.default.removeItem(at: staging) }
-        guard let export = try bridge.cloudSyncExport(stagingPath: staging.path, cloudKey: key, deviceName: deviceName) else {
-            throw NSError(domain: "CloudLibrarySync", code: 1, userInfo: [NSLocalizedDescriptionKey: "The library isn't open."])
-        }
+        let export = try app.cloudSyncExport(stagingPath: staging.path, cloudKey: key, deviceName: deviceName)
         try coordinatedReplace(at: folder.appendingPathComponent(libraryFileName), with: staging)
         let manifestTmp = RustBridge.stateDirectory().appendingPathComponent("cloud-manifest.json")
         try Data(export.manifestJson.utf8).write(to: manifestTmp, options: .atomic)
         defer { try? FileManager.default.removeItem(at: manifestTmp) }
         try coordinatedReplace(at: folder.appendingPathComponent(manifestFileName), with: manifestTmp)
-        bridge.cloudSyncMarkPushed(generation: export.generation)
+        try app.cloudSyncMarkPushed(generation: export.generation)
         return export.generation
     }
 

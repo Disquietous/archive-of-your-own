@@ -7,12 +7,14 @@ enum SearchFormCache {
     private static let sessionID = "persistent"
     private static let key = "searchFormFields"
 
+    @MainActor
     static func load(_ bridge: RustBridge) -> [UFormField]? {
         guard let json = bridge.getSessionCache(key: key, sessionId: sessionID),
               let fields = decode(json), !fields.isEmpty else { return nil }
         return fields
     }
 
+    @MainActor
     static func store(_ fields: [UFormField], _ bridge: RustBridge) {
         guard let json = encode(fields) else { return }
         bridge.setSessionCache(key: key, data: json, sessionId: sessionID)

@@ -142,26 +142,124 @@ fn io_err(what: &str, e: std::io::Error) -> AO3Error {
     storage_err(format!("{what}: {e}"))
 }
 
+// Sidecar and Backups/ live in the state directory (the database's
+// parent). These helpers take the directory rather than an `AO3App` so
+// the first-launch bootstrap — which runs before any library is open —
+// shares them.
+
+fn sidecar_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(SIDECAR_NAME)
+}
+
+fn backups_dir_in(state_dir: &Path) -> PathBuf {
+    state_dir.join(BACKUPS_DIR)
+}
+
+/// The sidecar as written, or defaults when absent. Never mints.
+fn read_sync_state(state_dir: &Path) -> SyncState {
+    match std::fs::read(sidecar_path(state_dir)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => SyncState::default(),
+    }
+}
+
+fn write_sync_state_to(state_dir: &Path, state: &SyncState) -> Result<(), AO3Error> {
+    let json = serde_json::to_vec_pretty(state).map_err(|e| storage_err(e.to_string()))?;
+    let path = sidecar_path(state_dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| io_err("write sync state", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| io_err("commit sync state", e))
+}
+
+/// Verify a staged cloud copy opens with the sync key, is not from a
+/// newer app, and carries the generation the manifest promised (a
+/// mismatch means iCloud has not finished delivering the file that goes
+/// with the manifest we read). Returns the writer's device name.
+fn check_staged_copy(staged: &Path, cloud_key: &str, expected_generation: i64) -> Result<String, AO3Error> {
+    let conn = library_file::open_closed(staged, cloud_key).map_err(AO3Error::from)?;
+    let version = library_file::user_version(&conn).map_err(AO3Error::from)?;
+    if version > Storage::SCHEMA_VERSION {
+        return Err(storage_err(format!(
+            "the iCloud copy was written by a newer app (schema v{version}); update this app first"
+        )));
+    }
+    let embedded = library_file::read_embedded(&conn).map_err(AO3Error::from)?;
+    drop(conn);
+    let generation: i64 = embedded
+        .get(&format!("{EMBED_PREFIX}generation"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if generation != expected_generation {
+        return Err(storage_err("the iCloud copy is still updating; try again in a moment"));
+    }
+    Ok(embedded
+        .get(&format!("{EMBED_PREFIX}device_name"))
+        .cloned()
+        .unwrap_or_default())
+}
+
+fn backup_info_in(state_dir: &Path, id: &str) -> Option<UBackupInfo> {
+    let dir = backups_dir_in(state_dir);
+    let db = dir.join(format!("{id}.db"));
+    let size = std::fs::metadata(&db).ok()?.len();
+    let meta: BackupMeta = std::fs::read(dir.join(format!("{id}.json")))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    Some(UBackupInfo {
+        id: id.to_string(),
+        created_at: if meta.created_at > 0 { meta.created_at } else { id.parse().unwrap_or(0) },
+        reason: meta.reason,
+        source_device: meta.source_device,
+        size_bytes: size,
+    })
+}
+
+/// Every backup under the state directory, newest first.
+fn list_backups_in(state_dir: &Path) -> Vec<UBackupInfo> {
+    let dir = backups_dir_in(state_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<UBackupInfo> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let id = name.strip_suffix(".db")?;
+            backup_info_in(state_dir, id)
+        })
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out
+}
+
+/// 16 random bytes as hex from a closed library's CSPRNG — the device id
+/// for a sidecar written before any `Storage` exists.
+fn random_hex_from(conn: &rusqlite::Connection) -> Result<String, AO3Error> {
+    conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))
+        .map_err(|e| storage_err(e.to_string()))
+}
+
+fn state_dir_of(db_path: &Path) -> PathBuf {
+    db_path.parent().map(Path::to_path_buf).unwrap_or_else(|| db_path.to_path_buf())
+}
+
 impl AO3App {
-    fn sidecar_path(&self) -> PathBuf {
-        Path::new(&self.state_dir).join(SIDECAR_NAME)
+    fn state_path(&self) -> &Path {
+        Path::new(&self.state_dir)
     }
 
     fn backups_dir(&self) -> PathBuf {
-        Path::new(&self.state_dir).join(BACKUPS_DIR)
+        backups_dir_in(self.state_path())
     }
 
     fn staging_path(&self, name: &str) -> PathBuf {
-        Path::new(&self.state_dir).join(name)
+        self.state_path().join(name)
     }
 
     /// Load the sidecar, minting a device id on first use.
     fn sync_state(&self, storage: &Storage) -> Result<SyncState, AO3Error> {
-        let path = self.sidecar_path();
-        let mut state: SyncState = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => SyncState::default(),
-        };
+        let mut state = read_sync_state(self.state_path());
         if state.device_id.is_empty() {
             state.device_id = storage.random_hex(16).map_err(AO3Error::from)?;
             self.write_sync_state(&state)?;
@@ -170,38 +268,7 @@ impl AO3App {
     }
 
     fn write_sync_state(&self, state: &SyncState) -> Result<(), AO3Error> {
-        let json = serde_json::to_vec_pretty(state).map_err(|e| storage_err(e.to_string()))?;
-        let path = self.sidecar_path();
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json).map_err(|e| io_err("write sync state", e))?;
-        std::fs::rename(&tmp, &path).map_err(|e| io_err("commit sync state", e))
-    }
-
-    /// Verify a staged cloud copy opens with the sync key, is not from a
-    /// newer app, and carries the generation the manifest promised (a
-    /// mismatch means iCloud has not finished delivering the file that
-    /// goes with the manifest we read). Returns the writer's device name.
-    fn check_staged_copy(&self, staged: &Path, cloud_key: &str, expected_generation: i64) -> Result<String, AO3Error> {
-        let conn = library_file::open_closed(staged, cloud_key).map_err(AO3Error::from)?;
-        let version = library_file::user_version(&conn).map_err(AO3Error::from)?;
-        if version > Storage::SCHEMA_VERSION {
-            return Err(storage_err(format!(
-                "the iCloud copy was written by a newer app (schema v{version}); update this app first"
-            )));
-        }
-        let embedded = library_file::read_embedded(&conn).map_err(AO3Error::from)?;
-        drop(conn);
-        let generation: i64 = embedded
-            .get(&format!("{EMBED_PREFIX}generation"))
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        if generation != expected_generation {
-            return Err(storage_err("the iCloud copy is still updating; try again in a moment"));
-        }
-        Ok(embedded
-            .get(&format!("{EMBED_PREFIX}device_name"))
-            .cloned()
-            .unwrap_or_default())
+        write_sync_state_to(self.state_path(), state)
     }
 
     fn new_backup_slot(&self, reason: &str, source_device: &str) -> Result<(String, PathBuf), AO3Error> {
@@ -218,20 +285,7 @@ impl AO3App {
     }
 
     fn backup_info(&self, id: &str) -> Option<UBackupInfo> {
-        let dir = self.backups_dir();
-        let db = dir.join(format!("{id}.db"));
-        let size = std::fs::metadata(&db).ok()?.len();
-        let meta: BackupMeta = std::fs::read(dir.join(format!("{id}.json")))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        Some(UBackupInfo {
-            id: id.to_string(),
-            created_at: if meta.created_at > 0 { meta.created_at } else { id.parse().unwrap_or(0) },
-            reason: meta.reason,
-            source_device: meta.source_device,
-            size_bytes: size,
-        })
+        backup_info_in(self.state_path(), id)
     }
 
     /// Re-encrypt every backup from `old` to `new` so a library password
@@ -244,6 +298,108 @@ impl AO3App {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// First-launch bootstrap: no library exists yet, but iCloud or Backups/
+// may hold one. These run before any `AO3App` — the platform gate calls
+// them with the paths it would otherwise create an empty database at.
+// None of them ever overwrites an existing library file.
+// ---------------------------------------------------------------------------
+
+fn require_no_library(db_path: &Path) -> Result<(), AO3Error> {
+    if db_path.exists() {
+        return Err(storage_err(format!("a library already exists at {}", db_path.display())));
+    }
+    Ok(())
+}
+
+/// The manifest beside a cloud copy, decoded for display (who wrote it,
+/// when, which schema). Fails on an unreadable manifest.
+#[uniffi::export]
+pub fn cloud_manifest_parse(manifest_json: String) -> Result<UCloudManifest, AO3Error> {
+    serde_json::from_str(&manifest_json).map_err(|e| storage_err(format!("iCloud manifest: {e}")))
+}
+
+/// Backups a device with no library could restore — whatever Backups/
+/// still holds beside `db_path` (a library that vanished after a crash or
+/// a deleted file leaves these behind). Newest first.
+#[uniffi::export]
+pub fn library_bootstrap_backups(db_path: String) -> Vec<UBackupInfo> {
+    list_backups_in(&state_dir_of(Path::new(&db_path)))
+}
+
+/// Start this device's library from the staged iCloud copy: verify it
+/// against the manifest's generation, re-key it from the sync key to the
+/// local `passphrase`, move it to `db_path`, and write a sidecar that
+/// makes this device current with that generation (so the next local
+/// change pushes rather than prompting). Sync is left enabled — the user
+/// chose the cloud copy. The caller then opens the library as usual.
+#[uniffi::export]
+pub fn library_bootstrap_from_cloud(
+    db_path: String,
+    staged_path: String,
+    cloud_key: String,
+    expected_generation: i64,
+    passphrase: String,
+) -> Result<(), AO3Error> {
+    let db_path = PathBuf::from(&db_path);
+    let staged = PathBuf::from(&staged_path);
+    require_no_library(&db_path)?;
+    let writer = check_staged_copy(&staged, &cloud_key, expected_generation)?;
+    library_file::rekey_file(&staged, &cloud_key, &passphrase).map_err(AO3Error::from)?;
+    let state_dir = state_dir_of(&db_path);
+    std::fs::create_dir_all(&state_dir).map_err(|e| io_err("create library dir", e))?;
+    std::fs::rename(&staged, &db_path).map_err(|e| io_err("move iCloud copy into place", e))?;
+    library_file::remove_file_set(&staged);
+
+    let mut state = read_sync_state(&state_dir);
+    if state.device_id.is_empty() {
+        let conn = library_file::open_closed(&db_path, &passphrase).map_err(AO3Error::from)?;
+        state.device_id = random_hex_from(&conn)?;
+    }
+    state.enabled = true;
+    state.last_pushed_generation = expected_generation;
+    state.known_cloud_generation = state.known_cloud_generation.max(expected_generation);
+    state.last_push_at = now_ms();
+    state.dismissed_generation = 0;
+    write_sync_state_to(&state_dir, &state)?;
+    log_info!("sync", "bootstrapped library from iCloud copy gen {} from {}", expected_generation, writer);
+    Ok(())
+}
+
+/// Start this device's library from backup `id` (the backup stays). The
+/// backup must open with `passphrase` — the key it was made under. A
+/// restored library is a new lineage for iCloud, so any ownership mark
+/// in the sidecar is dropped. The caller then opens the library as usual.
+#[uniffi::export]
+pub fn library_bootstrap_from_backup(db_path: String, id: String, passphrase: String) -> Result<(), AO3Error> {
+    let db_path = PathBuf::from(&db_path);
+    require_no_library(&db_path)?;
+    let state_dir = state_dir_of(&db_path);
+    let source = backups_dir_in(&state_dir).join(format!("{id}.db"));
+    let conn = library_file::open_closed(&source, &passphrase)
+        .map_err(|_| storage_err("this backup was made under a different library password and can't be opened"))?;
+    let version = library_file::user_version(&conn).map_err(AO3Error::from)?;
+    drop(conn);
+    if version > Storage::SCHEMA_VERSION {
+        return Err(storage_err(format!("this backup was made by a newer app (schema v{version})")));
+    }
+    let incoming = state_dir.join("restore.incoming");
+    library_file::remove_file_set(&incoming);
+    std::fs::copy(&source, &incoming).map_err(|e| io_err("copy backup", e))?;
+    if let Err(e) = std::fs::rename(&incoming, &db_path) {
+        library_file::remove_file_set(&incoming);
+        return Err(io_err("move backup copy into place", e));
+    }
+    let mut state = read_sync_state(&state_dir);
+    if sidecar_path(&state_dir).exists() {
+        state.last_pushed_generation = 0;
+        state.last_push_at = 0;
+        write_sync_state_to(&state_dir, &state)?;
+    }
+    log_info!("backup", "bootstrapped library from backup {}", id);
+    Ok(())
 }
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
@@ -362,7 +518,7 @@ impl AO3App {
         let staged = PathBuf::from(&staged_path);
         let mut s = self.storage.blocking_lock();
         let mut state = self.sync_state(&s)?;
-        let writer = self.check_staged_copy(&staged, &cloud_key, expected_generation)?;
+        let writer = check_staged_copy(&staged, &cloud_key, expected_generation)?;
         library_file::rekey_file(&staged, &cloud_key, s.passphrase()).map_err(AO3Error::from)?;
         let (id, backup_path) = self.new_backup_slot("Before using the iCloud copy", "")?;
         if let Err(e) = s.replace_with(&staged, &backup_path) {
@@ -385,7 +541,7 @@ impl AO3App {
     pub fn cloud_sync_stash_foreign_copy(&self, staged_path: String, cloud_key: String, expected_generation: i64) -> Result<UBackupInfo, AO3Error> {
         let staged = PathBuf::from(&staged_path);
         let s = self.storage.blocking_lock();
-        let writer = self.check_staged_copy(&staged, &cloud_key, expected_generation)?;
+        let writer = check_staged_copy(&staged, &cloud_key, expected_generation)?;
         library_file::rekey_file(&staged, &cloud_key, s.passphrase()).map_err(AO3Error::from)?;
         let (id, backup_path) = self.new_backup_slot("iCloud copy replaced by this device", &writer)?;
         if let Err(e) = std::fs::rename(&staged, &backup_path) {
@@ -400,20 +556,7 @@ impl AO3App {
 
     /// Every backup on this device, newest first.
     pub fn backups_list(&self) -> Result<Vec<UBackupInfo>, AO3Error> {
-        let dir = self.backups_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(Vec::new());
-        };
-        let mut out: Vec<UBackupInfo> = entries
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                let id = name.strip_suffix(".db")?;
-                self.backup_info(id)
-            })
-            .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(out)
+        Ok(list_backups_in(self.state_path()))
     }
 
     /// Replace the live library with backup `id` (the backup itself stays;
@@ -459,5 +602,142 @@ impl AO3App {
         library_file::remove_file_set(&db);
         let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::*;
+
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ao3_bootstrap_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A staged cloud copy as the transport would hand it in: an export
+    /// keyed with the sync key, stamped with generation and writer.
+    fn stage_cloud_copy(dir: &Path, generation: i64) -> PathBuf {
+        let src = dir.join("source.db");
+        let store = Storage::open(src.to_str().unwrap(), "src-key").unwrap();
+        store.set_state("who", "cloud").unwrap();
+        let staged = dir.join("cloud-incoming.aoyodb");
+        let gen_s = generation.to_string();
+        store
+            .export_copy(
+                &staged,
+                "cloud-key",
+                &[
+                    (&format!("{EMBED_PREFIX}generation"), gen_s.as_str()),
+                    (&format!("{EMBED_PREFIX}device_name"), "Other Mac"),
+                ],
+            )
+            .unwrap();
+        drop(store);
+        library_file::remove_file_set(&src);
+        staged
+    }
+
+    #[test]
+    fn bootstrap_from_cloud_places_rekeyed_copy_and_marks_this_device_current() {
+        let dir = fresh_dir("cloud");
+        let db_path = dir.join("library.db");
+        let staged = stage_cloud_copy(&dir, 7);
+
+        library_bootstrap_from_cloud(
+            db_path.to_string_lossy().to_string(),
+            staged.to_string_lossy().to_string(),
+            "cloud-key".into(),
+            7,
+            "local-pass".into(),
+        )
+        .unwrap();
+
+        assert!(!staged.exists(), "staged copy is consumed");
+        let store = Storage::open(db_path.to_str().unwrap(), "local-pass").unwrap();
+        assert_eq!(store.get_state("who").unwrap().as_deref(), Some("cloud"));
+        drop(store);
+        let state = read_sync_state(&dir);
+        assert!(state.enabled);
+        assert!(!state.device_id.is_empty());
+        assert_eq!(state.last_pushed_generation, 7);
+        assert_eq!(state.known_cloud_generation, 7);
+        assert!(state.last_push_at > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_from_cloud_rejects_generation_mismatch_and_existing_library() {
+        let dir = fresh_dir("cloud_reject");
+        let db_path = dir.join("library.db");
+        let staged = stage_cloud_copy(&dir, 3);
+        let err = library_bootstrap_from_cloud(
+            db_path.to_string_lossy().to_string(),
+            staged.to_string_lossy().to_string(),
+            "cloud-key".into(),
+            4,
+            "local-pass".into(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("still updating"));
+        assert!(staged.exists(), "a rejected copy is left for the next attempt");
+        assert!(!db_path.exists());
+
+        std::fs::write(&db_path, b"existing").unwrap();
+        let err = library_bootstrap_from_cloud(
+            db_path.to_string_lossy().to_string(),
+            staged.to_string_lossy().to_string(),
+            "cloud-key".into(),
+            3,
+            "local-pass".into(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("already exists"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_from_backup_copies_it_into_place_and_keeps_the_backup() {
+        let dir = fresh_dir("backup");
+        let db_path = dir.join("library.db");
+        let backups = backups_dir_in(&dir);
+        std::fs::create_dir_all(&backups).unwrap();
+        let backup_db = backups.join("1700000000000.db");
+        {
+            let store = Storage::open(backup_db.to_str().unwrap(), "k").unwrap();
+            store.set_state("who", "backup").unwrap();
+        }
+        std::fs::write(backups.join("1700000000000.json"), br#"{"created_at":1700000000000,"reason":"Before using the iCloud copy","source_device":""}"#).unwrap();
+        write_sync_state_to(&dir, &SyncState { device_id: "dev".into(), enabled: true, last_push_at: 5, last_pushed_generation: 9, known_cloud_generation: 9, dismissed_generation: 0 }).unwrap();
+
+        let listed = library_bootstrap_backups(db_path.to_string_lossy().to_string());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "1700000000000");
+        assert_eq!(listed[0].reason, "Before using the iCloud copy");
+
+        let wrong = library_bootstrap_from_backup(db_path.to_string_lossy().to_string(), "1700000000000".into(), "nope".into());
+        assert!(format!("{:?}", wrong.unwrap_err()).contains("different library password"));
+        assert!(!db_path.exists());
+
+        library_bootstrap_from_backup(db_path.to_string_lossy().to_string(), "1700000000000".into(), "k".into()).unwrap();
+        let store = Storage::open(db_path.to_str().unwrap(), "k").unwrap();
+        assert_eq!(store.get_state("who").unwrap().as_deref(), Some("backup"));
+        drop(store);
+        assert!(backup_db.exists(), "the backup itself stays");
+        let state = read_sync_state(&dir);
+        assert_eq!(state.device_id, "dev");
+        assert!(state.enabled);
+        assert_eq!(state.last_pushed_generation, 0, "restored library is a new lineage");
+        assert_eq!(state.last_push_at, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cloud_manifest_parse_reads_the_transport_manifest() {
+        let m = cloud_manifest_parse(r#"{"format":1,"device_id":"d","device_name":"Phone","written_at":5,"generation":2,"schema_version":18,"db_size":10}"#.into()).unwrap();
+        assert_eq!(m.device_name, "Phone");
+        assert_eq!(m.generation, 2);
+        assert!(cloud_manifest_parse("{".into()).is_err());
     }
 }

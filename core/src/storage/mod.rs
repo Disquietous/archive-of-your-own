@@ -250,7 +250,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 17;
+    pub(crate) const SCHEMA_VERSION: u32 = 18;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -305,6 +305,11 @@ impl Storage {
                 15 => self.migrate_v15(),
                 16 => self.drop_abandoned_sync_bookkeeping(),
                 17 => self.drop_abandoned_sync_bookkeeping(),
+                // v18: databases stamped 16/17 under the unreleased row-sync
+                // schema still carried its columns (the drop landed after
+                // they were stamped); run the drop once more so every
+                // library at 18 has one shape.
+                18 => self.drop_abandoned_sync_bookkeeping(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
