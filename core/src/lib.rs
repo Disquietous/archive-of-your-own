@@ -1,3 +1,5 @@
+#[cfg(feature = "tor")]
+mod arti_trace;
 pub mod error;
 pub mod models;
 pub mod storage;
@@ -18,6 +20,8 @@ pub fn init_logging(db_path: &str, passphrase: &str) {
         })
     {
         let _ = GLOBAL_LOG_DB.set(std::sync::Mutex::new(conn));
+        #[cfg(feature = "tor")]
+        arti_trace::install();
     }
 }
 

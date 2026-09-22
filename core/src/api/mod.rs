@@ -183,7 +183,9 @@ impl AO3App {
         Fut: std::future::Future<Output = Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AO3Error>> + Send + 'static,
     {
         let kind = OpKind::Fetch { label: key.to_string() };
-        self.run_on_runtime(move |client, storage| async move {
+        // Registered under the caller's op id so `cancel_operation` can
+        // abort the page in flight (a crawl's Cancel button).
+        self.run_on_runtime_for(op_id, move |client, storage| async move {
             let (works, has_next, total, found) = recovery::with_recovery_as(
                 client, storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),

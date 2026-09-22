@@ -24,6 +24,11 @@ struct WorkListFilterView: View {
                 filterField("Kudos (e.g. >1000)", text: filter.kudos)
                 filterField("Words (e.g. <50000)", text: filter.words)
             }
+            Toggle("Completed", isOn: filter.completed)
+                .toggleStyle(.checkbox)
+                .font(Font(MacFont.ui(12.5, weight: .medium)))
+                .foregroundStyle(theme.ink2)
+                .help("Only works whose posted chapters equal the total (32/32).")
 
             TokenFilterSection(theme: theme, label: "FANDOM",
                                placeholder: "Type to add a fandom…",

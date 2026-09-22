@@ -128,13 +128,16 @@ async fn handle_socks_connection(
             s
         }
         Ok(Err(e)) => {
-            log_debug!("socks"," Failed to connect to {host}:{port} in {:?}: {e}", socks_start.elapsed());
+            // arti's top-level Display is generic ("failed to obtain exit
+            // circuit"); the cause — no usable guards, circuit timeout,
+            // stale directory — is only in the source chain.
+            log_info!("socks"," Failed to connect to {host}:{port} in {:?}: {}", socks_start.elapsed(), error_chain(&e));
             let reply = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
             stream.write_all(&reply).await?;
             return Err(format!("Tor connect failed: {e}").into());
         }
         Err(_) => {
-            log_debug!("socks"," Timed out connecting to {host}:{port} after 15s");
+            log_info!("socks"," Timed out connecting to {host}:{port} after 15s");
             let reply = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
             stream.write_all(&reply).await?;
             return Err("Tor stream timed out after 15s".into());
@@ -164,6 +167,19 @@ async fn handle_socks_connection(
     }
 
     Ok(())
+}
+
+/// An error with every `source()` beneath it, outermost first.
+#[cfg(feature = "tor")]
+pub(super) fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(cause) = source {
+        out.push_str(" <- ");
+        out.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    out
 }
 
 /// Capture the path of the circuit carrying `stream` into the process-global

@@ -63,7 +63,7 @@ final class AuthorProfileModel {
     /// changed (the caller drops its list filters then).
     @discardableResult
     func open(_ username: String) -> Bool {
-        worksTask.cancel()
+        cancelWorksRefresh()
         let changed = self.username != username
         if changed {
             resetPanes()
@@ -141,12 +141,18 @@ final class AuthorProfileModel {
         }
     }
 
+    /// Stop the crawl: flag it so no further page starts, and abort the
+    /// page in flight — without the abort the request (and any recovery
+    /// retries behind it) would run to completion first.
     func cancelWorksRefresh() {
         worksTask.cancel()
+        if let id = worksRefreshOp.opID {
+            appState.bridge.cancelOperation(id)
+        }
     }
 
     func close() {
-        worksTask.cancel()
+        cancelWorksRefresh()
         username = nil
         works = []
         worksError = nil

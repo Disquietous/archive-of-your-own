@@ -6,7 +6,9 @@ extension ULogEntry: Identifiable {}
 
 /// A read-only console over the encrypted debug-log sidecar database —
 /// the Rust core's log_debug!/log_info!/log_error! lines plus the Swift
-/// layer's writeLog breadcrumbs. Sortable and filterable on every field.
+/// layer's writeLog breadcrumbs. Filterable on every field (in SQL, via
+/// `DebugLogFeed`), paged in as the table scrolls, sortable within what's
+/// loaded.
 final class DebugLogWindowController: NSWindowController {
     convenience init(theme: AppTheme, appState: AppState) {
         let host = NSHostingController(rootView: DebugLogView(theme: theme, appState: appState))
@@ -29,17 +31,20 @@ struct DebugLogView: View {
     @Bindable var theme: AppTheme
     let appState: AppState
 
-    @State private var entries: [ULogEntry] = []
+    @State private var feed: DebugLogFeed
     @State private var selectedID: Int64?
-    @State private var filterText = ""
-    @State private var levelFilter = "All"
-    @State private var tagFilter = "All"
     /// Newest first by default; every column header re-sorts.
     @State private var sortOrder = [KeyPathComparator(\ULogEntry.id, order: .reverse)]
     @State private var autoRefresh = true
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private static let levels = ["All", "DEBUG", "INFO", "WARN", "ERROR"]
+
+    init(theme: AppTheme, appState: AppState) {
+        self.theme = theme
+        self.appState = appState
+        _feed = State(initialValue: DebugLogFeed(bridge: appState.bridge))
+    }
 
     /// Timestamps arrive as SQLite UTC "yyyy-MM-dd HH:mm:ss".
     private static let parseFormatter: DateFormatter = {
@@ -54,31 +59,16 @@ struct DebugLogView: View {
         return f
     }()
 
-    private var distinctTags: [String] {
-        var tags = Set(entries.map(\.tag))
-        tags.remove("")
-        return ["All"] + tags.sorted()
-    }
+    private var tagOptions: [String] { ["All"] + feed.tags }
 
-    private var filtered: [ULogEntry] {
-        let needle = filterText.trimmingCharacters(in: .whitespaces)
-        return entries.filter { e in
-            let levelOK = levelFilter == "All" || e.level == levelFilter
-            let tagOK = tagFilter == "All" || e.tag == tagFilter
-            // Free text matches ANY field.
-            let textOK = needle.isEmpty
-                || e.message.localizedCaseInsensitiveContains(needle)
-                || e.tag.localizedCaseInsensitiveContains(needle)
-                || e.level.localizedCaseInsensitiveContains(needle)
-                || localTime(e.timestamp).localizedCaseInsensitiveContains(needle)
-                || String(e.id).contains(needle)
-            return levelOK && tagOK && textOK
-        }
-        .sorted(using: sortOrder)
+    /// The loaded rows in the chosen column order. Sorting is local to
+    /// what's loaded; the feed itself is always newest first.
+    private var rows: [ULogEntry] {
+        feed.entries.sorted(using: sortOrder)
     }
 
     private var selected: ULogEntry? {
-        entries.first { $0.id == selectedID }
+        feed.entries.first { $0.id == selectedID }
     }
 
     var body: some View {
@@ -94,8 +84,8 @@ struct DebugLogView: View {
             }
         }
         .background(theme.bg)
-        .onAppear(perform: reload)
-        .onReceive(timer) { _ in if autoRefresh { reload() } }
+        .onAppear { feed.reload() }
+        .onReceive(timer) { _ in if autoRefresh { feed.poll() } }
     }
 
     private var toolbar: some View {
@@ -103,33 +93,33 @@ struct DebugLogView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(theme.ink3)
-            TextField("Filter any field", text: $filterText)
+            TextField("Filter any field", text: $feed.text)
                 .textFieldStyle(.plain)
                 .frame(maxWidth: 220)
-            Picker("Level", selection: $levelFilter) {
+            Picker("Level", selection: $feed.level) {
                 ForEach(Self.levels, id: \.self) { Text($0) }
             }
             .frame(maxWidth: 130)
-            Picker("Tag", selection: $tagFilter) {
-                ForEach(distinctTags, id: \.self) { Text($0) }
+            Picker("Tag", selection: $feed.tag) {
+                ForEach(tagOptions, id: \.self) { Text($0) }
             }
             .frame(maxWidth: 160)
             Spacer()
-            Text("\(filtered.count) of \(entries.count)")
+            Text("\(feed.entries.count) of \(feed.total)")
                 .font(Font(MacFont.ui(11)))
                 .foregroundStyle(theme.ink3)
+                .help("Rows loaded of rows matching the filter — more load as you scroll.")
             Toggle("Live", isOn: $autoRefresh)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
-            Button("Reload", action: reload)
+            Button("Reload") { feed.reload() }
             Button("Copy All") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(appState.bridge.dumpLogs(limit: 5000), forType: .string)
+                NSPasteboard.general.setString(appState.bridge.dumpLogs(), forType: .string)
             }
             Button("Clear") {
-                appState.bridge.clearLogs()
                 selectedID = nil
-                reload()
+                feed.clear()
             }
         }
         .padding(.horizontal, 12)
@@ -137,11 +127,15 @@ struct DebugLogView: View {
     }
 
     private var logTable: some View {
-        Table(filtered, selection: $selectedID, sortOrder: $sortOrder) {
+        Table(rows, selection: $selectedID, sortOrder: $sortOrder) {
             TableColumn("#", value: \.id) { e in
                 Text(String(e.id))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.ink3)
+                    // Table rows are lazy: a cell appearing means the row
+                    // scrolled into view — the feed pages in the next
+                    // batch once that nears the oldest loaded row.
+                    .onAppear { feed.rowAppeared(e) }
             }
             .width(56)
             TableColumn("Time", value: \.timestamp) { e in
@@ -227,10 +221,6 @@ struct DebugLogView: View {
     }
 
     // MARK: - Helpers
-
-    private func reload() {
-        entries = appState.bridge.getLogs(limit: 2000)
-    }
 
     private func localTime(_ sqliteUTC: String) -> String {
         guard let date = Self.parseFormatter.date(from: sqliteUTC) else { return sqliteUTC }

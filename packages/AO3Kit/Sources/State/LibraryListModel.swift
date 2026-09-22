@@ -213,7 +213,8 @@ final class LibraryListModel {
             kudosExpr: f.kudos,
             wordsExpr: f.words,
             tags: Array(f.tags),
-            fandoms: Array(f.fandoms))
+            fandoms: Array(f.fandoms),
+            completedOnly: f.completed)
     }
 
     /// Run a work list through the Rust core's filter/sort engine. Sample
@@ -259,12 +260,16 @@ final class LibraryListModel {
         var words = ""
         var tags: Set<String> = []
         var fandoms: Set<String> = []
+        /// Only works whose chapter count equals the declared total
+        /// (32/32); an unknown total (5/?) never matches.
+        var completed = false
         var isActive: Bool {
             !text.trimmingCharacters(in: .whitespaces).isEmpty
                 || !kudos.trimmingCharacters(in: .whitespaces).isEmpty
                 || !words.trimmingCharacters(in: .whitespaces).isEmpty
                 || !tags.isEmpty
                 || !fandoms.isEmpty
+                || completed
         }
     }
 

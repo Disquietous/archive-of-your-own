@@ -1,105 +1,45 @@
 import SwiftUI
 
 /// The debug log: the core's log entries, newest first, filterable by
-/// free text, level and tag, with live refresh, copy-all and clear.
-/// Tapping a row opens the full message. The iOS counterpart of the
-/// macOS `DebugLogView`.
+/// free text, level and tag (in SQL, via `DebugLogFeed`), paged in as the
+/// list scrolls, with live refresh, copy-all and clear. Tapping a row
+/// opens the full message. The iOS counterpart of the macOS `DebugLogView`.
 struct DebugLogScreen: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
 
-    @State private var entries: [ULogEntry] = []
+    /// Created on first appearance — the bridge comes from the environment.
+    @State private var feed: DebugLogFeed?
     @State private var selected: ULogEntry?
-    @State private var filterText = ""
-    @State private var levelFilter = "All"
-    @State private var tagFilter = "All"
     @State private var autoRefresh = true
     @State private var copied = false
 
     private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private static let levels = ["All", "DEBUG", "INFO", "WARN", "ERROR"]
 
-    private var distinctTags: [String] {
-        var tags = Set(entries.map(\.tag))
-        tags.remove("")
-        return ["All"] + tags.sorted()
-    }
-
-    private var filtered: [ULogEntry] {
-        let needle = filterText.trimmingCharacters(in: .whitespaces)
-        return entries.filter { e in
-            let levelOK = levelFilter == "All" || e.level == levelFilter
-            let tagOK = tagFilter == "All" || e.tag == tagFilter
-            // Free text matches ANY field.
-            let textOK = needle.isEmpty
-                || e.message.localizedCaseInsensitiveContains(needle)
-                || e.tag.localizedCaseInsensitiveContains(needle)
-                || e.level.localizedCaseInsensitiveContains(needle)
-                || Self.localTime(e.timestamp).localizedCaseInsensitiveContains(needle)
-                || String(e.id).contains(needle)
-            return levelOK && tagOK && textOK
-        }
-        .sorted { $0.id > $1.id }
-    }
-
     var body: some View {
         ZStack(alignment: .top) {
-            List {
-                Section {
-                    controls
-                        .listRowInsets(EdgeInsets(top: 4, leading: theme.pad, bottom: 8, trailing: theme.pad))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-                Section {
-                    if filtered.isEmpty {
-                        Text(entries.isEmpty ? "No log entries yet." : "No entries match the filter.")
-                            .font(Typography.uiSmall())
-                            .foregroundStyle(theme.ink3)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 24)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    } else {
-                        ForEach(filtered, id: \.id) { e in
-                            Button { selected = e } label: { row(e) }
-                                .buttonStyle(.plain)
-                                .listRowInsets(EdgeInsets(top: 8, leading: theme.pad, bottom: 8, trailing: theme.pad))
-                                .listRowBackground(Color.clear)
-                                .listRowSeparator(.visible)
-                        }
-                    }
-                } header: {
-                    Text("\(filtered.count) of \(entries.count)".uppercased())
-                        .font(Typography.sectionHeader())
-                        .tracking(0.08 * 13)
-                        .foregroundStyle(theme.ink3)
-                        .padding(.leading, theme.pad - 16)
-                }
+            if let feed {
+                content(feed)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .contentMargins(.top, ScreenChromeMetrics.height, for: .scrollContent)
-
             ScreenChrome(title: "Debug Log", subtitle: autoRefresh ? "Live" : "Paused") {
                 ChromeIconButton(symbol: autoRefresh ? "pause.circle" : "play.circle",
                                  tint: autoRefresh ? theme.accent : nil) {
                     autoRefresh.toggle()
                 }
                 .accessibilityLabel(autoRefresh ? "Pause live refresh" : "Resume live refresh")
-                ChromeIconButton(symbol: "arrow.clockwise") { reload() }
+                ChromeIconButton(symbol: "arrow.clockwise") { feed?.reload() }
                     .accessibilityLabel("Reload")
                 Menu {
                     Button {
-                        UIPasteboard.general.string = state.bridge.dumpLogs(limit: 5000)
+                        UIPasteboard.general.string = state.bridge.dumpLogs()
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
                     } label: {
                         Label(copied ? "Copied" : "Copy All", systemImage: copied ? "checkmark" : "doc.on.clipboard")
                     }
                     Button(role: .destructive) {
-                        state.bridge.clearLogs()
-                        reload()
+                        feed?.clear()
                     } label: {
                         Label("Clear Debug Log", systemImage: "trash")
                     }
@@ -112,20 +52,69 @@ struct DebugLogScreen: View {
             }
         }
         .libraryScreen()
-        .onAppear(perform: reload)
-        .onReceive(timer) { _ in if autoRefresh { reload() } }
+        .onAppear {
+            if feed == nil { feed = DebugLogFeed(bridge: state.bridge) }
+            feed?.reload()
+        }
+        .onReceive(timer) { _ in if autoRefresh { feed?.poll() } }
         .sheet(item: $selected) { e in
             DebugLogDetailSheet(entry: e)
                 .environment(theme)
         }
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ListFilterField(text: $filterText, placeholder: "Filter any field")
+    private func content(_ feed: DebugLogFeed) -> some View {
+        @Bindable var feed = feed
+        return List {
+            Section {
+                controls(feed)
+                    .listRowInsets(EdgeInsets(top: 4, leading: theme.pad, bottom: 8, trailing: theme.pad))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+            Section {
+                if feed.entries.isEmpty {
+                    Text(feed.total == 0 && feed.level == "All" && feed.tag == "All" && feed.text.isEmpty
+                         ? "No log entries yet." : "No entries match the filter.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 24)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                } else {
+                    ForEach(feed.entries, id: \.id) { e in
+                        Button { selected = e } label: { row(e) }
+                            .buttonStyle(.plain)
+                            .listRowInsets(EdgeInsets(top: 8, leading: theme.pad, bottom: 8, trailing: theme.pad))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.visible)
+                            // List rows are lazy: appearing means scrolled
+                            // into view — the feed pages in the next batch
+                            // once that nears the oldest loaded row.
+                            .onAppear { feed.rowAppeared(e) }
+                    }
+                }
+            } header: {
+                Text("\(feed.entries.count) of \(feed.total)".uppercased())
+                    .font(Typography.sectionHeader())
+                    .tracking(0.08 * 13)
+                    .foregroundStyle(theme.ink3)
+                    .padding(.leading, theme.pad - 16)
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .contentMargins(.top, ScreenChromeMetrics.height, for: .scrollContent)
+    }
+
+    private func controls(_ feed: DebugLogFeed) -> some View {
+        @Bindable var feed = feed
+        return VStack(alignment: .leading, spacing: 10) {
+            ListFilterField(text: $feed.text, placeholder: "Filter any field")
             HStack(spacing: 8) {
-                filterMenu("Level", selection: $levelFilter, options: Self.levels)
-                filterMenu("Tag", selection: $tagFilter, options: distinctTags)
+                filterMenu("Level", selection: $feed.level, options: Self.levels)
+                filterMenu("Tag", selection: $feed.tag, options: ["All"] + feed.tags)
             }
         }
     }
@@ -189,10 +178,6 @@ struct DebugLogScreen: View {
     }
 
     // MARK: - Helpers
-
-    private func reload() {
-        entries = state.bridge.getLogs(limit: 2000)
-    }
 
     /// Timestamps arrive as SQLite UTC "yyyy-MM-dd HH:mm:ss".
     private static let parseFormatter: DateFormatter = {

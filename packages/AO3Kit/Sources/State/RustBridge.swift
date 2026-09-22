@@ -1123,16 +1123,33 @@ final class RustBridge {
 
     // MARK: - Debug Log
 
-    func getLogs(limit: UInt32 = 500) -> [ULogEntry] {
+    /// Newest `limit` rows, oldest first; 0 = every row.
+    func getLogs(limit: UInt32 = 0) -> [ULogEntry] {
         (try? app?.getLogs(limit: limit)) ?? []
     }
 
-    func dumpLogs(limit: UInt32 = 1000) -> String {
+    /// `getLogs` as text; 0 = every row.
+    func dumpLogs(limit: UInt32 = 0) -> String {
         (try? app?.dumpLogs(limit: limit)) ?? ""
     }
 
     func clearLogs() {
         try? app?.clearLogs()
+    }
+
+    /// One page of the log: rows matching `query` with ids strictly between
+    /// `afterID` and `beforeID` (0 = unbounded), newest first, at most
+    /// `limit` (0 = all).
+    func queryLogs(_ query: ULogQuery, beforeID: Int64 = 0, afterID: Int64 = 0, limit: UInt32 = 0) -> [ULogEntry] {
+        (try? app?.queryLogs(query: query, beforeId: beforeID, afterId: afterID, limit: limit)) ?? []
+    }
+
+    func countLogs(_ query: ULogQuery) -> UInt64 {
+        app?.countLogs(query: query) ?? 0
+    }
+
+    func logTags() -> [String] {
+        app?.logTags() ?? []
     }
 
     func writeLog(level: String, tag: String, message: String) {

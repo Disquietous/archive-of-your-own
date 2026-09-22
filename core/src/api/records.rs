@@ -9,6 +9,16 @@ pub struct ULogEntry {
     pub message: String,
 }
 
+/// Debug-log viewer filter. Each field narrows when set: `level` and
+/// `tag` match exactly; `text` matches case-insensitively against any
+/// column (message, tag, level, timestamp, id).
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct ULogQuery {
+    pub level: Option<String>,
+    pub tag: Option<String>,
+    pub text: Option<String>,
+}
+
 /// One recorded HTTP request for the request-audit UI.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct URequestLogEntry {
@@ -797,6 +807,9 @@ pub struct UWorkListQuery {
     /// OR within the group: a work matches if it carries ANY selected tag.
     pub tags: Vec<String>,
     pub fandoms: Vec<String>,
+    /// Keep only works whose posted chapter count equals the declared
+    /// total (32/32). An unknown total (5/?) never matches.
+    pub completed_only: bool,
 }
 
 /// The filter dialog's suggestion pools for one work list.

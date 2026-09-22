@@ -9,7 +9,7 @@ crate-type = ["lib", "staticlib"]
 
 [features]
 default = []
-tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip", "tor-proto"]
+tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip", "tor-proto", "tracing", "tracing-subscriber"]
 # The uniffi-bindgen helper binary only. Keeping uniffi/cli behind a
 # feature keeps the 70s+ code-generator (uniffi_bindgen, goblin, askama,
 # clap, …) out of the library's dependency graph — measured as the bulk
@@ -42,6 +42,11 @@ tor-netdir = { version = "0.42", optional = true, features = ["geoip"] }
 tor-dirmgr = { version = "0.42", optional = true }
 # stream-ctrl exposes DataStream::client_stream_ctrl() -> tunnel -> real path
 tor-proto = { version = "0.42", optional = true, features = ["stream-ctrl"] }
+# arti reports guard/circuit/bootstrap trouble only through `tracing`; the
+# bridge in src/arti_trace.rs routes those events into the debug log. Both
+# crates are already in the graph via arti — this adds no new code.
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry", "std"] }
 
 [[bin]]
 name = "uniffi-bindgen"

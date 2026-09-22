@@ -193,7 +193,7 @@ impl AO3Client {
         .map_err(|_| AppError::TorError(
             "Tor bootstrap timed out after 90 seconds. Check your network connection.".to_string()
         ))?
-        .map_err(|e| AppError::TorError(format!("Tor bootstrap failed: {e}")))?;
+        .map_err(|e| AppError::TorError(format!("Tor bootstrap failed: {}", socks::error_chain(&e))))?;
 
         let tor = Arc::new(tor);
 

@@ -128,7 +128,10 @@ fn passes_list_filter(w: &WorkSummary, q: &UWorkListQuery) -> bool {
         || work_fandoms(w).iter().any(|f| q.fandoms.contains(f));
     let kudos_ok = matches_count(w.kudos as i64, &q.kudos_expr);
     let words_ok = matches_count(w.word_count as i64, &q.words_expr);
-    text_ok && tags_ok && fandoms_ok && kudos_ok && words_ok
+    // Chapter counts, not AO3's complete flag: 32/32 passes, 5/32 and 5/?
+    // do not.
+    let completed_ok = !q.completed_only || w.total_chapters == Some(w.chapter_count);
+    text_ok && tags_ok && fandoms_ok && kudos_ok && words_ok && completed_ok
 }
 
 /// ">" / "<" prefixed comparisons; a plain number means "at least".
@@ -199,6 +202,7 @@ mod tests {
             words_expr: String::new(),
             tags: vec![],
             fandoms: vec![],
+            completed_only: false,
         }
     }
 
@@ -276,6 +280,25 @@ mod tests {
         let works = vec![work(1, "Orphan", 0, 0, "", true, Rating::General, &[], &[])];
         let mut q = query();
         q.fandoms = vec![UNKNOWN_FANDOM.to_string()];
+        assert_eq!(filter_and_sort(works, &q), vec![1]);
+    }
+
+    #[test]
+    fn completed_only_compares_chapter_counts() {
+        let chapters = |id, count, total| {
+            let mut w = work(id, "Work", 0, 0, "", false, Rating::General, &[], &[]);
+            w.chapter_count = count;
+            w.total_chapters = total;
+            w
+        };
+        let works = vec![
+            chapters(1, 32, Some(32)),
+            chapters(2, 5, Some(32)),
+            chapters(3, 5, None),
+        ];
+        let mut q = query();
+        assert_eq!(filter_and_sort(works.clone(), &q), vec![1, 2, 3]);
+        q.completed_only = true;
         assert_eq!(filter_and_sort(works, &q), vec![1]);
     }
 }

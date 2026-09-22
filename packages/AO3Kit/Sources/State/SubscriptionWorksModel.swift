@@ -43,7 +43,7 @@ final class SubscriptionWorksModel {
     /// whether the target changed (the caller drops its list filter then).
     @discardableResult
     func open(subscriptionID: String, author: String, subType: String = "author") -> Bool {
-        task.cancel()
+        cancelRefresh()
         let changed = subId != subscriptionID
         title = author
         error = nil
@@ -118,12 +118,18 @@ final class SubscriptionWorksModel {
         }
     }
 
+    /// Stop the crawl: flag it so no further page starts, and abort the
+    /// page in flight — without the abort the request (and any recovery
+    /// retries behind it) would run to completion first.
     func cancelRefresh() {
         task.cancel()
+        if let id = refreshOp.opID {
+            appState.bridge.cancelOperation(id)
+        }
     }
 
     func close() {
-        task.cancel()
+        cancelRefresh()
         title = nil
         works = []
         error = nil

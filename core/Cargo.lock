@@ -133,6 +133,8 @@ dependencies = [
  "tor-netdir",
  "tor-proto",
  "tor-rtcompat",
+ "tracing",
+ "tracing-subscriber",
  "uniffi",
  "url",
 ]
