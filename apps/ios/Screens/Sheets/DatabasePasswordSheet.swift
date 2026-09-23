@@ -259,7 +259,7 @@ struct DatabasePasswordSheet: View {
         }
         // Verify by trying to open the DB with the entered password
         if !state.bridge.verifyPassword(password) {
-            error = "Wrong password."
+            error = state.bridge.lastOpenFailure?.message ?? "Wrong password."
             return
         }
         if state.bridge.removePassword() {

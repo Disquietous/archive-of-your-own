@@ -488,6 +488,14 @@ struct MacDatabaseUnlockView: View {
         if appState.bridge.open(userPassword: password) {
             RecoveryKey.resetFailureCount()
         } else {
+            // Only a rejected key is a password attempt. Anything else
+            // (schema newer than this build, damaged file) shows its real
+            // message and leaves the attempt counter and the typed
+            // password alone.
+            if let failure = appState.bridge.lastOpenFailure, failure != .wrongPassword {
+                error = failure.message
+                return
+            }
             RecoveryKey.recordFailure()
             if RecoveryKey.shouldWipe() {
                 RecoveryKey.wipeDatabase()
@@ -518,7 +526,7 @@ struct MacDatabaseUnlockView: View {
         if appState.bridge.open(userPassword: recovered) {
             RecoveryKey.resetFailureCount()
         } else {
-            error = "Recovery failed — database may be corrupted."
+            error = appState.bridge.lastOpenFailure?.message ?? "Recovery failed — database may be corrupted."
         }
     }
 }

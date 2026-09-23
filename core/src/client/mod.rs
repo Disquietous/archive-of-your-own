@@ -19,7 +19,7 @@ mod socks;
 
 pub use audit::{ActiveRequest, ActiveRequestGuard, RequestRecord, active_requests_snapshot,
                 drain_request_records, now_ms, push_request_record, redact_payload};
-pub use circuit::{CircuitHopInfo, current_circuit_hops};
+pub use circuit::{CircuitHopInfo, StreamInfo, current_circuit_hops, current_stream};
 pub use failure::FailureKind;
 pub use helpers::sniff_image_kind;
 
@@ -216,6 +216,7 @@ impl AO3Client {
 
         // A fresh bootstrap means any previously captured path is stale.
         circuit::clear_current_circuit_hops();
+        circuit::clear_current_stream();
 
         let port = local_addr.port();
         let proxy_url = format!("socks5h://127.0.0.1:{}", port);
@@ -504,6 +505,7 @@ impl AO3Client {
         // The captured circuit path belongs to the transport we just tore
         // down — never show it for a direct connection.
         circuit::clear_current_circuit_hops();
+        circuit::clear_current_stream();
         Ok(())
     }
 
@@ -604,6 +606,7 @@ impl AO3Client {
         // The old circuit's path no longer applies; the slot refills when the
         // first stream runs on the new isolated client.
         circuit::clear_current_circuit_hops();
+        circuit::clear_current_stream();
 
         Ok(())
     }

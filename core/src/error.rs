@@ -29,6 +29,12 @@ pub enum AppError {
 
     #[error("session_expired")]
     SessionExpired,
+
+    /// SQLCipher rejected the key: the first page read after `PRAGMA key`
+    /// came back "not a database". Distinct from every other open failure
+    /// (schema too new, file damaged) so the unlock UI can say which.
+    #[error("wrong_passphrase")]
+    WrongPassphrase,
 }
 
 impl From<rusqlite::Error> for AppError {

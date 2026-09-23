@@ -197,6 +197,9 @@ struct RequestLogView: View {
                         detailField("Response", bytes(e.responseBytes))
                     }
                     detailField("When", fullClock(e.startedMs))
+                    if let transport = e.transport {
+                        detailField("Transport", transport, mono: true)
+                    }
                     if let error = e.error {
                         detailField("Error", error, tint: Color(hex: "CE514D"))
                     }

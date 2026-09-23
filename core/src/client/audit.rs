@@ -16,6 +16,10 @@ pub struct RequestRecord {
     pub error: Option<String>,
     /// Redacted request payload (POST form params; credentials removed).
     pub payload: Option<String>,
+    /// The Tor stream that carried the request (see
+    /// `circuit::StreamInfo::summary`). None off Tor or when no stream was
+    /// observed for it.
+    pub transport: Option<String>,
 }
 
 static REQUEST_LOG: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<RequestRecord>>> =
@@ -77,6 +81,7 @@ impl AuditCtx {
             response_bytes,
             error,
             payload: self.payload.clone(),
+            transport: super::circuit::current_stream().map(|s| s.summary()),
         });
     }
 }

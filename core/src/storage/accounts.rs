@@ -209,16 +209,16 @@ impl Storage {
     #[allow(clippy::type_complexity)]
     pub fn insert_request_logs(
         &self,
-        records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>)],
+        records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>)],
         max_rows: Option<u64>,
     ) -> Result<(), AppError> {
-        for (started, method, url, status, dur, req_b, resp_b, error, payload) in records {
+        for (started, method, url, status, dur, req_b, resp_b, error, payload, transport) in records {
             self.conn.execute(
                 "INSERT INTO request_log
-                 (started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![*started as i64, method, url, *status as i64, *dur as i64,
-                        *req_b as i64, *resp_b as i64, error, payload],
+                        *req_b as i64, *resp_b as i64, error, payload, transport],
             ).map_err(map_sql)?;
         }
         if let Some(max) = max_rows.filter(|_| !records.is_empty()) {
@@ -260,9 +260,9 @@ impl Storage {
     pub fn get_request_logs(
         &self,
         limit: u32,
-    ) -> Result<Vec<(i64, u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>)>, AppError> {
+    ) -> Result<Vec<(i64, u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>)>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload
+            "SELECT id, started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport
              FROM request_log ORDER BY id DESC LIMIT ?1"
         ).map_err(map_sql)?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -277,6 +277,7 @@ impl Storage {
                 row.get::<_, i64>(7)? as u64,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)

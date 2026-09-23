@@ -216,6 +216,9 @@ impl AO3App {
                 move |client| {
                     let url = url_for_fetch.clone();
                     async move {
+                        // Inside the attempt closure so retries pace too —
+                        // not just the first request for each item.
+                        tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
                         let c = client.read().await;
                         let timeout = c.timeout_for_url(&url);
                         c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)

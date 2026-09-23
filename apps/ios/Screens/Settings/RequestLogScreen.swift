@@ -261,6 +261,9 @@ struct RequestLogDetailSheet: View {
                         field("Response", RequestLogScreen.bytes(entry.responseBytes))
                     }
                     field("When", RequestLogScreen.fullClock(entry.startedMs))
+                    if let transport = entry.transport {
+                        field("Transport", transport, mono: true)
+                    }
                     if let error = entry.error {
                         field("Error", error, tint: Color(hex: "CE514D"))
                     }

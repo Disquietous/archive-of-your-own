@@ -92,9 +92,47 @@ final class RustBridge {
 
     /// Open an existing database. For user-password DBs, pass the user's password.
     /// For auto-key DBs, pass nil to use the Keychain key.
+    /// Why the last `open`/`verifyPassword` failed. Only `.wrongPassword`
+    /// is a bad key; everything else (schema newer than this build, damaged
+    /// file, missing keychain item) carries the real message and must not
+    /// be counted as a password attempt.
+    enum DbOpenFailure: Equatable {
+        case wrongPassword
+        case other(String)
+
+        var message: String {
+            switch self {
+            case .wrongPassword: return "Wrong password."
+            case .other(let m): return m
+            }
+        }
+    }
+    var lastOpenFailure: DbOpenFailure?
+
+    /// The failure classification for an error thrown by `Ao3App`.
+    private static func classifyOpenError(_ error: Error) -> DbOpenFailure {
+        if case Ao3Error.WrongPassword = error { return .wrongPassword }
+        return .other(Self.describeOpenError(error))
+    }
+
+    /// The message inside the Rust error, without the Swift enum wrapper.
+    private static func describeOpenError(_ error: Error) -> String {
+        if let e = error as? Ao3Error {
+            switch e {
+            case .Storage(let m), .Network(let m), .Parse(let m), .NotFound(let m), .Http(_, let m):
+                return m
+            default:
+                return "\(e)"
+            }
+        }
+        return error.localizedDescription
+    }
+
     func open(userPassword: String? = nil) -> Bool {
+        lastOpenFailure = nil
         guard let key = userPassword ?? Self.autoKey() else {
             connectionError = "Could not read the database key from the Keychain. Grant keychain access and relaunch."
+            lastOpenFailure = .other(connectionError!)
             return false
         }
         let dbPath = Self.databasePath()
@@ -114,7 +152,10 @@ final class RustBridge {
             registerRecoveryHooks()
             return true
         } catch {
-            connectionError = error.localizedDescription
+            let failure = Self.classifyOpenError(error)
+            lastOpenFailure = failure
+            connectionError = failure.message
+            NSLog("[db] open failed: %@", failure.message)
             return false
         }
     }
@@ -227,6 +268,7 @@ final class RustBridge {
     /// Verify a password by trying to open the DB file with it.
     func verifyPassword(_ password: String) -> Bool {
         let dbPath = Self.databasePath()
+        lastOpenFailure = nil
         do {
             let testApp = try Ao3App(dbPath: dbPath, dbPassphrase: password)
             // If it opened successfully, the password is correct.
@@ -234,6 +276,7 @@ final class RustBridge {
             _ = testApp
             return true
         } catch {
+            lastOpenFailure = Self.classifyOpenError(error)
             return false
         }
     }

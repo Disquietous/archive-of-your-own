@@ -190,6 +190,18 @@ impl Storage {
     fn prepare_connection(conn: Connection, passphrase: &str) -> Result<Connection, AppError> {
         if !passphrase.is_empty() {
             conn.pragma_update(None, "key", passphrase).map_err(map_sql)?;
+            // SQLCipher only checks the key on the first page read. Do that
+            // read here and name the outcome, so a rejected key surfaces as
+            // WrongPassphrase and nothing else does (a schema that is newer
+            // than this build, or a damaged file, is a different error and
+            // the unlock UI must not count it as a bad password).
+            if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(())) {
+                return Err(match e {
+                    rusqlite::Error::SqliteFailure(f, _)
+                        if f.code == rusqlite::ErrorCode::NotADatabase => AppError::WrongPassphrase,
+                    other => map_sql(other),
+                });
+            }
         }
         conn.pragma_update(None, "journal_mode", "WAL").map_err(map_sql)?;
         // SQLite leaves foreign key enforcement off by default; the join
@@ -250,7 +262,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 18;
+    pub(crate) const SCHEMA_VERSION: u32 = 19;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -310,6 +322,7 @@ impl Storage {
                 // they were stamped); run the drop once more so every
                 // library at 18 has one shape.
                 18 => self.drop_abandoned_sync_bookkeeping(),
+                19 => self.add_request_log_transport(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -317,6 +330,44 @@ impl Storage {
             tx.commit()
                 .map_err(|e| migration_failed(next, e))?;
             version = next;
+        }
+        Ok(())
+    }
+
+    /// v19 — `request_log.transport`: the Tor stream that carried the
+    /// request (circuit id, exit/guard fingerprints, connect time, TLS
+    /// first-byte offsets), so the request log viewer shows which exit a
+    /// failure happened on. NULL off Tor. Fresh databases already get the
+    /// column from the baseline CREATE, hence the existence guard.
+    fn add_request_log_transport(&self) -> Result<(), AppError> {
+        // A pre-versioning library that never ran a request-logging build
+        // has no table at all; give it the current shape outright.
+        let exists: bool = self.conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_log'",
+                [], |r| r.get::<_, i64>(0),
+            )
+            .map_err(map_sql)? > 0;
+        if !exists {
+            self.conn.execute_batch(
+                "CREATE TABLE request_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_ms  INTEGER NOT NULL,
+                    method      TEXT NOT NULL,
+                    url         TEXT NOT NULL,
+                    status      INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    req_bytes   INTEGER NOT NULL,
+                    resp_bytes  INTEGER NOT NULL,
+                    error       TEXT,
+                    payload     TEXT,
+                    transport   TEXT
+                );",
+            ).map_err(map_sql)?;
+        } else if !self.column_exists("request_log", "transport")? {
+            self.conn
+                .execute("ALTER TABLE request_log ADD COLUMN transport TEXT", [])
+                .map_err(map_sql)?;
         }
         Ok(())
     }
@@ -1202,7 +1253,8 @@ impl Storage {
                     req_bytes   INTEGER NOT NULL,
                     resp_bytes  INTEGER NOT NULL,
                     error       TEXT,
-                    payload     TEXT
+                    payload     TEXT,
+                    transport   TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS custom_themes (

@@ -247,6 +247,8 @@ final class AppState {
 
     // Connection state
     var isTestingCircuit = false
+    /// A connectTor() is in progress; later callers wait for it.
+    var isConnectingTor = false
     var circuitAttempt = 0
     /// Count of user-initiated fetches currently in flight (retryOnTimeout
     /// wraps them all). The subscription checker yields between items while
@@ -533,6 +535,8 @@ final class AppState {
                 return "Cancelled."
             case .PasswordNeeded, .SessionExpired:
                 return "Session expired. Please re-enter your password."
+            case .WrongPassword:
+                return "Wrong password."
             }
         }
         return error.localizedDescription

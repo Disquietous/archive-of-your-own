@@ -2592,3 +2592,38 @@ fn abandoned_sync_bookkeeping_is_dropped_on_migrate() {
     drop(db);
     library_file::remove_file_set(&path);
 }
+
+#[test]
+fn rejected_key_is_wrong_passphrase_not_storage_error() {
+    let path = temp_db_path("wrong_key");
+    let path_str = path.to_string_lossy().to_string();
+    {
+        let db = Storage::open(&path_str, "right").unwrap();
+        assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+    }
+    match Storage::open(&path_str, "wrong") {
+        Err(AppError::WrongPassphrase) => {}
+        Err(other) => panic!("expected WrongPassphrase, got {other}"),
+        Ok(_) => panic!("wrong key opened the database"),
+    }
+    // The right key still opens it — the probe read has no side effects.
+    Storage::open(&path_str, "right").unwrap();
+    library_file::remove_file_set(&path);
+}
+
+#[test]
+fn request_log_transport_column_round_trips() {
+    let db = Storage::open_in_memory("").unwrap();
+    assert!(db.column_exists("request_log", "transport").unwrap());
+    let rows = vec![
+        (1_u64, "GET".to_string(), "https://x/a".to_string(), 200_u16, 5_u64, 1_u64, 2_u64, None, None,
+         Some("circ=Circ 1.1 exit=abcd1234 guard=ef567890 connect=200ms first_tx=+0ms first_rx=+230ms".to_string())),
+        (2_u64, "GET".to_string(), "https://x/b".to_string(), 0_u16, 5_u64, 1_u64, 0_u64, Some("timeout".to_string()), None, None),
+    ];
+    db.insert_request_logs(&rows, None).unwrap();
+    let got = db.get_request_logs(10).unwrap();
+    assert_eq!(got.len(), 2);
+    // Newest first.
+    assert_eq!(got[0].10, None);
+    assert_eq!(got[1].10.as_deref(), Some("circ=Circ 1.1 exit=abcd1234 guard=ef567890 connect=200ms first_tx=+0ms first_rx=+230ms"));
+}

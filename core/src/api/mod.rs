@@ -281,7 +281,7 @@ impl AO3App {
         if records.is_empty() { return; }
         let tuples: Vec<_> = records.into_iter().map(|r| (
             r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
-            r.request_bytes, r.response_bytes, r.error, r.payload,
+            r.request_bytes, r.response_bytes, r.error, r.payload, r.transport,
         )).collect();
         if let Ok(storage) = self.storage.try_lock() {
             let cap = upkeep::request_log_row_cap(&storage);
@@ -291,7 +291,7 @@ impl AO3App {
                 crate::client::push_request_record(crate::client::RequestRecord {
                     started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
                     duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
-                    error: t.7, payload: t.8,
+                    error: t.7, payload: t.8, transport: t.9,
                 });
             }
         }

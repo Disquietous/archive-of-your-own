@@ -153,6 +153,14 @@ struct DatabaseUnlockScreen: View {
         if state.bridge.open(userPassword: password) {
             RecoveryKey.resetFailureCount()
         } else {
+            // Only a rejected key is a password attempt. Anything else
+            // (schema newer than this build, damaged file) shows its real
+            // message and leaves the attempt counter and the typed
+            // password alone.
+            if let failure = state.bridge.lastOpenFailure, failure != .wrongPassword {
+                error = failure.message
+                return
+            }
             RecoveryKey.recordFailure()
             if RecoveryKey.shouldWipe() {
                 RecoveryKey.wipeDatabase()
@@ -183,7 +191,7 @@ struct DatabaseUnlockScreen: View {
         if state.bridge.open(userPassword: recoveredPassword) {
             RecoveryKey.resetFailureCount()
         } else {
-            error = "Recovery failed — database may be corrupted."
+            error = state.bridge.lastOpenFailure?.message ?? "Recovery failed — database may be corrupted."
         }
     }
 }

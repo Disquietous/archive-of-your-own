@@ -64,6 +64,10 @@ extension ListPaneViewController {
                 }
                 buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for updates") { [weak self] in
                     guard let self else { return }
+                    // A running check owns the queue; clearing it underneath
+                    // that loop ends it early and the guard refuses the new
+                    // one, so the click would do nothing useful.
+                    guard !self.appState.isCheckingSubscriptions else { return }
                     Task {
                         self.appState.bridge.resetSubscriptionCheck()
                         await self.appState.checkSubscriptions(force: true)

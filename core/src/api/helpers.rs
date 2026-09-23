@@ -82,6 +82,11 @@ pub(super) fn snapshot_check_due(s: &Storage, sub_type: &str, sub_id: &str) -> b
 pub(super) const CENSUS_INTERVAL_SECS: u64 = 7 * 24 * 3600;
 /// Hard page cap per census — safety valve against pagination anomalies.
 pub(super) const CENSUS_MAX_PAGES: u32 = 200;
+/// Minimum gap before EVERY request the check makes — page-1 checks,
+/// census pages, and each recovery-engine retry of either. The check is
+/// the one scheduled back-to-back walk against AO3, so it paces itself
+/// well above the client's global 500ms limiter.
+pub(super) const SUBSCRIPTION_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// In-progress census bookkeeping, persisted in the snapshot row so a
 /// cancelled or crashed check resumes where it left off.

@@ -4,6 +4,18 @@ import SwiftUI
 
 extension AppState {
     func connectTor() async {
+        // Coalesce: launch auto-start, the auto-check's ensureTorConnected,
+        // and a user click can all land here while a connect is already in
+        // progress. Wait for that one instead of tearing it down.
+        if isConnectingTor {
+            while isConnectingTor {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            return
+        }
+        isConnectingTor = true
+        defer { isConnectingTor = false }
+
         let wasConnected = bridge.torStatus.isConnected
         // Always persist session cookies before the transport swap wipes the
         // jar — the Rust side refuses to overwrite authenticated cookies with

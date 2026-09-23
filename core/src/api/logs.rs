@@ -116,11 +116,11 @@ impl AO3App {
         self.flush_request_log();
         let storage = self.storage.blocking_lock();
         let rows = storage.get_request_logs(limit).map_err(AO3Error::from)?;
-        Ok(rows.into_iter().map(|(id, started, method, url, status, dur, req_b, resp_b, error, payload)| {
+        Ok(rows.into_iter().map(|(id, started, method, url, status, dur, req_b, resp_b, error, payload, transport)| {
             URequestLogEntry {
                 id, started_ms: started as i64, method, url, status,
                 duration_ms: dur as i64, request_bytes: req_b as i64,
-                response_bytes: resp_b as i64, error, payload,
+                response_bytes: resp_b as i64, error, payload, transport,
             }
         }).collect())
     }

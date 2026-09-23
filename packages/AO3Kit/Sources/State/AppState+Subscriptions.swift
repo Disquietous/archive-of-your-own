@@ -69,12 +69,19 @@ extension AppState {
     func checkSubscriptions(force: Bool = false) async {
         guard ao3Username != nil else { return }
         guard !isCheckingSubscriptions else { return }
+        // Claim the check BEFORE the first await. Waiting for Tor can take
+        // a minute; a second caller arriving in that window (the toolbar
+        // button, a library replacement re-running the auto-check) used to
+        // pass the guard and start a second loop over the same queue.
+        isCheckingSubscriptions = true
 
         if bridge.networkBlocked {
-            guard await ensureTorConnected() else { return }
+            guard await ensureTorConnected() else {
+                isCheckingSubscriptions = false
+                return
+            }
         }
 
-        isCheckingSubscriptions = true
         subscriptionCheckTask.reset()
         subscriptionCheckFailed = 0
         // Notification count = entries that will badge as "New", so the

@@ -32,6 +32,10 @@ pub struct URequestLogEntry {
     pub response_bytes: i64,
     pub error: Option<String>,
     pub payload: Option<String>,
+    /// Tor stream that carried the request — circuit id, exit/guard
+    /// fingerprints, connect time, and TLS first-byte offsets (or
+    /// "never"). None off Tor.
+    pub transport: Option<String>,
 }
 
 /// An AO3 series as a listing shows it (a series bookmark blurb).

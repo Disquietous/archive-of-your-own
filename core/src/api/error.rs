@@ -26,6 +26,11 @@ pub enum AO3Error {
     /// is no longer valid.
     #[error("session_expired")]
     SessionExpired,
+    /// The database key was rejected. Only this variant means "wrong
+    /// password"; any other open failure is something else and must not
+    /// be counted as a bad-password attempt.
+    #[error("wrong_password")]
+    WrongPassword,
 }
 
 impl From<AppError> for AO3Error {
@@ -39,6 +44,7 @@ impl From<AppError> for AO3Error {
             AppError::ElementNotFound(m) => AO3Error::NotFound { message: m },
             AppError::InvalidWorkId(m) => AO3Error::Parse { message: m },
             AppError::SessionExpired => AO3Error::SessionExpired,
+            AppError::WrongPassphrase => AO3Error::WrongPassword,
         }
     }
 }
