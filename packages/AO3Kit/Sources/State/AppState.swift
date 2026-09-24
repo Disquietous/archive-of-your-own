@@ -229,6 +229,9 @@ final class AppState {
     var goneWorkIDs: Set<String> = []
     var isCheckingSubscriptions = false
     let subscriptionCheckTask = NetworkTask()
+    /// Live picture of the check for monitor UIs (queue, current item,
+    /// outcomes, pause/stop requests).
+    let checkMonitor = SubscriptionCheckMonitor()
     var subscriptionCheckTotal: Int = 0
     var subscriptionCheckRemaining: Int = 0
     /// Per-subscription last-completed-check stamps ("subType:subId" →

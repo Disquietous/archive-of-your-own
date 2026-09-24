@@ -1282,6 +1282,11 @@ final class RustBridge {
     /// stale, or leftover queue items exist. Replaces gating on the global
     /// round-completion date, which overstated freshness for rows checked
     /// early in an interrupted round.
+    /// The persisted What's New queue, front item first.
+    func getSubscriptionCheckQueue() -> [UCheckQueueItem] {
+        (try? app?.getSubscriptionCheckQueue()) ?? []
+    }
+
     func isSubscriptionCheckDue(extraAuthors: [String] = []) -> Bool {
         (try? app?.isSubscriptionCheckDue(extraAuthors: extraAuthors)) ?? false
     }

@@ -58,6 +58,9 @@ extension ListPaneViewController {
             // bookmarkedWorkIDs also re-renders the moment a bookmark
             // toggles.)
             let bookmarked = appState.bookmarkedWorkIDs
+            // Same for kudosGivenWorkIDs: the heart turns red the moment
+            // kudos land, without a reload.
+            let kudosGiven = appState.kudosGivenWorkIDs
             // Reading unseenNewWorkIDs re-renders when a selection clears
             // a "New" pill, so the badge drops without a full reload.
             let unseen = section == .whatsNew ? appState.unseenNewWorkIDs : []
@@ -68,6 +71,7 @@ extension ListPaneViewController {
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
+                cell.setKudosGiven(kudosGiven.contains(works[row].id))
                 cell.setNew(unseen.contains(works[row].id))
                 cell.setRemoved(gone.contains(works[row].id))
                 cell.setFollowState(model.follows.authorFollowState(works[row].author))

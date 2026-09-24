@@ -55,6 +55,21 @@ impl AO3App {
             .any(|(t, id, _)| snapshot_check_due(&s, t, id)))
     }
 
+    /// The persisted check queue as it stands — front item first. Read by
+    /// the monitor window between items; empty when no round is pending.
+    pub fn get_subscription_check_queue(&self) -> Result<Vec<UCheckQueueItem>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        Ok(queue.iter().map(|q| UCheckQueueItem {
+            sub_type: q["sub_type"].as_str().unwrap_or("").to_string(),
+            sub_id: q["sub_id"].as_str().unwrap_or("").to_string(),
+            name: q["name"].as_str().unwrap_or("").to_string(),
+            census: q["census"].as_bool().unwrap_or(false),
+        }).collect())
+    }
+
     pub fn reset_subscription_check(&self) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
         s.clear_check_queue().map_err(AO3Error::from)

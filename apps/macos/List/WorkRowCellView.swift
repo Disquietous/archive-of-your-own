@@ -492,10 +492,12 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
-                   bookmarked: Bool = false, followState: MacAppModel.AuthorFollowState = .none,
+                   bookmarked: Bool = false, kudosGiven: Bool = false,
+                   followState: MacAppModel.AuthorFollowState = .none,
                    isNew: Bool = false, isRemoved: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
+        self.kudosGiven = kudosGiven
         setNew(isNew)
         setRemoved(isRemoved)
         authorName = work.author
@@ -607,11 +609,12 @@ final class WorkRowCellView: NSTableCellView {
         fullSummaryHeight = heights.full
         summaryHeight.constant = summaryExpanded ? fullSummaryHeight : collapsedSummaryHeight
 
-        var meta = "♥ \(Fmt.k(work.kudos))   \(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
+        var meta = " \(Fmt.k(work.kudos))   \(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
         if downloaded {
             meta += "   ⤓ Offline"
         }
-        metaLabel.stringValue = meta
+        metaText = meta
+        renderMeta()
 
         progressTrack.isHidden = progress <= 0
 
@@ -642,6 +645,31 @@ final class WorkRowCellView: NSTableCellView {
         return parts.joined(separator: ", ")
     }
 
+    /// Whether the signed-in user has left kudos on this work — the heart
+    /// in the meta line turns red, matching the reader's kudos button.
+    private var kudosGiven = false
+    /// Meta text after the heart glyph; kept so the heart can be recolored
+    /// without recomputing the line.
+    private var metaText = ""
+
+    func setKudosGiven(_ given: Bool) {
+        guard given != kudosGiven else { return }
+        kudosGiven = given
+        renderMeta()
+    }
+
+    private func renderMeta() {
+        let font = MacFont.ui(11, weight: .medium)
+        let line = NSMutableAttributedString(string: "♥", attributes: [
+            .font: font,
+            .foregroundColor: kudosGiven ? NSColor(srgbRed: 0xCE / 255, green: 0x51 / 255, blue: 0x4D / 255, alpha: 1) : theme.nsInk3,
+        ])
+        line.append(NSAttributedString(string: metaText, attributes: [
+            .font: font, .foregroundColor: theme.nsInk3,
+        ]))
+        metaLabel.attributedStringValue = line
+    }
+
     func applyTheme() {
         layer?.backgroundColor = isRowSelected ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
         selectionBar.layer?.backgroundColor = isRowSelected ? theme.nsAccent.cgColor : NSColor.clear.cgColor
@@ -649,7 +677,7 @@ final class WorkRowCellView: NSTableCellView {
         fandomLabel.textColor = theme.nsAccent
         titleLabel.textColor = theme.nsInk
         summaryLabel.textColor = theme.nsInk2
-        metaLabel.textColor = theme.nsInk3
+        renderMeta()
         datesLabel.textColor = theme.nsInk3
         newBadge.font = MacFont.ui(9, weight: .bold)
         newBadge.textColor = theme.nsAccent

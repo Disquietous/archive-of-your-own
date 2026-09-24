@@ -762,6 +762,17 @@ impl From<crate::models::UserProfile> for UUserProfile {
     }
 }
 
+/// One pending item of the What's New check queue, for the monitor UI.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UCheckQueueItem {
+    pub sub_type: String,
+    pub sub_id: String,
+    pub name: String,
+    /// A census continuation (deeper listing pages) rather than a page-1
+    /// check.
+    pub census: bool,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USubscriptionCheckResult {
     pub sub_type: String,

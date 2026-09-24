@@ -74,10 +74,12 @@ extension AppState {
         // button, a library replacement re-running the auto-check) used to
         // pass the guard and start a second loop over the same queue.
         isCheckingSubscriptions = true
+        checkMonitor.begin()
 
         if bridge.networkBlocked {
             guard await ensureTorConnected() else {
                 isCheckingSubscriptions = false
+                checkMonitor.end(error: "Tor did not connect.")
                 return
             }
         }
@@ -96,37 +98,58 @@ extension AppState {
             let total = try bridge.startSubscriptionCheck(extraAuthors: follows, onlyStale: !force)
             subscriptionCheckTotal = Int(total)
             subscriptionCheckRemaining = Int(total)
+            checkMonitor.queued(bridge.getSubscriptionCheckQueue())
 
             while !subscriptionCheckTask.isCancelled {
-                // Yield to the user: while they're actively fetching something,
-                // pause between items so the background check never competes
-                // for the circuit or the rate limiter.
-                var pausedForUser = false
-                while activeUserFetches > 0 && !subscriptionCheckTask.isCancelled {
-                    if !pausedForUser {
-                        pausedForUser = true
-                        subscriptionCheckTask.statusMessage = "Paused while you browse…"
+                // Hold between items while the user is fetching something
+                // (never compete for the circuit or the rate limiter) or
+                // while the monitor's Pause is down. Stop is honored here
+                // too, so it takes effect at the next item boundary.
+                var held = false
+                while !subscriptionCheckTask.isCancelled
+                        && (activeUserFetches > 0 || checkMonitor.pauseRequested) {
+                    if checkMonitor.stopRequested { subscriptionCheckTask.cancel() ; break }
+                    if !held {
+                        held = true
+                        subscriptionCheckTask.statusMessage = checkMonitor.pauseRequested
+                            ? "Paused." : "Paused while you browse…"
                     }
+                    checkMonitor.setPhase(checkMonitor.pauseRequested ? .pausedByUser : .pausedForBrowsing)
                     try? await Task.sleep(nanoseconds: 500_000_000)
                 }
+                if checkMonitor.stopRequested { subscriptionCheckTask.cancel() }
                 if subscriptionCheckTask.isCancelled { break }
-                if pausedForUser {
+                if held {
                     subscriptionCheckTask.statusMessage = nil
                 }
+                checkMonitor.setPhase(.running)
 
-                guard let result = try await bridge.checkNextSubscription() else { break }
+                let queue = bridge.getSubscriptionCheckQueue()
+                checkMonitor.queued(queue)
+                guard let head = queue.first else { break }
+                checkMonitor.dispatched(head)
+                if checkMonitor.stopRequested { checkMonitor.setPhase(.stopping) }
+
+                guard let result = try await bridge.checkNextSubscription() else {
+                    checkMonitor.dispatched(nil)
+                    break
+                }
                 subscriptionCheckRemaining = Int(result.remaining)
                 // Each completed check stamped its row — keep list labels live.
                 loadSubscriptionLastChecked()
 
-                if result.error != nil {
+                let finishedItem = UCheckQueueItem(
+                    subType: result.subType, subId: result.subId, name: result.name, census: head.census)
+                if let error = result.error {
                     // A transient failure already got rotated-and-retried in
                     // Rust before this returned — nothing left for Swift to
                     // decide. A still-retryable item was requeued for later
                     // in this cycle (reflected in `remaining`); this just
                     // counts the attempt and moves to the next item.
                     subscriptionCheckFailed += 1
+                    checkMonitor.finished(finishedItem, .failed(error))
                 } else {
+                    checkMonitor.finished(finishedItem, result.changed ? .updated : .unchanged)
                     if result.changed {
                         loadNewWorks()
                         reloadCachedWorks()
@@ -153,7 +176,9 @@ extension AppState {
             }
         } catch {
             if !subscriptionCheckTask.isCancelled {
-                subscriptionCheckTask.statusMessage = "Check failed: \(Self.readableError(error))"
+                let msg = "Check failed: \(Self.readableError(error))"
+                subscriptionCheckTask.statusMessage = msg
+                checkMonitor.end(error: msg)
             }
         }
         if subscriptionCheckFailed > 0 {
@@ -162,6 +187,43 @@ extension AppState {
         isCheckingSubscriptions = false
         subscriptionCheckTotal = 0
         subscriptionCheckRemaining = 0
+        checkMonitor.queued(bridge.getSubscriptionCheckQueue())
+        if checkMonitor.isRunning { checkMonitor.end() }
+    }
+
+    // MARK: - Monitor controls
+
+    /// Start a run: resume a leftover queue and everything that is due, or
+    /// with `all`, clear the queue and check every subscription.
+    func startSubscriptionCheck(all: Bool) {
+        guard !isCheckingSubscriptions else { return }
+        if all { bridge.resetSubscriptionCheck() }
+        Task { await checkSubscriptions(force: all) }
+    }
+
+    /// Hold the run at the next item boundary. The in-flight request
+    /// finishes; nothing new is dispatched until `resumeSubscriptionCheck`.
+    func pauseSubscriptionCheck() {
+        guard isCheckingSubscriptions else { return }
+        checkMonitor.pauseRequested = true
+    }
+
+    func resumeSubscriptionCheck() {
+        checkMonitor.pauseRequested = false
+    }
+
+    /// End the run. The queue stays persisted, so the next Start resumes
+    /// where this left off. The in-flight request is aborted when nothing
+    /// of the user's is in flight; otherwise it is left to finish.
+    func stopSubscriptionCheck() {
+        guard isCheckingSubscriptions else { return }
+        checkMonitor.stopRequested = true
+        checkMonitor.pauseRequested = false
+        checkMonitor.setPhase(.stopping)
+        subscriptionCheckTask.cancel()
+        if activeUserFetches == 0 {
+            bridge.cancelRequest()
+        }
     }
 
     func loadNewWorks() {

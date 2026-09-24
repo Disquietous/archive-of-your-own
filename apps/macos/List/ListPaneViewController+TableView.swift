@@ -57,6 +57,7 @@ extension ListPaneViewController {
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
+                       kudosGiven: appState.kudosGivenWorkIDs.contains(work.id),
                        followState: model.follows.authorFollowState(work.author),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        isRemoved: appState.goneWorkIDs.contains(work.id),

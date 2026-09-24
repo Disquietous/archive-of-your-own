@@ -62,6 +62,9 @@ extension ListPaneViewController {
                         self?.appState.clearNewWorks()
                     })
                 }
+                buttons.append(ToolButton(theme: theme, symbol: "list.bullet.rectangle", tooltip: "Show the check monitor") {
+                    (NSApp.delegate as? AppDelegate)?.openWhatsNewMonitor()
+                })
                 buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for updates") { [weak self] in
                     guard let self else { return }
                     // A running check owns the queue; clearing it underneath

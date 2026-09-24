@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindowController: MainWindowController?
     private var requestLogWindowController: RequestLogWindowController?
     private var debugLogWindowController: DebugLogWindowController?
+    /// The What's New check monitor; the view reaches it to toggle
+    /// keep-on-top, so it is not private.
+    var whatsNewMonitor: WhatsNewMonitorWindowController?
 
     // Auto-lock: every in-app event stamps lastActivity; a coarse timer
     // compares the idle span against the user's setting.
@@ -254,6 +257,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         requestLogWindowController?.show()
     }
 
+    @objc func openWhatsNewMonitor() {
+        if whatsNewMonitor == nil {
+            let controller = WhatsNewMonitorWindowController(theme: theme, appState: appState)
+            whatsNewMonitor = controller
+            releaseOnClose(controller.window) { [weak self] in
+                self?.whatsNewMonitor = nil
+            }
+        }
+        whatsNewMonitor?.show()
+    }
+
     @objc private func openDebugLog() {
         if debugLogWindowController == nil {
             let controller = DebugLogWindowController(theme: theme, appState: appState)
@@ -457,6 +471,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleSidebar.keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(toggleSidebar)
         viewMenu.addItem(.separator())
+        let monitor = NSMenuItem(title: "What's New Check…", action: #selector(openWhatsNewMonitor), keyEquivalent: "u")
+        monitor.keyEquivalentModifierMask = [.command, .option]
+        monitor.target = self
+        viewMenu.addItem(monitor)
         let requestLog = NSMenuItem(title: "Request Log", action: #selector(openRequestLog), keyEquivalent: "l")
         requestLog.keyEquivalentModifierMask = [.command, .option]
         requestLog.target = self
