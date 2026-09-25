@@ -139,7 +139,8 @@ extension AppState {
                 loadSubscriptionLastChecked()
 
                 let finishedItem = UCheckQueueItem(
-                    subType: result.subType, subId: result.subId, name: result.name, census: head.census)
+                    subType: result.subType, subId: result.subId, name: result.name, census: head.census,
+                    page: head.page, totalPages: head.totalPages)
                 if let error = result.error {
                     // A transient failure already got rotated-and-retried in
                     // Rust before this returned — nothing left for Swift to

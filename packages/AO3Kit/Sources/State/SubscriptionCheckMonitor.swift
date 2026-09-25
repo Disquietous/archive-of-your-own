@@ -1,5 +1,16 @@
 import Foundation
 
+public extension UCheckQueueItem {
+    /// The name as the monitor shows it: a census item carries the listing
+    /// page it fetches, so successive continuations of one subscription
+    /// read as distinct requests.
+    var displayName: String {
+        guard census, page > 0 else { return name }
+        if totalPages > 0 { return "\(name) · page \(page) of \(totalPages)" }
+        return "\(name) · page \(page)"
+    }
+}
+
 /// Live, observable picture of the What's New check for a monitor UI:
 /// what phase the run is in, which item is in flight, what is still
 /// queued, and what each finished item came back with. Written only by

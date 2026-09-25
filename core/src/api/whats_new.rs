@@ -62,11 +62,30 @@ impl AO3App {
         let queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        Ok(queue.iter().map(|q| UCheckQueueItem {
-            sub_type: q["sub_type"].as_str().unwrap_or("").to_string(),
-            sub_id: q["sub_id"].as_str().unwrap_or("").to_string(),
-            name: q["name"].as_str().unwrap_or("").to_string(),
-            census: q["census"].as_bool().unwrap_or(false),
+        Ok(queue.iter().map(|q| {
+            let sub_type = q["sub_type"].as_str().unwrap_or("").to_string();
+            let sub_id = q["sub_id"].as_str().unwrap_or("").to_string();
+            let census = q["census"].as_bool().unwrap_or(false);
+            // The page cursor lives in the persisted census state, not the
+            // queue marker (see check_next_subscription).
+            let (page, total_pages) = if census {
+                s.get_snapshot_census_meta(&sub_type, &sub_id)
+                    .ok()
+                    .and_then(|(_, _, state)| state)
+                    .and_then(|json| serde_json::from_str::<CensusState>(&json).ok())
+                    .map(|c| (c.next_page, c.total_pages))
+                    .unwrap_or((0, 0))
+            } else {
+                (0, 0)
+            };
+            UCheckQueueItem {
+                sub_type,
+                sub_id,
+                name: q["name"].as_str().unwrap_or("").to_string(),
+                census,
+                page,
+                total_pages,
+            }
         }).collect())
     }
 

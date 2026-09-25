@@ -771,6 +771,12 @@ pub struct UCheckQueueItem {
     /// A census continuation (deeper listing pages) rather than a page-1
     /// check.
     pub census: bool,
+    /// For a census item, the listing page this item will fetch next
+    /// (from the persisted census cursor); 0 otherwise.
+    pub page: u32,
+    /// For a census item, the listing's page count as last parsed; 0 when
+    /// unknown or not a census.
+    pub total_pages: u32,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

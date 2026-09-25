@@ -129,7 +129,7 @@ struct WhatsNewMonitorView: View {
             return "Last check finished"
         case .connecting: return "Waiting for Tor"
         case .running:
-            if let c = monitor.current { return c.census ? "Census: \(c.name)" : "Checking \(c.name)" }
+            if let c = monitor.current { return c.census ? "Census: \(c.displayName)" : "Checking \(c.name)" }
             return "Checking"
         case .pausedByUser: return "Paused"
         case .pausedForBrowsing: return "Paused while you browse"
@@ -284,7 +284,7 @@ struct WhatsNewMonitorView: View {
                 .scaleEffect(0.6)
                 .frame(width: 14, height: 14)
             kindBadge(item)
-            Text(item.name)
+            Text(item.displayName)
                 .font(Font(MacFont.ui(12, weight: .semibold)))
                 .foregroundStyle(theme.ink)
                 .lineLimit(1)
@@ -332,7 +332,7 @@ struct WhatsNewMonitorView: View {
                     .foregroundStyle(color)
                     .frame(width: 26)
                 kindBadge(c.item)
-                Text(c.item.name)
+                Text(c.item.displayName)
                     .font(Font(MacFont.ui(12)))
                     .foregroundStyle(theme.ink)
                     .lineLimit(1)
