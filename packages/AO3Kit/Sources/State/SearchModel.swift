@@ -64,7 +64,7 @@ final class SearchModel {
     /// timeout retry. Every trigger of every query type funnels through
     /// here so they all get identical progress UI and retry behavior.
     @MainActor
-    private func trackedFetch<T>(
+    func trackedFetch<T>(
         _ op: TrackedOperation,
         _ appState: AppState,
         _ body: @escaping (UInt64) async throws -> T
@@ -285,7 +285,7 @@ final class SearchModel {
     /// collection drill-ins flip the visible scope to Works so the works
     /// table renders; the back arrow restores this, returning to the form
     /// of the tab that initiated the search.
-    private var originScope: SearchScope?
+    var originScope: SearchScope?
 
     // MARK: - Split collection results (works | bookmarks, side by side)
 
@@ -297,16 +297,16 @@ final class SearchModel {
     var splitCollectionTitle: String?
     /// What the collections results list was showing, restored when the
     /// split closes so its pager keeps working.
-    private var splitReturnQuery: ActiveQuery?
+    var splitReturnQuery: ActiveQuery?
 
     /// Set while a single-pane collection drill-in was opened from the
     /// collections hit list: the results back arrow pops back to that
     /// list (splitReturnQuery's counterpart for the no-split case) before
     /// a second press reaches the form.
-    private(set) var canReturnToCollectionHits = false
+    var canReturnToCollectionHits = false
     /// The hit list's query, restored on that pop so its pager keeps
     /// working (nil for library hit lists, whose pager is inert).
-    private var collectionReturnQuery: ActiveQuery?
+    var collectionReturnQuery: ActiveQuery?
 
     var bookmarkResults: [Work] = []
     var bookmarksPage: UInt32 = 1
@@ -496,10 +496,10 @@ final class SearchModel {
     /// the results pane (run_library_search). Released whenever something
     /// else replaces those results; the core's LRU cap backstops handles a
     /// teardown never releases.
-    private var librarySearchHandle: UInt64?
+    var librarySearchHandle: UInt64?
 
     @MainActor
-    private func releaseLibrarySearch(_ appState: AppState) {
+    func releaseLibrarySearch(_ appState: AppState) {
         if let handle = librarySearchHandle {
             appState.bridge.dropLibrarySearch(handle)
             librarySearchHandle = nil
@@ -507,7 +507,7 @@ final class SearchModel {
     }
 
     @MainActor
-    private func beginNewQuery(_ appState: AppState) {
+    func beginNewQuery(_ appState: AppState) {
         releaseLibrarySearch(appState)
         onNewQuery?()
         canReturnToCollectionHits = false
@@ -572,127 +572,6 @@ final class SearchModel {
         }
     }
 
-    /// An all-blank criteria record (blank matches everything in the core).
-    static func emptyLibraryCriteria() -> ULibrarySearchCriteria {
-        ULibrarySearchCriteria(
-            query: "", title: "", creators: "", revisedAt: "", complete: "",
-            crossover: "", singleChapter: false, wordCount: "", language: "",
-            fandomNames: "", characterNames: "", relationshipNames: "",
-            freeformNames: "", ratings: [], warnings: [], categories: [],
-            hits: "", kudosCount: "", commentsCount: "", bookmarksCount: "",
-            sortColumn: "", sortDirection: "")
-    }
-
-    /// A works request as label-based criteria for the local library
-    /// search. Select and checkbox choices are stored as AO3's option
-    /// values (numeric ids); the scraped form knows each value's label,
-    /// and the core matches on names — translate here so the Rust side
-    /// never needs AO3's id tables.
-    @MainActor
-    private func libraryCriteria(from request: WorksSearchRequest) -> ULibrarySearchCriteria {
-        var c = Self.emptyLibraryCriteria()
-        // Selected option values → their labels, for id-valued controls —
-        // via the scraped form when it's loaded; raw values pass through
-        // otherwise. Driven by the request's own keys, never formFields,
-        // so programmatic requests (a tag click) match correctly even
-        // when the form was never scraped.
-        func labels(_ name: String, _ value: String, _ checked: Set<String>) -> [String] {
-            let values = checked.isEmpty ? (value.isEmpty ? [] : [value]) : Array(checked)
-            guard let field = formFields.first(where: { $0.name == name }) else { return values }
-            return values.compactMap { v in
-                field.options.first { $0.value == v }?.label
-                    .trimmingCharacters(in: .whitespaces)
-            }.filter { !$0.isEmpty }
-        }
-        for name in Set(request.fieldValues.keys).union(request.checkboxValues.keys) {
-            let value = (request.fieldValues[name] ?? "").trimmingCharacters(in: .whitespaces)
-            let checked = request.checkboxValues[name] ?? []
-            switch name {
-            case _ where name.hasSuffix("[query]"): c.query = value
-            case _ where name.hasSuffix("[title]"): c.title = value
-            case _ where name.hasSuffix("[creators]"): c.creators = value
-            case _ where name.hasSuffix("[revised_at]"): c.revisedAt = value
-            case _ where name.hasSuffix("[complete]"): c.complete = value
-            case _ where name.hasSuffix("[crossover]"): c.crossover = value
-            case _ where name.hasSuffix("[single_chapter]"): c.singleChapter = checked.contains("1") || value == "1"
-            case _ where name.hasSuffix("[word_count]"): c.wordCount = value
-            case _ where name.hasSuffix("[language_id]"): c.language = labels(name, value, checked).first ?? ""
-            case _ where name.hasSuffix("[fandom_names]"): c.fandomNames = value
-            case _ where name.hasSuffix("[character_names]"): c.characterNames = value
-            case _ where name.hasSuffix("[relationship_names]"): c.relationshipNames = value
-            case _ where name.hasSuffix("[freeform_names]"): c.freeformNames = value
-            case _ where name.contains("[rating_ids]"): c.ratings = labels(name, value, checked)
-            case _ where name.contains("[archive_warning_ids]"): c.warnings = labels(name, value, checked)
-            case _ where name.contains("[category_ids]"): c.categories = labels(name, value, checked)
-            case _ where name.hasSuffix("[hits]"): c.hits = value
-            case _ where name.hasSuffix("[kudos_count]"): c.kudosCount = value
-            case _ where name.hasSuffix("[comments_count]"): c.commentsCount = value
-            case _ where name.hasSuffix("[bookmarks_count]"): c.bookmarksCount = value
-            case _ where name.hasSuffix("[sort_column]"): c.sortColumn = value
-            case _ where name.hasSuffix("[sort_direction]"): c.sortDirection = value
-            default: break
-            }
-        }
-        return c
-    }
-
-    /// Library mode for Works: evaluate the form's criteria against the
-    /// cached works and reuse the works results pane. No pagination — the
-    /// library returns everything at once (activeQuery stays nil so the
-    /// pager stays inert).
-    @MainActor
-    private func runLibraryWorksSearch(_ appState: AppState, criteria: ULibrarySearchCriteria) {
-        guard let search = appState.bridge.runLibrarySearch(criteria) else {
-            presentLibraryWorks([], appState: appState)
-            return
-        }
-        // Show-everything presentation: hydrate the full range in one page.
-        // The handle stays live so future paging can slice for free.
-        let works = appState.bridge.getLibrarySearchPage(search.handle)
-            .map(AppState.workFromSummary)
-        presentLibraryWorks(works, appState: appState) // releases any prior handle
-        librarySearchHandle = search.handle
-    }
-
-    /// Land a library (no-network) result set in the works results pane.
-    /// activeQuery stays nil so the pager stays inert — library reads
-    /// return everything at once.
-    @MainActor
-    private func presentLibraryWorks(_ works: [Work], appState: AppState) {
-        releaseLibrarySearch(appState)
-        onNewQuery?()
-        canReturnToCollectionHits = false
-        collectionReturnQuery = nil
-        activeQuery = nil
-        appState.searchError = nil
-        appState.searchResults = works
-        currentPage = 1
-        hasNextPage = false
-        totalPages = 1
-        totalWorks = UInt32(works.count)
-        hasSearched = true
-        showingResults = true
-    }
-
-    @MainActor
-    private func beginLibraryScopeResults(_ appState: AppState) {
-        releaseLibrarySearch(appState)
-        onNewQuery?()
-        // Library reads aren't paged — a stale AO3 query must not leave
-        // the pager live over library results.
-        activeQuery = nil
-        tagHits = []
-        userHits = []
-        collectionHits = []
-        bookmarkHits = []
-        currentPage = 1
-        hasNextPage = false
-        totalPages = 1
-        totalWorks = nil
-        hasSearched = true
-        showingResults = true
-    }
-
     // MARK: - Works search API (the one entry point for works searches)
 
     /// Every Search→Works criterion as one value: field values keyed by
@@ -715,334 +594,7 @@ final class SearchModel {
     /// The request behind the works results currently showing. Sort
     /// re-runs amend this, so refining programmatically triggered results
     /// never falls back to the form's criteria.
-    private(set) var activeWorksRequest: WorksSearchRequest?
-
-    /// The works-search API: execute `request` under the library/AO3
-    /// source toggle and show the results view. Every works-search
-    /// trigger funnels through here.
-    @MainActor
-    func runWorksSearch(_ request: WorksSearchRequest, appState: AppState) {
-        scopeNotice = nil
-        originScope = scope
-        scope = .works
-        activeWorksRequest = request
-        if searchLibraryOnly {
-            runLibraryWorksSearch(appState, criteria: libraryCriteria(from: request))
-            return
-        }
-        var keys: [String] = []
-        var values: [String] = []
-        for (name, value) in request.fieldValues where !value.isEmpty {
-            keys.append(name)
-            values.append(value)
-        }
-        for (name, selected) in request.checkboxValues {
-            for value in selected {
-                keys.append(name)
-                values.append(value)
-            }
-        }
-        activeQuery = .form(keys: keys, values: values)
-        beginNewQuery(appState)
-        Task { await fetch(page: 1, appState: appState) }
-    }
-
-    /// Re-run the current works results with one field changed (the
-    /// results header's server-side sort menu). No-op when no works
-    /// request has run.
-    @MainActor
-    func updateWorksSearchField(_ name: String, value: String, appState: AppState) {
-        guard var request = activeWorksRequest else { return }
-        request.fieldValues[name] = value
-        runWorksSearch(request, appState: appState)
-    }
-
-    /// The library/AO3 source toggle. Flipped while search results are
-    /// showing, the results clear and the same search re-runs under the
-    /// new source — works results re-run their active request, the other
-    /// scopes re-run their form criteria. Drill-in listings (a tag's AO3
-    /// browse, a collection's works, the split view) aren't re-runnable
-    /// searches, and the forms just pick up the new value on the next Go.
-    @MainActor
-    func toggleSearchSource(_ appState: AppState) {
-        searchLibraryOnly.toggle()
-        guard showingResults, splitCollectionName == nil, !canReturnToCollectionHits else { return }
-        if scope == .works {
-            switch activeQuery {
-            case .form, nil:
-                if let request = activeWorksRequest {
-                    runWorksSearch(request, appState: appState)
-                }
-            default:
-                break
-            }
-        } else {
-            performScopedSearch(appState)
-        }
-    }
-
-    /// A clicked tag (pill, fandom card, tag hit): a one-criterion works
-    /// request — the tag in the field matching its library-known category,
-    /// Additional Tags when unknown — through the works-search API. The
-    /// visible form is neither shown nor touched.
-    @MainActor
-    func startTagQuery(_ tag: String, appState: AppState) {
-        let tagType = appState.bridge.searchLibraryTags(tag)
-            .first { $0.name.caseInsensitiveCompare(tag) == .orderedSame }?
-            .tagType
-        let suffix = switch tagType {
-        case "fandom": "[fandom_names]"
-        case "character": "[character_names]"
-        case "relationship": "[relationship_names]"
-        default: "[freeform_names]"
-        }
-        let field = formFields.first { $0.name.hasSuffix(suffix) }?.name ?? "work_search\(suffix)"
-        runWorksSearch(WorksSearchRequest(fieldValues: [field: tag]), appState: appState)
-    }
-
-    /// AO3's tag-browse listing (/tags/…/works), paged — the explicitly
-    /// AO3-side listing behind the fandom drill-in's "Search AO3" button,
-    /// which bypasses the source toggle by design.
-    @MainActor
-    func startAO3TagListing(_ tag: String, appState: AppState) {
-        // Tag/collection listings are works results — land on the Works tab
-        // whatever scope the search section was left on. The pre-flip scope
-        // is where the back arrow returns.
-        originScope = scope
-        scope = .works
-        activeQuery = .tag(tag)
-        beginNewQuery(appState)
-        Task { await fetch(page: 1, appState: appState) }
-    }
-
-    /// A collection's works — `name` is the /collections/{name} slug.
-    /// Library mode reads what this collection's cached listings already
-    /// recorded (no network, per the source toggle's promise) — split into
-    /// works and bookmarks panes when both were cached, a single pane
-    /// otherwise. AO3 mode fetches the live listing, paged. When the
-    /// caller knows the collection holds both works and bookmarked items,
-    /// AO3 mode splits the results view — works pane and bookmarks pane,
-    /// first pages loaded simultaneously, paged independently. A
-    /// bookmarks-only collection pages its /bookmarks listing in the
-    /// single results pane instead. `fromHitList` marks a drill-in from
-    /// the collections hit list: the single-pane paths then keep the hit
-    /// list behind the results so the back arrow pops to it (the split
-    /// paths already do, via splitReturnQuery).
-    @MainActor
-    func startCollectionQuery(_ name: String, title: String = "",
-                              workCount: UInt32 = 0, bookmarkedCount: UInt32 = 0,
-                              fromHitList: Bool = false,
-                              appState: AppState) {
-        let hitListQuery = activeQuery
-        let hits = collectionHits
-        if searchLibraryOnly {
-            let works = appState.bridge.getLibraryCollectionWorks(name: name)
-                .map(AppState.workFromSummary)
-            // Library-mode panes are works lists; series bookmarks have
-            // no row here.
-            let bookmarks = appState.bridge.getLibraryCollectionBookmarks(name: name)
-                .compactMap(\.work).map(AppState.workFromSummary)
-            if works.isEmpty || bookmarks.isEmpty {
-                originScope = scope
-                scope = .works
-                presentLibraryWorks(works.isEmpty ? bookmarks : works, appState: appState)
-                if fromHitList {
-                    collectionHits = hits
-                    collectionReturnQuery = hitListQuery
-                    canReturnToCollectionHits = true
-                }
-                return
-            }
-            // Library split: both panes land at once from the cache, the
-            // pagers stay inert (activeQuery nil, single page each).
-            splitReturnQuery = activeQuery
-            splitCollectionName = name
-            splitCollectionTitle = title.isEmpty ? name : title
-            activeQuery = nil
-            onNewQuery?()
-            appState.searchResults = works
-            appState.searchError = nil
-            currentPage = 1
-            hasNextPage = false
-            totalPages = 1
-            totalWorks = UInt32(works.count)
-            bookmarkResults = bookmarks
-            bookmarksPage = 1
-            bookmarksHasNext = false
-            bookmarksTotalPages = 1
-            bookmarksTotal = UInt32(bookmarks.count)
-            bookmarksError = nil
-            hasSearched = true
-            showingResults = true
-            return
-        }
-        if workCount > 0, bookmarkedCount > 0 {
-            // Split mode: the scope stays on Collections and the hit list
-            // survives untouched behind the panes — the works pane's back
-            // arrow returns straight to it.
-            splitReturnQuery = activeQuery
-            splitCollectionName = name
-            splitCollectionTitle = title.isEmpty ? name : title
-            activeQuery = .collection(name)
-            onNewQuery?()
-            appState.searchResults = []
-            appState.searchError = nil
-            appState.isSearching = true
-            currentPage = 1
-            hasNextPage = false
-            totalPages = 1
-            totalWorks = nil
-            bookmarkResults = []
-            bookmarksPage = 1
-            bookmarksHasNext = false
-            bookmarksTotalPages = 1
-            bookmarksTotal = nil
-            bookmarksError = nil
-            hasSearched = true
-            showingResults = true
-            Task { await fetch(page: 1, appState: appState) }
-            Task { await fetchBookmarksPage(1, appState: appState) }
-        } else {
-            originScope = scope
-            scope = .works
-            // A bookmarks-only collection has an empty /works listing —
-            // its items live under /bookmarks, so page that instead.
-            activeQuery = (workCount == 0 && bookmarkedCount > 0)
-                ? .collectionBookmarks(name) : .collection(name)
-            beginNewQuery(appState)
-            if fromHitList {
-                collectionHits = hits
-                collectionReturnQuery = hitListQuery
-                canReturnToCollectionHits = true
-            }
-            Task { await fetch(page: 1, appState: appState) }
-        }
-        // Cache the collection's profile metadata + tags. This is the one
-        // shared entry point for opening a collection (browse list and
-        // search results both land here); the core answers from the
-        // database after the first fetch, so it's one request per
-        // collection, ever. AO3 mode only — the profile fetch is a
-        // network op.
-        Task { @MainActor in
-            _ = try? await appState.bridge.ensureCollectionProfile(name: name)
-        }
-    }
-
-    /// The bookmarks pane's pager.
-    @MainActor
-    func goToBookmarksPage(_ page: UInt32, appState: AppState) {
-        guard page >= 1, splitCollectionName != nil, !isFetchingBookmarks else { return }
-        Task { await fetchBookmarksPage(page, appState: appState) }
-    }
-
-    /// A bookmark listing page as a works page — the work-row panes show
-    /// the bookmarked works; series bookmarks (cached by the core) have no
-    /// row in a works list.
-    private static func worksPage(_ page: UPagedBookmarks) -> UPagedWorks {
-        UPagedWorks(works: page.bookmarks.compactMap(\.work),
-                    hasNextPage: page.hasNextPage,
-                    totalPages: page.totalPages,
-                    totalWorks: page.totalFound)
-    }
-
-    @MainActor
-    private func fetchBookmarksPage(_ page: UInt32, appState: AppState) async {
-        guard let name = splitCollectionName else { return }
-        isFetchingBookmarks = true
-        bookmarksError = nil
-        do {
-            let result = Self.worksPage(try await trackedFetch(bookmarksFetchOp, appState) { opID in
-                try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
-            })
-            bookmarkResults = result.works.map(AppState.workFromSummary)
-            bookmarksPage = page
-            bookmarksHasNext = result.hasNextPage
-            bookmarksTotalPages = max(result.totalPages, page)
-            bookmarksTotal = result.totalWorks
-            // Fetched works are persisted by the Rust layer — merge them
-            // into the library snapshot so they join local lists at once.
-            appState.mergeCachedWorks(bookmarkResults)
-        } catch {
-            if !appState.searchTask.isCancelled && !error.isCancellation {
-                bookmarksError = error.localizedDescription
-            }
-        }
-        isFetchingBookmarks = false
-    }
-
-    @MainActor
-    func goToPage(_ page: UInt32, appState: AppState) {
-        guard page >= 1, activeQuery != nil, !appState.isSearching else { return }
-        Task { await fetch(page: page, appState: appState) }
-    }
-
-    @MainActor
-    private func fetch(page: UInt32, appState: AppState) async {
-        guard let query = activeQuery else { return }
-        hasSearched = true
-        appState.isSearching = true
-        appState.searchError = nil
-        do {
-            switch query {
-            case .form(let keys, let values):
-                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page, opID: opID)
-                }, page: page, appState: appState)
-            case .tag(let tag):
-                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.searchByTagPaged(tag, page: page, opID: opID)
-                }, page: page, appState: appState)
-            case .collection(let name):
-                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.fetchCollectionWorks(name: name, page: page, opID: opID)
-                }, page: page, appState: appState)
-            case .collectionBookmarks(let name):
-                applyWorksPage(Self.worksPage(try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.fetchCollectionBookmarks(name: name, page: page, opID: opID)
-                }), page: page, appState: appState)
-            case .bookmarkSearch(let criteria):
-                let result = try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.searchBookmarks(criteria: criteria, page: page, opID: opID)
-                }
-                bookmarkHits = result.bookmarks
-                totalWorks = result.totalFound
-                currentPage = page
-                hasNextPage = result.hasNextPage
-                totalPages = max(result.totalPages, page)
-                // Fetched works are persisted by the Rust layer — merge
-                // them into the library snapshot so they join local lists.
-                appState.mergeCachedWorks(result.bookmarks.compactMap(\.work))
-            case .collectionsIndex(let criteria):
-                let result = try await trackedFetch(searchFetchOp, appState) { opID in
-                    try await appState.bridge.browseCollections(criteria: criteria, page: page, opID: opID)
-                }
-                collectionHits = result.collections
-                totalWorks = nil
-                currentPage = page
-                hasNextPage = result.hasNextPage
-                totalPages = max(result.totalPages, page)
-            }
-        } catch {
-            if !appState.searchTask.isCancelled && !error.isCancellation {
-                appState.searchError = error.localizedDescription
-            }
-        }
-        appState.isSearching = false
-    }
-
-    /// Land one page of works-style results (Works form, tag listing, a
-    /// collection's works) in the shared works results pane.
-    @MainActor
-    private func applyWorksPage(_ result: UPagedWorks, page: UInt32, appState: AppState) {
-        appState.searchResults = result.works.map(AppState.workFromSummary)
-        totalWorks = result.totalWorks
-        currentPage = page
-        hasNextPage = result.hasNextPage
-        totalPages = max(result.totalPages, page)
-        // Results are persisted by the Rust layer as they're fetched —
-        // merge them into the library snapshot so they join local lists.
-        appState.mergeCachedWorks(appState.searchResults)
-    }
+    var activeWorksRequest: WorksSearchRequest?
 
     func clearFilters() {
         let query = queryText
@@ -1057,59 +609,4 @@ final class SearchModel {
 
     var savedSearches: [USavedSearch] = []
 
-    func loadSavedSearches(_ appState: AppState) {
-        savedSearches = appState.bridge.getSavedSearches()
-    }
-
-    /// Persist the current criteria (query, fields, checkboxes) under a name.
-    func saveCurrentSearch(named name: String, appState: AppState) {
-        NSLog("[saved-search] saveCurrentSearch(%@): %d field(s), %d checkbox group(s)",
-              name, fieldValues.count, checkboxValues.count)
-        let payload: [String: Any] = [
-            "fieldValues": fieldValues,
-            "checkboxValues": checkboxValues.mapValues { Array($0) },
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: payload),
-              let json = String(data: data, encoding: .utf8) else {
-            NSLog("[saved-search] saveCurrentSearch(%@): JSON encode failed", name)
-            return
-        }
-        appState.bridge.saveSearch(name: name, paramsJson: json)
-        loadSavedSearches(appState)
-    }
-
-    /// Restore a saved search's criteria into the form (query, fields,
-    /// checkboxes) so the user can tweak them before running the search.
-    @MainActor
-    func applySavedSearch(_ saved: USavedSearch) {
-        guard let data = saved.paramsJson.data(using: .utf8),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        fieldValues = payload["fieldValues"] as? [String: String] ?? [:]
-        let boxes = payload["checkboxValues"] as? [String: [String]] ?? [:]
-        checkboxValues = boxes.mapValues(Set.init)
-    }
-
-    func deleteSavedSearch(_ id: Int64, appState: AppState) {
-        appState.bridge.deleteSavedSearch(id)
-        loadSavedSearches(appState)
-    }
-
-    /// One-line criteria summary for a saved-search row: the query text plus
-    /// how many other criteria are set — so same-named searches are tellable
-    /// apart without running them.
-    static func summary(of saved: USavedSearch) -> String? {
-        guard let data = saved.paramsJson.data(using: .utf8),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        let fields = payload["fieldValues"] as? [String: String] ?? [:]
-        let boxes = payload["checkboxValues"] as? [String: [String]] ?? [:]
-        let query = fields.first { $0.key.hasSuffix("[query]") && !$0.value.isEmpty }?.value
-        let filterCount = fields.filter { !$0.key.hasSuffix("[query]") && !$0.value.isEmpty }.count
-            + boxes.reduce(0) { $0 + $1.value.count }
-        var parts: [String] = []
-        if let query { parts.append("“\(query)”") }
-        if filterCount > 0 {
-            parts.append(filterCount == 1 ? "1 filter" : "\(filterCount) filters")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
 }

@@ -78,86 +78,8 @@ final class ReaderViewController: NSViewController {
         let root = NSView()
         root.wantsLayer = true
 
-        metaLabel.font = MacFont.ui(12, weight: .semibold)
-        titleLabel.font = MacFont.serif(30, weight: .semibold)
-        titleLabel.maximumNumberOfLines = 0
-        titleLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        titleRule.wantsLayer = true
-
-        textView.isEditable = false
-        textView.isSelectable = true
-        // Read-only text never takes drops; unregistering lets a dragged
-        // AO3 link fall through to the window (LinkDropWindow).
-        textView.unregisterDraggedTypes()
-        textView.delegate = self
-        textView.drawsBackground = false
-        textView.textContainerInset = .zero
-        textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.lineFragmentPadding = 0
-        textView.isVerticallyResizable = false
-        textView.isHorizontallyResizable = false
-        textView.usesFindBar = true
-        textView.translatesAutoresizingMaskIntoConstraints = false
-        dropCapLabel.translatesAutoresizingMaskIntoConstraints = false
-        bodyContainer.addSubview(textView)
-        bodyContainer.addSubview(dropCapLabel)
-        NSLayoutConstraint.activate([
-            textView.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
-            textView.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
-            textView.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
-            textView.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
-            dropCapLabel.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
-            dropCapLabel.topAnchor.constraint(equalTo: bodyContainer.topAnchor, constant: -4),
-        ])
-
-        endRule.wantsLayer = true
-        ornamentLabel.font = MacFont.ui(20)
-        ornamentLabel.alignment = .center
-        nextChapterButton.isBordered = false
-        nextChapterButton.wantsLayer = true
-        nextChapterButton.layer?.cornerRadius = 11
-        nextChapterButton.target = self
-        nextChapterButton.action = #selector(nextChapter)
-        nextChapterButton.translatesAutoresizingMaskIntoConstraints = false
-        nextChapterButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        nextChapterButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
-        endNoteBig.font = MacFont.serif(19)
-        endNoteBig.alignment = .center
-        endNoteSub.font = MacFont.ui(14)
-        endNoteSub.alignment = .center
-        nextWorkButton.isBordered = false
-        nextWorkButton.wantsLayer = true
-        nextWorkButton.layer?.cornerRadius = 11
-        nextWorkButton.target = self
-        nextWorkButton.action = #selector(openNextWorkInSeries)
-        nextWorkButton.translatesAutoresizingMaskIntoConstraints = false
-        nextWorkButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        nextWorkButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
-
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 0
-        column.setContentCompressionResistancePriority(.init(1), for: .horizontal)
-        column.edgeInsets = NSEdgeInsets(top: 46, left: 0, bottom: 120, right: 0)
-        [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel,
-         nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { column.addArrangedSubview($0) }
-        column.setCustomSpacing(18, after: endNoteSub)
-        column.setCustomSpacing(10, after: metaLabel)
-        column.setCustomSpacing(22, after: titleLabel)
-        column.setCustomSpacing(28, after: titleRule)
-        column.setCustomSpacing(46, after: bodyContainer)
-        column.setCustomSpacing(30, after: endRule)
-        column.setCustomSpacing(20, after: ornamentLabel)
-        column.setCustomSpacing(4, after: endNoteBig)
-
-        titleRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        titleRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        endRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
-        endRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        bodyContainer.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        ornamentLabel.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        endNoteBig.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
-        endNoteSub.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        configureColumnViews()
+        arrangeColumn()
 
         let document = FlippedView()
         column.translatesAutoresizingMaskIntoConstraints = false
@@ -223,6 +145,94 @@ final class ReaderViewController: NSViewController {
                  theme.readHyphenation, theme.readJustified, session.immersive)
             DispatchQueue.main.async { self.renderChapter() }
         }
+    }
+
+    /// Title, body text view, and end-of-chapter views — fonts, behavior,
+    /// and their fixed-size constraints.
+    private func configureColumnViews() {
+        metaLabel.font = MacFont.ui(12, weight: .semibold)
+        titleLabel.font = MacFont.serif(30, weight: .semibold)
+        titleLabel.maximumNumberOfLines = 0
+        titleLabel.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        titleRule.wantsLayer = true
+
+        textView.isEditable = false
+        textView.isSelectable = true
+        // Read-only text never takes drops; unregistering lets a dragged
+        // AO3 link fall through to the window (LinkDropWindow).
+        textView.unregisterDraggedTypes()
+        textView.delegate = self
+        textView.drawsBackground = false
+        textView.textContainerInset = .zero
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.isVerticallyResizable = false
+        textView.isHorizontallyResizable = false
+        textView.usesFindBar = true
+        textView.translatesAutoresizingMaskIntoConstraints = false
+        dropCapLabel.translatesAutoresizingMaskIntoConstraints = false
+        bodyContainer.addSubview(textView)
+        bodyContainer.addSubview(dropCapLabel)
+        NSLayoutConstraint.activate([
+            textView.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: bodyContainer.trailingAnchor),
+            textView.topAnchor.constraint(equalTo: bodyContainer.topAnchor),
+            textView.bottomAnchor.constraint(equalTo: bodyContainer.bottomAnchor),
+            dropCapLabel.leadingAnchor.constraint(equalTo: bodyContainer.leadingAnchor),
+            dropCapLabel.topAnchor.constraint(equalTo: bodyContainer.topAnchor, constant: -4),
+        ])
+
+        endRule.wantsLayer = true
+        ornamentLabel.font = MacFont.ui(20)
+        ornamentLabel.alignment = .center
+        nextChapterButton.isBordered = false
+        nextChapterButton.wantsLayer = true
+        nextChapterButton.layer?.cornerRadius = 11
+        nextChapterButton.target = self
+        nextChapterButton.action = #selector(nextChapter)
+        nextChapterButton.translatesAutoresizingMaskIntoConstraints = false
+        nextChapterButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
+        nextChapterButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        endNoteBig.font = MacFont.serif(19)
+        endNoteBig.alignment = .center
+        endNoteSub.font = MacFont.ui(14)
+        endNoteSub.alignment = .center
+        nextWorkButton.isBordered = false
+        nextWorkButton.wantsLayer = true
+        nextWorkButton.layer?.cornerRadius = 11
+        nextWorkButton.target = self
+        nextWorkButton.action = #selector(openNextWorkInSeries)
+        nextWorkButton.translatesAutoresizingMaskIntoConstraints = false
+        nextWorkButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
+        nextWorkButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+    }
+
+    /// Stacks the reading column and pins its rows to the column width.
+    private func arrangeColumn() {
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 0
+        column.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        column.edgeInsets = NSEdgeInsets(top: 46, left: 0, bottom: 120, right: 0)
+        [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel,
+         nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { column.addArrangedSubview($0) }
+        column.setCustomSpacing(18, after: endNoteSub)
+        column.setCustomSpacing(10, after: metaLabel)
+        column.setCustomSpacing(22, after: titleLabel)
+        column.setCustomSpacing(28, after: titleRule)
+        column.setCustomSpacing(46, after: bodyContainer)
+        column.setCustomSpacing(30, after: endRule)
+        column.setCustomSpacing(20, after: ornamentLabel)
+        column.setCustomSpacing(4, after: endNoteBig)
+
+        titleRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        titleRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        endRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        endRule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        bodyContainer.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        ornamentLabel.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        endNoteBig.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        endNoteSub.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
     }
 
     /// Saved position (character offset) to restore once the chapter

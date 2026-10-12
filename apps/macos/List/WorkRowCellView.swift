@@ -5,7 +5,7 @@ import AppKit
 /// Followed / Subscribed menu (FollowBellMenu) — the owner wires `onClick`.
 /// Shared by WorkRowCellView, BookmarkRowCellView and the SwiftUI FollowBell.
 final class FollowBellButton: NSButton {
-    private let theme: AppTheme
+    let theme: AppTheme
     private let pointSize: CGFloat
     private(set) var name: String = ""
     var onClick: ((FollowBellButton) -> Void)?
@@ -50,13 +50,13 @@ final class FollowBellButton: NSButton {
 final class WorkRowCellView: NSTableCellView {
     static let reuseID = NSUserInterfaceItemIdentifier("WorkRowCell")
 
-    private let theme: AppTheme
-    private let selectionBar = NSView()
+    let theme: AppTheme
+    let selectionBar = NSView()
     private let spine = NSView()
-    private let fandomLabel = NSTextField(wrappingLabelWithString: "")
-    private let titleLabel = NSTextField(wrappingLabelWithString: "")
+    let fandomLabel = NSTextField(wrappingLabelWithString: "")
+    let titleLabel = NSTextField(wrappingLabelWithString: "")
     private let authorLabel = NSTextField(labelWithString: "")
-    private let summaryLabel = NSTextField(wrappingLabelWithString: "")
+    let summaryLabel = NSTextField(wrappingLabelWithString: "")
     /// Clipping container whose height constraint is what expand/collapse
     /// animates — a line-count clamp can't animate, a constraint can.
     private let summaryClip = NSView()
@@ -70,24 +70,24 @@ final class WorkRowCellView: NSTableCellView {
     private var tagsHeight: NSLayoutConstraint!
     private var collapsedTagsHeight: CGFloat = 0
     private var fullTagsHeight: CGFloat = 0
-    private let metaLabel = NSTextField(labelWithString: "")
-    private let datesLabel = NSTextField(labelWithString: "")
+    let metaLabel = NSTextField(labelWithString: "")
+    let datesLabel = NSTextField(labelWithString: "")
     /// "New" pill in the top-right corner: a What's New entry the user has
     /// not selected since it was added. Hidden everywhere else.
-    private let newBadge = NSTextField(labelWithString: "NEW")
+    let newBadge = NSTextField(labelWithString: "NEW")
     private var isNew = false
     /// "Removed" pill beside the "New" pill: the work is flagged
     /// `gone_from_ao3` (deleted or hidden on AO3; only the cached copy remains).
-    private let removedBadge = NSTextField(labelWithString: "REMOVED")
+    let removedBadge = NSTextField(labelWithString: "REMOVED")
     private var isRemoved = false
     /// Holds both pills; a hidden pill detaches so the other slides over.
     private let badgeStack = NSStackView()
-    private let progressTrack = NSView()
-    private let progressFill = NSView()
+    let progressTrack = NSView()
+    let progressFill = NSView()
     private var progressWidth: NSLayoutConstraint!
     /// Per-row bottom hairline (the design's row border) — the table grid is
     /// off because NSTableView paints phantom lines below the last row.
-    private let separator = NSView()
+    let separator = NSView()
     /// Quick bookmark toggle, aligned with the meta row — bookmark a work
     /// straight from the list without opening its detail page.
     private let bookmarkButton = NSButton()
@@ -122,7 +122,7 @@ final class WorkRowCellView: NSTableCellView {
         }
     }
 
-    private var isRowSelected = false
+    var isRowSelected = false
     /// Called when the user clicks a truncated summary to expand/collapse it.
     var onToggleSummary: (() -> Void)?
     /// Called when the user clicks the row's bookmark button.
@@ -136,10 +136,10 @@ final class WorkRowCellView: NSTableCellView {
     var onFollowBell: ((NSView) -> Void)?
 
     /// Shared measuring label for summary heights.
-    private static let measureLabel = NSTextField(wrappingLabelWithString: "")
+    static let measureLabel = NSTextField(wrappingLabelWithString: "")
     /// Separate measuring label for tags so attributed content never bleeds
     /// into the summary measurements.
-    private static let tagsMeasureLabel = NSTextField(wrappingLabelWithString: "")
+    static let tagsMeasureLabel = NSTextField(wrappingLabelWithString: "")
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -160,6 +160,34 @@ final class WorkRowCellView: NSTableCellView {
         // consumes row clicks (blocking selection) and hands the text to the
         // field editor, which drops the inline rating-badge attachment.
         titleLabel.isSelectable = false
+        let byline = makeByline()
+        configureSummaryAndTagsClips()
+        configureChrome()
+
+        let body = makeBodyStack(byline: byline)
+
+        bookmarkButton.isBordered = false
+        bookmarkButton.setButtonType(.momentaryPushIn)
+        bookmarkButton.target = self
+        bookmarkButton.action = #selector(bookmarkClicked)
+        bookmarkButton.toolTip = "Bookmark"
+
+        separator.wantsLayer = true
+        badgeStack.orientation = .horizontal
+        badgeStack.spacing = 6
+        badgeStack.addArrangedSubview(removedBadge)
+        badgeStack.addArrangedSubview(newBadge)
+        for view in [selectionBar, spine, body, datesLabel, badgeStack, separator, bookmarkButton] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        progressFill.translatesAutoresizingMaskIntoConstraints = false
+        progressWidth = progressFill.widthAnchor.constraint(equalToConstant: 0)
+
+        activateRowConstraints(body: body)
+    }
+
+    private func makeByline() -> NSStackView {
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
         authorLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(authorClicked)))
@@ -169,6 +197,10 @@ final class WorkRowCellView: NSTableCellView {
         byline.orientation = .horizontal
         byline.alignment = .centerY
         byline.spacing = 4
+        return byline
+    }
+
+    private func configureSummaryAndTagsClips() {
         summaryLabel.font = MacFont.ui(12.5)
         summaryClip.wantsLayer = true
         summaryClip.layer?.masksToBounds = true
@@ -194,6 +226,9 @@ final class WorkRowCellView: NSTableCellView {
             tagsLabel.leadingAnchor.constraint(equalTo: tagsClip.leadingAnchor),
             tagsLabel.trailingAnchor.constraint(equalTo: tagsClip.trailingAnchor),
         ])
+    }
+
+    private func configureChrome() {
         metaLabel.font = MacFont.ui(11, weight: .medium)
         metaLabel.lineBreakMode = .byTruncatingTail
 
@@ -216,7 +251,9 @@ final class WorkRowCellView: NSTableCellView {
         progressFill.wantsLayer = true
         progressFill.layer?.cornerRadius = 1.5
         progressTrack.addSubview(progressFill)
+    }
 
+    private func makeBodyStack(byline: NSStackView) -> NSStackView {
         let body = NSStackView(views: [titleLabel, byline, fandomLabel, summaryClip, tagsClip, metaLabel, progressTrack])
         bodyStack = body
         body.orientation = .vertical
@@ -234,25 +271,10 @@ final class WorkRowCellView: NSTableCellView {
         for label in [fandomLabel, titleLabel, authorLabel, metaLabel] {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
+        return body
+    }
 
-        bookmarkButton.isBordered = false
-        bookmarkButton.setButtonType(.momentaryPushIn)
-        bookmarkButton.target = self
-        bookmarkButton.action = #selector(bookmarkClicked)
-        bookmarkButton.toolTip = "Bookmark"
-
-        separator.wantsLayer = true
-        badgeStack.orientation = .horizontal
-        badgeStack.spacing = 6
-        badgeStack.addArrangedSubview(removedBadge)
-        badgeStack.addArrangedSubview(newBadge)
-        for view in [selectionBar, spine, body, datesLabel, badgeStack, separator, bookmarkButton] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        progressFill.translatesAutoresizingMaskIntoConstraints = false
-        progressWidth = progressFill.widthAnchor.constraint(equalToConstant: 0)
-
+    private func activateRowConstraints(body: NSStackView) {
         // High-but-not-required: during measurement it pulls the cell's bottom
         // snugly to the content (labels outrank it at 751, so nothing
         // stretches), and during the resize animation it degrades gracefully
@@ -377,105 +399,7 @@ final class WorkRowCellView: NSTableCellView {
     /// Rounded-rect rating letter drawn as an image so it can ride inline at
     /// the end of the title as a text attachment. Cached per rating. Shared
     /// with BookmarkRowCellView so every row's badge is pixel-identical.
-    private static var badgeImages: [Rating: NSImage] = [:]
-    static func ratingBadgeImage(for rating: Rating) -> NSImage {
-        if let cached = badgeImages[rating] { return cached }
-        let size = NSSize(width: badgeSize, height: badgeSize)
-        let image = NSImage(size: size, flipped: false) { rect in
-            NSColor(rating.badgeColor).setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
-            let letter = NSAttributedString(string: rating.letter, attributes: [
-                .font: MacFont.ui(9, weight: .heavy),
-                .foregroundColor: NSColor.white,
-            ])
-            let s = letter.size()
-            letter.draw(at: NSPoint(x: (rect.width - s.width) / 2, y: (rect.height - s.height) / 2))
-            return true
-        }
-        badgeImages[rating] = image
-        return image
-    }
-
-    /// Wraps the title so lines that share the vertical band of the top-right
-    /// dates block stop short of it while every later line spans the full
-    /// width. NSTextField can't vary width per line, so the wrap is computed
-    /// with an exclusion-path layout and baked in as hard line breaks.
-    /// Shared with BookmarkRowCellView, whose corner block is the
-    /// bookmarked-by/date lines instead of the dates.
-    static func wrappedAroundDates(_ title: NSAttributedString, width: CGFloat,
-                                   datesSize: NSSize) -> NSAttributedString {
-        // Keep at least 60pt of title width no matter how wide the dates run.
-        let exclusionWidth = min(datesSize.width, width - 60)
-        guard exclusionWidth > 0, datesSize.height > 0 else { return title }
-
-        let storage = NSTextStorage(attributedString: title)
-        let layoutManager = NSLayoutManager()
-        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
-        container.lineFragmentPadding = 0
-        container.exclusionPaths = [NSBezierPath(rect: NSRect(x: width - exclusionWidth, y: 0,
-                                                              width: exclusionWidth,
-                                                              height: datesSize.height))]
-        layoutManager.addTextContainer(container)
-        storage.addLayoutManager(layoutManager)
-        layoutManager.ensureLayout(for: container)
-
-        // Collect the character index ending each laid-out line.
-        var breaks: [Int] = []
-        var glyphIndex = 0
-        while glyphIndex < layoutManager.numberOfGlyphs {
-            var lineGlyphs = NSRange()
-            layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineGlyphs)
-            let lineEnd = layoutManager.characterRange(forGlyphRange: lineGlyphs,
-                                                       actualGlyphRange: nil).upperBound
-            if lineEnd < storage.length { breaks.append(lineEnd) }
-            glyphIndex = NSMaxRange(lineGlyphs)
-        }
-        guard !breaks.isEmpty else { return title }
-
-        let wrapped = NSMutableAttributedString(attributedString: title)
-        let text = title.string as NSString
-        for lineEnd in breaks.reversed() {
-            let before = text.character(at: lineEnd - 1)
-            if before == 0x0A { continue }  // already a hard break
-            let attributes = wrapped.attributes(at: lineEnd - 1, effectiveRange: nil)
-            if before == 0x20 {
-                // Soft wraps eat the boundary space; mirror that exactly.
-                wrapped.replaceCharacters(in: NSRange(location: lineEnd - 1, length: 1),
-                                          with: NSAttributedString(string: "\n", attributes: attributes))
-            } else {
-                wrapped.insert(NSAttributedString(string: "\n", attributes: attributes), at: lineEnd)
-            }
-        }
-        return wrapped
-    }
-
-    /// Measure the summary's collapsed (2-line) and full heights at a width.
-    private static func summaryHeights(text: String, width: CGFloat) -> (collapsed: CGFloat, full: CGFloat) {
-        let label = measureLabel
-        label.font = MacFont.ui(12.5)
-        label.stringValue = text
-        label.preferredMaxLayoutWidth = width
-        label.maximumNumberOfLines = 2
-        let collapsed = label.intrinsicContentSize.height
-        label.maximumNumberOfLines = 0
-        label.invalidateIntrinsicContentSize()
-        let full = label.intrinsicContentSize.height
-        return (collapsed, max(full, collapsed))
-    }
-
-    /// Measure the tag pills' collapsed (2-line) and full heights at a width.
-    private static func tagsHeights(text: NSAttributedString, width: CGFloat) -> (collapsed: CGFloat, full: CGFloat) {
-        let label = tagsMeasureLabel
-        label.attributedStringValue = text
-        label.preferredMaxLayoutWidth = width
-        label.maximumNumberOfLines = 2
-        label.invalidateIntrinsicContentSize()
-        let collapsed = label.intrinsicContentSize.height
-        label.maximumNumberOfLines = 0
-        label.invalidateIntrinsicContentSize()
-        let full = label.intrinsicContentSize.height
-        return (collapsed, max(full, collapsed))
-    }
+    static var badgeImages: [Rating: NSImage] = [:]
 
     /// Flip only the selection highlight (background fill + accent bar) —
     /// no label content is touched.
@@ -517,59 +441,17 @@ final class WorkRowCellView: NSTableCellView {
         metaLabel.font = MacFont.ui(11, weight: .medium)
         datesLabel.font = MacFont.ui(10, weight: .medium)
 
-        // Density (Settings → Spacing) sets the row's breathing room.
-        let vPad = Self.verticalPad(for: theme.density)
-        let gap = Self.sectionGap(for: theme.density)
-        bodyTop.constant = vPad
-        bodyBottom.constant = -vPad
-        spineTop.constant = vPad
-        spineBottom.constant = -vPad
-        datesTop.constant = vPad
-        bodyStack.setCustomSpacing(gap, after: summaryClip)
-        bodyStack.setCustomSpacing(gap, after: tagsClip)
-        bodyStack.setCustomSpacing(gap, after: metaLabel)
+        applyDensityMetrics()
 
-        // Published/updated dates in the top-right corner. Blurb data only
-        // carries an updated date; a work page carries both (identical for
-        // single-chapter works — collapse to the published line then).
-        var dateLines: [String] = []
-        if !work.published.isEmpty { dateLines.append("Published \(work.published)") }
-        if !work.updated.isEmpty && work.updated != work.published {
-            dateLines.append("Updated \(work.updated)")
-        }
-        datesLabel.stringValue = dateLines.joined(separator: "\n")
-        datesLabel.isHidden = dateLines.isEmpty
-        titleLabel.preferredMaxLayoutWidth = availableTextWidth
+        let dateLines = renderDates(for: work, availableTextWidth: availableTextWidth)
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
         // One fandom per line, matching the work-details header.
         fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
         fandomLabel.stringValue = work.fandomList.joined(separator: "\n")
 
-        // Serif title with the rating badge inline after the last word — a
-        // non-breaking space keeps the badge from wrapping onto its own line.
-        let titleFont = MacFont.serif(16, weight: .semibold)
-        let title = NSMutableAttributedString(
-            string: work.title + "\u{00A0}",
-            attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
-        let badge = NSTextAttachment()
-        badge.image = Self.ratingBadgeImage(for: work.rating)
-        badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - Self.badgeSize) / 2,
-                              width: Self.badgeSize, height: Self.badgeSize)
-        title.append(NSAttributedString(attachment: badge))
-        // The dates block occupies the row's top-right corner. The opening
-        // title line(s) wrap short of it; every line below runs full width.
-        var datesSize = NSSize.zero
-        if !dateLines.isEmpty {
-            let size = datesLabel.intrinsicContentSize
-            datesSize = NSSize(width: size.width + 10, height: size.height)
-        }
-        // The pills share the corner — keep the title clear of them too.
-        if isNew { datesSize.width += 44 }
-        if isRemoved { datesSize.width += 66 }
-        if isNew || isRemoved { datesSize.height = max(datesSize.height, 16) }
-        titleLabel.attributedStringValue = Self.wrappedAroundDates(
-            title, width: availableTextWidth, datesSize: datesSize)
+        renderTitle(for: work, dateLines: dateLines, isNew: isNew, isRemoved: isRemoved,
+                    availableTextWidth: availableTextWidth)
 
         let author = NSMutableAttributedString(
             string: "by ", attributes: [.font: MacFont.ui(12), .foregroundColor: theme.nsInk3])
@@ -580,26 +462,7 @@ final class WorkRowCellView: NSTableCellView {
         summaryLabel.stringValue = work.summary
         summaryClip.isHidden = work.summary.isEmpty
 
-        tagsClip.isHidden = work.tags.isEmpty
-        if !work.tags.isEmpty {
-            let sortedTags = work.tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-            let tags = NSMutableAttributedString()
-            for (index, tag) in sortedTags.enumerated() {
-                if index > 0 {
-                    tags.append(NSAttributedString(string: "  ", attributes: [.font: MacFont.ui(10.5)]))
-                }
-                tags.append(NSAttributedString(string: " \(tag) ", attributes: [
-                    .font: MacFont.ui(10.5, weight: .semibold),
-                    .foregroundColor: theme.nsInk2,
-                    .backgroundColor: theme.nsSurface2,
-                ]))
-            }
-            tagsLabel.attributedStringValue = tags
-            let tagHeights = Self.tagsHeights(text: tags, width: availableTextWidth)
-            collapsedTagsHeight = tagHeights.collapsed
-            fullTagsHeight = tagHeights.full
-            tagsHeight.constant = tagsExpanded ? fullTagsHeight : collapsedTagsHeight
-        }
+        renderTags(for: work, tagsExpanded: tagsExpanded, availableTextWidth: availableTextWidth)
         let heights = Self.summaryHeights(text: work.summary, width: availableTextWidth)
         collapsedSummaryHeight = heights.collapsed
         fullSummaryHeight = heights.full
@@ -629,79 +492,94 @@ final class WorkRowCellView: NSTableCellView {
         }
     }
 
-    private static func axDescription(for work: Work, progress: Double,
-                                      downloaded: Bool, bookmarked: Bool, finished: Bool) -> String {
-        var parts: [String] = [work.title, "by \(work.author)"]
-        if !work.fandomDisplay.isEmpty { parts.append(work.fandomDisplay) }
-        parts.append("rated \(work.rating.rawValue)")
-        parts.append("\(Fmt.k(work.words)) words")
-        parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")
-        if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
-        if downloaded { parts.append("available offline") }
-        if bookmarked { parts.append("bookmarked") }
-        if finished { parts.append("finished") }
-        return parts.joined(separator: ", ")
+    private func applyDensityMetrics() {
+        // Density (Settings → Spacing) sets the row's breathing room.
+        let vPad = Self.verticalPad(for: theme.density)
+        let gap = Self.sectionGap(for: theme.density)
+        bodyTop.constant = vPad
+        bodyBottom.constant = -vPad
+        spineTop.constant = vPad
+        spineBottom.constant = -vPad
+        datesTop.constant = vPad
+        bodyStack.setCustomSpacing(gap, after: summaryClip)
+        bodyStack.setCustomSpacing(gap, after: tagsClip)
+        bodyStack.setCustomSpacing(gap, after: metaLabel)
+    }
+
+    private func renderDates(for work: Work, availableTextWidth: CGFloat) -> [String] {
+        // Published/updated dates in the top-right corner. Blurb data only
+        // carries an updated date; a work page carries both (identical for
+        // single-chapter works — collapse to the published line then).
+        var dateLines: [String] = []
+        if !work.published.isEmpty { dateLines.append("Published \(work.published)") }
+        if !work.updated.isEmpty && work.updated != work.published {
+            dateLines.append("Updated \(work.updated)")
+        }
+        datesLabel.stringValue = dateLines.joined(separator: "\n")
+        datesLabel.isHidden = dateLines.isEmpty
+        titleLabel.preferredMaxLayoutWidth = availableTextWidth
+        return dateLines
+    }
+
+    private func renderTitle(for work: Work, dateLines: [String], isNew: Bool, isRemoved: Bool,
+                             availableTextWidth: CGFloat) {
+        // Serif title with the rating badge inline after the last word — a
+        // non-breaking space keeps the badge from wrapping onto its own line.
+        let titleFont = MacFont.serif(16, weight: .semibold)
+        let title = NSMutableAttributedString(
+            string: work.title + "\u{00A0}",
+            attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
+        let badge = NSTextAttachment()
+        badge.image = Self.ratingBadgeImage(for: work.rating)
+        badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - Self.badgeSize) / 2,
+                              width: Self.badgeSize, height: Self.badgeSize)
+        title.append(NSAttributedString(attachment: badge))
+        // The dates block occupies the row's top-right corner. The opening
+        // title line(s) wrap short of it; every line below runs full width.
+        var datesSize = NSSize.zero
+        if !dateLines.isEmpty {
+            let size = datesLabel.intrinsicContentSize
+            datesSize = NSSize(width: size.width + 10, height: size.height)
+        }
+        // The pills share the corner — keep the title clear of them too.
+        if isNew { datesSize.width += 44 }
+        if isRemoved { datesSize.width += 66 }
+        if isNew || isRemoved { datesSize.height = max(datesSize.height, 16) }
+        titleLabel.attributedStringValue = Self.wrappedAroundDates(
+            title, width: availableTextWidth, datesSize: datesSize)
+    }
+
+    private func renderTags(for work: Work, tagsExpanded: Bool, availableTextWidth: CGFloat) {
+        tagsClip.isHidden = work.tags.isEmpty
+        if !work.tags.isEmpty {
+            let sortedTags = work.tags.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+            let tags = NSMutableAttributedString()
+            for (index, tag) in sortedTags.enumerated() {
+                if index > 0 {
+                    tags.append(NSAttributedString(string: "  ", attributes: [.font: MacFont.ui(10.5)]))
+                }
+                tags.append(NSAttributedString(string: " \(tag) ", attributes: [
+                    .font: MacFont.ui(10.5, weight: .semibold),
+                    .foregroundColor: theme.nsInk2,
+                    .backgroundColor: theme.nsSurface2,
+                ]))
+            }
+            tagsLabel.attributedStringValue = tags
+            let tagHeights = Self.tagsHeights(text: tags, width: availableTextWidth)
+            collapsedTagsHeight = tagHeights.collapsed
+            fullTagsHeight = tagHeights.full
+            tagsHeight.constant = tagsExpanded ? fullTagsHeight : collapsedTagsHeight
+        }
     }
 
     /// Whether the signed-in user has left kudos on this work — the heart
     /// in the meta line turns red, matching the reader's kudos button.
-    private var kudosGiven = false
+    var kudosGiven = false
     /// Meta text after the heart glyph; kept so the heart can be recolored
     /// without recomputing the line.
-    private var metaText = ""
+    var metaText = ""
     /// The user's manual finished-reading flag — "✓ Finished" in the meta
     /// line.
-    private var finished = false
+    var finished = false
 
-    func setFinished(_ value: Bool) {
-        guard value != finished else { return }
-        finished = value
-        renderMeta()
-    }
-
-    func setKudosGiven(_ given: Bool) {
-        guard given != kudosGiven else { return }
-        kudosGiven = given
-        renderMeta()
-    }
-
-    private func renderMeta() {
-        let font = MacFont.ui(11, weight: .medium)
-        let line = NSMutableAttributedString(string: "♥", attributes: [
-            .font: font,
-            .foregroundColor: kudosGiven ? NSColor(srgbRed: 0xCE / 255, green: 0x51 / 255, blue: 0x4D / 255, alpha: 1) : theme.nsInk3,
-        ])
-        line.append(NSAttributedString(string: metaText, attributes: [
-            .font: font, .foregroundColor: theme.nsInk3,
-        ]))
-        if finished {
-            line.append(NSAttributedString(string: "   ✓ Finished", attributes: [
-                .font: font, .foregroundColor: theme.nsInk2,
-            ]))
-        }
-        metaLabel.attributedStringValue = line
-    }
-
-    func applyTheme() {
-        layer?.backgroundColor = isRowSelected ? theme.nsAccentSoft.cgColor : NSColor.clear.cgColor
-        selectionBar.layer?.backgroundColor = isRowSelected ? theme.nsAccent.cgColor : NSColor.clear.cgColor
-        separator.layer?.backgroundColor = theme.nsLine.cgColor
-        fandomLabel.textColor = theme.nsAccent
-        titleLabel.textColor = theme.nsInk
-        summaryLabel.textColor = theme.nsInk2
-        renderMeta()
-        datesLabel.textColor = theme.nsInk3
-        newBadge.font = MacFont.ui(9, weight: .bold)
-        newBadge.textColor = theme.nsAccent
-        newBadge.layer?.backgroundColor = theme.nsAccentSoft.cgColor
-        newBadge.layer?.borderColor = theme.nsAccent.withAlphaComponent(0.5).cgColor
-        newBadge.layer?.borderWidth = 1
-        removedBadge.font = MacFont.ui(9, weight: .bold)
-        removedBadge.textColor = theme.nsAccent2
-        removedBadge.layer?.backgroundColor = theme.nsAccent2.withAlphaComponent(0.13).cgColor
-        removedBadge.layer?.borderColor = theme.nsAccent2.withAlphaComponent(0.5).cgColor
-        removedBadge.layer?.borderWidth = 1
-        progressTrack.layer?.backgroundColor = theme.nsSurface3.cgColor
-        progressFill.layer?.backgroundColor = theme.nsAccent.cgColor
-    }
 }

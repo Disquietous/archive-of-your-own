@@ -50,27 +50,7 @@ extension AppState {
             checkMonitor.queued(bridge.getWhatsNewCheckQueue())
 
             while !whatsNewCheckTask.isCancelled {
-                // Hold between items while the user is fetching something
-                // (never compete for the circuit or the rate limiter) or
-                // while the monitor's Pause is down. Stop is honored here
-                // too, so it takes effect at the next item boundary.
-                var held = false
-                while !whatsNewCheckTask.isCancelled
-                        && (activeUserFetches > 0 || checkMonitor.pauseRequested) {
-                    if checkMonitor.stopRequested { whatsNewCheckTask.cancel() ; break }
-                    if !held {
-                        held = true
-                        whatsNewCheckTask.statusMessage = checkMonitor.pauseRequested
-                            ? "Paused." : "Paused while you browse…"
-                    }
-                    checkMonitor.setPhase(checkMonitor.pauseRequested ? .pausedByUser : .pausedForBrowsing)
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                }
-                if checkMonitor.stopRequested { whatsNewCheckTask.cancel() }
-                if whatsNewCheckTask.isCancelled { break }
-                if held {
-                    whatsNewCheckTask.statusMessage = nil
-                }
+                if await holdBetweenChecks() { break }
                 checkMonitor.setPhase(.running)
 
                 let queue = bridge.getWhatsNewCheckQueue()
@@ -83,38 +63,7 @@ extension AppState {
                     checkMonitor.dispatched(nil)
                     break
                 }
-                whatsNewCheckRemaining = Int(result.remaining)
-                // Each completed check stamped its row — keep list labels live.
-                loadFollowLastChecked()
-
-                let finishedItem = UCheckQueueItem(
-                    kind: result.kind, targetId: result.targetId, name: result.name, census: head.census,
-                    page: head.page, totalPages: head.totalPages)
-                if let error = result.error {
-                    // A transient failure already got rotated-and-retried in
-                    // Rust before this returned — nothing left for Swift to
-                    // decide. A still-retryable item was requeued for later
-                    // in this cycle (reflected in `remaining`); this just
-                    // counts the attempt and moves to the next item.
-                    whatsNewCheckFailed += 1
-                    checkMonitor.finished(finishedItem, .failed(error))
-                } else {
-                    checkMonitor.finished(finishedItem, result.changed ? .updated : .unchanged)
-                    if result.changed {
-                        loadNewWorks()
-                        reloadCachedWorks()
-                        // work(byID:) consults fetchedWorks before the
-                        // cachedWorks snapshot — a copy viewed earlier this
-                        // session would shadow the freshly saved row, so
-                        // replace any flagged entries from the DB.
-                        for id in newWorkIDs where fetchedWorks[id] != nil {
-                            if let workId = UInt64(id),
-                               let fresh = bridge.getCachedWork(workId) {
-                                fetchedWorks[id] = Self.workFromSummary(fresh)
-                            }
-                        }
-                    }
-                }
+                handleCheckResult(result, head: head)
             }
 
             if !whatsNewCheckTask.isCancelled {
@@ -139,6 +88,67 @@ extension AppState {
         whatsNewCheckRemaining = 0
         checkMonitor.queued(bridge.getWhatsNewCheckQueue())
         if checkMonitor.isRunning { checkMonitor.end() }
+    }
+
+    /// Hold between items while the user is fetching something (never
+    /// compete for the circuit or the rate limiter) or while the monitor's
+    /// Pause is down. Returns true when the check was cancelled/stopped and
+    /// the loop must end.
+    private func holdBetweenChecks() async -> Bool {
+        var held = false
+        while !whatsNewCheckTask.isCancelled
+                && (activeUserFetches > 0 || checkMonitor.pauseRequested) {
+            if checkMonitor.stopRequested { whatsNewCheckTask.cancel() ; break }
+            if !held {
+                held = true
+                whatsNewCheckTask.statusMessage = checkMonitor.pauseRequested
+                    ? "Paused." : "Paused while you browse…"
+            }
+            checkMonitor.setPhase(checkMonitor.pauseRequested ? .pausedByUser : .pausedForBrowsing)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        if checkMonitor.stopRequested { whatsNewCheckTask.cancel() }
+        if whatsNewCheckTask.isCancelled { return true }
+        if held {
+            whatsNewCheckTask.statusMessage = nil
+        }
+        return false
+    }
+
+    /// Fold one finished follow check into the monitor and the feeds.
+    private func handleCheckResult(_ result: UFollowCheckResult, head: UCheckQueueItem) {
+        whatsNewCheckRemaining = Int(result.remaining)
+        // Each completed check stamped its row — keep list labels live.
+        loadFollowLastChecked()
+
+        let finishedItem = UCheckQueueItem(
+            kind: result.kind, targetId: result.targetId, name: result.name, census: head.census,
+            page: head.page, totalPages: head.totalPages)
+        if let error = result.error {
+            // A transient failure already got rotated-and-retried in
+            // Rust before this returned — nothing left for Swift to
+            // decide. A still-retryable item was requeued for later
+            // in this cycle (reflected in `remaining`); this just
+            // counts the attempt and moves to the next item.
+            whatsNewCheckFailed += 1
+            checkMonitor.finished(finishedItem, .failed(error))
+        } else {
+            checkMonitor.finished(finishedItem, result.changed ? .updated : .unchanged)
+            if result.changed {
+                loadNewWorks()
+                reloadCachedWorks()
+                // work(byID:) consults fetchedWorks before the
+                // cachedWorks snapshot — a copy viewed earlier this
+                // session would shadow the freshly saved row, so
+                // replace any flagged entries from the DB.
+                for id in newWorkIDs where fetchedWorks[id] != nil {
+                    if let workId = UInt64(id),
+                       let fresh = bridge.getCachedWork(workId) {
+                        fetchedWorks[id] = Self.workFromSummary(fresh)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Monitor controls

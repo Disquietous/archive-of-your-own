@@ -123,6 +123,18 @@ final class BookmarkRowCellView: NSTableCellView {
         bookmarkerTagsHeight = setUpTagClip(bookmarkerTagsClip, label: bookmarkerTagsLabel,
                                             action: #selector(bookmarkerTagsClicked))
 
+        let body = makeBodyStack()
+
+        separator.wantsLayer = true
+        for view in [spine, body, cornerLabel, separator] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+
+        activateRowConstraints(body: body)
+    }
+
+    private func makeBodyStack() -> NSStackView {
         let body = NSStackView(views: [titleLabel, bylineStack, fandomLabel,
                                        workTagsClip, bookmarkerTagsClip, noteLabel, metaLabel])
         bodyStack = body
@@ -139,13 +151,10 @@ final class BookmarkRowCellView: NSTableCellView {
         for label in [fandomLabel, titleLabel, noteLabel, metaLabel] {
             label.setContentHuggingPriority(.init(751), for: .vertical)
         }
+        return body
+    }
 
-        separator.wantsLayer = true
-        for view in [spine, body, cornerLabel, separator] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-
+    private func activateRowConstraints(body: NSStackView) {
         bodyBottom = body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
         bodyBottom.priority = .defaultHigh
         bodyTop = body.topAnchor.constraint(equalTo: topAnchor, constant: 12)
@@ -333,84 +342,16 @@ final class BookmarkRowCellView: NSTableCellView {
         metaLabel.font = MacFont.ui(11, weight: .medium)
         cornerLabel.font = MacFont.ui(10, weight: .medium)
 
-        // Density (Settings → Spacing) sets the row's breathing room.
-        let vPad = Self.verticalPad(for: theme.density)
-        let gap = Self.sectionGap(for: theme.density)
-        bodyTop.constant = vPad
-        bodyBottom.constant = -vPad
-        spineTop.constant = vPad
-        spineBottom.constant = -vPad
-        cornerTop.constant = vPad
-        bodyStack.setCustomSpacing(gap, after: workTagsClip)
-        bodyStack.setCustomSpacing(gap, after: bookmarkerTagsClip)
-        bodyStack.setCustomSpacing(gap, after: noteLabel)
+        applyDensityMetrics()
 
         workTagsLabel.preferredMaxLayoutWidth = availableTextWidth
         bookmarkerTagsLabel.preferredMaxLayoutWidth = availableTextWidth
         noteLabel.preferredMaxLayoutWidth = availableTextWidth
         titleLabel.preferredMaxLayoutWidth = availableTextWidth
 
-        // Corner block: REC pill + bookmarked-by, date beneath — the
-        // bookmark's data in the work row's dates slot.
-        let right = NSMutableParagraphStyle()
-        right.alignment = .right
-        let cornerFont = MacFont.ui(10, weight: .medium)
-        let corner = NSMutableAttributedString()
-        if hit.rec {
-            let badge = NSTextAttachment()
-            let image = recBadgeImage()
-            badge.image = image
-            badge.bounds = CGRect(x: 0, y: cornerFont.capHeight - image.size.height + 2,
-                                  width: image.size.width, height: image.size.height)
-            corner.append(NSAttributedString(attachment: badge))
-            corner.append(NSAttributedString(string: " "))
-        }
-        corner.append(NSAttributedString(
-            string: hit.bookmarker.isEmpty ? "Bookmarked" : "Bookmarked by \(hit.bookmarker)"))
-        if !hit.dateBookmarked.isEmpty {
-            corner.append(NSAttributedString(string: "\n\(hit.dateBookmarked)"))
-        }
-        corner.addAttributes([
-            .font: cornerFont,
-            .foregroundColor: theme.nsInk3,
-            .paragraphStyle: right,
-        ], range: NSRange(location: 0, length: corner.length))
-        cornerLabel.attributedStringValue = corner
+        renderCorner(for: hit)
 
-        spine.layer?.backgroundColor = NSColor(Fandom.spineColor(for: hit.displayFandoms.first ?? "Unknown Fandom")).cgColor
-        // One fandom per line, matching the work list item. A mystery hit
-        // (unrevealed challenge work) has no fandoms — its "Part of
-        // <collection>" line rides the fandom slot, as on AO3. A series
-        // blurb carries no fandoms — "Series" rides the slot instead.
-        fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
-        if hit.mystery && hit.displayFandoms.isEmpty && !hit.mysteryCollectionTitle.isEmpty {
-            fandomLabel.stringValue = "Part of \(hit.mysteryCollectionTitle)"
-        } else if series != nil {
-            fandomLabel.stringValue = "Series"
-        } else {
-            fandomLabel.stringValue = hit.displayFandoms.joined(separator: "\n")
-        }
-        fandomLabel.isHidden = fandomLabel.stringValue.isEmpty
-
-        // Serif title with the rating badge inline after the last word,
-        // wrapped short of the corner block — exactly the work row's title.
-        // No badge when the rating is unknown (mystery works and series
-        // carry none).
-        let titleFont = MacFont.serif(16, weight: .semibold)
-        let title = NSMutableAttributedString(
-            string: hit.displayTitle + "\u{00A0}",
-            attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
-        if let work, let rating = Rating(rawValue: work.rating) {
-            let badge = NSTextAttachment()
-            badge.image = WorkRowCellView.ratingBadgeImage(for: rating)
-            badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - WorkRowCellView.badgeSize) / 2,
-                                  width: WorkRowCellView.badgeSize, height: WorkRowCellView.badgeSize)
-            title.append(NSAttributedString(attachment: badge))
-        }
-        let cornerSize = cornerLabel.intrinsicContentSize
-        titleLabel.attributedStringValue = WorkRowCellView.wrappedAroundDates(
-            title, width: availableTextWidth,
-            datesSize: NSSize(width: cornerSize.width + 10, height: cornerSize.height))
+        renderFandomAndTitle(for: hit, work: work, series: series, availableTextWidth: availableTextWidth)
 
         // Mystery works have no byline at all; other blurbs without an
         // author link (anonymous works) keep the "Unknown" fallback.
@@ -452,6 +393,87 @@ final class BookmarkRowCellView: NSTableCellView {
         setAccessibilityLabel(Self.axDescription(for: hit))
 
         applyTheme()
+    }
+
+    private func applyDensityMetrics() {
+        // Density (Settings → Spacing) sets the row's breathing room.
+        let vPad = Self.verticalPad(for: theme.density)
+        let gap = Self.sectionGap(for: theme.density)
+        bodyTop.constant = vPad
+        bodyBottom.constant = -vPad
+        spineTop.constant = vPad
+        spineBottom.constant = -vPad
+        cornerTop.constant = vPad
+        bodyStack.setCustomSpacing(gap, after: workTagsClip)
+        bodyStack.setCustomSpacing(gap, after: bookmarkerTagsClip)
+        bodyStack.setCustomSpacing(gap, after: noteLabel)
+    }
+
+    private func renderCorner(for hit: UBookmarkHit) {
+        // Corner block: REC pill + bookmarked-by, date beneath — the
+        // bookmark's data in the work row's dates slot.
+        let right = NSMutableParagraphStyle()
+        right.alignment = .right
+        let cornerFont = MacFont.ui(10, weight: .medium)
+        let corner = NSMutableAttributedString()
+        if hit.rec {
+            let badge = NSTextAttachment()
+            let image = recBadgeImage()
+            badge.image = image
+            badge.bounds = CGRect(x: 0, y: cornerFont.capHeight - image.size.height + 2,
+                                  width: image.size.width, height: image.size.height)
+            corner.append(NSAttributedString(attachment: badge))
+            corner.append(NSAttributedString(string: " "))
+        }
+        corner.append(NSAttributedString(
+            string: hit.bookmarker.isEmpty ? "Bookmarked" : "Bookmarked by \(hit.bookmarker)"))
+        if !hit.dateBookmarked.isEmpty {
+            corner.append(NSAttributedString(string: "\n\(hit.dateBookmarked)"))
+        }
+        corner.addAttributes([
+            .font: cornerFont,
+            .foregroundColor: theme.nsInk3,
+            .paragraphStyle: right,
+        ], range: NSRange(location: 0, length: corner.length))
+        cornerLabel.attributedStringValue = corner
+    }
+
+    private func renderFandomAndTitle(for hit: UBookmarkHit, work: UWorkSummary?, series: USeriesSummary?,
+                                      availableTextWidth: CGFloat) {
+        spine.layer?.backgroundColor = NSColor(Fandom.spineColor(for: hit.displayFandoms.first ?? "Unknown Fandom")).cgColor
+        // One fandom per line, matching the work list item. A mystery hit
+        // (unrevealed challenge work) has no fandoms — its "Part of
+        // <collection>" line rides the fandom slot, as on AO3. A series
+        // blurb carries no fandoms — "Series" rides the slot instead.
+        fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
+        if hit.mystery && hit.displayFandoms.isEmpty && !hit.mysteryCollectionTitle.isEmpty {
+            fandomLabel.stringValue = "Part of \(hit.mysteryCollectionTitle)"
+        } else if series != nil {
+            fandomLabel.stringValue = "Series"
+        } else {
+            fandomLabel.stringValue = hit.displayFandoms.joined(separator: "\n")
+        }
+        fandomLabel.isHidden = fandomLabel.stringValue.isEmpty
+
+        // Serif title with the rating badge inline after the last word,
+        // wrapped short of the corner block — exactly the work row's title.
+        // No badge when the rating is unknown (mystery works and series
+        // carry none).
+        let titleFont = MacFont.serif(16, weight: .semibold)
+        let title = NSMutableAttributedString(
+            string: hit.displayTitle + "\u{00A0}",
+            attributes: [.font: titleFont, .foregroundColor: theme.nsInk])
+        if let work, let rating = Rating(rawValue: work.rating) {
+            let badge = NSTextAttachment()
+            badge.image = WorkRowCellView.ratingBadgeImage(for: rating)
+            badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - WorkRowCellView.badgeSize) / 2,
+                                  width: WorkRowCellView.badgeSize, height: WorkRowCellView.badgeSize)
+            title.append(NSAttributedString(attachment: badge))
+        }
+        let cornerSize = cornerLabel.intrinsicContentSize
+        titleLabel.attributedStringValue = WorkRowCellView.wrappedAroundDates(
+            title, width: availableTextWidth,
+            datesSize: NSSize(width: cornerSize.width + 10, height: cornerSize.height))
     }
 
     private static func axDescription(for hit: UBookmarkHit) -> String {

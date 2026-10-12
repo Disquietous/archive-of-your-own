@@ -92,7 +92,28 @@ final class AuthorProfileViewController: NSViewController {
         preferred.priority = .defaultHigh
         preferred.isActive = true
 
-        // Identity header: avatar beside name + meta lines.
+        let headerRow = makeHeaderRow()
+        let statusRow = makeStatusRow()
+        configureBodyControls()
+
+        for view in [headerRow, statsLabel, listsRow, statusRow, actionsRow, actionErrorLabel, actionsSeparator, bioView] {
+            column.addArrangedSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            bioView.widthAnchor.constraint(equalTo: column.widthAnchor),
+            actionErrorLabel.widthAnchor.constraint(equalTo: column.widthAnchor),
+            actionsSeparator.widthAnchor.constraint(equalTo: column.widthAnchor),
+        ])
+
+        view = root
+
+        ObservationRelay.track { [weak self] in
+            self?.render()
+        }
+    }
+
+    /// Identity header: avatar beside name + meta lines.
+    private func makeHeaderRow() -> NSStackView {
         avatarView.translatesAutoresizingMaskIntoConstraints = false
         avatarView.wantsLayer = true
         avatarView.layer?.cornerRadius = 32
@@ -112,7 +133,10 @@ final class AuthorProfileViewController: NSViewController {
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 14
+        return headerRow
+    }
 
+    private func makeStatusRow() -> NSStackView {
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
@@ -121,7 +145,11 @@ final class AuthorProfileViewController: NSViewController {
         statusRow.orientation = .horizontal
         statusRow.alignment = .firstBaseline
         statusRow.spacing = 6
+        return statusRow
+    }
 
+    /// Bio text view, block/mute actions, and the works/bookmarks/collections row.
+    private func configureBodyControls() {
         bioView.isEditable = false
         bioView.isSelectable = true
         bioView.unregisterDraggedTypes()  // let AO3 link drops reach the window
@@ -169,21 +197,6 @@ final class AuthorProfileViewController: NSViewController {
         listsRow.setViews([worksButton, bookmarksButton, collectionsButton], in: .leading)
 
         actionsSeparator.boxType = .separator
-
-        for view in [headerRow, statsLabel, listsRow, statusRow, actionsRow, actionErrorLabel, actionsSeparator, bioView] {
-            column.addArrangedSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            bioView.widthAnchor.constraint(equalTo: column.widthAnchor),
-            actionErrorLabel.widthAnchor.constraint(equalTo: column.widthAnchor),
-            actionsSeparator.widthAnchor.constraint(equalTo: column.widthAnchor),
-        ])
-
-        view = root
-
-        ObservationRelay.track { [weak self] in
-            self?.render()
-        }
     }
 
     /// Point the pane at an author. Kicks the cached-then-network profile

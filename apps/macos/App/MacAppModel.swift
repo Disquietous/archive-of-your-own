@@ -106,7 +106,7 @@ final class MacAppModel {
     }
 
     /// The list filter rule (see LibraryListModel.listEmptied).
-    private func listEmptied(_ sections: Section...) {
+    func listEmptied(_ sections: Section...) {
         guard !lists.retainListFilters else { return }
         for section in sections { lists.workListFilters[section] = nil }
     }
@@ -425,7 +425,7 @@ final class MacAppModel {
         }
     }
 
-    private func clearSelection() {
+    func clearSelection() {
         selectedWorkID = nil
         readerOpen = false
         immersive = false
@@ -546,149 +546,16 @@ final class MacAppModel {
         lists.listFiltered(fandomLibraryWorksRaw, section: .fandoms)
     }
 
-    private var fandomLibraryWorksRaw: [Work] {
+    var fandomLibraryWorksRaw: [Work] {
         fandomWorksTag.map { appState.libraryWorks(inFandom: $0) } ?? []
-    }
-
-    // MARK: - Sample data (testing/demo)
-
-    var sampleDataLoaded: Bool { appState.sampleDataLoaded }
-
-    func loadSampleData() { appState.loadSampleData() }
-
-    func clearSampleData() {
-        let removed = appState.clearSampleData()
-        if let selected = selectedWorkID, removed.contains(selected) {
-            clearSelection()
-        }
-    }
-
-    // MARK: - Subscription drill-in (stays inside Subscriptions)
-
-    var filteredSubscriptionWorks: [Work] {
-        works(for: .subscriptions)
-    }
-
-    /// Show a subscription's locally stored works in the reading pane.
-    func openSubscriptionAuthorWorks(subscriptionID: String, author: String, subType: String = "author") {
-        if subscriptionWorks.subId != subscriptionID { listEmptied(.subscriptions) }
-        subscriptionWorks.open(subscriptionID: subscriptionID, author: author, subType: subType)
-        selectedWorkID = nil
-        readerOpen = false
-    }
-
-    func closeSubscriptionWorks() {
-        subscriptionWorks.close()
-        listEmptied(.subscriptions)
-        selectedWorkID = nil
     }
 
     // MARK: - Author profile (two-pane author view)
 
-    var filteredAuthorWorks: [Work] {
-        works(for: .authors)
-    }
-
     /// Where the author view was entered from when it wasn't the Authors
     /// list (a work detail's byline, search results, the Following
     /// drill-in) — the profile's back button returns there.
-    private var authorDetailReturnSection: Section?
-
-    /// Open the two-pane author view on an author: their profile in the
-    /// list pane, one of their lists in the reading pane.
-    func openAuthor(_ username: String) {
-        authorDetailReturnSection = nil
-        if author.username != username { listEmptied(.authors, .authorWorks) }
-        author.open(username)
-        selectedWorkID = nil
-        readerOpen = false
-    }
-
-    func closeAuthorWorks() {
-        author.close()
-        listEmptied(.authors, .authorWorks)
-        selectedWorkID = nil
-        // Back returns to wherever the author was opened from (a work
-        // detail, search results, the Following drill-in) — the Authors
-        // list when they were opened from there.
-        if let origin = authorDetailReturnSection {
-            authorDetailReturnSection = nil
-            goSection(origin)
-        }
-    }
-
-    /// Clicking an author anywhere outside the Authors list (a work
-    /// detail's byline, a search user hit, the Following drill-in's person
-    /// button) lands here: open the two-pane author view, remembering the
-    /// origin so the profile's back button can return to it.
-    func openAuthorProfile(_ author: String) {
-        let origin = section
-        let username = AppState.canonicalAuthorUsername(author)
-        goSection(.authors)
-        openAuthor(username)
-        authorDetailReturnSection = origin == .authors ? nil : origin
-    }
-
-    /// Profile buttons land here: swap the reading pane to one of the
-    /// user's lists.
-    func showAuthorPane(_ username: String, _ pane: AuthorPane) {
-        if section != .authors || author.username != username {
-            openAuthorProfile(username)
-        }
-        selectedWorkID = nil
-        readerOpen = false
-        author.showPane(pane)
-    }
-
-    // MARK: - Lists
-
-    /// A section's list: its membership (which this shell knows — pane
-    /// drill-ins included) ordered and filtered by the shared list model.
-    func works(for section: Section) -> [Work] {
-        lists.works(for: section, raw: rawWorks(for: section))
-    }
-
-    /// Suggestion pools for the filter dialog.
-    func availableTags(for s: Section) -> [String] {
-        lists.availableTags(for: s, raw: rawWorks(for: s))
-    }
-
-    func availableFandoms(for s: Section) -> [String] {
-        lists.availableFandoms(for: s, raw: rawWorks(for: s))
-    }
-
-    private func rawWorks(for section: Section) -> [Work] {
-        switch section {
-        case .search:
-            appState.searchResults
-        case .reading:
-            appState.currentlyReading
-        case .history:
-            appState.history.compactMap { appState.work(byID: $0) }
-        case .bookmarks:
-            appState.bookmarkedWorkIDs.compactMap { appState.work(byID: $0) }
-                .sorted { $0.title < $1.title }
-        case .readingLists:
-            selectedReadingListID.map { appState.worksInReadingList($0) } ?? []
-        case .downloads:
-            appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
-                .sorted { $0.title < $1.title }
-        case .authorWorks:
-            author.works
-        case .whatsNew:
-            appState.newWorkIDs.compactMap { appState.work(byID: $0) }
-        // Reading-pane drill-ins: the works lists shown while these
-        // sections are active (feeds availableTags + the shared filter).
-        case .subscriptions:
-            subscriptionWorks.works
-        case .authors:
-            author.works
-        case .fandoms:
-            fandomLibraryWorksRaw
-        default:
-            []
-        }
-    }
+    var authorDetailReturnSection: Section?
 }
 
 // MARK: - Pane reader host

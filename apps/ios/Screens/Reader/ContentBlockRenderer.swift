@@ -146,25 +146,7 @@ struct ContentBlockRenderer {
             result.append(mutable)
 
         case .heading(let level, let text):
-            let size: CGFloat = switch level {
-            case 1: bodySize * 1.45
-            case 2: bodySize * 1.25
-            case 3: bodySize * 1.1
-            default: bodySize
-            }
-            let style = NSMutableParagraphStyle()
-            style.paragraphSpacingBefore = level <= 2 ? 20 : 12
-            style.paragraphSpacing = 8
-            style.headIndent = CGFloat(indentLevel) * 24
-            style.firstLineHeadIndent = CGFloat(indentLevel) * 24
-            result.append(NSAttributedString(
-                string: text + "\n",
-                attributes: [
-                    .font: Self.readingFont(named: theme.readingFont.fontName, size: size, weight: .semibold),
-                    .foregroundColor: inkColor,
-                    .paragraphStyle: style,
-                ]
-            ))
+            appendHeading(level: level, text: text, indentLevel: indentLevel, to: result)
 
         case .blockquote(let blocks):
             for inner in blocks {
@@ -176,49 +158,10 @@ struct ContentBlockRenderer {
             }
 
         case .horizontalRule:
-            // An actual drawn rule (like HTML <hr>), centered at the full
-            // text measure, via a 1pt-high tinted attachment image.
-            let style = NSMutableParagraphStyle()
-            style.alignment = .center
-            style.paragraphSpacingBefore = 14
-            style.paragraphSpacing = 14
-            let ruleWidth = max(120, imageDisplayWidth)
-            let lineColor = UIColor(theme.line)
-            let image = UIGraphicsImageRenderer(size: CGSize(width: ruleWidth, height: 1)).image { context in
-                lineColor.setFill()
-                context.fill(CGRect(x: 0, y: 0, width: ruleWidth, height: 1))
-            }
-            let attachment = NSTextAttachment()
-            attachment.image = image
-            attachment.bounds = CGRect(x: 0, y: bodySize * 0.22, width: ruleWidth, height: 1)
-            let rule = NSMutableAttributedString(attachment: attachment)
-            rule.append(NSAttributedString(string: "\n"))
-            rule.addAttributes([.paragraphStyle: style],
-                               range: NSRange(location: 0, length: rule.length))
-            result.append(rule)
+            appendHorizontalRule(to: result)
 
         case .list(let ordered, let items):
-            for (index, itemBlocks) in items.enumerated() {
-                let marker = ordered ? "\(index + 1)." : "•"
-                let markerString = NSMutableAttributedString(
-                    string: marker + "\t",
-                    attributes: [.font: bodyFont, .foregroundColor: ink3Color]
-                )
-                let start = result.length
-                result.append(markerString)
-                var first = true
-                for inner in itemBlocks {
-                    append(inner, to: result, indentLevel: first ? 0 : indentLevel + 1)
-                    first = false
-                }
-                let style = bodyParagraphStyle(indentLevel: indentLevel)
-                style.headIndent = CGFloat(indentLevel + 1) * 28
-                style.firstLineHeadIndent = CGFloat(indentLevel) * 28
-                style.tabStops = [NSTextTab(textAlignment: .left, location: CGFloat(indentLevel + 1) * 28)]
-                style.paragraphSpacing = 4
-                result.addAttribute(.paragraphStyle, value: style,
-                                    range: NSRange(location: start, length: result.length - start))
-            }
+            appendList(ordered: ordered, items: items, indentLevel: indentLevel, to: result)
 
         case .preFormatted(let text):
             let style = NSMutableParagraphStyle()
@@ -237,6 +180,76 @@ struct ContentBlockRenderer {
 
         case .image(let src, let alt):
             appendImage(src: src, alt: alt, to: result)
+        }
+    }
+
+    private func appendHeading(level: Int, text: String, indentLevel: Int, to result: NSMutableAttributedString) {
+        let size: CGFloat = switch level {
+        case 1: bodySize * 1.45
+        case 2: bodySize * 1.25
+        case 3: bodySize * 1.1
+        default: bodySize
+        }
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = level <= 2 ? 20 : 12
+        style.paragraphSpacing = 8
+        style.headIndent = CGFloat(indentLevel) * 24
+        style.firstLineHeadIndent = CGFloat(indentLevel) * 24
+        result.append(NSAttributedString(
+            string: text + "\n",
+            attributes: [
+                .font: Self.readingFont(named: theme.readingFont.fontName, size: size, weight: .semibold),
+                .foregroundColor: inkColor,
+                .paragraphStyle: style,
+            ]
+        ))
+    }
+
+    private func appendHorizontalRule(to result: NSMutableAttributedString) {
+        // An actual drawn rule (like HTML <hr>), centered at the full
+        // text measure, via a 1pt-high tinted attachment image.
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.paragraphSpacingBefore = 14
+        style.paragraphSpacing = 14
+        let ruleWidth = max(120, imageDisplayWidth)
+        let lineColor = UIColor(theme.line)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: ruleWidth, height: 1)).image { context in
+            lineColor.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: ruleWidth, height: 1))
+        }
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: bodySize * 0.22, width: ruleWidth, height: 1)
+        let rule = NSMutableAttributedString(attachment: attachment)
+        rule.append(NSAttributedString(string: "\n"))
+        rule.addAttributes([.paragraphStyle: style],
+                           range: NSRange(location: 0, length: rule.length))
+        result.append(rule)
+    }
+
+    private func appendList(ordered: Bool, items: [[ParsedContentBlock]], indentLevel: Int,
+                            to result: NSMutableAttributedString) {
+        for (index, itemBlocks) in items.enumerated() {
+            let marker = ordered ? "\(index + 1)." : "•"
+            let markerString = NSMutableAttributedString(
+                string: marker + "\t",
+                attributes: [.font: bodyFont, .foregroundColor: ink3Color]
+            )
+            let start = result.length
+            result.append(markerString)
+            var first = true
+            for inner in itemBlocks {
+                append(inner, to: result, indentLevel: first ? 0 : indentLevel + 1)
+                first = false
+            }
+            let style = bodyParagraphStyle(indentLevel: indentLevel)
+            style.headIndent = CGFloat(indentLevel + 1) * 28
+            style.firstLineHeadIndent = CGFloat(indentLevel) * 28
+            style.tabStops = [NSTextTab(textAlignment: .left, location: CGFloat(indentLevel + 1) * 28)]
+            style.paragraphSpacing = 4
+            result.addAttribute(.paragraphStyle, value: style,
+                                range: NSRange(location: start, length: result.length - start))
         }
     }
 

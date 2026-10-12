@@ -5,55 +5,55 @@ import SwiftUI
 /// reader, with the privacy dot, reading-settings popover, and the floating
 /// immersive exit button.
 final class ReadPaneViewController: NSViewController {
-    private let theme: AppTheme
-    private let appState: AppState
-    private let model: MacAppModel
+    let theme: AppTheme
+    let appState: AppState
+    let model: MacAppModel
 
-    private let toolbar: PaneToolbarView
-    private let container = NSView()
-    private let privacyDot = NSView()
-    private let immersiveExit = NSButton()
+    let toolbar: PaneToolbarView
+    let container = NSView()
+    let privacyDot = NSView()
+    let immersiveExit = NSButton()
 
-    private var backButton: ToolButton!
-    private var settingsButton: ToolButton!
-    private var immersiveButton: ToolButton!
-    private var bookmarkButton: ToolButton!
-    private var commentsButton: ToolButton!
-    private var chaptersButton: ToolButton!
-    private var chaptersPopover: NSPopover?
+    var backButton: ToolButton!
+    var settingsButton: ToolButton!
+    var immersiveButton: ToolButton!
+    var bookmarkButton: ToolButton!
+    var commentsButton: ToolButton!
+    var chaptersButton: ToolButton!
+    var chaptersPopover: NSPopover?
     // Detail-mode work actions (the detail view's buttons live in this
     // header toolbar, not in the scroll body).
-    private var startReadingButton: ToolButton!
-    private var downloadButton: ToolButton!
-    private var readingListButton: ToolButton!
-    private var subscribeButton: ToolButton!
-    private var kudosButton: ToolButton!
-    private var workCommentsButton: ToolButton!
-    private var editBookmarkButton: ToolButton!
+    var startReadingButton: ToolButton!
+    var downloadButton: ToolButton!
+    var readingListButton: ToolButton!
+    var subscribeButton: ToolButton!
+    var kudosButton: ToolButton!
+    var workCommentsButton: ToolButton!
+    var editBookmarkButton: ToolButton!
     /// The user's manual "finished reading" flag — never inferred.
-    private var finishedButton: ToolButton!
+    var finishedButton: ToolButton!
     /// Both modes: move the selected work into its own window.
-    private var detachButton: ToolButton!
-    private var readingListPopover: NSPopover?
+    var detachButton: ToolButton!
+    var readingListPopover: NSPopover?
 
-    private let readerController: ReaderViewController
-    private var resultsController: SearchResultsViewController?
+    let readerController: ReaderViewController
+    var resultsController: SearchResultsViewController?
     /// The author profile's Bookmarks pane — bookmark hits (works and
     /// series), not a works list.
-    private var authorBookmarksController: BookmarkResultsViewController?
-    private var collectionSplitController: NSSplitViewController?
-    private var pagerHost: NSHostingView<SearchPagerView>?
-    private var resultsBackButton: ToolButton!
-    private var detailHost: NSHostingView<AnyView>?
-    private var emptyHost: NSHostingView<AnyView>?
+    var authorBookmarksController: BookmarkResultsViewController?
+    var collectionSplitController: NSSplitViewController?
+    var pagerHost: NSHostingView<SearchPagerView>?
+    var resultsBackButton: ToolButton!
+    var detailHost: NSHostingView<AnyView>?
+    var emptyHost: NSHostingView<AnyView>?
 
-    private enum Mode: Equatable {
+    enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorBookmarks(String),
              authorCollections(String), detail(String), reading(String, Int), inboxThread(UInt64),
              settings, scopeForm, scopeResults, collectionSplit
     }
 
-    private var renderedMode: Mode?
+    var renderedMode: Mode?
 
     init(theme: AppTheme, appState: AppState, model: MacAppModel) {
         self.theme = theme
@@ -73,6 +73,62 @@ final class ReadPaneViewController: NSViewController {
         root.wantsLayer = true
         root.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
+        makeToolbarButtons()
+
+        addChild(readerController)
+
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        container.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(toolbar)
+        root.addSubview(container)
+
+        privacyDot.wantsLayer = true
+        privacyDot.layer?.cornerRadius = 4
+        privacyDot.toolTip = "Private connection"
+        privacyDot.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(privacyDot)
+
+        immersiveExit.isBordered = false
+        immersiveExit.wantsLayer = true
+        immersiveExit.layer?.cornerRadius = 9
+        immersiveExit.layer?.borderWidth = 1
+        immersiveExit.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Exit immersive")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
+        immersiveExit.toolTip = "Exit immersive (Esc)"
+        immersiveExit.target = self
+        immersiveExit.action = #selector(exitImmersive)
+        immersiveExit.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(immersiveExit)
+
+        toolbarTop = toolbar.topAnchor.constraint(equalTo: root.topAnchor)
+        NSLayoutConstraint.activate([
+            toolbarTop,
+            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            container.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            privacyDot.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
+            privacyDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            privacyDot.widthAnchor.constraint(equalToConstant: 8),
+            privacyDot.heightAnchor.constraint(equalToConstant: 8),
+            immersiveExit.topAnchor.constraint(equalTo: toolbar.topAnchor, constant: 9),
+            immersiveExit.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            immersiveExit.widthAnchor.constraint(equalToConstant: 34),
+            immersiveExit.heightAnchor.constraint(equalToConstant: 34),
+        ])
+        view = root
+
+        ObservationRelay.track { [weak self] in
+            self?.render()
+        }
+
+        installKeyMonitor()
+    }
+
+    /// Creates the toolbar buttons for both modes; called once from loadView.
+    private func makeToolbarButtons() {
         backButton = ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to details") { [weak self] in
             self?.model.closeReader()
         }
@@ -136,56 +192,9 @@ final class ReadPaneViewController: NSViewController {
                                   tooltip: "Open in separate window") { [weak self] in
             self?.detachToWindow()
         }
+    }
 
-        addChild(readerController)
-
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-        container.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(toolbar)
-        root.addSubview(container)
-
-        privacyDot.wantsLayer = true
-        privacyDot.layer?.cornerRadius = 4
-        privacyDot.toolTip = "Private connection"
-        privacyDot.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(privacyDot)
-
-        immersiveExit.isBordered = false
-        immersiveExit.wantsLayer = true
-        immersiveExit.layer?.cornerRadius = 9
-        immersiveExit.layer?.borderWidth = 1
-        immersiveExit.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Exit immersive")?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold))
-        immersiveExit.toolTip = "Exit immersive (Esc)"
-        immersiveExit.target = self
-        immersiveExit.action = #selector(exitImmersive)
-        immersiveExit.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(immersiveExit)
-
-        toolbarTop = toolbar.topAnchor.constraint(equalTo: root.topAnchor)
-        NSLayoutConstraint.activate([
-            toolbarTop,
-            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            privacyDot.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
-            privacyDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
-            privacyDot.widthAnchor.constraint(equalToConstant: 8),
-            privacyDot.heightAnchor.constraint(equalToConstant: 8),
-            immersiveExit.topAnchor.constraint(equalTo: toolbar.topAnchor, constant: 9),
-            immersiveExit.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
-            immersiveExit.widthAnchor.constraint(equalToConstant: 34),
-            immersiveExit.heightAnchor.constraint(equalToConstant: 34),
-        ])
-        view = root
-
-        ObservationRelay.track { [weak self] in
-            self?.render()
-        }
-
+    private func installKeyMonitor() {
         // App-wide reading keys: ← / → change chapters while reading; Escape
         // backs out of the innermost context (immersive → reader → selection
         // → drill-in). Never fires while typing in an editable text control
@@ -223,1313 +232,65 @@ final class ReadPaneViewController: NSViewController {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
 
-    private var keyMonitor: Any?
-    private var toolbarTop: NSLayoutConstraint!
-    private var subscriptionCloseBtn: ToolButton?
-    private var readingListCloseBtn: ToolButton?
-    private var fandomCloseBtn: ToolButton?
-    private var fandomSearchBtn: ToolButton?
-    private var fandomLibraryBackBtn: ToolButton?
-    private var filterButtons: [String: ToolButton] = [:]
-    private var filterPopover: NSPopover?
+    var keyMonitor: Any?
+    var toolbarTop: NSLayoutConstraint!
+    var subscriptionCloseBtn: ToolButton?
+    var readingListCloseBtn: ToolButton?
+    var fandomCloseBtn: ToolButton?
+    var fandomSearchBtn: ToolButton?
+    var fandomLibraryBackBtn: ToolButton?
+    var filterButtons: [String: ToolButton] = [:]
+    var filterPopover: NSPopover?
 
-    /// Same filter-popover machinery as ListPaneViewController: a cached
-    /// toggle button anchoring a transient popover, sized to its SwiftUI
-    /// content before showing.
-    private func filterButton(key: String, active: Bool, content: @escaping () -> AnyView) -> ToolButton {
-        if let existing = filterButtons[key] {
-            existing.isOn = active
-            return existing
-        }
-        var anchor: ToolButton!
-        let button = ToolButton(theme: theme, symbol: "line.3.horizontal.decrease.circle",
-                                tooltip: "Filter this list") { [weak self] in
-            guard let self, let anchor else { return }
-            if let popover = filterPopover, popover.isShown {
-                popover.close()
-                filterPopover = nil
-                return
-            }
-            let popover = NSPopover()
-            popover.behavior = .transient
-            let host = NSHostingController(rootView: content())
-            popover.contentViewController = host
-            host.view.layoutSubtreeIfNeeded()
-            popover.contentSize = host.view.fittingSize
-            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
-            filterPopover = popover
-        }
-        button.isOn = active
-        anchor = button
-        filterButtons[key] = button
-        return button
-    }
-
-    /// Header filter for the bookmark search results — the work-list
-    /// fields plus the bookmark's own (bookmarked by, note, date).
-    private func bookmarksFilterButton() -> ToolButton {
-        let button = filterButton(key: "bookmark-search",
-                                  active: model.search.bookmarkListFilter.isActive) { [theme, model] in
-            AnyView(BookmarkListFilterView(theme: theme, model: model))
-        }
-        // A client-side sieve over the fetched rows — make sure it can't be
-        // mistaken for a server-side search refinement.
-        button.toolTip = "Filter the fetched results (this page only)"
-        return button
-    }
-
-    private func worksFilterButton(for section: MacAppModel.Section) -> ToolButton {
-        let button = filterButton(key: "works-\(section)",
-                                  active: model.lists.workListFilter(for: section).isActive) { [theme, model] in
-            AnyView(WorkListFilterView(theme: theme, model: model, section: section))
-        }
-        if section == .search {
-            // This is a client-side sieve over the fetched rows — make sure
-            // it can't be mistaken for a server-side search refinement.
-            button.toolTip = "Filter the fetched results (this page only)"
-        }
-        return button
-    }
-
-    /// The scraped AO3 sort-column field, when the form has one.
-    private func searchSortField() -> UFormField? {
-        model.search.formFields.first { $0.name.hasSuffix("[sort_column]") }
-    }
-
-    /// Server-side sort menu for search results: options come from the
-    /// scraped form's sort fields; picking one rewrites the criteria and
-    /// re-runs the query, so re-sorting no longer means a round-trip back
-    /// to the form.
-    private func searchSortButton() -> ToolButton {
-        var anchor: ToolButton!
-        let button = ToolButton(theme: theme, symbol: "arrow.up.arrow.down",
-                                tooltip: "Sort results (re-runs the search)") { [weak self] in
-            guard let self, let anchor else { return }
-            showSearchSortMenu(from: anchor)
-        }
-        anchor = button
-        return button
-    }
-
-    private func showSearchSortMenu(from anchor: NSView) {
-        guard let sortField = searchSortField() else { return }
-        let search = model.search
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-
-        let sortHeader = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
-        sortHeader.isEnabled = false
-        menu.addItem(sortHeader)
-        // AO3 pre-selects a default when the field is unset in the
-        // request behind the current results.
-        let currentSort = search.activeWorksRequest?.fieldValues[sortField.name]
-            ?? sortField.options.first { $0.selected }?.value ?? ""
-        for option in sortField.options {
-            let title = option.label.trimmingCharacters(in: .whitespaces)
-            guard !title.isEmpty else { continue }
-            let item = NSMenuItem(title: title, action: #selector(searchSortChosen(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = option.value == currentSort ? .on : .off
-            item.representedObject = [sortField.name, option.value]
-            menu.addItem(item)
-        }
-
-        if let directionField = model.search.formFields.first(where: { $0.name.hasSuffix("[sort_direction]") }) {
-            menu.addItem(.separator())
-            let directionHeader = NSMenuItem(title: "Direction", action: nil, keyEquivalent: "")
-            directionHeader.isEnabled = false
-            menu.addItem(directionHeader)
-            let currentDirection = search.activeWorksRequest?.fieldValues[directionField.name]
-                ?? directionField.options.first { $0.selected }?.value ?? ""
-            for option in directionField.options {
-                let title = option.label.trimmingCharacters(in: .whitespaces)
-                guard !title.isEmpty else { continue }
-                let item = NSMenuItem(title: title, action: #selector(searchSortChosen(_:)), keyEquivalent: "")
-                item.target = self
-                item.state = option.value == currentDirection ? .on : .off
-                item.representedObject = [directionField.name, option.value]
-                menu.addItem(item)
-            }
-        }
-
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
-    }
-
-    @objc private func searchSortChosen(_ sender: NSMenuItem) {
-        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
-        // Amend the request behind the current results — never the form,
-        // which programmatic triggers (tag clicks) don't populate.
-        model.search.updateWorksSearchField(pair[0], value: pair[1], appState: appState)
-    }
-    private var authorRefreshBtn: LabelToolButton?
-    private var subscriptionRefreshBtn: LabelToolButton?
-    private lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
-    private var detailRefreshBtn: ToolButton?
-    private var inboxThreadRefreshBtn: ToolButton?
-
-    /// The pager, hosted for the toolbar. The toolbar sits in the window's
-    /// titlebar band (fullSizeContentView), and an NSHostingView there
-    /// inherits a top safe-area inset that shoves the SwiftUI content below
-    /// the bar's midline — the same mechanism the Tor overlay hit. Clearing
-    /// safeAreaRegions makes it center like the AppKit ToolButtons.
-    private func makePagerHost() -> NSHostingView<SearchPagerView> {
-        if let pagerHost { return pagerHost }
-        let host = NSHostingView(rootView: SearchPagerView(theme: theme, appState: appState, model: model))
-        host.safeAreaRegions = []
-        pagerHost = host
-        return host
-    }
-
-    private var ao3Btn: LabelToolButton?
-    private var ao3ButtonURL: URL?
-
-    /// The header's "Ao3" pill: opens the shown entity's archive page in
-    /// the user's configured link app. One cached instance — only one of
-    /// the entity headers (work, collection, tag) is ever visible, and the
-    /// URL is re-set on every render pass.
-    private func ao3Button(url: URL?, tooltip: String) -> LabelToolButton {
-        let button = ao3Btn ?? LabelToolButton(theme: theme) { [weak self] in
-            guard let self, let url = ao3ButtonURL else { return }
-            ExternalLinkOpener.open(url, bridge: appState.bridge)
-        }
-        ao3Btn = button
-        ao3ButtonURL = url
-        button.configure(title: "Ao3", symbol: "arrow.up.right", tooltip: tooltip)
-        return button
-    }
+    var authorRefreshBtn: LabelToolButton?
+    var subscriptionRefreshBtn: LabelToolButton?
+    lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
+    var detailRefreshBtn: ToolButton?
+    var inboxThreadRefreshBtn: ToolButton?
+    var ao3Btn: LabelToolButton?
+    var ao3ButtonURL: URL?
 
     /// The pane's request-progress banner, hosted as a sibling of
     /// `container` added after it so the content swaps `show(mode:)`
     /// performs inside the container can never cover it.
-    private let requestProgressOverlay = RequestProgressOverlay()
+    let requestProgressOverlay = RequestProgressOverlay()
 
     /// The split collection view's per-half banners — one overlay instance
     /// per pane, each reading its own tracked operation (the halves fetch
     /// concurrently, so they can't share one). The view refs are captured
     /// when the halves are built; nil until then.
-    private let splitWorksOverlay = RequestProgressOverlay()
-    private let splitBookmarksOverlay = RequestProgressOverlay()
-    private var splitWorksHalf: (root: NSView, table: NSView)?
-    private var splitBookmarksHalf: (root: NSView, table: NSView)?
+    let splitWorksOverlay = RequestProgressOverlay()
+    let splitBookmarksOverlay = RequestProgressOverlay()
+    var splitWorksHalf: (root: NSView, table: NSView)?
+    var splitBookmarksHalf: (root: NSView, table: NSView)?
 
-    private var readerRefreshBtn: ToolButton?
-
-    /// Reader header: refetch the chapters from AO3, bypassing the caches —
-    /// picks up chapter text that changed or arrived after the original fetch.
-    private func readerRefreshButton() -> ToolButton {
-        let button = readerRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                    tooltip: "Refresh chapter from AO3") { [weak self] in
-            self?.readerController.refreshChaptersFromAO3()
-        }
-        readerRefreshBtn = button
-        return button
-    }
-
-    /// Detail header: re-fetch the work's current details from AO3.
-    private func detailRefreshButton() -> ToolButton {
-        let button = detailRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                    tooltip: "Refresh details from AO3") { [weak self] in
-            guard let self, let id = model.selectedWorkID else { return }
-            Task { @MainActor in await self.appState.refreshWorkMetadata(id) }
-        }
-        detailRefreshBtn = button
-        return button
-    }
-
-    /// Inbox thread header: fetch the thread from AO3 again. Threads are
-    /// cached forever once fetched, so this is the only way to pick up
-    /// replies posted since.
-    private func inboxThreadRefreshButton() -> ToolButton {
-        let button = inboxThreadRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                         tooltip: "Refresh thread from AO3") { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in await self.appState.refreshInboxThread() }
-        }
-        inboxThreadRefreshBtn = button
-        return button
-    }
-
-    private func subscriptionCloseButton() -> ToolButton {
-        let button = subscriptionCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
-            self?.model.closeSubscriptionWorks()
-        }
-        subscriptionCloseBtn = button
-        return button
-    }
-
-    private var detailCloseBtn: ToolButton?
-    private var inboxThreadCloseBtn: ToolButton?
-
-    /// Work-detail header (plain-list origin, no results to go back to):
-    /// unload the work and return to the empty pane. The list that
-    /// selected it may have emptied since, so this is the only way out
-    /// besides Escape.
-    private func detailCloseButton() -> ToolButton {
-        let button = detailCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close") { [weak self] in
-            self?.model.closeSelectedWork()
-        }
-        detailCloseBtn = button
-        return button
-    }
-
-    /// Inbox thread header: deselect the message and return to the empty pane.
-    private func inboxThreadCloseButton() -> ToolButton {
-        let button = inboxThreadCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close") { [weak self] in
-            self?.appState.clearInboxSelection()
-        }
-        inboxThreadCloseBtn = button
-        return button
-    }
-
-    private func readingListCloseButton() -> ToolButton {
-        let button = readingListCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close list") { [weak self] in
-            self?.model.closeReadingList()
-        }
-        readingListCloseBtn = button
-        return button
-    }
-
-    private var authorProfileBtn: ToolButton?
-    private var authorSubscribeBtn: ToolButton?
+    var readerRefreshBtn: ToolButton?
+    var detailCloseBtn: ToolButton?
+    var inboxThreadCloseBtn: ToolButton?
+    var authorProfileBtn: ToolButton?
+    var authorSubscribeBtn: ToolButton?
 
     /// The author the drill-in toolbar buttons act on — set on every render
     /// pass so the cached buttons' closures always target the current author.
-    private var drillInAuthorUsername: String?
+    var drillInAuthorUsername: String?
 
-    /// The author drill-ins' follow bell: the Followed / Subscribed menu
-    /// (any AO3 change is confirmed by a sheet first). Glyph and tint track
-    /// the live follow state each render.
-    private func authorSubscribeButton(username: String) -> ToolButton {
-        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "bell",
-                                                      tooltip: "Follow") { [weak self] in
-            guard let self, let user = drillInAuthorUsername, let anchor = authorSubscribeBtn else { return }
-            FollowBellMenu.show(for: .author(user), follows: model.follows, from: anchor)
-        }
-        authorSubscribeBtn = button
-        let shaded = model.follows.isShaded(.author(username))
-        button.setSymbol(shaded ? "bell.fill" : "bell")
-        button.tintOverride = shaded ? theme.nsAccent : nil
-        button.toolTip = "Followed / Subscribed — choose how to track \(username)"
-        button.isEnabled = !model.follows.isBusy(.author(username))
-        return button
-    }
-
-    /// Person button for the subscriptions drill-in: opens the two-pane
-    /// author view (profile in the list pane, their lists here).
-    private func authorProfileButton() -> ToolButton {
-        let button = authorProfileBtn ?? ToolButton(theme: theme, symbol: "person.crop.circle",
-                                                    tooltip: "Show author profile") { [weak self] in
-            guard let self, let user = drillInAuthorUsername else { return }
-            model.openAuthorProfile(user)
-        }
-        authorProfileBtn = button
-        return button
-    }
-
-    /// The follow-bell/profile buttons for an author drill-in header, in
-    /// trailing-order. The bell's Subscribed item needs a signed-in AO3
-    /// session (the menu disables it otherwise); the profile card is public.
-    private func authorHeaderButtons(username: String) -> [NSView] {
-        drillInAuthorUsername = username
-        return [authorSubscribeButton(username: username), authorProfileButton()]
-    }
-
-    // MARK: - Search pane buttons (the list pane is collapsed in Search,
-    // so the form's actions live in this pane's header)
-
-    private var searchBackBtn: ToolButton?
-    private var searchGoBtn: ToolButton?
-    private var reloadCriteriaBtn: ToolButton?
-    private var scopeTabs: ScopeTabsView?
-    private var searchSourceBtn: ToolButton?
-    private var searchEyeBtn: ToolButton?
-
-    /// The search scope tabs living where the "Search" title used to be.
-    /// One instance for the pane's lifetime; render() re-reads the model's
-    /// scope into it every pass (observable input, per the relay rule).
-    private func scopeTabsView() -> ScopeTabsView {
-        let tabs = scopeTabs ?? {
-            let view = ScopeTabsView(theme: theme)
-            view.onSelect = { [weak self] scope in
-                guard let self else { return }
-                self.model.search.setScope(scope)
-            }
-            return view
-        }()
-        scopeTabs = tabs
-        return tabs
-    }
-
-    /// Library/AO3 source toggle: internaldrive = only the app's database,
-    /// globe = full search on AO3.
-    private func searchSourceButton() -> ToolButton {
-        let button = searchSourceBtn ?? ToolButton(theme: theme, symbol: "internaldrive",
-                                                   tooltip: "Search source") { [weak self] in
-            guard let self else { return }
-            model.search.toggleSearchSource(appState)
-        }
-        searchSourceBtn = button
-        let libraryOnly = model.search.searchLibraryOnly
-        button.setSymbol(libraryOnly ? "internaldrive" : "globe")
-        button.toolTip = libraryOnly
-            ? "Searching your library only — click to search AO3"
-            : "Searching AO3 — click to search only your library"
-        button.isOn = !libraryOnly
-        return button
-    }
-
-    /// Split collection subtitle: the two listings' own totals, once known.
-    private func splitCollectionSubtitle(_ search: SearchModel) -> String? {
-        var parts: [String] = []
-        if let works = search.totalWorks {
-            parts.append(works == 1 ? "1 work" : "\(works) works")
-        }
-        if let items = search.bookmarksTotal {
-            parts.append(items == 1 ? "1 bookmarked item" : "\(items) bookmarked items")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
-    }
-
-    /// Results subtitle per scope: works-style results reuse the pager
-    /// subtitle; the others report their own hit counts.
-    private func scopeResultsSubtitle(_ search: SearchModel) -> String? {
-        switch search.scope {
-        case .works:
-            let parts = [model.searchDisplayTitle, search.resultsSubtitle].compactMap { $0 }
-            return parts.isEmpty ? nil : parts.joined(separator: " · ")
-        case .bookmarks:
-            var parts: [String] = []
-            // Paged AO3 results carry the page position; library hits don't.
-            if case .bookmarkSearch = search.activeQuery {
-                parts.append(search.totalPages > 1
-                    ? "Page \(search.currentPage) of \(search.totalPages)"
-                    : "Page \(search.currentPage)")
-            }
-            if search.bookmarkListFilter.isActive {
-                parts.append("\(search.filteredBookmarkHits.count) of \(search.bookmarkHits.count) bookmarks")
-            } else {
-                let total = search.totalWorks.map(Int.init) ?? search.bookmarkHits.count
-                parts.append(total == 1 ? "1 bookmark" : "\(total) bookmarks")
-            }
-            return parts.joined(separator: " · ")
-        case .tags:
-            return search.tagHits.count == 1 ? "1 tag" : "\(search.tagHits.count) tags"
-        case .users:
-            return search.userHits.count == 1 ? "1 user" : "\(search.userHits.count) users"
-        case .collections:
-            let count = search.collectionHits.count == 1
-                ? "1 collection" : "\(search.collectionHits.count) collections"
-            // Paged AO3 results carry the page position; library hits don't.
-            if case .collectionsIndex = search.activeQuery, let sub = search.resultsSubtitle {
-                return "\(sub) · \(count)"
-            }
-            return count
-        }
-    }
-
-    private func searchFormBackButton() -> ToolButton {
-        let button = searchBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left",
-                                                 tooltip: "Back to search criteria") { [weak self] in
-            self?.model.searchBack()
-        }
-        searchBackBtn = button
-        return button
-    }
-
-    private func searchGoButton() -> ToolButton {
-        let button = searchGoBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass",
-                                               tooltip: "Search") { [weak self] in
-            guard let self else { return }
-            model.search.performScopedSearch(appState)
-        }
-        searchGoBtn = button
-        button.isOn = true
-        return button
-    }
-
-    private func reloadCriteriaButton() -> ToolButton {
-        let button = reloadCriteriaBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                     tooltip: "Reload search criteria from AO3") { [weak self] in
-            guard let self else { return }
-            Task { await self.model.search.scrapeForm(self.appState) }
-        }
-        reloadCriteriaBtn = button
-        return button
-    }
-
-    private func searchEyeButton() -> ToolButton {
-        let eye = searchEyeBtn ?? ToolButton(theme: theme, symbol: "eye",
-                                             tooltip: "Hide explicit") { [weak self] in
-            self?.model.hideExplicit.toggle()
-        }
-        searchEyeBtn = eye
-        eye.isOn = model.hideExplicit
-        eye.setSymbol(model.hideExplicit ? "eye.slash" : "eye")
-        return eye
-    }
-
-    private var authorBookmarksMoreBtn: ToolButton?
-    private func authorBookmarksMoreButton() -> ToolButton {
-        let button = authorBookmarksMoreBtn ?? ToolButton(theme: theme, symbol: "arrow.down.circle",
-                                                          tooltip: "Load more bookmarks") { [weak self] in
-            self?.model.author.loadMoreBookmarks()
-        }
-        authorBookmarksMoreBtn = button
-        return button
-    }
+    var searchBackBtn: ToolButton?
+    var searchGoBtn: ToolButton?
+    var reloadCriteriaBtn: ToolButton?
+    var scopeTabs: ScopeTabsView?
+    var searchSourceBtn: ToolButton?
+    var searchEyeBtn: ToolButton?
+    var authorBookmarksMoreBtn: ToolButton?
 
     // The bookmarks/collections panes are local-first: these buttons are
     // their only network trigger.
-    private var authorBookmarksRefreshBtn: ToolButton?
-    private func authorBookmarksRefreshButton() -> ToolButton {
-        let button = authorBookmarksRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                             tooltip: "Refresh bookmarks from AO3") { [weak self] in
-            self?.model.author.refreshBookmarks()
-        }
-        authorBookmarksRefreshBtn = button
-        return button
-    }
+    var authorBookmarksRefreshBtn: ToolButton?
+    var authorCollectionsRefreshBtn: ToolButton?
 
-    private var authorCollectionsRefreshBtn: ToolButton?
-    private func authorCollectionsRefreshButton() -> ToolButton {
-        let button = authorCollectionsRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                               tooltip: "Refresh collections from AO3") { [weak self] in
-            self?.model.author.refreshCollections()
-        }
-        authorCollectionsRefreshBtn = button
-        return button
-    }
+    var markAllReadBtn: ToolButton?
+    lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
 
-    private func fandomCloseButton() -> ToolButton {
-        let button = fandomCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close works list") { [weak self] in
-            self?.model.closeFandomWorks()
-        }
-        fandomCloseBtn = button
-        return button
-    }
-
-    private func fandomSearchButton() -> ToolButton {
-        let button = fandomSearchBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass", tooltip: "Search AO3 for this fandom's works") { [weak self] in
-            self?.model.searchFandomOnAO3()
-        }
-        fandomSearchBtn = button
-        return button
-    }
-
-    private func fandomLibraryBackButton() -> ToolButton {
-        let button = fandomLibraryBackBtn ?? ToolButton(theme: theme, symbol: "arrow.left", tooltip: "Back to library works") { [weak self] in
-            self?.model.showFandomLibraryWorks()
-        }
-        fandomLibraryBackBtn = button
-        return button
-    }
-
-    /// Drill-in staleness line: "N works stored · refreshed 3d ago" when a
-    /// full crawl has ever completed, plain count otherwise.
-    private func storedWorksSubtitle(count: Int, crawledAt: String?) -> String {
-        let stored = "\(count) works stored"
-        guard let crawledAt, !crawledAt.isEmpty else { return stored }
-        return "\(stored) · refreshed \(Fmt.relativeTime(crawledAt))"
-    }
-
-    /// The drill-in header button: "Refresh Works" idle, "Cancel" while a
-    /// crawl runs. render() re-invokes this every pass, so the label always
-    /// tracks the current state.
-    private func refreshWorksButton(forAuthor: Bool) -> LabelToolButton {
-        let button: LabelToolButton
-        if forAuthor {
-            button = authorRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
-                guard let model = self?.model else { return }
-                if model.author.isLoadingWorks {
-                    model.author.cancelWorksRefresh()
-                } else {
-                    // A stopped crawl picks up where it left off.
-                    model.author.refreshWorks(resume: model.author.worksCrawlStop != nil)
-                }
-            }
-            authorRefreshBtn = button
-        } else {
-            button = subscriptionRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
-                guard let model = self?.model else { return }
-                if model.subscriptionWorks.isLoading {
-                    model.subscriptionWorks.cancelRefresh()
-                } else {
-                    model.subscriptionWorks.refresh(resume: model.subscriptionWorks.crawlStop != nil)
-                }
-            }
-            subscriptionRefreshBtn = button
-        }
-        let loading = forAuthor ? model.author.isLoadingWorks : model.subscriptionWorks.isLoading
-        let stop = forAuthor ? model.author.worksCrawlStop : model.subscriptionWorks.crawlStop
-        if loading {
-            button.configure(title: "Cancel", symbol: "xmark",
-                             tooltip: "Stop fetching — works fetched so far are kept, and it can resume")
-        } else if let stop {
-            button.configure(title: "Resume Works", symbol: "arrow.clockwise",
-                             tooltip: "\(stop.label) — continue fetching from there")
-        } else {
-            button.configure(title: "Refresh Works", symbol: "arrow.clockwise",
-                             tooltip: "Fetch this author’s complete works list from AO3, page by page")
-        }
-        return button
-    }
-
-    // MARK: - Render
-
-    private func render() {
-        // Track the app text-size setting so toolbar fonts refresh with it.
-        _ = theme.uiFontScale
-        // Request-progress banner: hidden unless a branch below hands it a
-        // tracked operation id (work-detail refresh, the works crawls, and
-        // the reader's chapter fetch). The defer runs on every early
-        // return, so no branch has to remember to hide it.
-        var requestOverlayOpID: UInt64?
-        defer { requestProgressOverlay.update(opID: requestOverlayOpID, over: container, in: view,
-                                              theme: theme, appState: appState) }
-        // The split collection view's halves each carry their own banner,
-        // set only by the split branch — same defer discipline.
-        var splitWorksOpID: UInt64?
-        var splitBookmarksOpID: UInt64?
-        defer {
-            if let half = splitWorksHalf {
-                splitWorksOverlay.update(opID: splitWorksOpID, over: half.table, in: half.root,
-                                         theme: theme, appState: appState)
-            }
-            if let half = splitBookmarksHalf {
-                splitBookmarksOverlay.update(opID: splitBookmarksOpID, over: half.table, in: half.root,
-                                             theme: theme, appState: appState)
-            }
-        }
-        view.layer?.backgroundColor = theme.nsBg.cgColor
-        toolbar.applyTheme()
-        toolbarTop.constant = model.immersive ? 20 : 0
-        privacyDot.layer?.backgroundColor = theme.nsSage.cgColor
-        immersiveExit.layer?.backgroundColor = theme.nsSurface.cgColor
-        immersiveExit.layer?.borderColor = theme.nsLine.cgColor
-        immersiveExit.contentTintColor = theme.nsInk2
-        immersiveExit.isHidden = !model.immersive
-
-        // Only the work-detail branch places an after-title view; clearing
-        // here keeps the list branches from inheriting the detail pane's
-        // Start Reading button.
-        toolbar.setAfterTitle([])
-
-        // Subscriptions drill-in: an author subscription's works, without
-        // ever leaving the Subscriptions section.
-        if model.section == .subscriptions, let title = model.subscriptionWorks.title, model.selectedWork == nil {
-            let isAuthor = model.subscriptionWorks.subType == "author"
-            let author = model.subscriptionWorks.subId ?? title
-            let sub = model.subscriptionWorks.isLoading
-                ? (model.subscriptionWorks.fetchStatus ?? "Fetching works from AO3…")
-                : storedWorksSubtitle(count: model.filteredSubscriptionWorks.count,
-                                      crawledAt: model.subscriptionWorks.crawledAt)
-            toolbar.configure(title: title, sub: sub)
-            requestOverlayOpID = model.subscriptionWorks.refreshOp.opID
-            toolbar.setLeading([subscriptionCloseButton()])
-            var trailing: [NSView] = [sortFilterMenu.makeButton(for: .subscriptions),
-                                      worksFilterButton(for: .subscriptions),
-                                      refreshWorksButton(forAuthor: false)]
-            if isAuthor {
-                trailing = authorHeaderButtons(username: author)
-                    + [markAllReadButton(works: model.filteredSubscriptionWorks)] + trailing
-            }
-            toolbar.setTrailing(trailing)
-            show(mode: .subscriptionWorks(title))
-            return
-        }
-
-        // Authors drill-in: one of the author's lists (works, bookmarks,
-        // or collections) in this pane — their profile sits in the list
-        // pane, and its buttons pick which list shows here.
-        if model.section == .authors, let author = model.author.username, model.selectedWork == nil {
-            switch model.author.pane {
-            case .works:
-                let sub = model.author.isLoadingWorks
-                    ? (model.author.worksFetchStatus ?? "Fetching works from AO3…")
-                    : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
-                                          crawledAt: model.author.worksCrawledAt)
-                toolbar.configure(title: "Works", sub: sub)
-                requestOverlayOpID = model.author.worksRefreshOp.opID
-                toolbar.setLeading([])
-                toolbar.setTrailing([markAllReadButton(works: model.filteredAuthorWorks),
-                                     sortFilterMenu.makeButton(for: .authors),
-                                     worksFilterButton(for: .authors),
-                                     refreshWorksButton(forAuthor: true)])
-                show(mode: .subscriptionWorks(author))
-            case .bookmarks:
-                let count = model.author.bookmarks.count
-                let sub = model.author.isLoadingBookmarks
-                    ? (count == 0 ? "Fetching bookmarks from AO3…"
-                                  : "Fetching bookmarks from AO3… \(count) so far")
-                    : count == 1 ? "1 bookmark" : "\(count) bookmarks"
-                toolbar.configure(title: "Bookmarks", sub: sub)
-                requestOverlayOpID = model.author.bookmarksRefreshOp.opID
-                toolbar.setLeading([])
-                var trailing: [NSView] = []
-                if model.author.bookmarksHasNext {
-                    trailing.append(authorBookmarksMoreButton())
-                }
-                trailing.append(authorBookmarksRefreshButton())
-                toolbar.setTrailing(trailing)
-                show(mode: .authorBookmarks(author))
-            case .collections:
-                let count = model.author.collections.count
-                let sub = model.author.isLoadingCollections
-                    ? "Fetching collections from AO3…"
-                    : count == 1 ? "1 collection" : "\(count) collections"
-                toolbar.configure(title: "Collections", sub: sub)
-                toolbar.setLeading([])
-                toolbar.setTrailing([authorCollectionsRefreshButton()])
-                show(mode: .authorCollections(author))
-            }
-            return
-        }
-
-        // Fandoms drill-in, without leaving the Fandoms section. Local-first:
-        // the library's works for the fandom, with an explicit Search AO3
-        // action that swaps the pane to the archive's paged tag results.
-        if model.section == .fandoms, let tag = model.fandomWorksTag, model.selectedWork == nil {
-            let tagAO3 = ao3Button(url: ExternalLinkOpener.ao3TagURL(tag),
-                                   tooltip: "Open this tag's works on AO3 in your browser")
-            if model.fandomSearchActive {
-                let search = model.search
-                toolbar.configure(title: tag, sub: search.resultsSubtitle)
-                toolbar.setLeading([fandomLibraryBackButton()])
-                toolbar.setTrailing([tagAO3] + (search.hasSearched
-                    ? [makePagerHost(), worksFilterButton(for: .search)] : []))
-            } else {
-                let count = model.fandomLibraryWorks.count
-                toolbar.configure(title: tag,
-                                  sub: count == 1 ? "1 work in library" : "\(count) works in library")
-                toolbar.setLeading([fandomCloseButton()])
-                toolbar.setTrailing([tagAO3, fandomSearchButton(), worksFilterButton(for: .fandoms)])
-            }
-            show(mode: .searchResults)
-            return
-        }
-
-        // Reading Lists drill-in: the selected list's works, mirroring the
-        // Subscriptions → works flow.
-        if model.section == .readingLists, let listID = model.selectedReadingListID,
-           model.selectedWork == nil {
-            let name = appState.readingLists.first { $0.id == listID }?.name ?? "Reading List"
-            let summary = appState.readingListSummary(listID)
-            let sub = summary.totalCount == 0
-                ? "Reading list"
-                : "\(Fmt.k(summary.totalWords)) words · \(summary.readCount) of \(summary.totalCount) read"
-            toolbar.configure(title: name, sub: sub + bulkDownload.statusSuffix)
-            toolbar.setLeading([readingListCloseButton()])
-            let listWorkIDs = appState.worksInReadingList(listID).map(\.id)
-            toolbar.setTrailing([bulkDownload.update(ids: listWorkIDs),
-                                 sortFilterMenu.makeButton(for: .readingLists),
-                                 worksFilterButton(for: .readingLists)])
-            show(mode: .searchResults)
-            return
-        }
-
-        // Settings spans this pane full-width (the list pane is collapsed),
-        // hosting the same SwiftUI panes the standalone window used to.
-        if model.section == .settings {
-            toolbar.configure(title: "Settings", sub: nil)
-            toolbar.setLeading([])
-            toolbar.setTrailing([])
-            show(mode: .settings)
-            return
-        }
-
-        // Search section with no selection: the list pane is collapsed, so
-        // this pane holds the whole flow — scope tabs in place of the title,
-        // the scope's form, flipping to results once a query runs (back
-        // button returns). Works/Bookmarks results use the works table;
-        // Tags/Users/Collections render their own hit lists.
-        if model.section == .search, model.selectedWork == nil {
-            let search = model.search
-            if search.showingResults, let collectionName = search.splitCollectionName {
-                // Split collection view: the pane toolbar names the
-                // collection; the back arrow and both pagers live in the
-                // halves' own header bars.
-                toolbar.configure(title: search.splitCollectionTitle ?? "Collection",
-                                  sub: splitCollectionSubtitle(search))
-                // Each half's fetch runs tracked under its own operation;
-                // each half's banner follows its own opID.
-                splitWorksOpID = search.searchFetchOp.opID
-                splitBookmarksOpID = search.bookmarksFetchOp.opID
-                toolbar.setLeading([])
-                toolbar.setTrailing([ao3Button(url: ExternalLinkOpener.ao3CollectionURL(collectionName),
-                                               tooltip: "Open this collection on AO3 in your browser"),
-                                     searchSourceButton()])
-                show(mode: .collectionSplit)
-                return
-            }
-            if search.showingResults {
-                let worksStyle = search.scope == .works
-                // AO3-side Works/Bookmarks/Collections queries run tracked —
-                // the banner shows while their fetch is in flight.
-                requestOverlayOpID = search.searchFetchOp.opID
-                toolbar.configure(title: "", sub: scopeResultsSubtitle(search))
-                let back = searchFormBackButton()
-                // The same arrow pops one level: to the collections hit
-                // list behind a drill-in, to the screen that triggered the
-                // search when it came from outside the Search section, to
-                // the form otherwise.
-                back.toolTip = search.canReturnToCollectionHits
-                    ? "Back to collections results"
-                    : model.searchReturnSection != nil ? "Back"
-                    : "Back to search criteria"
-                toolbar.setLeading([back])
-                if worksStyle {
-                    var trailing: [NSView] = search.hasSearched
-                        ? [makePagerHost(), worksFilterButton(for: .search)] : []
-                    // Server-side sort — only form queries carry AO3 sort params.
-                    if search.hasSearched, case .form = search.activeQuery,
-                       searchSortField() != nil {
-                        trailing.insert(searchSortButton(), at: 0)
-                    }
-                    trailing.append(searchSourceButton())
-                    toolbar.setTrailing(trailing)
-                    show(mode: .searchResults)
-                } else {
-                    // AO3 collections and bookmark results are paged like
-                    // works results.
-                    var trailing: [NSView] = []
-                    switch search.activeQuery {
-                    case .collectionsIndex, .bookmarkSearch:
-                        trailing.append(makePagerHost())
-                    default:
-                        break
-                    }
-                    if search.scope == .bookmarks, search.hasSearched {
-                        trailing.append(bookmarksFilterButton())
-                    }
-                    trailing.append(searchSourceButton())
-                    toolbar.setTrailing(trailing)
-                    show(mode: .scopeResults)
-                }
-            } else {
-                // The scope tabs live where the title would be — only while
-                // the form is showing; results keep a plain header.
-                let tabs = scopeTabsView()
-                tabs.configure(selected: search.scope)
-                toolbar.setAfterTitle([tabs])
-                toolbar.configure(title: "", sub: nil)
-                toolbar.setLeading([])
-                if search.scope == .works {
-                    toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
-                                         searchEyeButton(), searchSourceButton()])
-                    show(mode: .searchForm)
-                } else {
-                    toolbar.setTrailing([searchGoButton(), searchSourceButton()])
-                    show(mode: .scopeForm)
-                }
-            }
-            return
-        }
-
-        if model.section == .inbox, let item = appState.selectedInboxItem {
-            toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
-            toolbar.setLeading([inboxThreadCloseButton()])
-            toolbar.setTrailing([inboxThreadRefreshButton()])
-            let mode = Mode.inboxThread(item.commentId)
-            show(mode: mode)
-            if case .inboxThread = renderedMode, let host = detailHost {
-                host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))
-            }
-            return
-        }
-
-        guard let work = model.selectedWork else {
-            toolbar.configure(title: "", sub: nil)
-            toolbar.setLeading([])
-            toolbar.setTrailing([])
-            show(mode: .empty)
-            return
-        }
-
-        let reading = model.readerOpen
-        let cameFromResults = model.section == .search
-            || (model.section == .subscriptions && model.subscriptionWorks.title != nil)
-            || (model.section == .authors && model.author.username != nil)
-            || (model.section == .fandoms && model.fandomWorksTag != nil)
-        toolbar.configure(title: reading ? work.title : "Details",
-                          sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
-        // Kudos posts from either mode's toolbar, so its op shows in both.
-        requestOverlayOpID = appState.kudosOp.opID
-            ?? (reading ? model.paneReader.chapterFetchOp.opID : appState.workRefreshOp.opID)
-        toolbar.setLeading(reading ? [backButton]
-                           : cameFromResults ? [resultsBackButton] : [detailCloseButton()])
-        immersiveButton.isOn = model.immersive
-        let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
-        bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
-        bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
-        if reading {
-            toolbar.setTrailing([detachButton, settingsButton, immersiveButton, chaptersButton,
-                                 readerRefreshButton(), commentsButton, bookmarkButton])
-        } else {
-            refreshDetailActionButtons(for: work, bookmarked: bookmarked)
-            toolbar.setAfterTitle([startReadingButton])
-            var trailing: [NSView] = [ao3Button(url: ExternalLinkOpener.ao3WorkURL(work.id),
-                                                tooltip: "Open this work on AO3 in your browser"),
-                                      detachButton, settingsButton, detailRefreshButton(),
-                                      downloadButton, readingListButton, subscribeButton,
-                                      kudosButton, workCommentsButton, finishedButton]
-            if bookmarked { trailing.append(editBookmarkButton) }
-            trailing.append(bookmarkButton)
-            toolbar.setTrailing(trailing)
-        }
-
-        show(mode: reading ? .reading(work.id, model.readerChapter) : .detail(work.id))
-
-        // Detail is SwiftUI and re-renders itself; only rebuild on identity change.
-        if case .detail = renderedMode, let host = detailHost {
-            host.rootView = AnyView(DetailView(theme: theme, appState: appState, model: model, work: work))
-        }
-    }
-
-    private func show(mode: Mode) {
-        guard mode != renderedMode else { return }
-
-        // The split collection view only appears in its own mode; every
-        // other mode clears it here rather than case by case.
-        if mode != .collectionSplit {
-            collectionSplitController?.view.removeFromSuperview()
-        }
-        if case .authorBookmarks = mode {} else {
-            authorBookmarksController?.view.removeFromSuperview()
-        }
-
-        switch mode {
-        case .authorBookmarks:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            detailHost?.removeFromSuperview()
-            detailHost = nil
-            emptyHost?.removeFromSuperview()
-            if authorBookmarksController == nil {
-                let controller = BookmarkResultsViewController(
-                    theme: theme, appState: appState, model: model, source: .authorBookmarks)
-                addChild(controller)
-                authorBookmarksController = controller
-            }
-            pin(authorBookmarksController!.view)
-
-        case .collectionSplit:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            detailHost?.removeFromSuperview()
-            detailHost = nil
-            emptyHost?.removeFromSuperview()
-            pin(collectionSplit().view)
-        case .searchResults, .subscriptionWorks:
-            readerController.view.removeFromSuperview()
-            detailHost?.removeFromSuperview()
-            detailHost = nil
-            emptyHost?.removeFromSuperview()
-            if resultsController == nil {
-                let controller = SearchResultsViewController(theme: theme, appState: appState, model: model)
-                addChild(controller)
-                resultsController = controller
-            }
-            pin(resultsController!.view)
-
-        case .searchForm:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(SearchFormView(theme: theme, appState: appState, model: model))
-            detailHost = host
-            pin(host)
-
-        case .settings:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(SettingsRootView(theme: theme, appState: appState, model: model))
-            detailHost = host
-            pin(host)
-
-        case .scopeForm:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(ScopeSearchFormView(theme: theme, appState: appState, model: model))
-            detailHost = host
-            pin(host)
-
-        case .scopeResults:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(ScopeResultsView(theme: theme, appState: appState, model: model))
-            detailHost = host
-            pin(host)
-
-        case .authorCollections:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(AuthorCollectionsView(theme: theme, appState: appState, model: model))
-            detailHost = host
-            pin(host)
-
-        case .empty:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            detailHost?.removeFromSuperview()
-            detailHost = nil
-            if emptyHost == nil {
-                let host = NSHostingView(rootView: AnyView(
-                    EmptyStateMac(theme: theme, icon: "book",
-                                  title: "Select a work to begin",
-                                  message: "Choose something from the list, or browse the archive. Everything you read stays private.")))
-                emptyHost = host
-            }
-            pin(emptyHost!)
-
-        case .detail(let workID):
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            if let work = appState.work(byID: workID) {
-                let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-                host.rootView = AnyView(DetailView(theme: theme, appState: appState, model: model, work: work))
-                detailHost = host
-                pin(host)
-            }
-
-        case .reading(let workID, let chapter):
-            detailHost?.removeFromSuperview()
-            detailHost = nil
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            if let work = appState.work(byID: workID) {
-                pin(readerController.view)
-                readerController.show(work: work, chapterIndex: chapter)
-            }
-
-        case .inboxThread:
-            readerController.view.removeFromSuperview()
-            resultsController?.view.removeFromSuperview()
-            emptyHost?.removeFromSuperview()
-            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(InboxThreadView(theme: theme, appState: appState))
-            detailHost = host
-            pin(host)
-        }
-        renderedMode = mode
-    }
-
-    /// The split collection view: works half (back arrow + its own pager)
-    /// and bookmarked-items half (its own pager), independently paged,
-    /// divided by a draggable thin divider.
-    private func collectionSplit() -> NSSplitViewController {
-        if let collectionSplitController { return collectionSplitController }
-        let split = NSSplitViewController()
-        split.splitView.dividerStyle = .thin
-        let worksItem = NSSplitViewItem(viewController: splitHalf(isWorks: true))
-        worksItem.minimumThickness = 320
-        split.addSplitViewItem(worksItem)
-        let bookmarksItem = NSSplitViewItem(viewController: splitHalf(isWorks: false))
-        bookmarksItem.minimumThickness = 320
-        split.addSplitViewItem(bookmarksItem)
-        addChild(split)
-        collectionSplitController = split
-        return split
-    }
-
-    /// One half of the split: a compact header bar over a works table.
-    private func splitHalf(isWorks: Bool) -> NSViewController {
-        let controller = NSViewController()
-        let root = NSView()
-        root.wantsLayer = true
-        controller.view = root
-
-        let header = NSHostingView(rootView: CollectionSplitPaneHeader(
-            theme: theme, appState: appState, model: model, isWorks: isWorks))
-        header.translatesAutoresizingMaskIntoConstraints = false
-        let results = SearchResultsViewController(
-            theme: theme, appState: appState, model: model,
-            fixedContext: isWorks ? .search : .collectionBookmarks)
-        controller.addChild(results)
-        let table = results.view
-        table.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(header)
-        root.addSubview(table)
-        NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: root.topAnchor),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            table.topAnchor.constraint(equalTo: header.bottomAnchor),
-            table.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            table.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            table.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-        ])
-        // Record the half's views so the render pass can float its
-        // request-progress banner over the table (below the header).
-        if isWorks {
-            splitWorksHalf = (root: root, table: table)
-        } else {
-            splitBookmarksHalf = (root: root, table: table)
-        }
-        return controller
-    }
-
-    private func pin(_ subview: NSView) {
-        guard subview.superview != container else { return }
-        subview.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(subview)
-        NSLayoutConstraint.activate([
-            subview.topAnchor.constraint(equalTo: container.topAnchor),
-            subview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            subview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            subview.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-        ])
-    }
-
-    /// Symbols, tints, and enabled states for the detail-mode work action
-    /// buttons — re-run on every render, like the bookmark button.
-    private func refreshDetailActionButtons(for work: Work, bookmarked: Bool) {
-        let started = model.appState.progress(for: work) > 0
-        let currentChapter = appState.progressMap[work.id]?.chapter ?? 1
-        startReadingButton.isOn = true
-        startReadingButton.toolTip = started
-            ? "Continue reading · Chapter \(currentChapter)" : "Start reading"
-
-        let downloaded = appState.downloadedWorkIDs.contains(work.id)
-        downloadButton.setSymbol(appState.isDownloading(work.id) ? "arrow.down.circle.dotted"
-                                 : downloaded ? "checkmark.circle" : "arrow.down.circle")
-        downloadButton.tintOverride = downloaded ? theme.nsSage : nil
-        downloadButton.toolTip = downloaded ? "Downloaded" : "Download for offline"
-
-        let workId = UInt64(work.id)
-        let inList = workId.map { !appState.readingListIDs(forWork: $0).isEmpty } ?? false
-        readingListButton.setSymbol(inList ? "books.vertical.fill" : "books.vertical")
-        readingListButton.tintOverride = inList ? theme.nsAccent : nil
-        readingListButton.isEnabled = workId != nil
-
-        let workTarget = FollowModel.Target(kind: .work, id: work.id, name: work.title)
-        let workShaded = model.follows.isShaded(workTarget)
-        subscribeButton.setSymbol(workShaded ? "bell.fill" : "bell")
-        subscribeButton.tintOverride = workShaded ? theme.nsAccent : nil
-        subscribeButton.isEnabled = UInt64(work.id) != nil && !model.follows.isBusy(workTarget)
-        subscribeButton.toolTip = "Followed / Subscribed — choose how to track this work"
-
-        // Heart states: empty = no kudos (or the POST failed), faded red =
-        // request in flight, full red = AO3 confirmed.
-        let hasKudos = appState.kudosGivenWorkIDs.contains(work.id)
-        let kudosPending = appState.kudosPendingWorkIDs.contains(work.id)
-        let kudosRed = NSColor(Color(hex: "CE514D"))
-        kudosButton.setSymbol(hasKudos || kudosPending ? "heart.fill" : "heart")
-        kudosButton.tintOverride = hasKudos ? kudosRed
-            : kudosPending ? kudosRed.withAlphaComponent(0.45) : nil
-        kudosButton.isEnabled = !hasKudos && !kudosPending
-        kudosButton.toolTip = hasKudos ? "Kudos left — kudos are permanent on AO3"
-            : kudosPending ? "Leaving kudos…" : "Leave kudos on AO3"
-
-        workCommentsButton.toolTip = work.comments > 0
-            ? "Comments · \(Fmt.k(work.comments))" : "Comments"
-
-        let finished = appState.finishedWorkIDs.contains(work.id)
-        finishedButton.setSymbol(finished ? "checkmark.circle.fill" : "checkmark.circle")
-        finishedButton.tintOverride = finished ? theme.nsSage : nil
-        finishedButton.toolTip = finished ? "Finished reading — click to unmark" : "Mark as finished reading"
-    }
-
-    // MARK: - Mark all as read (author works lists)
-
-    private var markAllReadBtn: ToolButton?
-    private lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
     /// The works the header toggle acts on — set each render pass so the
     /// cached button's closure always targets the list on screen.
-    private var markAllReadWorks: [Work] = []
-
-    /// Header toggle for an author's works list: flags every listed work
-    /// as finished, or clears the flag when they all already are. Both
-    /// directions are confirmed first — the flag is manual-only, so a
-    /// stray click must not rewrite a whole list.
-    private func markAllReadButton(works: [Work]) -> ToolButton {
-        markAllReadWorks = works
-        let button = markAllReadBtn ?? ToolButton(theme: theme, symbol: "checkmark.circle",
-                                                  tooltip: "Mark all as read") { [weak self] in
-            self?.confirmMarkAllRead()
-        }
-        markAllReadBtn = button
-        let allFinished = !works.isEmpty && works.allSatisfy { appState.finishedWorkIDs.contains($0.id) }
-        button.setSymbol(allFinished ? "checkmark.circle.fill" : "checkmark.circle")
-        button.tintOverride = allFinished ? theme.nsSage : nil
-        button.isOn = allFinished
-        button.isEnabled = !works.isEmpty
-        button.toolTip = allFinished
-            ? "All \(works.count) works are marked as read — click to unmark all"
-            : "Mark all \(works.count) works in this list as read"
-        return button
-    }
-
-    private func confirmMarkAllRead() {
-        let works = markAllReadWorks
-        guard !works.isEmpty else { return }
-        let allFinished = works.allSatisfy { appState.finishedWorkIDs.contains($0.id) }
-        let count = works.count == 1 ? "1 work" : "\(works.count) works"
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        if allFinished {
-            alert.messageText = "Unmark all as read?"
-            alert.informativeText = "This clears the finished-reading flag on all \(count) in this list."
-            alert.addButton(withTitle: "Unmark All")
-        } else {
-            alert.messageText = "Mark all as read?"
-            alert.informativeText = "This flags all \(count) in this list as finished reading."
-            alert.addButton(withTitle: "Mark All as Read")
-        }
-        alert.addButton(withTitle: "Cancel")
-        let apply = { [weak self] (response: NSApplication.ModalResponse) in
-            guard let self, response == .alertFirstButtonReturn else { return }
-            appState.setFinished(works.map(\.id), finished: !allFinished)
-        }
-        if let window = view.window {
-            alert.beginSheetModal(for: window, completionHandler: apply)
-        } else {
-            apply(alert.runModal())
-        }
-    }
-
-    // MARK: - Actions
-
-    private func toggleSettingsPopover() {
-        ReaderToolbarActions.presentReadingSettings(theme: theme, presenter: self)
-    }
-
-    /// Move the selected work into its own window. While reading, the
-    /// window picks up exactly where the pane was (chapter + anchored
-    /// line) and the pane goes back to the details — a move, not a copy,
-    /// so the work still has exactly one reader.
-    private func detachToWindow() {
-        guard let id = model.selectedWorkID else { return }
-        if model.readerOpen {
-            readerController.flushPendingPersist()
-            let chapter = readerController.chapterIndex
-            let pos = readerController.anchorOffset ?? 0
-            model.closeReader()
-            model.windows.open(id, chapter: chapter, at: pos)
-        } else {
-            let chapter = max(0, (appState.progressMap[id]?.chapter ?? 1) - 1)
-            model.windows.open(id, chapter: chapter, at: nil)
-        }
-    }
-
-    @objc private func exitImmersive() {
-        model.exitImmersive()
-    }
-
-    private func toggleChaptersPopover() {
-        if let popover = chaptersPopover, popover.isShown {
-            popover.close()
-            chaptersPopover = nil
-            return
-        }
-        guard let work = model.selectedWork else { return }
-        chaptersPopover = ReaderToolbarActions.chaptersPopover(
-            theme: theme, appState: appState, session: model.paneReader,
-            workID: work.id, anchor: chaptersButton) { [weak self] in
-                self?.chaptersPopover?.close()
-                self?.chaptersPopover = nil
-            }
-    }
-
-    private func toggleReadingListPopover() {
-        if let popover = readingListPopover, popover.isShown {
-            popover.close()
-            readingListPopover = nil
-            return
-        }
-        guard let work = model.selectedWork else { return }
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: ReadingListPopover(theme: theme, appState: appState, work: work))
-        popover.show(relativeTo: readingListButton.bounds, of: readingListButton, preferredEdge: .maxY)
-        readingListPopover = popover
-    }
-
-    /// Comments for the whole work (detail-mode toolbar), as a sheet.
-    private func showWorkComments() {
-        guard let work = model.selectedWork else { return }
-        ReaderToolbarActions.presentWorkComments(theme: theme, appState: appState, work: work, presenter: self)
-    }
-
-    private func showBookmarkEditSheet() {
-        guard let work = model.selectedWork else { return }
-        ReaderToolbarActions.presentBookmarkEdit(theme: theme, appState: appState, work: work, presenter: self)
-    }
-
-    /// Comments for the chapter currently open in the reader, as a sheet.
-    private func showChapterComments() {
-        guard let work = model.selectedWork else { return }
-        ReaderToolbarActions.presentChapterComments(theme: theme, appState: appState, work: work,
-                                                    chapterIndex: model.readerChapter, presenter: self)
-    }
-}
-
-/// Chapter list for the reader toolbar — jump anywhere in the work.
-struct ChapterListPopover: View {
-    @Bindable var theme: AppTheme
-    @Bindable var appState: AppState
-    @Bindable var session: ReaderSession
-    let workID: String
-    let onSelect: () -> Void
-
-    var body: some View {
-        let chapters = appState.chaptersForWork(workID) ?? []
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(spacing: 0) {
-                    ForEach(Array(chapters.enumerated()), id: \.offset) { index, chapter in
-                        chapterRow(index: index, chapter: chapter)
-                            .id(index)
-                    }
-                    if chapters.isEmpty {
-                        Text("Chapters are still loading…")
-                            .font(Font(MacFont.ui(12.5)))
-                            .foregroundStyle(theme.ink3)
-                            .padding(16)
-                    }
-                }
-                .padding(.vertical, 6)
-            }
-            .onAppear { proxy.scrollTo(session.chapter, anchor: .center) }
-        }
-        .frame(width: 300, height: 360)
-        .background(theme.surface)
-    }
-
-    private func chapterRow(index: Int, chapter: UChapter) -> some View {
-        let current = index == session.chapter
-        let title = chapter.title.isEmpty ? "Chapter \(index + 1)" : chapter.title
-        return Button {
-            session.open(workID, chapter: index)
-            onSelect()
-        } label: {
-            HStack(spacing: 10) {
-                Text("\(index + 1)")
-                    .font(Font(MacFont.ui(11, weight: .bold)))
-                    .foregroundStyle(current ? theme.onAccent : theme.ink3)
-                    .frame(minWidth: 22, minHeight: 22)
-                    .background(current ? theme.accent : theme.surface2)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                Text(title)
-                    .font(Font(MacFont.ui(12.5, weight: current ? .semibold : .regular)))
-                    .foregroundStyle(current ? theme.ink : theme.ink2)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
+    var markAllReadWorks: [Work] = []
 }

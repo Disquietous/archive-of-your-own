@@ -138,119 +138,11 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             renderedUIScale = theme.uiFontScale
             renderedWorkIDs = []
         }
-        switch context {
-        case .search: works = model.works(for: .search)
-        case .subscriptionWorks: works = model.filteredSubscriptionWorks
-        case .authorWorks: works = model.filteredAuthorWorks
-        // The Bookmarks pane is a BookmarkResultsViewController now; this
-        // context only remains so the pane switch never shows stale rows.
-        case .authorBookmarks: works = []
-        case .authorCollections: works = []
-        case .fandomWorks: works = model.fandomLibraryWorks
-        case .readingListWorks: works = model.filteredReadingListWorks
-        case .collectionBookmarks: works = model.search.bookmarkResults
-        }
+        loadWorks()
 
         overlayHost?.removeFromSuperview()
         overlayHost = nil
-        let overlay: AnyView?
-        switch context {
-        case .search:
-            if !model.search.hasSearched {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
-                                                title: "Search the archive",
-                                                message: "Set your criteria and press Search."))
-            } else if appState.isSearching && works.isEmpty {
-                overlay = AnyView(LoadingStateMac(theme: theme, message: "Searching the archive…",
-                                                  detail: "Requests are rate-limited to be kind to the archive.",
-                                                  otherActivity: otherActivity(excluding: "Searching the archive")))
-            } else if let error = appState.searchError, works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                title: "Couldn’t reach the archive", message: error))
-            } else if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
-                                                title: "No works found",
-                                                message: model.search.currentPage > 1
-                                                    ? "No results on page \(model.search.currentPage) — try an earlier page."
-                                                    : "Try different terms or fewer filters."))
-            } else {
-                overlay = nil
-            }
-        case .subscriptionWorks:
-            let who = model.subscriptionWorks.title ?? "this author"
-            if model.subscriptionWorks.isLoading && works.isEmpty {
-                overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: model.subscriptionWorks.fetchStatus ?? "Fetching works by \(who)…",
-                                                  detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
-                                                  otherActivity: otherActivity(excluding: "Fetching \(who)")))
-            } else if let error = model.subscriptionWorks.error, works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                title: "Couldn’t load works", message: error))
-            } else if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
-                                                title: "No works stored",
-                                                message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
-            } else {
-                overlay = nil
-            }
-        case .authorWorks:
-            let who = model.author.username ?? "this author"
-            if model.author.isLoadingWorks && works.isEmpty {
-                overlay = AnyView(LoadingStateMac(theme: theme,
-                                                  message: model.author.worksFetchStatus ?? "Fetching works by \(who)…",
-                                                  detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
-                                                  otherActivity: otherActivity(excluding: "Fetching \(who)")))
-            } else if let error = model.author.worksError, works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                title: "Couldn’t load works", message: error))
-            } else if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "person",
-                                                title: "No works stored",
-                                                message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
-            } else {
-                overlay = nil
-            }
-        case .authorBookmarks:
-            overlay = nil
-        case .authorCollections:
-            // Not shown in this context — the pane hosts AuthorCollectionsView.
-            overlay = nil
-        case .fandomWorks:
-            if works.isEmpty {
-                let tag = model.fandomWorksTag ?? "this fandom"
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "flame",
-                                                title: "Nothing in your library yet",
-                                                message: """
-                                                    Works from \(tag) you’ve opened or downloaded appear here. Press \
-                                                    Search AO3 above to find works on the archive.
-                                                    """))
-            } else {
-                overlay = nil
-            }
-        case .readingListWorks:
-            if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
-                                                title: "Empty list",
-                                                message: "Right-click any work and choose Add to Reading List."))
-            } else {
-                overlay = nil
-            }
-        case .collectionBookmarks:
-            if model.search.isFetchingBookmarks && works.isEmpty {
-                overlay = AnyView(LoadingStateMac(theme: theme, message: "Fetching bookmarked items…",
-                                                  detail: "Requests are rate-limited to be kind to the archive.",
-                                                  otherActivity: otherActivity(excluding: "Fetching bookmarked items")))
-            } else if let error = model.search.bookmarksError, works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
-                                                title: "Couldn’t reach the archive", message: error))
-            } else if works.isEmpty {
-                overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
-                                                title: "No bookmarked works",
-                                                message: "This collection’s bookmarked items include no works the app can show."))
-            } else {
-                overlay = nil
-            }
-        }
+        let overlay = overlayForContext()
         if let overlay {
             let host = NSHostingView(rootView: overlay)
             host.translatesAutoresizingMaskIntoConstraints = false
@@ -291,6 +183,140 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             }
         }
         renderedWorkIDs = ids
+    }
+
+    /// The rows for the current context.
+    private func loadWorks() {
+        switch context {
+        case .search: works = model.works(for: .search)
+        case .subscriptionWorks: works = model.filteredSubscriptionWorks
+        case .authorWorks: works = model.filteredAuthorWorks
+        // The Bookmarks pane is a BookmarkResultsViewController now; this
+        // context only remains so the pane switch never shows stale rows.
+        case .authorBookmarks: works = []
+        case .authorCollections: works = []
+        case .fandomWorks: works = model.fandomLibraryWorks
+        case .readingListWorks: works = model.filteredReadingListWorks
+        case .collectionBookmarks: works = model.search.bookmarkResults
+        }
+    }
+
+    /// The empty/loading/error state shown over the table for the current
+    /// context, or nil when the rows speak for themselves.
+    private func overlayForContext() -> AnyView? {
+        switch context {
+        case .search:
+            return searchOverlay()
+        case .subscriptionWorks:
+            return subscriptionWorksOverlay()
+        case .authorWorks:
+            return authorWorksOverlay()
+        case .authorBookmarks:
+            return nil
+        case .authorCollections:
+            // Not shown in this context — the pane hosts AuthorCollectionsView.
+            return nil
+        case .fandomWorks:
+            if works.isEmpty {
+                let tag = model.fandomWorksTag ?? "this fandom"
+                return AnyView(EmptyStateMac(theme: theme, icon: "flame",
+                                             title: "Nothing in your library yet",
+                                             message: """
+                                                 Works from \(tag) you’ve opened or downloaded appear here. Press \
+                                                 Search AO3 above to find works on the archive.
+                                                 """))
+            } else {
+                return nil
+            }
+        case .readingListWorks:
+            if works.isEmpty {
+                return AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
+                                             title: "Empty list",
+                                             message: "Right-click any work and choose Add to Reading List."))
+            } else {
+                return nil
+            }
+        case .collectionBookmarks:
+            return collectionBookmarksOverlay()
+        }
+    }
+
+    private func searchOverlay() -> AnyView? {
+        if !model.search.hasSearched {
+            return AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
+                                         title: "Search the archive",
+                                         message: "Set your criteria and press Search."))
+        } else if appState.isSearching && works.isEmpty {
+            return AnyView(LoadingStateMac(theme: theme, message: "Searching the archive…",
+                                           detail: "Requests are rate-limited to be kind to the archive.",
+                                           otherActivity: otherActivity(excluding: "Searching the archive")))
+        } else if let error = appState.searchError, works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                         title: "Couldn’t reach the archive", message: error))
+        } else if works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "magnifyingglass",
+                                         title: "No works found",
+                                         message: model.search.currentPage > 1
+                                             ? "No results on page \(model.search.currentPage) — try an earlier page."
+                                             : "Try different terms or fewer filters."))
+        } else {
+            return nil
+        }
+    }
+
+    private func subscriptionWorksOverlay() -> AnyView? {
+        let who = model.subscriptionWorks.title ?? "this author"
+        if model.subscriptionWorks.isLoading && works.isEmpty {
+            return AnyView(LoadingStateMac(theme: theme,
+                                           message: model.subscriptionWorks.fetchStatus ?? "Fetching works by \(who)…",
+                                           detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
+                                           otherActivity: otherActivity(excluding: "Fetching \(who)")))
+        } else if let error = model.subscriptionWorks.error, works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                         title: "Couldn’t load works", message: error))
+        } else if works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "person",
+                                         title: "No works stored",
+                                         message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
+        } else {
+            return nil
+        }
+    }
+
+    private func authorWorksOverlay() -> AnyView? {
+        let who = model.author.username ?? "this author"
+        if model.author.isLoadingWorks && works.isEmpty {
+            return AnyView(LoadingStateMac(theme: theme,
+                                           message: model.author.worksFetchStatus ?? "Fetching works by \(who)…",
+                                           detail: "Fetching every page of \(who)’s works. Requests are rate-limited to be kind to the archive.",
+                                           otherActivity: otherActivity(excluding: "Fetching \(who)")))
+        } else if let error = model.author.worksError, works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                         title: "Couldn’t load works", message: error))
+        } else if works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "person",
+                                         title: "No works stored",
+                                         message: "Press Refresh Works to fetch \(who)’s complete works list from AO3."))
+        } else {
+            return nil
+        }
+    }
+
+    private func collectionBookmarksOverlay() -> AnyView? {
+        if model.search.isFetchingBookmarks && works.isEmpty {
+            return AnyView(LoadingStateMac(theme: theme, message: "Fetching bookmarked items…",
+                                           detail: "Requests are rate-limited to be kind to the archive.",
+                                           otherActivity: otherActivity(excluding: "Fetching bookmarked items")))
+        } else if let error = model.search.bookmarksError, works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
+                                         title: "Couldn’t reach the archive", message: error))
+        } else if works.isEmpty {
+            return AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
+                                         title: "No bookmarked works",
+                                         message: "This collection’s bookmarked items include no works the app can show."))
+        } else {
+            return nil
+        }
     }
 
     /// In-flight operations other than the one named, for the loading summary.

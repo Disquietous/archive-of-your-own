@@ -29,212 +29,240 @@ extension ListPaneViewController {
             break
 
         case .reading, .history, .bookmarks, .downloads:
-            works = model.works(for: section)
-            let meta = sectionMeta(for: section)
-            let downloading = section == .reading ? bulkDownload.statusSuffix : ""
-            toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)\(downloading)")
-            toolbar.setLeading([])
-            var trailing: [NSView] = [sortFilterMenu.makeButton(for: section), worksFilterButton(for: section)]
-            if section == .reading && !works.isEmpty {
-                trailing.insert(removeAllReadingButton(), at: 0)
-                trailing.insert(bulkDownload.update(ids: works.map(\.id)), at: 0)
-            }
-            if section == .history && !works.isEmpty {
-                trailing.insert(clearHistoryButton(), at: 0)
-            }
-            toolbar.setTrailing(trailing)
-            let empty = works.isEmpty
-                ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
-                : nil
-            showWorksContent(section: section, header: nil, overlay: empty)
+            renderLibraryWorks(section: section)
 
         case .whatsNew:
-            do {
-                works = model.works(for: .whatsNew)
-                let checkSub: String
-                if works.isEmpty {
-                    checkSub = "No updates"
-                } else {
-                    checkSub = "\(works.count) updated"
-                }
-                toolbar.configure(title: "What's New", sub: checkSub)
-                var buttons: [NSView] = []
-                if !works.isEmpty {
-                    buttons.append(ToolButton(theme: theme, symbol: "trash", tooltip: "Clear all") { [weak self] in
-                        self?.appState.clearNewWorks()
-                    })
-                }
-                buttons.append(ToolButton(theme: theme, symbol: "list.bullet.rectangle", tooltip: "Show the check monitor") {
-                    (NSApp.delegate as? AppDelegate)?.openWhatsNewMonitor()
-                })
-                buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for updates") { [weak self] in
-                    guard let self else { return }
-                    // A running check owns the queue; clearing it underneath
-                    // that loop ends it early and the guard refuses the new
-                    // one, so the click would do nothing useful.
-                    guard !self.appState.isCheckingWhatsNew else { return }
-                    Task {
-                        self.appState.bridge.resetWhatsNewCheck()
-                        await self.appState.runWhatsNewCheck(force: true)
-                    }
-                })
-                buttons.append(sortFilterMenu.makeButton(for: .whatsNew))
-                buttons.append(worksFilterButton(for: .whatsNew))
-                toolbar.setLeading([])
-                toolbar.setTrailing(buttons)
-                let overlay: AnyView?
-                if !appState.isCheckingWhatsNew && works.isEmpty {
-                    let checkStatus = appState.whatsNewCheckTask.statusMessage
-                    overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
-                                                    title: "Nothing new",
-                                                    message: checkStatus ?? "Updates from works and authors you follow appear here."))
-                } else {
-                    overlay = nil
-                }
-                showWorksContent(section: section, header: nil, overlay: overlay)
-            }
+            renderWhatsNew(section: section)
 
         case .subscriptions:
-            do {
-                displayedSubscriptions = model.lists.filteredSubscriptions
-                works = []
-                let subtitle: String
-                if appState.isLoadingSubscriptions {
-                    subtitle = "Loading from AO3…"
-                } else if let err = appState.subscriptionError, !err.isEmpty {
-                    subtitle = "Error — \(err)"
-                } else {
-                    subtitle = "\(displayedSubscriptions.count) subscriptions"
-                }
-                toolbar.configure(title: "Subscriptions", sub: subtitle)
-                let subscriptionsFilter = filterButton(key: "following", active: !model.lists.subscriptionListFilter.isEmpty) { [theme, model] in
-                    AnyView(SingleFieldFilterView(theme: theme, model: model,
-                                                  title: "Filter Subscriptions",
-                                                  placeholder: "Name",
-                                                  text: Binding(get: { model.lists.subscriptionListFilter },
-                                                                set: { model.lists.subscriptionListFilter = $0 })))
-                }
-                toolbar.setLeading([])
-                toolbar.setTrailing([subscriptionsFilter, ToolButton(theme: theme, symbol: "arrow.down.circle",
-                                                                     tooltip: "Refresh list from AO3") { [weak self] in
-                    guard let self else { return }
-                    guard appState.ao3Username != nil else {
-                        appState.subscriptionError = "Sign in to AO3 in Settings first"
-                        return
-                    }
-                    guard !appState.isLoadingSubscriptions else { return }
-                    appState.subscriptionError = nil
-                    Task { await self.appState.loadSubscriptions(force: true, userInitiated: true) }
-                }])
-                let overlay: AnyView?
-                if let err = appState.subscriptionError, !err.isEmpty, !appState.isLoadingSubscriptions {
-                    overlay = AnyView(VStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 28, weight: .light))
-                            .foregroundStyle(theme.line2)
-                        Text("Couldn't load subscriptions")
-                            .font(Font(MacFont.serif(18, weight: .semibold)))
-                            .foregroundStyle(theme.ink2)
-                        Text(err)
-                            .font(Font(MacFont.ui(13)))
-                            .foregroundStyle(theme.ink3)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(nil)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(24)
-                    .frame(maxWidth: .infinity)
-                    .background(theme.bg))
-                } else if displayedSubscriptions.isEmpty {
-                    overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
-                                                   title: "No subscriptions",
-                                                   message: "Works, series, and authors you subscribe to on AO3 appear here."))
-                } else {
-                    overlay = nil
-                }
-                showSubscriptionsContent(section: section, overlay: overlay)
-            }
+            renderSubscriptions(section: section)
 
         case .readingLists:
-            displayedReadingLists = appState.readingLists
-            works = []
-            let count = displayedReadingLists.count
-            toolbar.configure(title: "Reading Lists",
-                              sub: count == 1 ? "1 list" : "\(count) lists")
-            toolbar.setLeading([])
-            toolbar.setTrailing([ToolButton(theme: theme, symbol: "plus", tooltip: "New reading list") { [weak self] in
-                self?.createReadingList()
-            }])
-            let overlay: AnyView? = displayedReadingLists.isEmpty
-                ? AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
-                                        title: "No reading lists",
-                                        message: "Create a list here, or right-click any work and choose Add to Reading List."))
-                : nil
-            showReadingListsContent(section: section, overlay: overlay)
+            renderReadingLists(section: section)
 
         case .inbox:
-            let sub: String
-            if appState.isLoadingInbox && appState.inboxMessages.isEmpty {
-                sub = "Loading…"
-            } else if appState.inboxUnreadCount > 0 {
-                sub = "\(appState.inboxUnreadCount) unread"
-            } else {
-                sub = "\(appState.inboxMessages.count) messages"
-            }
-            toolbar.configure(title: "Inbox", sub: sub)
-            toolbar.setLeading([])
-            let inboxFilter = filterButton(key: "inbox", active: !model.lists.inboxFilterAuthor.isEmpty
-                                               || !model.lists.inboxFilterWork.isEmpty
-                                               || !model.lists.inboxFilterText.isEmpty) { [theme, model] in
-                AnyView(InboxFilterView(theme: theme, model: model))
-            }
-            toolbar.setTrailing([inboxFilter] + inboxToolbarButtons())
-            showVariant(InboxView(theme: theme, appState: appState, model: model), section: section)
+            renderInbox(section: section)
 
         case .fandoms:
-            toolbar.configure(title: "Fandoms", sub: "\(model.follows.followedFandoms.count) followed")
-            toolbar.setLeading([])
-            toolbar.setTrailing([filterButton(key: "fandoms", active: !model.lists.fandomsListFilter.isEmpty) { [theme, model] in
-                AnyView(SingleFieldFilterView(theme: theme, model: model,
-                                              title: "Filter Fandoms",
-                                              placeholder: "Fandom name",
-                                              text: Binding(get: { model.lists.fandomsListFilter },
-                                                            set: { model.lists.fandomsListFilter = $0 })))
-            }])
-            showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
+            renderFandoms(section: section)
 
         case .authors:
-            // Drill-in: the author's profile replaces the list — their
-            // works/bookmarks/collections render in the reading pane.
-            if let author = model.author.username {
-                toolbar.configure(title: appState.userProfile(author)?.username ?? author,
-                                  sub: appState.isLoadingUserProfile(author)
-                                      ? "Fetching profile from AO3…" : "Author profile")
-                toolbar.setLeading([authorBackButton()])
-                toolbar.setTrailing([authorAO3Button(username: author),
-                                     authorProfileRefreshButton(username: author),
-                                     authorFollowButton(username: author)])
-                showAuthorProfileContent(username: author, activePane: model.author.pane)
-                break
-            }
-            let count = model.follows.follows(of: .author).count + model.follows.follows(of: .work).count
-                + model.follows.follows(of: .series).count
-            toolbar.configure(title: "Following", sub: "\(count) followed")
-            toolbar.setLeading([])
-            let followButton = ToolButton(theme: theme, symbol: "plus", tooltip: "Follow an author") { [model] in
-                model.lists.showFollowAuthorField.toggle()
-            }
-            followButton.isOn = model.lists.showFollowAuthorField
-            toolbar.setTrailing([followButton])
-            showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
+            renderAuthors(section: section)
 
         case .stats:
-            toolbar.configure(title: "Reading Stats", sub: "Counted on device")
-            toolbar.setTrailing([])
-            showVariant(StatsView(theme: theme, model: model), section: section)
+            renderStats(section: section)
         }
         renderedSection = section
         updateStatusBar(section: section)
+    }
+
+    private func renderLibraryWorks(section: MacAppModel.Section) {
+        works = model.works(for: section)
+        let meta = sectionMeta(for: section)
+        let downloading = section == .reading ? bulkDownload.statusSuffix : ""
+        toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)\(downloading)")
+        toolbar.setLeading([])
+        var trailing: [NSView] = [sortFilterMenu.makeButton(for: section), worksFilterButton(for: section)]
+        if section == .reading && !works.isEmpty {
+            trailing.insert(removeAllReadingButton(), at: 0)
+            trailing.insert(bulkDownload.update(ids: works.map(\.id)), at: 0)
+        }
+        if section == .history && !works.isEmpty {
+            trailing.insert(clearHistoryButton(), at: 0)
+        }
+        toolbar.setTrailing(trailing)
+        let empty = works.isEmpty
+            ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
+            : nil
+        showWorksContent(section: section, header: nil, overlay: empty)
+    }
+
+    private func renderWhatsNew(section: MacAppModel.Section) {
+        works = model.works(for: .whatsNew)
+        let checkSub: String
+        if works.isEmpty {
+            checkSub = "No updates"
+        } else {
+            checkSub = "\(works.count) updated"
+        }
+        toolbar.configure(title: "What's New", sub: checkSub)
+        var buttons: [NSView] = []
+        if !works.isEmpty {
+            buttons.append(ToolButton(theme: theme, symbol: "trash", tooltip: "Clear all") { [weak self] in
+                self?.appState.clearNewWorks()
+            })
+        }
+        buttons.append(ToolButton(theme: theme, symbol: "list.bullet.rectangle", tooltip: "Show the check monitor") {
+            (NSApp.delegate as? AppDelegate)?.openWhatsNewMonitor()
+        })
+        buttons.append(ToolButton(theme: theme, symbol: "arrow.clockwise", tooltip: "Check for updates") { [weak self] in
+            guard let self else { return }
+            // A running check owns the queue; clearing it underneath
+            // that loop ends it early and the guard refuses the new
+            // one, so the click would do nothing useful.
+            guard !self.appState.isCheckingWhatsNew else { return }
+            Task {
+                self.appState.bridge.resetWhatsNewCheck()
+                await self.appState.runWhatsNewCheck(force: true)
+            }
+        })
+        buttons.append(sortFilterMenu.makeButton(for: .whatsNew))
+        buttons.append(worksFilterButton(for: .whatsNew))
+        toolbar.setLeading([])
+        toolbar.setTrailing(buttons)
+        let overlay: AnyView?
+        if !appState.isCheckingWhatsNew && works.isEmpty {
+            let checkStatus = appState.whatsNewCheckTask.statusMessage
+            overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
+                                            title: "Nothing new",
+                                            message: checkStatus ?? "Updates from works and authors you follow appear here."))
+        } else {
+            overlay = nil
+        }
+        showWorksContent(section: section, header: nil, overlay: overlay)
+    }
+
+    private func renderSubscriptions(section: MacAppModel.Section) {
+        displayedSubscriptions = model.lists.filteredSubscriptions
+        works = []
+        let subtitle: String
+        if appState.isLoadingSubscriptions {
+            subtitle = "Loading from AO3…"
+        } else if let err = appState.subscriptionError, !err.isEmpty {
+            subtitle = "Error — \(err)"
+        } else {
+            subtitle = "\(displayedSubscriptions.count) subscriptions"
+        }
+        toolbar.configure(title: "Subscriptions", sub: subtitle)
+        let subscriptionsFilter = filterButton(key: "following", active: !model.lists.subscriptionListFilter.isEmpty) { [theme, model] in
+            AnyView(SingleFieldFilterView(theme: theme, model: model,
+                                          title: "Filter Subscriptions",
+                                          placeholder: "Name",
+                                          text: Binding(get: { model.lists.subscriptionListFilter },
+                                                        set: { model.lists.subscriptionListFilter = $0 })))
+        }
+        toolbar.setLeading([])
+        toolbar.setTrailing([subscriptionsFilter, ToolButton(theme: theme, symbol: "arrow.down.circle",
+                                                             tooltip: "Refresh list from AO3") { [weak self] in
+            guard let self else { return }
+            guard appState.ao3Username != nil else {
+                appState.subscriptionError = "Sign in to AO3 in Settings first"
+                return
+            }
+            guard !appState.isLoadingSubscriptions else { return }
+            appState.subscriptionError = nil
+            Task { await self.appState.loadSubscriptions(force: true, userInitiated: true) }
+        }])
+        let overlay: AnyView?
+        if let err = appState.subscriptionError, !err.isEmpty, !appState.isLoadingSubscriptions {
+            overlay = AnyView(VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(theme.line2)
+                Text("Couldn't load subscriptions")
+                    .font(Font(MacFont.serif(18, weight: .semibold)))
+                    .foregroundStyle(theme.ink2)
+                Text(err)
+                    .font(Font(MacFont.ui(13)))
+                    .foregroundStyle(theme.ink3)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity)
+            .background(theme.bg))
+        } else if displayedSubscriptions.isEmpty {
+            overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
+                                           title: "No subscriptions",
+                                           message: "Works, series, and authors you subscribe to on AO3 appear here."))
+        } else {
+            overlay = nil
+        }
+        showSubscriptionsContent(section: section, overlay: overlay)
+    }
+
+    private func renderReadingLists(section: MacAppModel.Section) {
+        displayedReadingLists = appState.readingLists
+        works = []
+        let count = displayedReadingLists.count
+        toolbar.configure(title: "Reading Lists",
+                          sub: count == 1 ? "1 list" : "\(count) lists")
+        toolbar.setLeading([])
+        toolbar.setTrailing([ToolButton(theme: theme, symbol: "plus", tooltip: "New reading list") { [weak self] in
+            self?.createReadingList()
+        }])
+        let overlay: AnyView? = displayedReadingLists.isEmpty
+            ? AnyView(EmptyStateMac(theme: theme, icon: "books.vertical",
+                                    title: "No reading lists",
+                                    message: "Create a list here, or right-click any work and choose Add to Reading List."))
+            : nil
+        showReadingListsContent(section: section, overlay: overlay)
+    }
+
+    private func renderInbox(section: MacAppModel.Section) {
+        let sub: String
+        if appState.isLoadingInbox && appState.inboxMessages.isEmpty {
+            sub = "Loading…"
+        } else if appState.inboxUnreadCount > 0 {
+            sub = "\(appState.inboxUnreadCount) unread"
+        } else {
+            sub = "\(appState.inboxMessages.count) messages"
+        }
+        toolbar.configure(title: "Inbox", sub: sub)
+        toolbar.setLeading([])
+        let inboxFilter = filterButton(key: "inbox", active: !model.lists.inboxFilterAuthor.isEmpty
+                                           || !model.lists.inboxFilterWork.isEmpty
+                                           || !model.lists.inboxFilterText.isEmpty) { [theme, model] in
+            AnyView(InboxFilterView(theme: theme, model: model))
+        }
+        toolbar.setTrailing([inboxFilter] + inboxToolbarButtons())
+        showVariant(InboxView(theme: theme, appState: appState, model: model), section: section)
+    }
+
+    private func renderFandoms(section: MacAppModel.Section) {
+        toolbar.configure(title: "Fandoms", sub: "\(model.follows.followedFandoms.count) followed")
+        toolbar.setLeading([])
+        toolbar.setTrailing([filterButton(key: "fandoms", active: !model.lists.fandomsListFilter.isEmpty) { [theme, model] in
+            AnyView(SingleFieldFilterView(theme: theme, model: model,
+                                          title: "Filter Fandoms",
+                                          placeholder: "Fandom name",
+                                          text: Binding(get: { model.lists.fandomsListFilter },
+                                                        set: { model.lists.fandomsListFilter = $0 })))
+        }])
+        showVariant(FollowedFandomsView(theme: theme, model: model), section: section)
+    }
+
+    private func renderAuthors(section: MacAppModel.Section) {
+        // Drill-in: the author's profile replaces the list — their
+        // works/bookmarks/collections render in the reading pane.
+        if let author = model.author.username {
+            toolbar.configure(title: appState.userProfile(author)?.username ?? author,
+                              sub: appState.isLoadingUserProfile(author)
+                                  ? "Fetching profile from AO3…" : "Author profile")
+            toolbar.setLeading([authorBackButton()])
+            toolbar.setTrailing([authorAO3Button(username: author),
+                                 authorProfileRefreshButton(username: author),
+                                 authorFollowButton(username: author)])
+            showAuthorProfileContent(username: author, activePane: model.author.pane)
+            return
+        }
+        let count = model.follows.follows(of: .author).count + model.follows.follows(of: .work).count
+            + model.follows.follows(of: .series).count
+        toolbar.configure(title: "Following", sub: "\(count) followed")
+        toolbar.setLeading([])
+        let followButton = ToolButton(theme: theme, symbol: "plus", tooltip: "Follow an author") { [model] in
+            model.lists.showFollowAuthorField.toggle()
+        }
+        followButton.isOn = model.lists.showFollowAuthorField
+        toolbar.setTrailing([followButton])
+        showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
+    }
+
+    private func renderStats(section: MacAppModel.Section) {
+        toolbar.configure(title: "Reading Stats", sub: "Counted on device")
+        toolbar.setTrailing([])
+        showVariant(StatsView(theme: theme, model: model), section: section)
     }
 
     private func updateStatusBar(section: MacAppModel.Section) {

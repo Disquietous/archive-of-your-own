@@ -101,26 +101,7 @@ struct ContentBlockRenderer {
     private func append(_ block: ParsedContentBlock, to result: NSMutableAttributedString, indentLevel: Int) {
         switch block {
         case .paragraph(let rawInlines):
-            let inlines = Self.collapseDoubleBreaks(rawInlines)
-            let text = renderInlines(inlines, baseFont: bodyFont, baseColor: inkColor)
-            if text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Whitespace-only paragraphs are intentional blank space —
-                // <p><br><br></p> scene breaks, <p>&nbsp;</p> spacers.
-                // Render one empty line per <br> (at least one). Genuinely
-                // empty <p></p> never gets here: the parser emits no block
-                // for a paragraph with no inline content at all.
-                let blankLines = max(Self.lineBreakCount(inlines), 1)
-                let blanks = NSMutableAttributedString(
-                    string: String(repeating: "\n", count: blankLines),
-                    attributes: [.font: bodyFont, .foregroundColor: inkColor])
-                applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: blanks)
-                result.append(blanks)
-                return
-            }
-            let mutable = NSMutableAttributedString(attributedString: text)
-            mutable.append(NSAttributedString(string: "\n"))
-            applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: mutable)
-            result.append(mutable)
+            appendParagraph(rawInlines, to: result, indentLevel: indentLevel)
 
         case .heading(let level, let text):
             let size: CGFloat = switch level {
@@ -153,50 +134,10 @@ struct ContentBlockRenderer {
             }
 
         case .horizontalRule:
-            // An actual drawn rule (like HTML <hr>), centered at the full
-            // text measure, via a 1pt-high tinted attachment image.
-            let style = NSMutableParagraphStyle()
-            style.alignment = .center
-            style.paragraphSpacingBefore = 14
-            style.paragraphSpacing = 14
-            let ruleWidth = max(120, imageDisplayWidth)
-            let lineColor = NSColor(theme.line)
-            let image = NSImage(size: NSSize(width: ruleWidth, height: 1), flipped: false) { rect in
-                lineColor.setFill()
-                rect.fill()
-                return true
-            }
-            let attachment = NSTextAttachment()
-            attachment.image = image
-            attachment.bounds = CGRect(x: 0, y: bodySize * 0.22, width: ruleWidth, height: 1)
-            let rule = NSMutableAttributedString(attachment: attachment)
-            rule.append(NSAttributedString(string: "\n"))
-            rule.addAttributes([.paragraphStyle: style],
-                               range: NSRange(location: 0, length: rule.length))
-            result.append(rule)
+            appendHorizontalRule(to: result)
 
         case .list(let ordered, let items):
-            for (index, itemBlocks) in items.enumerated() {
-                let marker = ordered ? "\(index + 1)." : "•"
-                let markerString = NSMutableAttributedString(
-                    string: marker + "\t",
-                    attributes: [.font: bodyFont, .foregroundColor: ink3Color]
-                )
-                let start = result.length
-                result.append(markerString)
-                var first = true
-                for inner in itemBlocks {
-                    append(inner, to: result, indentLevel: first ? 0 : indentLevel + 1)
-                    first = false
-                }
-                let style = bodyParagraphStyle(indentLevel: indentLevel)
-                style.headIndent = CGFloat(indentLevel + 1) * 28
-                style.firstLineHeadIndent = CGFloat(indentLevel) * 28
-                style.tabStops = [NSTextTab(textAlignment: .left, location: CGFloat(indentLevel + 1) * 28)]
-                style.paragraphSpacing = 4
-                result.addAttribute(.paragraphStyle, value: style,
-                                    range: NSRange(location: start, length: result.length - start))
-            }
+            appendList(ordered: ordered, items: items, to: result, indentLevel: indentLevel)
 
         case .preFormatted(let text):
             let style = NSMutableParagraphStyle()
@@ -215,6 +156,79 @@ struct ContentBlockRenderer {
 
         case .image(let src, let alt):
             appendImage(src: src, alt: alt, to: result)
+        }
+    }
+
+    private func appendParagraph(_ rawInlines: [ParsedInlineContent], to result: NSMutableAttributedString,
+                                 indentLevel: Int) {
+        let inlines = Self.collapseDoubleBreaks(rawInlines)
+        let text = renderInlines(inlines, baseFont: bodyFont, baseColor: inkColor)
+        if text.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Whitespace-only paragraphs are intentional blank space —
+            // <p><br><br></p> scene breaks, <p>&nbsp;</p> spacers.
+            // Render one empty line per <br> (at least one). Genuinely
+            // empty <p></p> never gets here: the parser emits no block
+            // for a paragraph with no inline content at all.
+            let blankLines = max(Self.lineBreakCount(inlines), 1)
+            let blanks = NSMutableAttributedString(
+                string: String(repeating: "\n", count: blankLines),
+                attributes: [.font: bodyFont, .foregroundColor: inkColor])
+            applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: blanks)
+            result.append(blanks)
+            return
+        }
+        let mutable = NSMutableAttributedString(attributedString: text)
+        mutable.append(NSAttributedString(string: "\n"))
+        applyParagraphStyle(bodyParagraphStyle(indentLevel: indentLevel), to: mutable)
+        result.append(mutable)
+    }
+
+    private func appendHorizontalRule(to result: NSMutableAttributedString) {
+        // An actual drawn rule (like HTML <hr>), centered at the full
+        // text measure, via a 1pt-high tinted attachment image.
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.paragraphSpacingBefore = 14
+        style.paragraphSpacing = 14
+        let ruleWidth = max(120, imageDisplayWidth)
+        let lineColor = NSColor(theme.line)
+        let image = NSImage(size: NSSize(width: ruleWidth, height: 1), flipped: false) { rect in
+            lineColor.setFill()
+            rect.fill()
+            return true
+        }
+        let attachment = NSTextAttachment()
+        attachment.image = image
+        attachment.bounds = CGRect(x: 0, y: bodySize * 0.22, width: ruleWidth, height: 1)
+        let rule = NSMutableAttributedString(attachment: attachment)
+        rule.append(NSAttributedString(string: "\n"))
+        rule.addAttributes([.paragraphStyle: style],
+                           range: NSRange(location: 0, length: rule.length))
+        result.append(rule)
+    }
+
+    private func appendList(ordered: Bool, items: [[ParsedContentBlock]], to result: NSMutableAttributedString,
+                            indentLevel: Int) {
+        for (index, itemBlocks) in items.enumerated() {
+            let marker = ordered ? "\(index + 1)." : "•"
+            let markerString = NSMutableAttributedString(
+                string: marker + "\t",
+                attributes: [.font: bodyFont, .foregroundColor: ink3Color]
+            )
+            let start = result.length
+            result.append(markerString)
+            var first = true
+            for inner in itemBlocks {
+                append(inner, to: result, indentLevel: first ? 0 : indentLevel + 1)
+                first = false
+            }
+            let style = bodyParagraphStyle(indentLevel: indentLevel)
+            style.headIndent = CGFloat(indentLevel + 1) * 28
+            style.firstLineHeadIndent = CGFloat(indentLevel) * 28
+            style.tabStops = [NSTextTab(textAlignment: .left, location: CGFloat(indentLevel + 1) * 28)]
+            style.paragraphSpacing = 4
+            result.addAttribute(.paragraphStyle, value: style,
+                                range: NSRange(location: start, length: result.length - start))
         }
     }
 

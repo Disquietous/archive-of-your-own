@@ -97,6 +97,45 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         let root = NSView()
         root.wantsLayer = true
 
+        configureTableView()
+
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+
+        contentStack.orientation = .vertical
+        contentStack.spacing = 0
+        contentStack.distribution = .fill
+
+        let (bar, barH) = makeStatusBar()
+
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(toolbar)
+        root.addSubview(contentStack)
+        root.addSubview(bar)
+        NSLayoutConstraint.activate([
+            toolbar.topAnchor.constraint(equalTo: root.topAnchor),
+            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentStack.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentStack.bottomAnchor.constraint(equalTo: bar.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            barH,
+        ])
+        view = root
+
+        ObservationRelay.track { [weak self] in
+            self?.render()
+        }
+    }
+
+    private func configureTableView() {
         let column = NSTableColumn(identifier: .init("work"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
@@ -125,15 +164,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         let rowMenu = NSMenu()
         rowMenu.delegate = self
         tableView.menu = rowMenu
+    }
 
-        scrollView.documentView = tableView
-        scrollView.hasVerticalScroller = true
-        scrollView.drawsBackground = false
-
-        contentStack.orientation = .vertical
-        contentStack.spacing = 0
-        contentStack.distribution = .fill
-
+    /// Builds the bottom status bar (spinner, message, top hairline) and
+    /// returns it with its zero-height constraint.
+    private func makeStatusBar() -> (NSView, NSLayoutConstraint) {
         let bar = NSView()
         bar.wantsLayer = true
         let spinner = NSProgressIndicator()
@@ -169,31 +204,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
         statusSpinner = spinner
         let barH = bar.heightAnchor.constraint(equalToConstant: 0)
         statusBarHeight = barH
-
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(toolbar)
-        root.addSubview(contentStack)
-        root.addSubview(bar)
-        NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: root.topAnchor),
-            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentStack.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentStack.bottomAnchor.constraint(equalTo: bar.topAnchor),
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            barH,
-        ])
-        view = root
-
-        ObservationRelay.track { [weak self] in
-            self?.render()
-        }
+        return (bar, barH)
     }
 
     override func viewDidLayout() {

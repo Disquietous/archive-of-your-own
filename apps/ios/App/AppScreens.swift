@@ -4,6 +4,7 @@ import SwiftUI
 /// stack — the tab stacks, the iPad detail column, and each work window.
 enum AppScreens {
     @ViewBuilder
+    // swiftlint:disable:next cyclomatic_complexity
     static func destination(for destination: AppDestination) -> some View {
         switch destination {
         case .workDetail(let workID):
