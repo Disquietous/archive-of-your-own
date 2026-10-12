@@ -1,24 +1,26 @@
 import AppKit
 
-/// The shaded follow bell used in list-item bylines — the work detail
-/// byline's control at row scale: filled + accent while the author is
-/// followed locally or subscribed on AO3. Shared by WorkRowCellView and
-/// BookmarkRowCellView.
+/// The follow bell used in list-item bylines and headers: filled + accent
+/// while the target is followed (or subscribed on AO3). Clicking opens the
+/// Followed / Subscribed menu (FollowBellMenu) — the owner wires `onClick`.
+/// Shared by WorkRowCellView, BookmarkRowCellView and the SwiftUI FollowBell.
 final class FollowBellButton: NSButton {
     private let theme: AppTheme
-    private(set) var author: String = ""
-    var onToggle: ((String) -> Void)?
+    private let pointSize: CGFloat
+    private(set) var name: String = ""
+    var onClick: ((FollowBellButton) -> Void)?
 
-    init(theme: AppTheme) {
+    init(theme: AppTheme, pointSize: CGFloat = 11) {
         self.theme = theme
+        self.pointSize = pointSize
         super.init(frame: .zero)
         isBordered = false
         setButtonType(.momentaryPushIn)
         target = self
         action = #selector(clicked)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 18),
-            heightAnchor.constraint(equalToConstant: 18),
+            widthAnchor.constraint(equalToConstant: pointSize + 7),
+            heightAnchor.constraint(equalToConstant: pointSize + 7),
         ])
     }
 
@@ -27,24 +29,16 @@ final class FollowBellButton: NSButton {
     }
 
     @objc private func clicked() {
-        onToggle?(author)
+        onClick?(self)
     }
 
-    func configure(author: String, state: MacAppModel.AuthorFollowState) {
-        self.author = author
-        let unfollows = state == .followed
-        image = NSImage(systemSymbolName: state.shaded ? "bell.fill" : "bell",
-                        accessibilityDescription: unfollows ? "Unfollow \(author)" : "Follow \(author)")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
-        contentTintColor = state.shaded ? theme.nsAccent : theme.nsInk3
-        switch state {
-        case .followed:
-            toolTip = "Unfollow \(author)"
-        case .subscribedOnly:
-            toolTip = "Subscribed to \(author) on AO3 — click to also follow on this device"
-        case .none:
-            toolTip = "Follow \(author) — adds them to Authors → Following"
-        }
+    func configure(name: String, shaded: Bool) {
+        self.name = name
+        image = NSImage(systemSymbolName: shaded ? "bell.fill" : "bell",
+                        accessibilityDescription: "Follow options for \(name)")?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium))
+        contentTintColor = shaded ? theme.nsAccent : theme.nsInk3
+        toolTip = "Followed / Subscribed — choose how to track \(name)"
     }
 }
 
@@ -138,7 +132,8 @@ final class WorkRowCellView: NSTableCellView {
     /// Called when the user clicks the byline — opens the author profile.
     var onAuthorClick: (() -> Void)?
     /// Called when the user clicks the byline's follow bell.
-    var onToggleFollow: (() -> Void)?
+    /// The byline bell was clicked — the owner pops the bell menu from it.
+    var onFollowBell: ((NSView) -> Void)?
 
     /// Shared measuring label for summary heights.
     private static let measureLabel = NSTextField(wrappingLabelWithString: "")
@@ -168,7 +163,7 @@ final class WorkRowCellView: NSTableCellView {
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
         authorLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(authorClicked)))
-        followButton.onToggle = { [weak self] _ in self?.onToggleFollow?() }
+        followButton.onClick = { [weak self] bell in self?.onFollowBell?(bell) }
         let byline = NSStackView(views: [authorLabel, followButton])
         bylineRow = byline
         byline.orientation = .horizontal
@@ -334,8 +329,8 @@ final class WorkRowCellView: NSTableCellView {
 
     /// Flip only the byline bell — callable without reconfiguring so follow
     /// toggles reflect instantly on every visible row.
-    func setFollowState(_ state: MacAppModel.AuthorFollowState) {
-        followButton.configure(author: authorName, state: state)
+    func setFollowShaded(_ shaded: Bool) {
+        followButton.configure(name: authorName, shaded: shaded)
     }
 
     /// Flip only the bookmark indicator — callable without reconfiguring so
@@ -493,16 +488,17 @@ final class WorkRowCellView: NSTableCellView {
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
                    bookmarked: Bool = false, kudosGiven: Bool = false,
-                   followState: MacAppModel.AuthorFollowState = .none,
-                   isNew: Bool = false, isRemoved: Bool = false,
+                   followShaded: Bool = false,
+                   isNew: Bool = false, isRemoved: Bool = false, finished: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
         self.kudosGiven = kudosGiven
+        self.finished = finished
         setNew(isNew)
         setRemoved(isRemoved)
         authorName = work.author
         authorLabel.toolTip = "View \(work.author)’s profile"
-        setFollowState(followState)
+        setFollowShaded(followShaded)
         isRowSelected = selected
         // NSTextField caches its intrinsic size, and changing the line clamp
         // doesn't flush it — a reused cell going expanded → collapsed kept
@@ -623,7 +619,8 @@ final class WorkRowCellView: NSTableCellView {
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         setAccessibilityLabel(Self.axDescription(for: work, progress: progress,
-                                                 downloaded: downloaded, bookmarked: bookmarked))
+                                                 downloaded: downloaded, bookmarked: bookmarked,
+                                                 finished: finished))
 
         applyTheme()
         if progress > 0 {
@@ -633,7 +630,7 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     private static func axDescription(for work: Work, progress: Double,
-                                      downloaded: Bool, bookmarked: Bool) -> String {
+                                      downloaded: Bool, bookmarked: Bool, finished: Bool) -> String {
         var parts: [String] = [work.title, "by \(work.author)"]
         if !work.fandomDisplay.isEmpty { parts.append(work.fandomDisplay) }
         parts.append("rated \(work.rating.rawValue)")
@@ -642,6 +639,7 @@ final class WorkRowCellView: NSTableCellView {
         if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
         if downloaded { parts.append("available offline") }
         if bookmarked { parts.append("bookmarked") }
+        if finished { parts.append("finished") }
         return parts.joined(separator: ", ")
     }
 
@@ -651,6 +649,15 @@ final class WorkRowCellView: NSTableCellView {
     /// Meta text after the heart glyph; kept so the heart can be recolored
     /// without recomputing the line.
     private var metaText = ""
+    /// The user's manual finished-reading flag — "✓ Finished" in the meta
+    /// line.
+    private var finished = false
+
+    func setFinished(_ value: Bool) {
+        guard value != finished else { return }
+        finished = value
+        renderMeta()
+    }
 
     func setKudosGiven(_ given: Bool) {
         guard given != kudosGiven else { return }
@@ -667,6 +674,11 @@ final class WorkRowCellView: NSTableCellView {
         line.append(NSAttributedString(string: metaText, attributes: [
             .font: font, .foregroundColor: theme.nsInk3,
         ]))
+        if finished {
+            line.append(NSAttributedString(string: "   ✓ Finished", attributes: [
+                .font: font, .foregroundColor: theme.nsInk2,
+            ]))
+        }
         metaLabel.attributedStringValue = line
     }
 

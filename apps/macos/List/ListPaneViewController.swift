@@ -20,6 +20,7 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var variantHost: NSView?
     var overlayHost: NSView?
     var removeAllButton: ToolButton?
+    lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
     var clearHistoryBtn: ToolButton?
     /// Author view: the drilled-in author's profile card, hosted in this
     /// pane while the reading pane shows their lists.
@@ -48,7 +49,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var displayedSubscriptions: [USubscription] = []
     /// Per-row "Checked …" stamps keyed "subType:subId" — captured during
     /// render (an observable read, so stamp changes re-render the list).
-    var displayedLastChecked: [String: String] = [:]
     var renderedSection: MacAppModel.Section?
     var renderedWorkIDs: [String] = []
     var renderedSubscriptionIDs: [String] = []

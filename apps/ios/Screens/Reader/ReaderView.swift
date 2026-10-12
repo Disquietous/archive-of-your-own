@@ -21,8 +21,9 @@ struct ReaderView: View {
     @State private var didCancel = false
     @State private var chapterTask = NetworkTask()
     @State private var visibleChapterIndex: Int = 0
-    @State private var tts = TTSController()
-    @State private var ttsChapter: Int = 0
+    @Environment(TTSController.self) private var tts
+    /// Identifies this reader as the owner of speech it starts.
+    @State private var readerToken = UUID()
     @State private var showVoicePicker = false
 
     // Text-anchored position: the column owns the anchor (character offset
@@ -134,11 +135,12 @@ struct ReaderView: View {
             measure: sizeClass == .regular ? CGFloat(theme.measure) : nil,
             readMargin: theme.readMargin,
             chromeTop: chromeVisible ? 60 : 24,
-            chromeBottom: chromeVisible ? (tts.isActive ? 130 : 80) : 32)
+            chromeBottom: chromeVisible ? (tts.isReading(workID: workID) ? 130 : 80) : 32)
     }
 
     private var ttsHighlight: ReaderBlockRef? {
-        tts.highlightedBlockIndex.map { ReaderBlockRef(chapter: ttsChapter, block: $0) }
+        guard tts.isReading(workID: workID), let chapter = tts.source?.chapter else { return nil }
+        return tts.highlightedBlockIndex.map { ReaderBlockRef(chapter: chapter, block: $0) }
     }
 
     /// Ask the column to land on `position` (consumed once that chapter's
@@ -219,7 +221,7 @@ struct ReaderView: View {
                 if chromeVisible {
                     VStack {
                         Spacer()
-                        if tts.isActive {
+                        if tts.isReading(workID: workID) {
                             ttsControlBar
                         }
                         if entireWork {
@@ -242,6 +244,9 @@ struct ReaderView: View {
                 nav.readerImmersive = sizeClass == .regular && !visible
             }
             .onAppear {
+                // Rebuilt after an unlock while this work was being read
+                // aloud: take the running speech back so leaving stops it.
+                if tts.isReading(workID: workID) { tts.owner = readerToken }
                 guard !didConfigure else { return }
                 didConfigure = true
                 // A fresh open lands in the user's preferred reading view.
@@ -257,6 +262,11 @@ struct ReaderView: View {
             .onDisappear {
                 textHandle.controller?.flushPendingPersist()
                 nav.readerImmersive = false
+                // Leaving the reader ends its speech; the app locking (which
+                // tears the view down too) keeps it playing (M4).
+                if tts.owner == readerToken, state.bridge.launchState != .locked {
+                    tts.stop()
+                }
             }
             .onChange(of: textContent(work)?.key, initial: true) {
                 if let content = textContent(work) {
@@ -738,17 +748,15 @@ struct ReaderView: View {
             Spacer(minLength: 4)
 
             Button {
-                if tts.isActive {
+                if tts.isReading(workID: workID) {
                     tts.stop()
                 } else if let blocks = ttsBlocks {
-                    ttsChapter = currentChapter
-                    tts.setContent(blocks)
-                    tts.play()
+                    tts.start(blocks, workID: workID, chapter: currentChapter, owner: readerToken)
                 }
             } label: {
-                Image(systemName: tts.isActive ? "speaker.wave.2.fill" : "speaker.wave.2")
+                Image(systemName: tts.isReading(workID: workID) ? "speaker.wave.2.fill" : "speaker.wave.2")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(tts.isActive ? theme.accent : theme.ink2)
+                    .foregroundStyle(tts.isReading(workID: workID) ? theme.accent : theme.ink2)
                     .frame(width: 36, height: 36)
             }
             .buttonStyle(IconButtonPressStyle())
@@ -795,6 +803,13 @@ struct ReaderView: View {
                 Label("Refresh Chapters from AO3", systemImage: "arrow.clockwise")
             }
             .disabled(UInt64(workID) == nil || isLoading)
+
+            Button {
+                presentFind()
+            } label: {
+                Label(entireWork ? "Find in Work" : "Find in Chapter", systemImage: "magnifyingglass")
+            }
+            .disabled(work.flatMap(textContent) == nil)
 
             Button {
                 state.toggleBookmark(workID)
@@ -844,6 +859,10 @@ struct ReaderView: View {
         }
     }
 
+    private func presentFind() {
+        textHandle.controller?.presentFind()
+    }
+
     /// Hardware keyboard: ←/→ change chapter, Esc shows the chrome (exits
     /// immersive) and, when it's already showing, leaves the reader — the
     /// mac reader's keys. Invisible buttons keep the shortcuts registered
@@ -856,6 +875,8 @@ struct ReaderView: View {
             Button { goToChapter(chapterIndex + 1) } label: { Text("") }
                 .keyboardShortcut(.rightArrow, modifiers: [])
                 .disabled(entireWork || isLastChapter)
+            Button { presentFind() } label: { Text("") }
+                .keyboardShortcut("f", modifiers: .command)
             Button {
                 if !chromeVisible {
                     withAnimation(.easeInOut(duration: 0.2)) { chromeVisible = true }

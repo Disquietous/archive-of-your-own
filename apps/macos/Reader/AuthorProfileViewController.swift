@@ -24,11 +24,6 @@ final class AuthorProfileViewController: NSViewController {
     private let statsLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let bioView = SelfSizingTextView()
-    /// AO3 subscription toggle. The title reads the local mirror:
-    /// "Subscribe" when not subscribed, "Unsubscribe" when subscribed.
-    /// Every press goes through the confirmation sheet.
-    private let subscribeButton = NSButton(title: "Subscribe…", target: nil, action: nil)
-    private let subscribeSpinner = NSProgressIndicator()
     private let actionErrorLabel = NSTextField(wrappingLabelWithString: "")
     private let blockButton = NSButton(title: "Block…", target: nil, action: nil)
     private let muteButton = NSButton(title: "Mute…", target: nil, action: nil)
@@ -129,6 +124,7 @@ final class AuthorProfileViewController: NSViewController {
 
         bioView.isEditable = false
         bioView.isSelectable = true
+        bioView.unregisterDraggedTypes()  // let AO3 link drops reach the window
         bioView.drawsBackground = false
         bioView.textContainerInset = .zero
         bioView.textContainer?.lineFragmentPadding = 0
@@ -139,13 +135,6 @@ final class AuthorProfileViewController: NSViewController {
         bioView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         bioView.delegate = self
 
-        subscribeSpinner.style = .spinning
-        subscribeSpinner.controlSize = .small
-        subscribeSpinner.isDisplayedWhenStopped = false
-        subscribeSpinner.isHidden = true
-        subscribeButton.target = self
-        subscribeButton.action = #selector(subscribeTapped)
-        subscribeButton.bezelStyle = .rounded
         blockButton.target = self
         blockButton.action = #selector(blockTapped)
         blockButton.bezelStyle = .rounded
@@ -156,7 +145,8 @@ final class AuthorProfileViewController: NSViewController {
         actionsRow.orientation = .horizontal
         actionsRow.alignment = .centerY
         actionsRow.spacing = 8
-        actionsRow.setViews([subscribeButton, subscribeSpinner, blockButton, muteButton], in: .leading)
+        // AO3 subscription lives in the author's bell menu (toolbar).
+        actionsRow.setViews([blockButton, muteButton], in: .leading)
 
         actionErrorLabel.isHidden = true
         actionErrorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -326,28 +316,6 @@ final class AuthorProfileViewController: NSViewController {
         actionErrorLabel.isHidden = true
         guard signedIn else { return }
 
-        // The indicator reads the local mirror, which the profile fetch and
-        // every successful change refresh.
-        let subscribed = appState.isSubscribedToAuthor(username)
-        let busy = appState.isUserActionBusy("sub", username)
-        subscribeButton.title = subscribed ? "Unsubscribe…" : "Subscribe…"
-        subscribeButton.toolTip = subscribed
-            ? "Stop AO3 notifying you when this author posts a new work"
-            : "Have AO3 notify you when this author posts a new work"
-        subscribeButton.isEnabled = !busy
-        subscribeSpinner.isHidden = !busy
-        if busy {
-            subscribeSpinner.startAnimation(nil)
-        } else {
-            subscribeSpinner.stopAnimation(nil)
-        }
-        if let error = appState.userActionError("sub", username) {
-            actionErrorLabel.font = MacFont.ui(12)
-            actionErrorLabel.textColor = theme.nsInk3
-            actionErrorLabel.stringValue = "Couldn’t update AO3 subscription: \(error)"
-            actionErrorLabel.isHidden = false
-        }
-
         // Block/mute need the live state before they can flip it.
         let haveState = profile != nil
         blockButton.title = profile?.blocked == true ? "Unblock" : "Block…"
@@ -368,15 +336,6 @@ final class AuthorProfileViewController: NSViewController {
 
     @objc private func collectionsTapped() {
         onOpenList?(username, .collections)
-    }
-
-    @objc private func subscribeTapped() {
-        let subscribe = !appState.isSubscribedToAuthor(username)
-        AuthorSubscriptionConfirmation.present(in: view.window, username: username,
-                                               subscribe: subscribe) { [weak self] in
-            guard let self else { return }
-            appState.setAuthorSubscription(username, subscribed: subscribe)
-        }
     }
 
     @objc private func blockTapped() {

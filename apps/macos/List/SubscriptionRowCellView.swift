@@ -7,9 +7,10 @@ final class SubscriptionRowCellView: NSTableCellView {
     private let iconView = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
     private let typeLabel = NSTextField(labelWithString: "")
-    /// "Checked 2h ago" in the top-right corner — same treatment as the
-    /// work rows' published/updated dates.
-    private let checkedLabel = NSTextField(labelWithString: "")
+    /// The target's follow bell — opens the Followed / Subscribed menu.
+    private let bell: FollowBellButton
+    /// The bell was clicked — the owner pops the bell menu from it.
+    var onFollowBell: ((NSView) -> Void)?
     private var textStack: NSStackView!
     private let chevron = NSImageView()
     private let separator = NSView()
@@ -19,7 +20,6 @@ final class SubscriptionRowCellView: NSTableCellView {
     /// Minimum breathing room above/below the text block; the block itself is
     /// vertically centered, so both sides get at least this much.
     private var stackTop: NSLayoutConstraint!
-    private var checkedTop: NSLayoutConstraint!
 
     /// Density-driven padding (Settings → Spacing), matching the work rows.
     private static func verticalPad(for density: Density) -> CGFloat {
@@ -32,7 +32,9 @@ final class SubscriptionRowCellView: NSTableCellView {
 
     init(theme: AppTheme) {
         self.theme = theme
+        self.bell = FollowBellButton(theme: theme)
         super.init(frame: .zero)
+        bell.onClick = { [weak self] bell in self?.onFollowBell?(bell) }
         wantsLayer = true
 
         iconView.imageScaling = .scaleProportionallyDown
@@ -42,10 +44,6 @@ final class SubscriptionRowCellView: NSTableCellView {
         nameLabel.maximumNumberOfLines = 1
 
         typeLabel.lineBreakMode = .byTruncatingTail
-
-        checkedLabel.alignment = .right
-        checkedLabel.maximumNumberOfLines = 1
-        checkedLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         chevron.image = NSImage(systemSymbolName: "chevron.right",
                                 accessibilityDescription: nil)?
@@ -60,7 +58,7 @@ final class SubscriptionRowCellView: NSTableCellView {
         textStack.alignment = .leading
         textStack.spacing = 2
 
-        for v in [selectionBar, iconView, textStack!, checkedLabel, chevron, separator] {
+        for v in [selectionBar, iconView, textStack!, bell, chevron, separator] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -69,7 +67,6 @@ final class SubscriptionRowCellView: NSTableCellView {
         // centerY makes the inset symmetric, and fittingSize (used for row
         // height) resolves to content + 2×inset.
         stackTop = textStack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 10)
-        checkedTop = checkedLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10)
 
         NSLayoutConstraint.activate([
             selectionBar.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -84,13 +81,12 @@ final class SubscriptionRowCellView: NSTableCellView {
 
             textStack.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 10),
             textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
-            // The name gives way before the date does (long series titles).
-            textStack.trailingAnchor.constraint(lessThanOrEqualTo: checkedLabel.leadingAnchor, constant: -8),
+            // The name gives way before the bell does (long series titles).
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: bell.leadingAnchor, constant: -8),
             stackTop,
-            checkedTop,
 
-            checkedLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            bell.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -10),
+            bell.centerYAnchor.constraint(equalTo: centerYAnchor),
 
             chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -109,7 +105,7 @@ final class SubscriptionRowCellView: NSTableCellView {
         fatalError("init(coder:) is not supported")
     }
 
-    func configure(with sub: USubscription, isLoading: Bool, isActive: Bool, lastChecked: String? = nil) {
+    func configure(with sub: USubscription, isLoading: Bool, isActive: Bool, followShaded: Bool) {
         let typeName: String
         let iconName: String
         switch sub.subType.lowercased() {
@@ -126,17 +122,10 @@ final class SubscriptionRowCellView: NSTableCellView {
 
         nameLabel.font = MacFont.ui(14, weight: .semibold)
         typeLabel.font = MacFont.ui(12)
-        checkedLabel.font = MacFont.ui(10, weight: .medium)
         stackTop.constant = Self.verticalPad(for: theme.density)
-        checkedTop.constant = Self.verticalPad(for: theme.density)
         nameLabel.stringValue = sub.name
         typeLabel.stringValue = isLoading ? "Fetching works…" : typeName
-        if let lastChecked {
-            checkedLabel.stringValue = "Checked \(Fmt.relativeTime(lastChecked))"
-            checkedLabel.isHidden = false
-        } else {
-            checkedLabel.isHidden = true
-        }
+        bell.configure(name: sub.name, shaded: followShaded)
         iconView.image = NSImage(systemSymbolName: iconName,
                                  accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
@@ -150,6 +139,11 @@ final class SubscriptionRowCellView: NSTableCellView {
         setAccessibilityLabel("\(sub.name), \(typeName) subscription")
     }
 
+    /// Re-shade only the bell — follow changes reflect without a reload.
+    func setFollowShaded(_ shaded: Bool) {
+        bell.configure(name: bell.name, shaded: shaded)
+    }
+
     /// Flip only the selection highlight — callable without reconfiguring,
     /// so the highlight moves the moment the selection changes.
     func setActive(_ active: Bool) {
@@ -161,7 +155,6 @@ final class SubscriptionRowCellView: NSTableCellView {
 
     func applyTheme() {
         typeLabel.textColor = theme.nsInk3
-        checkedLabel.textColor = theme.nsInk3
         iconView.contentTintColor = theme.nsAccent
         chevron.contentTintColor = theme.nsInk3
         separator.layer?.backgroundColor = theme.nsLine.cgColor

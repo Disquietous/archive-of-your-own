@@ -18,11 +18,16 @@ impl AO3App {
     /// ids without a cached row drop out. Returns ids in display order.
     pub fn filter_and_sort_works(&self, work_ids: Vec<u64>, query: UWorkListQuery)
         -> Result<Vec<u64>, AO3Error> {
-        let works = {
+        let (works, finished) = {
             let s = self.storage.blocking_lock();
-            s.get_works_by_ids(&work_ids)?
+            let finished: HashSet<u64> = if query.finished == "finished" || query.finished == "unfinished" {
+                s.get_finished_work_ids()?.into_iter().collect()
+            } else {
+                HashSet::new()
+            };
+            (s.get_works_by_ids(&work_ids)?, finished)
         };
-        Ok(filter_and_sort(works, &query))
+        Ok(filter_and_sort_with(works, &query, &finished))
     }
 
     /// The distinct tags and fandoms across a work list AFTER the section
@@ -74,12 +79,27 @@ impl AO3App {
     }
 }
 
-pub(super) fn filter_and_sort(mut works: Vec<WorkSummary>, q: &UWorkListQuery) -> Vec<u64> {
-    works.retain(|w| passes_section_filters(w, q) && passes_list_filter(w, q));
+#[cfg(test)]
+pub(super) fn filter_and_sort(works: Vec<WorkSummary>, q: &UWorkListQuery) -> Vec<u64> {
+    filter_and_sort_with(works, q, &HashSet::new())
+}
+
+/// `finished` = ids carrying the user's finished flag (only consulted when
+/// the query filters on it).
+pub(super) fn filter_and_sort_with(mut works: Vec<WorkSummary>, q: &UWorkListQuery,
+                                   finished: &HashSet<u64>) -> Vec<u64> {
+    works.retain(|w| {
+        let finished_ok = match q.finished.as_str() {
+            "finished" => finished.contains(&w.id),
+            "unfinished" => !finished.contains(&w.id),
+            _ => true,
+        };
+        finished_ok && passes_section_filters(w, q) && passes_list_filter(w, q)
+    });
     match q.sort.as_str() {
         "updated" => works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated)),
-        "kudos" => works.sort_by(|a, b| b.kudos.cmp(&a.kudos)),
-        "words" => works.sort_by(|a, b| b.word_count.cmp(&a.word_count)),
+        "kudos" => works.sort_by_key(|w| std::cmp::Reverse(w.kudos)),
+        "words" => works.sort_by_key(|w| std::cmp::Reverse(w.word_count)),
         "title" => works.sort_by_key(|w| w.title.to_lowercase()),
         _ => {} // "natural": keep the caller's order
     }
@@ -161,6 +181,7 @@ mod tests {
     use super::*;
     use crate::models::Rating;
 
+    #[allow(clippy::too_many_arguments)]
     fn work(id: u64, title: &str, kudos: u32, words: u64, updated: &str,
             complete: bool, rating: Rating, tags: &[&str], fandoms: &[&str]) -> WorkSummary {
         WorkSummary {
@@ -203,6 +224,7 @@ mod tests {
             tags: vec![],
             fandoms: vec![],
             completed_only: false,
+            finished: "any".to_string(),
         }
     }
 
@@ -300,5 +322,20 @@ mod tests {
         assert_eq!(filter_and_sort(works.clone(), &q), vec![1, 2, 3]);
         q.completed_only = true;
         assert_eq!(filter_and_sort(works, &q), vec![1]);
+    }
+
+    #[test]
+    fn finished_filter_uses_the_flag_set() {
+        let works = vec![
+            work(1, "A", 0, 0, "", false, Rating::General, &[], &[]),
+            work(2, "B", 0, 0, "", false, Rating::General, &[], &[]),
+        ];
+        let flagged: HashSet<u64> = [2].into_iter().collect();
+        let mut q = query();
+        assert_eq!(filter_and_sort_with(works.clone(), &q, &flagged), vec![1, 2]);
+        q.finished = "finished".to_string();
+        assert_eq!(filter_and_sort_with(works.clone(), &q, &flagged), vec![2]);
+        q.finished = "unfinished".to_string();
+        assert_eq!(filter_and_sort_with(works, &q, &flagged), vec![1]);
     }
 }

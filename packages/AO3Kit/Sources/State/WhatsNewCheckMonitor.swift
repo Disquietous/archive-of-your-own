@@ -14,10 +14,10 @@ public extension UCheckQueueItem {
 /// Live, observable picture of the What's New check for a monitor UI:
 /// what phase the run is in, which item is in flight, what is still
 /// queued, and what each finished item came back with. Written only by
-/// `AppState.checkSubscriptions`; read by any platform's monitor window.
+/// `AppState.runWhatsNewCheck`; read by any platform's monitor window.
 @Observable
 @MainActor
-public final class SubscriptionCheckMonitor {
+public final class WhatsNewCheckMonitor {
     public enum Phase: Equatable {
         /// No run in progress.
         case idle

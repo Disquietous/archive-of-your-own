@@ -280,7 +280,7 @@ impl AO3App {
     }
 
     pub async fn post_form(&self, url: String, keys: Vec<String>, values: Vec<String>) -> Result<String, AO3Error> {
-        let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
+        let pairs: Vec<(String, String)> = keys.into_iter().zip(values).collect();
         self.run_on_runtime(move |client, storage| async move {
             // Generic form POST of unknown semantics — treated as AtMostOnce,
             // same reasoning as post_comment/post_reply.

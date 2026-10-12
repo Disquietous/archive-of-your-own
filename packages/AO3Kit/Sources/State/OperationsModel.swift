@@ -27,12 +27,12 @@ final class OperationsModel {
         if appState.isResolvingCloudflare { ops.append("Clearing archive challenge") }
         if appState.isSearching { ops.append("Searching the archive") }
         if appState.isLoadingSubscriptions { ops.append("Loading your subscription list") }
-        if appState.isCheckingSubscriptions {
-            let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
-            if appState.subscriptionCheckTotal > 0 {
-                ops.append("Checking subscriptions (\(done)/\(appState.subscriptionCheckTotal))")
+        if appState.isCheckingWhatsNew {
+            let done = appState.whatsNewCheckTotal - appState.whatsNewCheckRemaining
+            if appState.whatsNewCheckTotal > 0 {
+                ops.append("Checking follows (\(done)/\(appState.whatsNewCheckTotal))")
             } else {
-                ops.append("Checking subscriptions")
+                ops.append("Checking follows")
             }
         }
         if subscriptionWorks.isLoading {

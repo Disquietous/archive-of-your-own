@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The request log: every archive request the core has made, newest

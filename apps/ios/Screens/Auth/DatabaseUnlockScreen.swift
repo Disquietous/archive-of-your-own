@@ -10,6 +10,15 @@ struct DatabaseUnlockScreen: View {
     @State private var showRecovery = false
     @State private var recoveryKeyInput = ""
     @State private var showWipeConfirm = false
+    @Environment(\.scenePhase) private var scenePhase
+    /// The opt-in biometric unlock prompts on its own once per visit.
+    @State private var didAutoPrompt = false
+    @State private var biometricInFlight = false
+
+    private var biometricName: String? {
+        BiometricUnlock.isAvailable(failedAttempts: RecoveryKey.failureCount)
+            ? BiometricUnlock.biometryName : nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +70,16 @@ struct DatabaseUnlockScreen: View {
                     }
                     .buttonStyle(ButtonPressStyle())
 
+                    if let biometricName {
+                        Button { unlockWithBiometrics() } label: {
+                            Label("Unlock with \(biometricName)",
+                                  systemImage: biometricName == "Touch ID" ? "touchid" : "faceid")
+                                .font(Typography.smallButtonLabel())
+                                .foregroundStyle(theme.accent)
+                        }
+                        .disabled(biometricInFlight)
+                    }
+
                     if RecoveryKey.hasRecoveryKey {
                         Button("Forgot password?") {
                             showRecovery = true
@@ -111,6 +130,7 @@ struct DatabaseUnlockScreen: View {
             .padding(.horizontal, 32)
             .alert("Reset Database?", isPresented: $showWipeConfirm) {
                 Button("Reset", role: .destructive) {
+                    BiometricUnlock.disable()
                     RecoveryKey.wipeDatabase()
                     state.bridge.isInitialized = false
                     state.bridge.hasDbPassword = false
@@ -145,13 +165,54 @@ struct DatabaseUnlockScreen: View {
             Spacer()
         }
         .background(theme.bg)
+        .onAppear { autoPromptIfActive(scenePhase) }
+        .onChange(of: scenePhase) { _, phase in autoPromptIfActive(phase) }
     }
 
+    /// Offer biometrics once per visit, only in the foreground (a lock on
+    /// leaving the app shows this screen while in the background, where
+    /// the system prompt can't appear).
+    private func autoPromptIfActive(_ phase: ScenePhase) {
+        guard phase == .active, !didAutoPrompt, !showRecovery, biometricName != nil else { return }
+        didAutoPrompt = true
+        unlockWithBiometrics()
+    }
+
+    private func unlockWithBiometrics() {
+        guard !biometricInFlight else { return }
+        biometricInFlight = true
+        error = nil
+        Task {
+            let outcome = await Task.detached {
+                BiometricUnlock.readPassword(reason: "Unlock your library")
+            }.value
+            biometricInFlight = false
+            switch outcome {
+            case .declined:
+                break
+            case .invalidated:
+                BiometricUnlock.disable()
+                error = "Biometric unlock was turned off because this device’s enrollment changed. Enter your password."
+            case .password(let stored):
+                if state.bridge.open(userPassword: stored) {
+                    RecoveryKey.resetFailureCount()
+                } else if state.bridge.lastOpenFailure == .wrongPassword {
+                    // The password changed since biometrics were enabled.
+                    // Not a password attempt: nothing is counted.
+                    BiometricUnlock.disable()
+                    error = "Biometric unlock was turned off because the password changed. Enter your password."
+                } else {
+                    error = state.bridge.lastOpenFailure?.message ?? "Couldn’t open the library."
+                }
+            }
+        }
+    }
 
     private func unlock() {
         error = nil
         if state.bridge.open(userPassword: password) {
             RecoveryKey.resetFailureCount()
+            BiometricUnlock.noteSuccessfulPasswordUnlock()
         } else {
             // Only a rejected key is a password attempt. Anything else
             // (schema newer than this build, damaged file) shows its real
@@ -163,6 +224,7 @@ struct DatabaseUnlockScreen: View {
             }
             RecoveryKey.recordFailure()
             if RecoveryKey.shouldWipe() {
+                BiometricUnlock.disable()
                 RecoveryKey.wipeDatabase()
                 state.bridge.hasDbPassword = false
                 RustBridge.persistDbPasswordFlag(false)
@@ -190,6 +252,7 @@ struct DatabaseUnlockScreen: View {
         }
         if state.bridge.open(userPassword: recoveredPassword) {
             RecoveryKey.resetFailureCount()
+            BiometricUnlock.noteSuccessfulPasswordUnlock()
         } else {
             error = state.bridge.lastOpenFailure?.message ?? "Recovery failed — database may be corrupted."
         }

@@ -5,7 +5,7 @@ struct ResumeCardView: View {
 
     let work: Work
     let progress: ReadingProgress
-    var chapter: String? = nil
+    var chapter: String?
     var onTap: () -> Void
 
     /// Book-level completion fraction.

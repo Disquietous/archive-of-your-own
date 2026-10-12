@@ -78,7 +78,7 @@ struct ChromeIconButton: View {
     @Environment(AppTheme.self) private var theme
 
     let symbol: String
-    var tint: Color? = nil
+    var tint: Color?
     var isBusy = false
     var action: () -> Void
 

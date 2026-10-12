@@ -86,6 +86,9 @@ final class ReaderViewController: NSViewController {
 
         textView.isEditable = false
         textView.isSelectable = true
+        // Read-only text never takes drops; unregistering lets a dragged
+        // AO3 link fall through to the window (LinkDropWindow).
+        textView.unregisterDraggedTypes()
         textView.delegate = self
         textView.drawsBackground = false
         textView.textContainerInset = .zero

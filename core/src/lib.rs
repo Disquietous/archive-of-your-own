@@ -103,6 +103,7 @@ pub fn dlog(level: &str, tag: &str, message: &str) {
 ///   because of bound blobs (chapter content JSON), and a truncated blob
 ///   is both useless and a content leak, while the placeholder form shows
 ///   the whole statement shape.
+///
 /// `expanded` is lazy so the expansion cost is skipped whenever it won't
 /// be used. No-op until `init_logging` has run (which also skips all
 /// formatting cost in tests and on the very first pre-logging open).

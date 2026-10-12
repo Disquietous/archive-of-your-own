@@ -50,8 +50,8 @@ extension AppState {
         cachedWorks.filter { $0.fandoms.contains(tag) || $0.fandom == tag }
     }
 
-    /// Authors the user follows on AO3 (user subscriptions).
-    var followedAuthors: [USubscription] {
+    /// The signed-in account's AO3 author subscriptions.
+    var subscribedAuthors: [USubscription] {
         subscriptions.filter {
             let t = $0.subType.lowercased()
             return t.contains("user") || t.contains("author")
@@ -90,32 +90,34 @@ extension AppState {
 
     // MARK: - AO3 links
 
-    /// What an archiveofourown.org URL points at, when it's something the
-    /// app can open. Platform models route the result to their screens.
-    enum AO3Link: Equatable {
-        case work(id: String)
-        case user(name: String)
-        case series(id: String)
-    }
-
-    static func parseAO3URL(_ raw: String) -> AO3Link? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let candidate = trimmed.hasPrefix("http") ? trimmed : "https://\(trimmed)"
-        guard let url = URL(string: candidate) else { return nil }
-        if let host = url.host, !host.hasSuffix("archiveofourown.org") { return nil }
-        let parts = url.path.split(separator: "/").map(String.init)
-
-        if let i = parts.firstIndex(of: "works"), i + 1 < parts.count, UInt64(parts[i + 1]) != nil {
-            return .work(id: parts[i + 1])
+    /// The 0-based chapter number an AO3 chapter link points at (links are
+    /// classified by `AO3Link`). Saved chapters answer without a request;
+    /// otherwise this is the one fetch opening the work costs anyway — the
+    /// work page, which saves the work and every chapter with its AO3 id.
+    /// nil when the fetch fails or the work has no such chapter.
+    func resolveChapterLink(workID: String, chapterID: String) async -> Int? {
+        guard let workId = UInt64(workID), let wanted = Int64(chapterID) else { return nil }
+        func index(in chapters: [UChapter]) -> Int? {
+            chapters.firstIndex { $0.chapterId == wanted }
         }
-        if let i = parts.firstIndex(of: "users"), i + 1 < parts.count, !parts[i + 1].isEmpty {
-            return .user(name: parts[i + 1])
+        if let chapters = fetchedChapters[workID], let i = index(in: chapters) { return i }
+        let cached = bridge.getCachedChapters(workId)
+        if let i = index(in: cached) {
+            fetchedChapters[workID] = cached
+            await fetchWorkMetadata(workID)
+            return i
         }
-        if let i = parts.firstIndex(of: "series"), i + 1 < parts.count, UInt64(parts[i + 1]) != nil {
-            return .series(id: parts[i + 1])
+        do {
+            let summary = try await retryOnTimeout(task: metadataTask, using: bridge) {
+                try await self.bridge.fetchWork(workId)
+            }
+            fetchedWorks[workID] = Self.workFromSummary(summary)
+            let chapters = bridge.getCachedChapters(workId)
+            fetchedChapters[workID] = chapters
+            return index(in: chapters)
+        } catch {
+            return nil
         }
-        return nil
     }
 
     // MARK: - Sample data (testing/demo)
@@ -160,19 +162,33 @@ extension AppState {
 
     // MARK: - Works crawl
 
+    /// Where a stopped works crawl left off (cancelled, interrupted by the
+    /// app leaving the foreground, or failed mid-way), so it can resume.
+    struct CrawlStop: Equatable {
+        let nextPage: UInt32
+        let totalPages: UInt32
+
+        var label: String { "Stopped at page \(nextPage) of \(totalPages)" }
+    }
+
     /// Walk every page of a works listing on AO3 (author or series),
     /// delivering the accumulated list after each page and a human-readable
     /// progress line before each request. Works are persisted to the library
     /// by the Rust layer as they arrive. Stops early (returning what it has)
-    /// if `task` is cancelled.
+    /// if `task` is cancelled. A stopped crawl resumes with `startPage` and
+    /// the works it already had as `seed`; `pageDone` reports each finished
+    /// page and the listing's page count.
     func crawlAllWorks(fetchPage: @escaping (UInt32) async throws -> UPagedWorks,
                        task: NetworkTask,
+                       startPage: UInt32 = 1,
+                       seed: [Work] = [],
                        status: (String) -> Void,
-                       partial: ([Work]) -> Void) async throws -> [Work] {
-        var all: [Work] = []
-        var seen = Set<String>()
-        var page: UInt32 = 1
-        var totalPages: UInt32 = 1
+                       partial: ([Work]) -> Void,
+                       pageDone: (_ page: UInt32, _ totalPages: UInt32) -> Void = { _, _ in }) async throws -> [Work] {
+        var all: [Work] = seed
+        var seen = Set(seed.map(\.id))
+        var page: UInt32 = max(1, startPage)
+        var totalPages: UInt32 = page
         while true {
             if page == 1 {
                 status("Fetching works from AO3…")
@@ -189,6 +205,7 @@ extension AppState {
                 all.append(work)
             }
             partial(all)
+            pageDone(page, result.hasNextPage ? totalPages : page)
             if !result.hasNextPage || task.isCancelled { break }
             page += 1
         }

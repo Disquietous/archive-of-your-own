@@ -302,7 +302,7 @@ impl AO3App {
     }
 
     pub fn is_request_active(&self) -> bool {
-        self.active_tasks.try_lock().map_or(false, |t| !t.is_empty())
+        self.active_tasks.try_lock().is_ok_and(|t| !t.is_empty())
     }
 
     pub fn is_tor_connected(&self) -> bool {
@@ -373,7 +373,7 @@ impl AO3App {
             ).await {
                 Ok(Ok(status)) => {
                     log_info!("health", "Circuit health check: status {}", status);
-                    Ok(status >= 200 && status < 400)
+                    Ok((200..400).contains(&status))
                 }
                 Ok(Err(e)) => {
                     log_info!("health", "Circuit health check failed: {}", e);

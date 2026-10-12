@@ -30,6 +30,8 @@ final class ReadPaneViewController: NSViewController {
     private var kudosButton: ToolButton!
     private var workCommentsButton: ToolButton!
     private var editBookmarkButton: ToolButton!
+    /// The user's manual "finished reading" flag — never inferred.
+    private var finishedButton: ToolButton!
     /// Both modes: move the selected work into its own window.
     private var detachButton: ToolButton!
     private var readingListPopover: NSPopover?
@@ -104,9 +106,11 @@ final class ReadPaneViewController: NSViewController {
         readingListButton = ToolButton(theme: theme, symbol: "books.vertical", tooltip: "Add to reading list") { [weak self] in
             self?.toggleReadingListPopover()
         }
-        subscribeButton = ToolButton(theme: theme, symbol: "bell", tooltip: "Subscribe to this work on AO3") { [weak self] in
-            guard let self, let id = model.selectedWorkID else { return }
-            appState.toggleWorkSubscription(id)
+        // The work's own follow bell: Followed / Subscribed menu.
+        subscribeButton = ToolButton(theme: theme, symbol: "bell", tooltip: "Follow this work") { [weak self] in
+            guard let self, let work = model.selectedWork else { return }
+            FollowBellMenu.show(for: FollowModel.Target(kind: .work, id: work.id, name: work.title),
+                                follows: model.follows, from: subscribeButton)
         }
         kudosButton = ToolButton(theme: theme, symbol: "heart", tooltip: "Leave kudos on AO3") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
@@ -122,6 +126,11 @@ final class ReadPaneViewController: NSViewController {
         editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
                                         tooltip: "Edit bookmark — notes, tags, sync to AO3") { [weak self] in
             self?.showBookmarkEditSheet()
+        }
+        finishedButton = ToolButton(theme: theme, symbol: "checkmark.circle",
+                                    tooltip: "Mark as finished reading") { [weak self] in
+            guard let self, let id = model.selectedWorkID else { return }
+            appState.toggleFinished(id)
         }
         detachButton = ToolButton(theme: theme, symbol: "macwindow",
                                   tooltip: "Open in separate window") { [weak self] in
@@ -190,7 +199,7 @@ final class ReadPaneViewController: NSViewController {
             if let editor = window.firstResponder as? NSTextView, editor.isEditable {
                 return event
             }
-            let hasModifiers = !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+            let hasModifiers = !event.modifierFlags.isDisjoint(with: [.command, .option, .control])
             switch event.keyCode {
             case 123 where model.readerOpen && !hasModifiers: // ←
                 readerController.goToAdjacentChapter(-1)
@@ -448,6 +457,30 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
+    private var detailCloseBtn: ToolButton?
+    private var inboxThreadCloseBtn: ToolButton?
+
+    /// Work-detail header (plain-list origin, no results to go back to):
+    /// unload the work and return to the empty pane. The list that
+    /// selected it may have emptied since, so this is the only way out
+    /// besides Escape.
+    private func detailCloseButton() -> ToolButton {
+        let button = detailCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close") { [weak self] in
+            self?.model.closeSelectedWork()
+        }
+        detailCloseBtn = button
+        return button
+    }
+
+    /// Inbox thread header: deselect the message and return to the empty pane.
+    private func inboxThreadCloseButton() -> ToolButton {
+        let button = inboxThreadCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close") { [weak self] in
+            self?.appState.clearInboxSelection()
+        }
+        inboxThreadCloseBtn = button
+        return button
+    }
+
     private func readingListCloseButton() -> ToolButton {
         let button = readingListCloseBtn ?? ToolButton(theme: theme, symbol: "xmark", tooltip: "Close list") { [weak self] in
             self?.model.closeReadingList()
@@ -463,26 +496,21 @@ final class ReadPaneViewController: NSViewController {
     /// pass so the cached buttons' closures always target the current author.
     private var drillInAuthorUsername: String?
 
-    /// Envelope button for the author drill-ins: subscribe/unsubscribe on
-    /// AO3, confirmed by a sheet before any request. Same glyph pair and
-    /// behaviour as the author details card; the follow bells are local.
-    /// Symbol and tooltip track the live subscription state each render.
+    /// The author drill-ins' follow bell: the Followed / Subscribed menu
+    /// (any AO3 change is confirmed by a sheet first). Glyph and tint track
+    /// the live follow state each render.
     private func authorSubscribeButton(username: String) -> ToolButton {
-        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "envelope",
-                                                      tooltip: "Subscribe on AO3") { [weak self] in
-            guard let self, let user = drillInAuthorUsername else { return }
-            let subscribe = !appState.isSubscribedToAuthor(user)
-            AuthorSubscriptionConfirmation.present(in: view.window, username: user,
-                                                   subscribe: subscribe) { [weak self] in
-                self?.appState.setAuthorSubscription(user, subscribed: subscribe)
-            }
+        let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "bell",
+                                                      tooltip: "Follow") { [weak self] in
+            guard let self, let user = drillInAuthorUsername, let anchor = authorSubscribeBtn else { return }
+            FollowBellMenu.show(for: .author(user), follows: model.follows, from: anchor)
         }
         authorSubscribeBtn = button
-        let subscribed = appState.isSubscribedToAuthor(username)
-        button.setSymbol(subscribed ? "envelope.fill" : "envelope")
-        button.tintOverride = subscribed ? theme.nsAccent : nil
-        button.toolTip = subscribed ? "Subscribed on AO3" : "Subscribe on AO3"
-        button.isEnabled = !appState.isUserActionBusy("sub", username)
+        let shaded = model.follows.isShaded(.author(username))
+        button.setSymbol(shaded ? "bell.fill" : "bell")
+        button.tintOverride = shaded ? theme.nsAccent : nil
+        button.toolTip = "Followed / Subscribed — choose how to track \(username)"
+        button.isEnabled = !model.follows.isBusy(.author(username))
         return button
     }
 
@@ -498,17 +526,12 @@ final class ReadPaneViewController: NSViewController {
         return button
     }
 
-    /// The subscribe/profile buttons for an author drill-in header, in
-    /// trailing-order. Subscribe needs a signed-in AO3 session; the profile
-    /// card is public data and always available.
+    /// The follow-bell/profile buttons for an author drill-in header, in
+    /// trailing-order. The bell's Subscribed item needs a signed-in AO3
+    /// session (the menu disables it otherwise); the profile card is public.
     private func authorHeaderButtons(username: String) -> [NSView] {
         drillInAuthorUsername = username
-        var buttons: [NSView] = []
-        if appState.ao3Username != nil {
-            buttons.append(authorSubscribeButton(username: username))
-        }
-        buttons.append(authorProfileButton())
-        return buttons
+        return [authorSubscribeButton(username: username), authorProfileButton()]
     }
 
     // MARK: - Search pane buttons (the list pane is collapsed in Search,
@@ -717,22 +740,37 @@ final class ReadPaneViewController: NSViewController {
         if forAuthor {
             button = authorRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
                 guard let model = self?.model else { return }
-                model.author.isLoadingWorks ? model.author.cancelWorksRefresh() : model.author.refreshWorks()
+                if model.author.isLoadingWorks {
+                    model.author.cancelWorksRefresh()
+                } else {
+                    // A stopped crawl picks up where it left off.
+                    model.author.refreshWorks(resume: model.author.worksCrawlStop != nil)
+                }
             }
             authorRefreshBtn = button
         } else {
             button = subscriptionRefreshBtn ?? LabelToolButton(theme: theme) { [weak self] in
                 guard let model = self?.model else { return }
-                model.subscriptionWorks.isLoading ? model.subscriptionWorks.cancelRefresh() : model.subscriptionWorks.refresh()
+                if model.subscriptionWorks.isLoading {
+                    model.subscriptionWorks.cancelRefresh()
+                } else {
+                    model.subscriptionWorks.refresh(resume: model.subscriptionWorks.crawlStop != nil)
+                }
             }
             subscriptionRefreshBtn = button
         }
         let loading = forAuthor ? model.author.isLoadingWorks : model.subscriptionWorks.isLoading
-        button.configure(title: loading ? "Cancel" : "Refresh Works",
-                         symbol: loading ? "xmark" : "arrow.clockwise",
-                         tooltip: loading
-                            ? "Stop fetching — works fetched so far are kept"
-                            : "Fetch this author’s complete works list from AO3, page by page")
+        let stop = forAuthor ? model.author.worksCrawlStop : model.subscriptionWorks.crawlStop
+        if loading {
+            button.configure(title: "Cancel", symbol: "xmark",
+                             tooltip: "Stop fetching — works fetched so far are kept, and it can resume")
+        } else if let stop {
+            button.configure(title: "Resume Works", symbol: "arrow.clockwise",
+                             tooltip: "\(stop.label) — continue fetching from there")
+        } else {
+            button.configure(title: "Refresh Works", symbol: "arrow.clockwise",
+                             tooltip: "Fetch this author’s complete works list from AO3, page by page")
+        }
         return button
     }
 
@@ -792,7 +830,8 @@ final class ReadPaneViewController: NSViewController {
                                       worksFilterButton(for: .subscriptions),
                                       refreshWorksButton(forAuthor: false)]
             if isAuthor {
-                trailing = authorHeaderButtons(username: author) + trailing
+                trailing = authorHeaderButtons(username: author)
+                    + [markAllReadButton(works: model.filteredSubscriptionWorks)] + trailing
             }
             toolbar.setTrailing(trailing)
             show(mode: .subscriptionWorks(title))
@@ -812,7 +851,8 @@ final class ReadPaneViewController: NSViewController {
                 toolbar.configure(title: "Works", sub: sub)
                 requestOverlayOpID = model.author.worksRefreshOp.opID
                 toolbar.setLeading([])
-                toolbar.setTrailing([sortFilterMenu.makeButton(for: .authors),
+                toolbar.setTrailing([markAllReadButton(works: model.filteredAuthorWorks),
+                                     sortFilterMenu.makeButton(for: .authors),
                                      worksFilterButton(for: .authors),
                                      refreshWorksButton(forAuthor: true)])
                 show(mode: .subscriptionWorks(author))
@@ -877,9 +917,11 @@ final class ReadPaneViewController: NSViewController {
             let sub = summary.totalCount == 0
                 ? "Reading list"
                 : "\(Fmt.k(summary.totalWords)) words · \(summary.readCount) of \(summary.totalCount) read"
-            toolbar.configure(title: name, sub: sub)
+            toolbar.configure(title: name, sub: sub + bulkDownload.statusSuffix)
             toolbar.setLeading([readingListCloseButton()])
-            toolbar.setTrailing([sortFilterMenu.makeButton(for: .readingLists),
+            let listWorkIDs = appState.worksInReadingList(listID).map(\.id)
+            toolbar.setTrailing([bulkDownload.update(ids: listWorkIDs),
+                                 sortFilterMenu.makeButton(for: .readingLists),
                                  worksFilterButton(for: .readingLists)])
             show(mode: .searchResults)
             return
@@ -985,7 +1027,7 @@ final class ReadPaneViewController: NSViewController {
 
         if model.section == .inbox, let item = appState.selectedInboxItem {
             toolbar.configure(title: item.workReference, sub: "Comment by \(item.author)")
-            toolbar.setLeading([])
+            toolbar.setLeading([inboxThreadCloseButton()])
             toolbar.setTrailing([inboxThreadRefreshButton()])
             let mode = Mode.inboxThread(item.commentId)
             show(mode: mode)
@@ -1013,7 +1055,8 @@ final class ReadPaneViewController: NSViewController {
         // Kudos posts from either mode's toolbar, so its op shows in both.
         requestOverlayOpID = appState.kudosOp.opID
             ?? (reading ? model.paneReader.chapterFetchOp.opID : appState.workRefreshOp.opID)
-        toolbar.setLeading(reading ? [backButton] : (cameFromResults ? [resultsBackButton] : []))
+        toolbar.setLeading(reading ? [backButton]
+                           : cameFromResults ? [resultsBackButton] : [detailCloseButton()])
         immersiveButton.isOn = model.immersive
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
@@ -1028,7 +1071,7 @@ final class ReadPaneViewController: NSViewController {
                                                 tooltip: "Open this work on AO3 in your browser"),
                                       detachButton, settingsButton, detailRefreshButton(),
                                       downloadButton, readingListButton, subscribeButton,
-                                      kudosButton, workCommentsButton]
+                                      kudosButton, workCommentsButton, finishedButton]
             if bookmarked { trailing.append(editBookmarkButton) }
             trailing.append(bookmarkButton)
             toolbar.setTrailing(trailing)
@@ -1268,14 +1311,12 @@ final class ReadPaneViewController: NSViewController {
         readingListButton.tintOverride = inList ? theme.nsAccent : nil
         readingListButton.isEnabled = workId != nil
 
-        let subscribed = appState.isSubscribedToWork(work.id)
-        subscribeButton.setSymbol(subscribed ? "bell.fill" : "bell")
-        subscribeButton.tintOverride = subscribed ? theme.nsAccent : nil
-        subscribeButton.isEnabled = appState.ao3Username != nil
-            && !appState.subscriptionTogglingWorkIDs.contains(work.id)
-        subscribeButton.toolTip = appState.ao3Username == nil
-            ? "Sign in to subscribe to this work"
-            : subscribed ? "Unsubscribe from this work on AO3" : "Subscribe to this work on AO3"
+        let workTarget = FollowModel.Target(kind: .work, id: work.id, name: work.title)
+        let workShaded = model.follows.isShaded(workTarget)
+        subscribeButton.setSymbol(workShaded ? "bell.fill" : "bell")
+        subscribeButton.tintOverride = workShaded ? theme.nsAccent : nil
+        subscribeButton.isEnabled = UInt64(work.id) != nil && !model.follows.isBusy(workTarget)
+        subscribeButton.toolTip = "Followed / Subscribed — choose how to track this work"
 
         // Heart states: empty = no kudos (or the POST failed), faded red =
         // request in flight, full red = AO3 confirmed.
@@ -1291,6 +1332,69 @@ final class ReadPaneViewController: NSViewController {
 
         workCommentsButton.toolTip = work.comments > 0
             ? "Comments · \(Fmt.k(work.comments))" : "Comments"
+
+        let finished = appState.finishedWorkIDs.contains(work.id)
+        finishedButton.setSymbol(finished ? "checkmark.circle.fill" : "checkmark.circle")
+        finishedButton.tintOverride = finished ? theme.nsSage : nil
+        finishedButton.toolTip = finished ? "Finished reading — click to unmark" : "Mark as finished reading"
+    }
+
+    // MARK: - Mark all as read (author works lists)
+
+    private var markAllReadBtn: ToolButton?
+    private lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
+    /// The works the header toggle acts on — set each render pass so the
+    /// cached button's closure always targets the list on screen.
+    private var markAllReadWorks: [Work] = []
+
+    /// Header toggle for an author's works list: flags every listed work
+    /// as finished, or clears the flag when they all already are. Both
+    /// directions are confirmed first — the flag is manual-only, so a
+    /// stray click must not rewrite a whole list.
+    private func markAllReadButton(works: [Work]) -> ToolButton {
+        markAllReadWorks = works
+        let button = markAllReadBtn ?? ToolButton(theme: theme, symbol: "checkmark.circle",
+                                                  tooltip: "Mark all as read") { [weak self] in
+            self?.confirmMarkAllRead()
+        }
+        markAllReadBtn = button
+        let allFinished = !works.isEmpty && works.allSatisfy { appState.finishedWorkIDs.contains($0.id) }
+        button.setSymbol(allFinished ? "checkmark.circle.fill" : "checkmark.circle")
+        button.tintOverride = allFinished ? theme.nsSage : nil
+        button.isOn = allFinished
+        button.isEnabled = !works.isEmpty
+        button.toolTip = allFinished
+            ? "All \(works.count) works are marked as read — click to unmark all"
+            : "Mark all \(works.count) works in this list as read"
+        return button
+    }
+
+    private func confirmMarkAllRead() {
+        let works = markAllReadWorks
+        guard !works.isEmpty else { return }
+        let allFinished = works.allSatisfy { appState.finishedWorkIDs.contains($0.id) }
+        let count = works.count == 1 ? "1 work" : "\(works.count) works"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        if allFinished {
+            alert.messageText = "Unmark all as read?"
+            alert.informativeText = "This clears the finished-reading flag on all \(count) in this list."
+            alert.addButton(withTitle: "Unmark All")
+        } else {
+            alert.messageText = "Mark all as read?"
+            alert.informativeText = "This flags all \(count) in this list as finished reading."
+            alert.addButton(withTitle: "Mark All as Read")
+        }
+        alert.addButton(withTitle: "Cancel")
+        let apply = { [weak self] (response: NSApplication.ModalResponse) in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            appState.setFinished(works.map(\.id), finished: !allFinished)
+        }
+        if let window = view.window {
+            alert.beginSheetModal(for: window, completionHandler: apply)
+        } else {
+            apply(alert.runModal())
+        }
     }
 
     // MARK: - Actions
@@ -1369,7 +1473,6 @@ final class ReadPaneViewController: NSViewController {
                                                     chapterIndex: model.readerChapter, presenter: self)
     }
 }
-
 
 /// Chapter list for the reader toolbar — jump anywhere in the work.
 struct ChapterListPopover: View {

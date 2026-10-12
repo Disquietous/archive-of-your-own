@@ -30,6 +30,7 @@ targets:
     dependencies:
       - framework: AO3Core.xcframework
         embed: false
+      - target: ArchiveShareExtension
     settings:
       base:
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -48,6 +49,29 @@ targets:
           - "-lz"
           - "-lresolv"
           - "-llzma"
+
+  # "AoYO" in the iOS share sheet: classifies a shared AO3 link and hands
+  # it to the app through the app group. Deliberately links no Rust core —
+  # only the pure link classifier and the hand-off store.
+  ArchiveShareExtension:
+    type: app-extension
+    platform: iOS
+    configFiles:
+      Debug: Local.xcconfig
+      Release: Local.xcconfig
+    sources:
+      - path: apps/ios-share
+      - path: packages/AO3Kit/Sources/Links
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        PRODUCT_BUNDLE_IDENTIFIER: com.archiveofyourown.reader.share
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: false
+        INFOPLIST_FILE: apps/ios-share/Info.plist
+        CODE_SIGN_ENTITLEMENTS: apps/ios-share/ShareExtension.entitlements
+        CODE_SIGN_STYLE: Automatic
 
   ArchiveOfYourOwnMac:
     type: application

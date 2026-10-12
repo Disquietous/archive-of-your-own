@@ -41,7 +41,7 @@ extension ListPaneViewController {
         // re-renders the moment a follow or AO3 subscription toggles (the
         // reload path configures cells lazily outside this tracked closure —
         // see the drill-in reads in showSubscriptionsContent).
-        _ = model.follows.followedAuthorNames
+        _ = model.follows.follows
         _ = appState.subscriptions
 
         let sectionChanged = renderedSection != section
@@ -65,6 +65,7 @@ extension ListPaneViewController {
             // a "New" pill, so the badge drops without a full reload.
             let unseen = section == .whatsNew ? appState.unseenNewWorkIDs : []
             let gone = appState.goneWorkIDs
+            let finished = appState.finishedWorkIDs
             tableView.enumerateAvailableRowViews { [weak self] _, row in
                 guard let self, row < works.count,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? WorkRowCellView
@@ -74,7 +75,8 @@ extension ListPaneViewController {
                 cell.setKudosGiven(kudosGiven.contains(works[row].id))
                 cell.setNew(unseen.contains(works[row].id))
                 cell.setRemoved(gone.contains(works[row].id))
-                cell.setFollowState(model.follows.authorFollowState(works[row].author))
+                cell.setFinished(finished.contains(works[row].id))
+                cell.setFollowShaded(model.follows.isShaded(.author(works[row].author)))
             }
         }
         renderedWorkIDs = ids
@@ -125,6 +127,9 @@ extension ListPaneViewController {
         let activeID = model.subscriptionWorks.subId
         let activeType = model.subscriptionWorks.subType
         let loadingID = model.subscriptionWorks.loadingSubscriptionID
+        // Bell inputs: follows and the account's subscriptions.
+        _ = model.follows.follows
+        _ = appState.subscriptions
 
         let sectionChanged = renderedSection != section
         let ids = displayedSubscriptions.map(\.id)
@@ -141,7 +146,7 @@ extension ListPaneViewController {
                 cell.configure(with: sub,
                                isLoading: loadingID == sub.id,
                                isActive: activeID == sub.id && activeType == normalizedSubType(sub),
-                               lastChecked: displayedLastChecked["\(sub.subType):\(sub.id)"])
+                               followShaded: model.follows.isShaded(followTarget(for: sub)))
             }
         }
         renderedSubscriptionIDs = ids

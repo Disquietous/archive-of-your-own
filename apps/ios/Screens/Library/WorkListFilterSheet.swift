@@ -29,6 +29,17 @@ struct WorkListFilterSheet: View {
                         FilterTextField(placeholder: "Words (e.g. <50000)", text: filter.words)
                             .keyboardType(.numbersAndPunctuation)
                     }
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Finished reading")
+                            .font(.custom("HankenGrotesk", size: 12).weight(.semibold))
+                            .foregroundStyle(theme.ink3)
+                        Picker("Finished reading", selection: filter.finished) {
+                            ForEach(LibraryListModel.FinishedFilter.allCases, id: \.self) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
                     TokenFilterSection(label: "Fandom", placeholder: "Type to add a fandom…",
                                        selected: filter.fandoms, allOptions: availableFandoms)
                     TokenFilterSection(label: "Tags", placeholder: "Type to add a tag…",

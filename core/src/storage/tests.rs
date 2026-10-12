@@ -253,39 +253,30 @@ fn test_search_local_bookmarks_filtered() {
     assert_eq!(all, vec![1, 2]);
 
     // Work-side criteria.
-    let mut c = C::default();
-    c.bookmarkable_query = "Another".into();
+    let c = C { bookmarkable_query: "Another".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = C::default();
-    c.other_tag_names = "Fluff".into();
+    let c = C { other_tag_names: "Fluff".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
-    let mut c = C::default();
-    c.word_count = ">50000".into();
+    let c = C { word_count: ">50000".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
     // Library language matching is by display name, case-insensitive.
-    let mut c = C::default();
-    c.language_id = "english".into();
+    let c = C { language_id: "english".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
 
     // Bookmark-side criteria.
-    let mut c = C::default();
-    c.rec = true;
+    let c = C { rec: true, ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
-    let mut c = C::default();
-    c.bookmark_notes = "friend".into();
+    let c = C { bookmark_notes: "friend".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = C::default();
-    c.bookmarker = "OtherUser".into();
+    let c = C { bookmarker: "OtherUser".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = C::default();
-    c.other_bookmark_tag_names = "Comfort Read".into();
+    let mut c = C { other_bookmark_tag_names: "Comfort Read".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
     c.other_bookmark_tag_names = "Favorite".into();
     assert_eq!(ids(&c), vec![2]);
 
     // Hits carry the bookmark's own fields alongside the work blurb.
-    let mut c = C::default();
-    c.bookmarker = "OtherUser".into();
+    let c = C { bookmarker: "OtherUser".into(), ..Default::default() };
     let hit = &db.search_local_bookmarks_filtered(&c, 0).unwrap()[0];
     assert_eq!(hit.bookmarker, "otheruser");
     assert_eq!(hit.note, "note from a friend");
@@ -296,8 +287,7 @@ fn test_search_local_bookmarks_filtered() {
     // A series bookmark: cached with its series row, matched by the type
     // filter and by name/author queries; work-tag and language filters
     // exclude it (series carry neither).
-    let mut c = C::default();
-    c.bookmarkable_type = "Series".into();
+    let c = C { bookmarkable_type: "Series".into(), ..Default::default() };
     assert!(ids(&c).is_empty());
     db.save_series(&crate::models::SeriesSummary {
         id: 77, name: "A Long Saga".into(), authors: vec!["SagaWriter".into()],
@@ -310,29 +300,23 @@ fn test_search_local_bookmarks_filtered() {
     let hit = &db.search_local_bookmarks_filtered(&c, 0).unwrap()[0];
     assert!(hit.work.is_none());
     assert_eq!(hit.series.as_ref().unwrap().name, "A Long Saga");
-    let mut c = C::default();
-    c.bookmarkable_query = "SagaWriter".into();
+    let c = C { bookmarkable_query: "SagaWriter".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![77]);
-    let mut c = C::default();
-    c.other_tag_names = "Fluff".into();
+    let c = C { other_tag_names: "Fluff".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
-    let mut c = C::default();
-    c.language_id = "english".into();
+    let c = C { language_id: "english".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
-    let mut c = C::default();
-    c.bookmarkable_type = "Work".into();
+    let c = C { bookmarkable_type: "Work".into(), ..Default::default() };
     let mut w = ids(&c); w.sort();
     assert_eq!(w, vec![1, 2]);
     // External-work bookmarks are never cached.
-    let mut c = C::default();
-    c.bookmarkable_type = "External Work".into();
+    let c = C { bookmarkable_type: "External Work".into(), ..Default::default() };
     assert!(ids(&c).is_empty());
     db.remove_bookmark_for(BookmarkTarget::Series(77)).unwrap();
     db.delete_series(77).unwrap();
 
     // Sort by word count, AO3-style descending.
-    let mut c = C::default();
-    c.sort_column = "word_count".into();
+    let c = C { sort_column: "word_count".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2, 1]);
 }
 
@@ -388,30 +372,91 @@ fn test_history() {
 fn test_subscriptions_persistence() {
     let db = open_test_db();
 
-    assert!(db.get_subscriptions().unwrap().is_empty());
+    assert!(db.get_subscriptions("me").unwrap().is_empty());
 
     let subs = vec![
         ("author".into(), "coolwriter".into(), "CoolWriter".into(), Some("111".into())),
         ("work".into(), "12345".into(), "My Fic".into(), None),
     ];
-    db.save_subscriptions(&subs).unwrap();
-    let loaded = db.get_subscriptions().unwrap();
+    db.save_subscriptions("me", &subs).unwrap();
+    let loaded = db.get_subscriptions("me").unwrap();
     assert_eq!(loaded.len(), 2);
-    assert_eq!(db.get_subscription_ao3_id("author", "coolwriter").unwrap().as_deref(), Some("111"));
-    assert_eq!(db.get_subscription_ao3_id("work", "12345").unwrap(), None);
-    assert!(db.has_subscription("work", "12345").unwrap());
-    assert!(!db.has_subscription("work", "99999").unwrap());
+    assert_eq!(db.get_subscription_ao3_id("me", "author", "coolwriter").unwrap().as_deref(), Some("111"));
+    // Account and target ids match case-insensitively.
+    assert_eq!(db.get_subscription_ao3_id("ME", "author", "CoolWriter").unwrap().as_deref(), Some("111"));
+    assert_eq!(db.get_subscription_ao3_id("me", "work", "12345").unwrap(), None);
+    assert!(db.has_subscription("me", "work", "12345").unwrap());
+    assert!(!db.has_subscription("me", "work", "99999").unwrap());
 
-    // Single add/remove (work subscribe toggle path)
-    db.add_subscription("work", "555", "Another Fic", Some("222")).unwrap();
-    assert_eq!(db.get_subscription_ao3_id("work", "555").unwrap().as_deref(), Some("222"));
-    db.remove_subscription("work", "555").unwrap();
-    assert!(!db.has_subscription("work", "555").unwrap());
+    // Single add/remove.
+    db.add_subscription("me", "work", "555", "Another Fic", Some("222")).unwrap();
+    assert_eq!(db.get_subscription_ao3_id("me", "work", "555").unwrap().as_deref(), Some("222"));
+    db.remove_subscription("me", "work", "555").unwrap();
+    assert!(!db.has_subscription("me", "work", "555").unwrap());
 
-    // Replacing clears the old set
+    // Lists are per account: another account's rows are invisible, and
+    // replacing one account's list leaves the other's alone.
+    db.save_subscriptions("other", &[("work".into(), "1".into(), "Theirs".into(), None)]).unwrap();
+    assert!(!db.has_subscription("me", "work", "1").unwrap());
     let subs2 = vec![("series".into(), "99".into(), "Big Series".into(), None)];
-    db.save_subscriptions(&subs2).unwrap();
-    assert_eq!(db.get_subscriptions().unwrap().len(), 1);
+    db.save_subscriptions("me", &subs2).unwrap();
+    assert_eq!(db.get_subscriptions("me").unwrap().len(), 1);
+    assert_eq!(db.get_subscriptions("other").unwrap().len(), 1);
+}
+
+#[test]
+fn test_subscriptions_cleared_on_account_transitions() {
+    let db = open_test_db();
+    db.create_account("a", "Alice", "cookie").unwrap();
+    db.create_account("b", "Bob", "cookie").unwrap();
+    db.set_active_account("a").unwrap();
+    assert_eq!(db.subscription_account().as_deref(), Some("Alice"));
+    db.add_subscription("Alice", "work", "1", "W", None).unwrap();
+
+    // Re-activating the same account keeps the data.
+    db.set_active_account("a").unwrap();
+    assert!(db.has_subscription("Alice", "work", "1").unwrap());
+
+    // Switching accounts empties every subscription row.
+    db.set_active_account("b").unwrap();
+    assert_eq!(db.get_subscriptions("Alice").unwrap().len(), 0);
+    assert_eq!(db.subscription_account().as_deref(), Some("Bob"));
+
+    // Signing the active account out empties them; signing out another
+    // account doesn't.
+    db.add_subscription("Bob", "work", "2", "W", None).unwrap();
+    db.clear_account_cookies("a").unwrap();
+    assert!(db.has_subscription("Bob", "work", "2").unwrap());
+    db.clear_account_cookies("b").unwrap();
+    assert!(!db.has_subscription("Bob", "work", "2").unwrap());
+
+    // Removing the active account empties them; with no active account
+    // there is no subscription account.
+    db.add_subscription("Bob", "work", "3", "W", None).unwrap();
+    db.delete_account("b").unwrap();
+    assert!(!db.has_subscription("Bob", "work", "3").unwrap());
+    db.delete_account("a").unwrap();
+    assert!(db.subscription_account().is_none());
+}
+
+#[test]
+fn test_unfollowed_subscriptions() {
+    let db = open_test_db();
+    db.save_subscriptions("me", &[
+        ("author".into(), "Writer".into(), "Writer".into(), None),
+        ("work".into(), "10".into(), "Followed Fic".into(), None),
+        ("series".into(), "20".into(), "A Series".into(), None),
+    ]).unwrap();
+    db.save_subscriptions("other", &[("work".into(), "30".into(), "Theirs".into(), None)]).unwrap();
+    db.add_follow("work", "10", "Followed Fic").unwrap();
+    // Matched case-insensitively.
+    db.add_follow("author", "writer", "writer").unwrap();
+    // A follow without a subscription is normal and never listed.
+    db.add_follow("work", "40", "Just Followed").unwrap();
+
+    let missing = db.get_unfollowed_subscriptions("me").unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!((missing[0].0.as_str(), missing[0].1.as_str()), ("series", "20"));
 }
 
 #[test]
@@ -482,7 +527,12 @@ fn test_user_profile_round_trip() {
     assert_eq!(got.mute_ao3_id.as_deref(), Some("88"));
     assert!(!got.fetched_at.is_empty());
 
-    db.add_subscription("author", "Writer", "Writer", Some("777")).unwrap();
+    // Only the signed-in account's subscription counts.
+    db.add_subscription("me", "author", "Writer", "Writer", Some("777")).unwrap();
+    assert!(!db.get_user_profile("Writer").unwrap().unwrap().subscribed);
+    db.create_account("me", "me", "").unwrap();
+    db.set_active_account("me").unwrap();
+    db.add_subscription("me", "author", "Writer", "Writer", Some("777")).unwrap();
     let got = db.get_user_profile("Writer").unwrap().unwrap();
     assert!(got.subscribed);
     assert_eq!(got.subscription_ao3_id.as_deref(), Some("777"));
@@ -505,73 +555,56 @@ fn test_user_profile_round_trip() {
 }
 
 #[test]
-fn test_subscription_snapshots() {
+fn test_follow_check_state() {
     let db = open_test_db();
 
-    // Initially empty
-    assert!(db.get_subscription_snapshot("author", "testuser").unwrap().is_none());
+    // No follow: nothing to read, and writes don't create one.
+    assert!(db.get_follow_baseline("author", "u").unwrap().is_none());
+    assert_eq!(db.get_follow_census_meta("author", "u").unwrap(), (None, None, None));
+    db.set_follow_last_checked("author", "u", "2026-08-11 01:00:00").unwrap();
+    assert!(!db.is_followed("author", "u").unwrap());
 
-    // Save a snapshot
-    db.save_subscription_snapshot("author", "testuser", "2025-01-15").unwrap();
-    assert_eq!(
-        db.get_subscription_snapshot("author", "testuser").unwrap().as_deref(),
-        Some("2025-01-15")
-    );
+    assert!(db.add_follow("author", "U", "U").unwrap());
+    assert!(!db.add_follow("author", "u", "u").unwrap(), "NOCASE key: already followed");
+    assert!(db.get_follow_baseline("author", "u").unwrap().is_none(), "never checked = first run");
 
-    // Update replaces
-    db.save_subscription_snapshot("author", "testuser", "2025-03-01").unwrap();
-    assert_eq!(
-        db.get_subscription_snapshot("author", "testuser").unwrap().as_deref(),
-        Some("2025-03-01")
-    );
-
-    // Different sub is separate
-    assert!(db.get_subscription_snapshot("work", "100").unwrap().is_none());
-}
-
-#[test]
-fn test_snapshot_census_meta() {
-    let db = open_test_db();
-
-    // Unknown sub: all None.
-    assert_eq!(db.get_snapshot_census_meta("author", "u").unwrap(), (None, None, None));
-
-    // Census fields survive a snapshot date update (upsert, not replace).
-    db.set_snapshot_total_works("author", "u", 42).unwrap();
-    db.set_snapshot_last_census("author", "u", "1700000000").unwrap();
-    db.set_snapshot_census_state("author", "u", Some("{\"next_page\":3}")).unwrap();
-    db.save_subscription_snapshot("author", "u", "2025-06-01").unwrap();
-    let (total, last, state) = db.get_snapshot_census_meta("author", "u").unwrap();
+    // Each column updates independently.
+    db.set_follow_baseline("author", "u", "2025-06-01").unwrap();
+    db.set_follow_total_works("author", "u", 42).unwrap();
+    db.set_follow_last_census("author", "u", "2026-01-01 00:00:00").unwrap();
+    db.set_follow_census_state("author", "u", Some("{\"next_page\":3}")).unwrap();
+    db.set_follow_last_checked("author", "u", "2026-08-11 02:00:00").unwrap();
+    assert_eq!(db.get_follow_baseline("author", "u").unwrap().as_deref(), Some("2025-06-01"));
+    let (total, last, state) = db.get_follow_census_meta("author", "u").unwrap();
     assert_eq!(total, Some(42));
-    assert_eq!(last.as_deref(), Some("1700000000"));
+    assert_eq!(last.as_deref(), Some("2026-01-01 00:00:00"));
     assert_eq!(state.as_deref(), Some("{\"next_page\":3}"));
-    assert_eq!(db.get_subscription_snapshot("author", "u").unwrap().as_deref(), Some("2025-06-01"));
+    assert_eq!(db.get_follow_last_checked("author", "U").unwrap().as_deref(), Some("2026-08-11 02:00:00"));
+    db.set_follow_census_state("author", "u", None).unwrap();
+    assert!(db.get_follow_census_meta("author", "u").unwrap().2.is_none());
 
-    // Clearing the census state leaves the rest.
-    db.set_snapshot_census_state("author", "u", None).unwrap();
-    let (total, last, state) = db.get_snapshot_census_meta("author", "u").unwrap();
-    assert_eq!(total, Some(42));
-    assert!(last.is_some());
-    assert!(state.is_none());
+    // Unfollowing takes the check state with it.
+    assert!(db.remove_follow("author", "u").unwrap());
+    assert!(db.get_follow_last_checked("author", "u").unwrap().is_none());
+    assert!(db.add_follow("author", "u", "u").unwrap());
+    assert!(db.get_follow_baseline("author", "u").unwrap().is_none());
 }
 
 #[test]
-fn test_snapshot_last_checked() {
+fn test_check_targets_and_crawl_stamps() {
     let db = open_test_db();
+    db.add_follow("fandom", "Some Fandom", "Some Fandom").unwrap();
+    db.add_follow("work", "10", "beta Work").unwrap();
+    db.add_follow("author", "zed", "zed").unwrap();
+    db.add_follow("series", "5", "Alpha Series").unwrap();
+    // Fandoms are followed but never checked; sorted by name, ignoring case.
+    let targets: Vec<String> = db.get_check_targets().unwrap().into_iter().map(|t| t.2).collect();
+    assert_eq!(targets, vec!["Alpha Series", "beta Work", "zed"]);
 
-    // Unknown row: never checked.
-    assert!(db.get_snapshot_last_checked("author", "u").unwrap().is_none());
-
-    // Stamp creates the row if needed and survives a snapshot-date upsert.
-    db.set_snapshot_last_checked("author", "u", "2026-08-11 01:00:00").unwrap();
-    db.save_subscription_snapshot("author", "u", "2026-08-10").unwrap();
-    assert_eq!(db.get_snapshot_last_checked("author", "u").unwrap().as_deref(),
-               Some("2026-08-11 01:00:00"));
-
-    // Restamping overwrites.
-    db.set_snapshot_last_checked("author", "u", "2026-08-11 02:00:00").unwrap();
-    assert_eq!(db.get_snapshot_last_checked("author", "u").unwrap().as_deref(),
-               Some("2026-08-11 02:00:00"));
+    assert!(db.get_works_crawled_at("author", "zed").unwrap().is_none());
+    db.set_works_crawled_at("author", "Zed", "2026-01-01 00:00:00").unwrap();
+    db.set_works_crawled_at("author", "zed", "2026-02-01 00:00:00").unwrap();
+    assert_eq!(db.get_works_crawled_at("author", "ZED").unwrap().as_deref(), Some("2026-02-01 00:00:00"));
 }
 
 #[test]
@@ -846,8 +879,7 @@ fn test_search_collections_filtered() {
     let all = db.search_collections_filtered(&Default::default(), 0).unwrap();
     assert_eq!(all.len(), 3, "blank criteria = whole cache");
 
-    let mut c = crate::models::CollectionSearchCriteria::default();
-    c.title = "winter".into();
+    let mut c = crate::models::CollectionSearchCriteria { title: "winter".into(), ..Default::default() };
     let hits = db.search_collections_filtered(&c, 0).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].name, "winter_exchange");
@@ -909,7 +941,7 @@ fn test_search_collections_filtered() {
         .into_iter().map(|x| x.name).collect();
     assert_eq!(names, vec!["just_fics", "prompt_pile", "winter_exchange"]);
 
-    // Limit caps the result set (0 = everything, per sql_limit).
+    // Limit caps the result set (0 = everything).
     assert_eq!(db.search_collections_filtered(&Default::default(), 2).unwrap().len(), 2);
 }
 
@@ -943,56 +975,44 @@ fn test_filtered_library_search() {
     assert_eq!(ids(&LocalSearchCriteria::default()), vec![2, 1]);
 
     // Freeform tag present on one work / on none.
-    let mut c = LocalSearchCriteria::default();
-    c.freeform_names = "Fluff".into();
+    let mut c = LocalSearchCriteria { freeform_names: "Fluff".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
     c.freeform_names = "Coffee Shops".into();
     assert!(ids(&c).is_empty());
 
     // Fandom name, and crossover flags.
-    let mut c = LocalSearchCriteria::default();
-    c.fandom_names = "Fandom B".into();
+    let c = LocalSearchCriteria { fandom_names: "Fandom B".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.crossover = "T".into();
+    let mut c = LocalSearchCriteria { crossover: "T".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
     c.crossover = "F".into();
     assert_eq!(ids(&c), vec![1]);
 
     // Rating / warning / category labels as AO3's form spells them.
-    let mut c = LocalSearchCriteria::default();
-    c.ratings = vec!["Explicit".into()];
+    let c = LocalSearchCriteria { ratings: vec!["Explicit".into()], ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.warnings = vec!["Graphic Depictions Of Violence".into()];
+    let c = LocalSearchCriteria { warnings: vec!["Graphic Depictions Of Violence".into()], ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.categories = vec!["F/M".into()];
+    let c = LocalSearchCriteria { categories: vec!["F/M".into()], ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
 
     // Completion, single chapter, language.
-    let mut c = LocalSearchCriteria::default();
-    c.complete = "T".into();
+    let c = LocalSearchCriteria { complete: "T".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.single_chapter = true;
+    let c = LocalSearchCriteria { single_chapter: true, ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.language = "deutsch".into();
+    let c = LocalSearchCriteria { language: "deutsch".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
 
     // Numeric ranges: >N and lo-hi.
-    let mut c = LocalSearchCriteria::default();
-    c.word_count = ">50,000".into();
+    let c = LocalSearchCriteria { word_count: ">50,000".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
-    let mut c = LocalSearchCriteria::default();
-    c.kudos_count = "10-100".into();
+    let c = LocalSearchCriteria { kudos_count: "10-100".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
 
     // Date updated: prefix, absolute after, and a relative window wide
     // enough to stay deterministic.
-    let mut c = LocalSearchCriteria::default();
-    c.revised_at = "2025".into();
+    let mut c = LocalSearchCriteria { revised_at: "2025".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1]);
     c.revised_at = "> 2025".into();
     assert_eq!(ids(&c), vec![2]);
@@ -1000,20 +1020,15 @@ fn test_filtered_library_search() {
     assert_eq!(ids(&c), vec![2, 1]);
 
     // Sorting: kudos ascending, title ascending by AO3's default direction.
-    let mut c = LocalSearchCriteria::default();
-    c.sort_column = "kudos_count".into();
-    c.sort_direction = "asc".into();
+    let c = LocalSearchCriteria { sort_column: "kudos_count".into(), sort_direction: "asc".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![1, 2]);
-    let mut c = LocalSearchCriteria::default();
-    c.sort_column = "title_to_sort_on".into();
+    let c = LocalSearchCriteria { sort_column: "title_to_sort_on".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2, 1]); // "Another…" before "Test…"
 
     // Creators substring hits both (shared author), title narrows to one.
-    let mut c = LocalSearchCriteria::default();
-    c.creators = "Author1".into();
+    let c = LocalSearchCriteria { creators: "Author1".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2, 1]);
-    let mut c = LocalSearchCriteria::default();
-    c.title = "another".into();
+    let c = LocalSearchCriteria { title: "another".into(), ..Default::default() };
     assert_eq!(ids(&c), vec![2]);
 
     // Limit still applies when requested.
@@ -1059,6 +1074,36 @@ fn test_gone_from_ao3_flag() {
     // …only an explicit clear (census reappearance) does.
     db.set_works_gone(&[7001, 7002], false).unwrap();
     assert!(db.get_gone_work_ids().unwrap().is_empty());
+}
+
+#[test]
+fn test_finished_flag() {
+    let db = open_test_db();
+    let mut w = sample_work(7101);
+    db.save_work(&w).unwrap();
+    w.id = 7102;
+    db.save_work(&w).unwrap();
+
+    // Never set automatically.
+    assert!(db.get_finished_work_ids().unwrap().is_empty());
+    db.save_progress(7101, 3, 10).unwrap();
+    assert!(db.get_finished_work_ids().unwrap().is_empty());
+
+    db.set_works_finished(&[7101], true).unwrap();
+    assert_eq!(db.get_finished_work_ids().unwrap(), vec![7101]);
+
+    // A re-save (listing refresh) keeps the flag.
+    w.id = 7101;
+    db.save_work(&w).unwrap();
+    assert_eq!(db.get_finished_work_ids().unwrap(), vec![7101]);
+
+    db.set_works_finished(&[7101, 7102], true).unwrap();
+    let mut ids = db.get_finished_work_ids().unwrap();
+    ids.sort();
+    assert_eq!(ids, vec![7101, 7102]);
+
+    db.set_works_finished(&[7101, 7102], false).unwrap();
+    assert!(db.get_finished_work_ids().unwrap().is_empty());
 }
 
 #[test]
@@ -1318,17 +1363,102 @@ fn test_last_check_time() {
 }
 
 #[test]
-fn test_followed_items() {
+fn test_follows() {
     let db = Storage::open_in_memory("test-passphrase").unwrap();
-    db.add_followed("fandom", "Fandom A").unwrap();
-    db.add_followed("fandom", "Fandom B").unwrap();
-    db.add_followed("author", "writer_one").unwrap();
+    db.add_follow("fandom", "Fandom A", "Fandom A").unwrap();
+    db.add_follow("fandom", "Fandom B", "Fandom B").unwrap();
+    db.add_follow("author", "writer_one", "Pen (writer_one)").unwrap();
     // Duplicates are ignored; kinds are independent.
-    db.add_followed("fandom", "Fandom A").unwrap();
-    assert_eq!(db.get_followed("fandom").unwrap(), vec!["Fandom A", "Fandom B"]);
-    assert_eq!(db.get_followed("author").unwrap(), vec!["writer_one"]);
-    db.remove_followed("fandom", "Fandom A").unwrap();
-    assert_eq!(db.get_followed("fandom").unwrap(), vec!["Fandom B"]);
+    assert!(!db.add_follow("fandom", "Fandom A", "Fandom A").unwrap());
+    let fandoms: Vec<String> = db.get_follows(Some("fandom")).unwrap().into_iter().map(|f| f.target_id).collect();
+    assert_eq!(fandoms, vec!["Fandom A", "Fandom B"]);
+    let author = &db.get_follows(Some("author")).unwrap()[0];
+    assert_eq!((author.target_id.as_str(), author.name.as_str()), ("writer_one", "Pen (writer_one)"));
+    assert_eq!(db.get_follows(None).unwrap().len(), 3);
+    assert!(db.remove_follow("fandom", "Fandom A").unwrap());
+    assert!(!db.remove_follow("fandom", "Fandom A").unwrap());
+    assert_eq!(db.get_follows(Some("fandom")).unwrap().len(), 1);
+}
+
+#[test]
+fn test_migration_v20_to_v21_follows() {
+    let path = std::env::temp_dir().join(format!("ao3_v21_test_{}.db", std::process::id()));
+    let path_str = path.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&path);
+    drop(Storage::open(&path_str, "").unwrap());
+
+    // Rewind the fresh library to the v20 shape, with v20-era data.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE follows; DROP TABLE crawl_stamps; DROP TABLE subscriptions;
+             CREATE TABLE subscriptions (sub_type TEXT NOT NULL, sub_id TEXT NOT NULL,
+                 name TEXT NOT NULL, ao3_id TEXT, PRIMARY KEY (sub_type, sub_id));
+             CREATE TABLE subscription_snapshots (sub_type TEXT NOT NULL, sub_id TEXT NOT NULL,
+                 date_updated TEXT NOT NULL, total_works INTEGER, last_census_at TEXT,
+                 census_state TEXT, works_crawled_at TEXT, last_checked_at TEXT,
+                 PRIMARY KEY (sub_type, sub_id));
+             CREATE TABLE followed_items (kind TEXT NOT NULL, name TEXT NOT NULL,
+                 PRIMARY KEY (kind, name));
+             INSERT INTO followed_items VALUES
+                 ('fandom', 'Fandom A'), ('author', 'Pen (Writer_One)'), ('author', 'bare_user');
+             INSERT INTO subscriptions VALUES
+                 ('author', 'writer_one', 'writer_one', '11'),
+                 ('work', '100', 'Subscribed Fic', '12'),
+                 ('series', '200', 'Subscribed Series', NULL);
+             -- Case-colliding author rows: the more recently checked wins.
+             INSERT INTO subscription_snapshots VALUES
+                 ('author', 'writer_one', '2024-05-01', 40, '2024-05-01 00:00:00', NULL,
+                  '2024-04-01 00:00:00', '2026-01-02 00:00:00'),
+                 ('author', 'Writer_One', '2023-01-01', 1, NULL, NULL, NULL, '2025-01-01 00:00:00'),
+                 ('work', '100', '', NULL, NULL, NULL, NULL, NULL),
+                 ('author', 'orphan', '2020-01-01', NULL, NULL, NULL, '2020-02-02 00:00:00', NULL);
+             INSERT OR REPLACE INTO app_state VALUES ('subscription_check_queue',
+                 '[{\"sub_type\":\"work\",\"sub_id\":\"100\",\"name\":\"x\"}]');
+             PRAGMA user_version = 20;"
+        ).unwrap();
+    }
+
+    let db = Storage::open(&path_str, "").unwrap();
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+
+    // Device follows first, in order, then every subscription not already
+    // followed (the byline follow already covers writer_one).
+    let follows: Vec<(String, String, String)> = db.get_follows(None).unwrap().into_iter()
+        .map(|f| (f.kind, f.target_id, f.name)).collect();
+    assert_eq!(follows, vec![
+        ("fandom".to_string(), "Fandom A".to_string(), "Fandom A".to_string()),
+        ("author".to_string(), "Writer_One".to_string(), "Pen (Writer_One)".to_string()),
+        ("author".to_string(), "bare_user".to_string(), "bare_user".to_string()),
+        ("work".to_string(), "100".to_string(), "Subscribed Fic".to_string()),
+        ("series".to_string(), "200".to_string(), "Subscribed Series".to_string()),
+    ]);
+
+    // Check state moved onto the follow rows.
+    assert_eq!(db.get_follow_baseline("author", "writer_one").unwrap().as_deref(), Some("2024-05-01"));
+    assert_eq!(db.get_follow_last_checked("author", "writer_one").unwrap().as_deref(), Some("2026-01-02 00:00:00"));
+    assert_eq!(db.get_follow_census_meta("author", "writer_one").unwrap().0, Some(40));
+    assert!(db.get_follow_baseline("work", "100").unwrap().is_none(), "empty baseline = first run");
+    assert!(db.get_follow_last_checked("series", "200").unwrap().is_none());
+
+    // Crawl stamps survive, even for targets nobody follows.
+    assert_eq!(db.get_works_crawled_at("author", "writer_one").unwrap().as_deref(), Some("2024-04-01 00:00:00"));
+    assert_eq!(db.get_works_crawled_at("author", "orphan").unwrap().as_deref(), Some("2020-02-02 00:00:00"));
+
+    // Old tables gone; subscriptions are account-scoped and start empty;
+    // the old-key queue is cleared.
+    for table in ["followed_items", "subscription_snapshots"] {
+        let n: u32 = db.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1", [table], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "{table} dropped");
+    }
+    assert!(db.get_subscriptions("anyone").unwrap().is_empty());
+    let n: u32 = db.conn.query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+    assert_eq!(db.get_check_queue().unwrap().as_deref(), Some("[]"));
+
+    drop(db);
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -1561,11 +1691,8 @@ fn test_migration_v1_to_v2() {
         "SELECT note FROM bookmarks WHERE account_id = '[none]' AND bookmark_type = 'work' AND target_id = 7",
         [], |r| r.get(0)).unwrap();
     assert_eq!(sentinel_note, "signed-out era");
-    // v4: last_checked_at exists on the migrated table and starts NULL.
-    assert!(db.get_snapshot_last_checked("author", "writer_one").unwrap().is_none());
-    db.set_snapshot_last_checked("author", "writer_one", "2026-08-11 03:00:00").unwrap();
-    assert_eq!(db.get_snapshot_last_checked("author", "writer_one").unwrap().as_deref(),
-               Some("2026-08-11 03:00:00"));
+    // v21: the unfollowed snapshot row is gone; nothing is followed.
+    assert!(db.get_follows(None).unwrap().is_empty());
     // Reopening runs zero migrations and stays at the current version.
     drop(db);
     let db = Storage::open(&path_str, "").unwrap();
@@ -1874,9 +2001,7 @@ fn test_sql_search_sort_parity() {
                    "kudos_count", "comments_count", "bookmarks_count",
                    "revised_at", "_score", ""] {
         for direction in ["", "asc", "desc"] {
-            let mut c = LocalSearchCriteria::default();
-            c.sort_column = column.into();
-            c.sort_direction = direction.into();
+            let c = LocalSearchCriteria { sort_column: column.into(), sort_direction: direction.into(), ..Default::default() };
             assert_search_parity(&db, &c);
         }
     }
@@ -1991,6 +2116,7 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "DELETE FROM bookmarks WHERE bookmark_type = 'series' AND target_id = OLD.id;"), // v15 cascade trigger
         ("mod.rs", "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at, numeric_id, joined,"), // v12 account fold
         ("mod.rs", "DELETE FROM ao3_users WHERE id = ?1 AND id <> ?2 /* v12 fold */"), // v12 account fold
+        ("mod.rs", "UPDATE app_state SET value = '[]' WHERE key = 'subscription_check_queue';"), // v21 queue reset (runs before caches load)
     ];
     for (file, src) in sources {
         for (lineno, line) in src.lines().enumerate() {

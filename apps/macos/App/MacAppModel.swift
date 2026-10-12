@@ -11,7 +11,6 @@ final class MacAppModel {
     typealias WorkSort = LibraryListModel.WorkSort
     typealias CompletionFilter = LibraryListModel.CompletionFilter
     typealias WorkListFilter = LibraryListModel.WorkListFilter
-    typealias AuthorFollowState = FollowModel.AuthorFollowState
     typealias AuthorPane = AuthorProfileModel.Pane
 
     let appState: AppState
@@ -203,23 +202,58 @@ final class MacAppModel {
         works(for: .readingLists)
     }
 
-    /// Route an archiveofourown.org link to the matching screen.
-    /// Returns false when the URL isn't something the app can open (yet).
+    /// Route an archiveofourown.org link (⌘L, or a URL dropped on a
+    /// window) to the matching screen. Returns nil when it opened, else the
+    /// message to show — the link isn't AO3, or isn't a page the app has a
+    /// view for.
     @discardableResult
-    func openAO3URL(_ raw: String) -> Bool {
-        switch AppState.parseAO3URL(raw) {
-        case .work(let id):
+    func openAO3URL(_ raw: String) -> String? {
+        switch AO3Link.classify(raw) {
+        case .failure(let rejection):
+            return rejection.message
+        case .success(let link):
+            open(link)
+            return nil
+        }
+    }
+
+    private func open(_ link: AO3Link) {
+        switch link {
+        case .work(let id), .entireWork(let id):
+            // The mac reader has no entire-work mode; the detail is the
+            // closest landing.
             openWorkByID(id)
-        case .user(let name):
-            goSection(.authors)
-            openAuthor(name)
+        case .chapter(let workID, let chapterID):
+            Task { @MainActor in
+                if let chapter = await appState.resolveChapterLink(workID: workID, chapterID: chapterID) {
+                    openReader(workID, chapter: chapter)
+                } else {
+                    openWorkByID(workID)
+                }
+            }
+        case .user(let name, _, let pane):
+            // Pseuds share their user's profile.
+            switch pane {
+            case .profile: openAuthorProfile(name)
+            case .works: showAuthorPane(name, .works)
+            case .bookmarks: showAuthorPane(name, .bookmarks)
+            case .collections: showAuthorPane(name, .collections)
+            }
         case .series(let id):
             goSection(.subscriptions)
             openSubscriptionAuthorWorks(subscriptionID: id, author: "Series \(id)", subType: "series")
-        case nil:
-            return false
+        case .collection(let name):
+            openSearch { [self] in
+                search.scope = .collections
+                search.startCollectionQuery(name, appState: appState)
+            }
+        case .tag(let name):
+            // An AO3 tag listing link: AO3's results, whatever the source
+            // toggle says (the Fandoms "Search AO3" rule).
+            openSearch { [self] in
+                search.startAO3TagListing(name, appState: appState)
+            }
         }
-        return true
     }
 
     /// Show a work's detail page, fetching its metadata first when it isn't
@@ -395,6 +429,13 @@ final class MacAppModel {
         selectedWorkID = nil
         readerOpen = false
         immersive = false
+    }
+
+    /// The reading pane header's Close: unload the shown work and return
+    /// the pane to its empty state. The only way back out when the list
+    /// that selected the work has since emptied.
+    func closeSelectedWork() {
+        clearSelection()
     }
 
     /// Where a search was triggered from, when that wasn't the Search

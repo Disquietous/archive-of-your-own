@@ -157,24 +157,6 @@ struct PrivacyPopoverView: View {
                     .foregroundStyle(theme.ink3)
             }
             Spacer()
-            if appState.ao3AccountCount > 1 {
-                Menu {
-                    ForEach(appState.bridge.getAccounts(), id: \.id) { other in
-                        if !other.isActive {
-                            Button("Switch to \(other.username)") {
-                                appState.switchAccount(other.id)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(theme.ink2)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 24)
-                .help("Switch account")
-            }
             Button("Log Out") {
                 Task { @MainActor in
                     await appState.bridge.logoutAccount()

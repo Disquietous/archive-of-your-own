@@ -1,3 +1,4 @@
+// swiftlint:disable line_length
 import Foundation
 
 enum MockData {
@@ -158,3 +159,4 @@ enum MockData {
     ]
 
 }
+// swiftlint:enable line_length

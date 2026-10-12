@@ -11,7 +11,6 @@ struct WorkDetailView: View {
 
     @State private var exportedEpub: EpubExporter.Exported?
     @State private var exportError: String?
-    @State private var showUnsubscribeConfirm = false
 
     private var work: Work? {
         state.work(byID: workID)
@@ -27,6 +26,10 @@ struct WorkDetailView: View {
 
     private var isDownloaded: Bool {
         state.downloadedWorkIDs.contains(workID)
+    }
+
+    private var isFinished: Bool {
+        state.finishedWorkIDs.contains(workID)
     }
 
     private var hasKudos: Bool {
@@ -127,15 +130,6 @@ struct WorkDetailView: View {
         } message: {
             Text(exportError ?? "")
         }
-        .confirmationDialog("Unsubscribe from this work on AO3?",
-                            isPresented: $showUnsubscribeConfirm, titleVisibility: .visible) {
-            Button("Unsubscribe", role: .destructive) {
-                state.toggleWorkSubscription(workID)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This changes your AO3 account: AO3 will stop notifying you when this work updates. The request is sent over Tor.")
-        }
         .alert("Remove Synced Bookmark?", isPresented: pendingRemovalBinding) {
             Button("Remove Everywhere", role: .destructive) {
                 state.confirmBookmarkRemoval()
@@ -181,6 +175,12 @@ struct WorkDetailView: View {
                     }
             )
 
+            if let work, isReal {
+                // The work's own bell: Followed / Subscribed.
+                FollowBellMenu(target: FollowModel.Target(kind: .work, id: workID, name: work.title),
+                               glyphSize: 17, weight: .medium, hitSize: 36)
+            }
+
             if work != nil {
                 actionsMenu
             }
@@ -197,8 +197,6 @@ struct WorkDetailView: View {
                 Label("Refresh Details from AO3", systemImage: "arrow.clockwise")
             }
             .disabled(!isReal || state.isRefreshingWork)
-
-            subscribeItem
 
             Divider()
 
@@ -232,6 +230,14 @@ struct WorkDetailView: View {
                 } else {
                     Label("Download for Offline", systemImage: "arrow.down.circle")
                 }
+            }
+
+            // Manual "done reading" flag — never set automatically.
+            Button {
+                state.toggleFinished(workID)
+            } label: {
+                Label(isFinished ? "Unmark as Finished" : "Mark as Finished",
+                      systemImage: isFinished ? "checkmark.circle.fill" : "checkmark.circle")
             }
 
             if WorkWindowValue.isSupported, isReal {
@@ -276,32 +282,6 @@ struct WorkDetailView: View {
     private var commentsLabel: String {
         guard let work, work.comments > 0 else { return "Comments" }
         return "Comments · \(work.comments.abbreviated)"
-    }
-
-    /// Subscribe / unsubscribe on AO3 — a real account change, so
-    /// unsubscribing confirms first. Signed-out users see why it's off.
-    @ViewBuilder
-    private var subscribeItem: some View {
-        let subscribed = state.isSubscribedToWork(workID)
-        let toggling = state.subscriptionTogglingWorkIDs.contains(workID)
-        if state.ao3Username == nil {
-            Button {} label: {
-                Label("Sign in to Subscribe", systemImage: "bell.slash")
-            }
-            .disabled(true)
-        } else {
-            Button {
-                if subscribed {
-                    showUnsubscribeConfirm = true
-                } else {
-                    state.toggleWorkSubscription(workID)
-                }
-            } label: {
-                Label(subscribed ? "Unsubscribe on AO3" : "Subscribe on AO3",
-                      systemImage: subscribed ? "bell.fill" : "bell")
-            }
-            .disabled(!isReal || toggling)
-        }
     }
 
     /// Open (or surface) this work's own window at its saved chapter.
@@ -361,11 +341,10 @@ struct WorkDetailView: View {
         .padding(.top, 8)
     }
 
-    /// "by Author" opens the profile; the bell is the local follow (Authors
-    /// → Following), never an AO3 subscription.
+    /// "by Author" opens the profile; the bell is the author's
+    /// Followed / Subscribed menu.
     private func bylineRow(_ work: Work) -> some View {
         let canOpen = isReal && !work.author.isEmpty
-        let following = follows.followedAuthorNames.contains(work.author)
         return HStack(spacing: 8) {
             Button {
                 nav.libraryPath.append(AppDestination.authorWorks(
@@ -380,21 +359,7 @@ struct WorkDetailView: View {
             .accessibilityLabel("View \(work.author)’s profile")
 
             if canOpen {
-                Button {
-                    if following {
-                        follows.unfollowAuthor(work.author)
-                    } else {
-                        follows.followAuthor(work.author)
-                    }
-                } label: {
-                    Image(systemName: following ? "bell.fill" : "bell")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(following ? theme.accent : theme.ink3)
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(IconButtonPressStyle())
-                .accessibilityLabel(following ? "Unfollow \(work.author)" : "Follow \(work.author)")
+                FollowBellMenu(target: .author(work.author), weight: .medium)
             }
         }
     }
@@ -418,10 +383,21 @@ struct WorkDetailView: View {
     }
 
     /// "Part N of Series" opens the series' stored works (the Subscriptions
-    /// drill-in, which crawls the series on refresh).
+    /// drill-in, which crawls the series on refresh); the bell is the
+    /// series' Followed / Subscribed menu.
     private func seriesLine(_ s: SeriesInfo) -> some View {
-        let label = s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)"
         let canOpen = !s.seriesID.isEmpty && UInt64(s.seriesID) != nil
+        return HStack(spacing: 4) {
+            seriesLink(s, canOpen: canOpen)
+            if canOpen {
+                FollowBellMenu(target: FollowModel.Target(kind: .series, id: s.seriesID, name: s.name),
+                               glyphSize: 11, weight: .medium, hitSize: 24)
+            }
+        }
+    }
+
+    private func seriesLink(_ s: SeriesInfo, canOpen: Bool) -> some View {
+        let label = s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)"
         return Button {
             nav.openSubscriptionWorks(id: s.seriesID, name: s.name, subType: "series")
         } label: {

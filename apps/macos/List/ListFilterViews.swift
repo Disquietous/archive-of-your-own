@@ -29,6 +29,16 @@ struct WorkListFilterView: View {
                 .font(Font(MacFont.ui(12.5, weight: .medium)))
                 .foregroundStyle(theme.ink2)
                 .help("Only works whose posted chapters equal the total (32/32).")
+            Picker("Finished reading", selection: filter.finished) {
+                ForEach(LibraryListModel.FinishedFilter.allCases, id: \.self) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            .font(Font(MacFont.ui(12.5, weight: .medium)))
+            .foregroundStyle(theme.ink2)
+            .help("Works you marked as finished reading.")
 
             TokenFilterSection(theme: theme, label: "FANDOM",
                                placeholder: "Type to add a fandom…",
@@ -255,34 +265,6 @@ struct SingleFieldFilterView: View {
             FilterTextField(theme: theme, placeholder: placeholder, text: $text)
             FilterRetentionToggle(theme: theme, model: model)
         }
-        .padding(14)
-        .frame(width: 280)
-        .background(theme.surface)
-    }
-}
-
-/// Authors filter: which sources appear — local follows and/or AO3
-/// subscriptions. Username filtering lives in the list itself.
-struct AuthorsSourceFilterView: View {
-    @Bindable var theme: AppTheme
-    @Bindable var model: MacAppModel
-
-    var body: some View {
-        let _ = theme.uiFontScale
-        @Bindable var lists = model.lists
-        VStack(alignment: .leading, spacing: 10) {
-            header(theme: theme, title: "Filter Authors",
-                   clearEnabled: !(model.lists.authorsIncludeFollowed && model.lists.authorsIncludeSubscribed)) {
-                model.lists.authorsIncludeFollowed = true
-                model.lists.authorsIncludeSubscribed = true
-            }
-            Toggle("Include Followed", isOn: $lists.authorsIncludeFollowed)
-            Toggle("Include Subscribed", isOn: $lists.authorsIncludeSubscribed)
-            FilterRetentionToggle(theme: theme, model: model)
-        }
-        .toggleStyle(.checkbox)
-        .font(Font(MacFont.ui(12.5, weight: .medium)))
-        .foregroundStyle(theme.ink2)
         .padding(14)
         .frame(width: 280)
         .background(theme.surface)

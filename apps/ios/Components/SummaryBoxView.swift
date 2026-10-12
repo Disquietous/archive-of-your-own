@@ -30,7 +30,10 @@ struct SummaryBoxView: View {
 
 #Preview {
     SummaryBoxView(
-        summary: "When a series of impossible thefts plague the British Museum, Holmes finds himself entangled in a web of secrets that hits closer to home than he'd like."
+        summary: """
+            When a series of impossible thefts plague the British Museum, Holmes finds himself entangled in a web of \
+            secrets that hits closer to home than he'd like.
+            """
     )
     .padding()
     .environment(AppTheme())

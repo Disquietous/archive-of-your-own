@@ -41,6 +41,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appState.cloudSync.presentConflict = { [weak self] conflict in
             self?.presentCloudConflict(conflict)
         }
+        // A user-initiated subscription reload found subscriptions with no
+        // follow: one "Follow All / Not Now" prompt for the whole set.
+        ObservationRelay.track { [weak self] in
+            guard let self, let pending = appState.pendingFollowAll, !pending.isEmpty else { return }
+            DispatchQueue.main.async {
+                self.appState.pendingFollowAll = nil
+                self.presentFollowAll(pending)
+            }
+        }
+        // Bell-menu notices show in the list pane's status bar; each clears
+        // itself after a few seconds unless a newer one replaced it.
+        ObservationRelay.track { [weak self] in
+            guard let self, let notice = model.follows.notice else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (notice.isError ? 8 : 5)) { [weak self] in
+                guard let self, model.follows.notice == notice else { return }
+                model.follows.clearNotice()
+            }
+        }
+        // Launch found a What's New check overdue: warn, never auto-start —
+        // and not before Tor (when enabled) is connected.
+        ObservationRelay.track { [weak self] in
+            guard let self, appState.showWhatsNewOverdue else { return }
+            DispatchQueue.main.async {
+                self.appState.whatsNewCheckOverdue = false
+                self.presentWhatsNewOverdue()
+            }
+        }
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             let count = appState.newUnviewedWorkCount
@@ -220,7 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "iCloud has \(conflict.deviceName)'s library"
         let when = RelativeDateTimeFormatter().localizedString(for: conflict.writtenAt, relativeTo: Date())
-        alert.informativeText = "It was updated \(when). Use it on this Mac (this Mac's library is kept as a backup), or replace the iCloud copy with this Mac's library (the iCloud copy is kept as a backup)."
+        alert.informativeText = """
+            It was updated \(when). Use it on this Mac (this Mac's library is kept as a backup), or replace the iCloud \
+            copy with this Mac's library (the iCloud copy is kept as a backup).
+            """
         alert.addButton(withTitle: "Use iCloud Copy")
         alert.addButton(withTitle: "Replace iCloud Copy")
         alert.addButton(withTitle: "Not Now")
@@ -229,6 +259,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .alertFirstButtonReturn: sync.resolve(.useCloudCopy)
             case .alertSecondButtonReturn: sync.resolve(.overwriteCloudCopy)
             default: sync.resolve(.notNow)
+            }
+        }
+        if let window = mainWindowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
+    private func presentFollowAll(_ subscriptions: [USubscription]) {
+        let prompt = FollowModel.bulkFollowPrompt(for: subscriptions)
+        let alert = NSAlert()
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.message
+        alert.addButton(withTitle: FollowModel.BulkFollowPrompt.acceptLabel)
+        alert.addButton(withTitle: FollowModel.BulkFollowPrompt.declineLabel)
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.model.follows.followAll(subscriptions)
+            }
+        }
+        if let window = mainWindowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
+    private func presentWhatsNewOverdue() {
+        let alert = NSAlert()
+        alert.messageText = "What’s New is out of date"
+        alert.informativeText = "Some followed authors, works or series haven’t been checked in over 24 hours."
+        alert.addButton(withTitle: "Check Now")
+        alert.addButton(withTitle: "Later")
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.appState.startWhatsNewCheck(all: false)
             }
         }
         if let window = mainWindowController?.window, window.isVisible {
@@ -285,11 +352,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// SwiftUI views, and their timers actually deallocate.
     private func releaseOnClose(_ window: NSWindow?, _ release: @escaping () -> Void) {
         guard let window else { return }
-        var token: NSObjectProtocol?
-        token = NotificationCenter.default.addObserver(
+        let token = ObserverToken()
+        token.value = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
-            if let token { NotificationCenter.default.removeObserver(token) }
+            if let observer = token.value { NotificationCenter.default.removeObserver(observer) }
             // Deallocating mid-close is unsafe — let the close finish first.
             DispatchQueue.main.async(execute: release)
         }
@@ -320,7 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func promptOpenAO3URL() {
         let alert = NSAlert()
         alert.messageText = "Open AO3 URL"
-        alert.informativeText = "Paste a link to a work, author, or series."
+        alert.informativeText = "Paste an archiveofourown.org link. \(AO3Link.supportedSummary)"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
         field.placeholderString = "https://archiveofourown.org/works/…"
         alert.accessoryView = field
@@ -328,13 +395,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        if !model.openAO3URL(field.stringValue) {
-            let failed = NSAlert()
-            failed.alertStyle = .warning
-            failed.messageText = "Couldn’t open that link"
-            failed.informativeText = "Paste an archiveofourown.org work, author, or series URL."
-            failed.runModal()
+        if let problem = model.openAO3URL(field.stringValue) {
+            Self.presentLinkFailure(problem)
         }
+    }
+
+    /// The one alert for a link the app can't open (⌘L or a drop).
+    static func presentLinkFailure(_ problem: String) {
+        let failed = NSAlert()
+        failed.alertStyle = .warning
+        failed.messageText = "Couldn’t open that link"
+        failed.informativeText = "\(problem) \(AO3Link.supportedSummary)"
+        failed.runModal()
     }
 
     // MARK: - EPUB export
@@ -376,7 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             content.body = "Works you follow have new chapters waiting."
             let request = UNNotificationRequest(identifier: "whats-new-\(UUID().uuidString)",
                                                 content: content, trigger: nil)
-            center.add(request)
+            UNUserNotificationCenter.current().add(request)
         }
     }
 
@@ -475,14 +547,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.keyEquivalentModifierMask = [.command, .option]
         monitor.target = self
         viewMenu.addItem(monitor)
+        // Troubleshooting tools, grouped (Settings › Diagnostics holds
+        // their retention and timeout settings).
+        let diagnosticsMenu = NSMenu(title: "Diagnostics")
         let requestLog = NSMenuItem(title: "Request Log", action: #selector(openRequestLog), keyEquivalent: "l")
         requestLog.keyEquivalentModifierMask = [.command, .option]
         requestLog.target = self
-        viewMenu.addItem(requestLog)
+        diagnosticsMenu.addItem(requestLog)
         let debugLog = NSMenuItem(title: "Debug Log", action: #selector(openDebugLog), keyEquivalent: "d")
         debugLog.keyEquivalentModifierMask = [.command, .option]
         debugLog.target = self
-        viewMenu.addItem(debugLog)
+        diagnosticsMenu.addItem(debugLog)
+        let diagnostics = NSMenuItem(title: "Diagnostics", action: nil, keyEquivalent: "")
+        diagnostics.submenu = diagnosticsMenu
+        viewMenu.addItem(diagnostics)
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 
@@ -501,14 +579,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
     /// Clicking the notification brings the app forward on What's New.
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                didReceive response: UNNotificationResponse,
-                                withCompletionHandler completionHandler: @escaping () -> Void) {
-        DispatchQueue.main.async { [weak self] in
+    /// UserNotifications calls this off the main thread — hop explicitly.
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        Task { @MainActor [weak self] in
             guard let self else { return }
             NSApp.activate(ignoringOtherApps: true)
             model.goSection(.whatsNew)
         }
         completionHandler()
     }
+}
+
+/// Holds a block observer's token so its own block can unregister it.
+/// Written once before the observer can fire; read only on the main queue.
+private final class ObserverToken: @unchecked Sendable {
+    var value: NSObjectProtocol?
 }

@@ -60,7 +60,8 @@ private enum RawContentBlock: Decodable {
     private struct ImagePayload: Decodable { let src: String; let alt: String }
 
     private enum Tag: String, CodingKey {
-        case Paragraph, Heading, Blockquote, HorizontalRule, List, PreFormatted, Image
+        case paragraph = "Paragraph", heading = "Heading", blockquote = "Blockquote"
+        case horizontalRule = "HorizontalRule", list = "List", preFormatted = "PreFormatted", image = "Image"
     }
 
     init(from decoder: Decoder) throws {
@@ -72,25 +73,25 @@ private enum RawContentBlock: Decodable {
         }
         // Otherwise it's {"Tag": {payload}}
         let container = try decoder.container(keyedBy: Tag.self)
-        if let p = try? container.decode(ParagraphPayload.self, forKey: .Paragraph) {
+        if let p = try? container.decode(ParagraphPayload.self, forKey: .paragraph) {
             self = .paragraph(p.text); return
         }
-        if let h = try? container.decode(HeadingPayload.self, forKey: .Heading) {
+        if let h = try? container.decode(HeadingPayload.self, forKey: .heading) {
             self = .heading(h.level, h.text); return
         }
-        if let b = try? container.decode(BlockquotePayload.self, forKey: .Blockquote) {
+        if let b = try? container.decode(BlockquotePayload.self, forKey: .blockquote) {
             self = .blockquote(b.blocks); return
         }
-        if container.contains(.HorizontalRule) {
+        if container.contains(.horizontalRule) {
             self = .horizontalRule; return
         }
-        if let l = try? container.decode(ListPayload.self, forKey: .List) {
+        if let l = try? container.decode(ListPayload.self, forKey: .list) {
             self = .list(l.ordered, l.items); return
         }
-        if let p = try? container.decode(PreFormattedPayload.self, forKey: .PreFormatted) {
+        if let p = try? container.decode(PreFormattedPayload.self, forKey: .preFormatted) {
             self = .preFormatted(p.text); return
         }
-        if let i = try? container.decode(ImagePayload.self, forKey: .Image) {
+        if let i = try? container.decode(ImagePayload.self, forKey: .image) {
             self = .image(i.src, i.alt); return
         }
         self = .unknown
@@ -124,7 +125,8 @@ private indirect enum RawInlineContent: Decodable {
     private struct LinkPayload: Decodable { let href: String; let content: [RawInlineContent] }
 
     private enum Tag: String, CodingKey {
-        case Text, Bold, Italic, Link, Strikethrough, Superscript, LineBreak
+        case text = "Text", bold = "Bold", italic = "Italic", link = "Link"
+        case strikethrough = "Strikethrough", superscript = "Superscript", lineBreak = "LineBreak"
     }
 
     init(from decoder: Decoder) throws {
@@ -136,25 +138,25 @@ private indirect enum RawInlineContent: Decodable {
         }
         // {"Tag": {payload}}
         let container = try decoder.container(keyedBy: Tag.self)
-        if let t = try? container.decode(TextPayload.self, forKey: .Text) {
+        if let t = try? container.decode(TextPayload.self, forKey: .text) {
             self = .text(t.value); return
         }
-        if let b = try? container.decode(ContentPayload.self, forKey: .Bold) {
+        if let b = try? container.decode(ContentPayload.self, forKey: .bold) {
             self = .bold(b.content); return
         }
-        if let i = try? container.decode(ContentPayload.self, forKey: .Italic) {
+        if let i = try? container.decode(ContentPayload.self, forKey: .italic) {
             self = .italic(i.content); return
         }
-        if let l = try? container.decode(LinkPayload.self, forKey: .Link) {
+        if let l = try? container.decode(LinkPayload.self, forKey: .link) {
             self = .link(l.href, l.content); return
         }
-        if let s = try? container.decode(ContentPayload.self, forKey: .Strikethrough) {
+        if let s = try? container.decode(ContentPayload.self, forKey: .strikethrough) {
             self = .strikethrough(s.content); return
         }
-        if let s = try? container.decode(ContentPayload.self, forKey: .Superscript) {
+        if let s = try? container.decode(ContentPayload.self, forKey: .superscript) {
             self = .superscript(s.content); return
         }
-        if container.contains(.LineBreak) {
+        if container.contains(.lineBreak) {
             self = .lineBreak; return
         }
         self = .text("")

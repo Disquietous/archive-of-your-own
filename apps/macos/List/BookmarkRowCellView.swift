@@ -49,7 +49,8 @@ final class BookmarkRowCellView: NSTableCellView {
     /// Called when the user clicks an author name — opens the author profile.
     var onAuthorClick: ((String) -> Void)?
     /// Called when the user clicks an author's follow bell.
-    var onToggleFollow: ((String) -> Void)?
+    /// A byline bell was clicked — the owner pops the bell menu from it.
+    var onFollowBell: ((String, NSView) -> Void)?
 
     private static func verticalPad(for density: Density) -> CGFloat {
         switch density {
@@ -184,7 +185,7 @@ final class BookmarkRowCellView: NSTableCellView {
     /// Rebuild the byline for this hit's authors: each name opens the
     /// author profile and carries its own follow bell.
     private func rebuildByline(authors: [String],
-                               followState: (String) -> MacAppModel.AuthorFollowState) {
+                               followShaded: (String) -> Bool) {
         bylineStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         bylineBells = []
         bylineAuthors = authors
@@ -213,8 +214,8 @@ final class BookmarkRowCellView: NSTableCellView {
             bylineStack.addArrangedSubview(name)
             bylineStack.setCustomSpacing(2, after: name)
             let bell = FollowBellButton(theme: theme)
-            bell.configure(author: author, state: followState(author))
-            bell.onToggle = { [weak self] author in self?.onToggleFollow?(author) }
+            bell.configure(name: author, shaded: followShaded(author))
+            bell.onClick = { [weak self] bell in self?.onFollowBell?(author, bell) }
             bylineStack.addArrangedSubview(bell)
             bylineBells.append(bell)
         }
@@ -228,9 +229,9 @@ final class BookmarkRowCellView: NSTableCellView {
 
     /// Re-shade the byline bells in place — callable without reconfiguring
     /// so follow toggles reflect instantly on every visible row.
-    func updateFollowBells(_ followState: (String) -> MacAppModel.AuthorFollowState) {
+    func updateFollowBells(_ followShaded: (String) -> Bool) {
         for bell in bylineBells {
-            bell.configure(author: bell.author, state: followState(bell.author))
+            bell.configure(name: bell.name, shaded: followShaded(bell.name))
         }
     }
 
@@ -319,7 +320,7 @@ final class BookmarkRowCellView: NSTableCellView {
     func configure(with hit: UBookmarkHit,
                    workTagsExpanded: Bool, bookmarkerTagsExpanded: Bool,
                    availableTextWidth: CGFloat,
-                   followState: (String) -> MacAppModel.AuthorFollowState = { _ in .none }) {
+                   followShaded: (String) -> Bool = { _ in false }) {
         // A hit targets a work or a series; the row reads the same display
         // fields from whichever is present.
         let work = hit.work
@@ -414,7 +415,7 @@ final class BookmarkRowCellView: NSTableCellView {
         // Mystery works have no byline at all; other blurbs without an
         // author link (anonymous works) keep the "Unknown" fallback.
         bylineStack.isHidden = hit.mystery
-        rebuildByline(authors: hit.displayAuthors, followState: followState)
+        rebuildByline(authors: hit.displayAuthors, followShaded: followShaded)
 
         let workHeights = configureTagClip(
             hit.displayWorkTags, accented: false,

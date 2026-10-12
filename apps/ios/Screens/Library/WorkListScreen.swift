@@ -27,7 +27,7 @@ struct WorkListScreen: View {
 
     let section: LibrarySection
     let title: String
-    var subtitle: String? = nil
+    var subtitle: String?
     /// The section's membership; evaluated on every render pass (cheap —
     /// the engine's ordering is memoized per section).
     let rawWorks: () -> [Work]
@@ -37,13 +37,13 @@ struct WorkListScreen: View {
     var usesSectionPrefs = true
     /// What's New marks unseen rows.
     var marksNew = false
-    var swipe: SwipeAction? = nil
+    var swipe: SwipeAction?
     /// Row tap; defaults to opening the work detail.
-    var onOpen: ((Work) -> Void)? = nil
+    var onOpen: ((Work) -> Void)?
     /// Content above the rows (a crawl-age line, a hand-off button).
-    var header: AnyView? = nil
+    var header: AnyView?
     /// The host's ellipsis-menu items.
-    var menuItems: AnyView? = nil
+    var menuItems: AnyView?
 
     @State private var showFilterSheet = false
     @State private var newListFor: Work?
@@ -183,7 +183,7 @@ struct WorkListScreen: View {
         )
         .contextMenu {
             WorkRowMenu(work: work, onNewReadingList: { newListFor = $0 },
-                        onExportEpub: { exportEpub($0) }) {
+                        onExportEpub: { exportEpub($0) }, tail: {
                 if let swipe {
                     Divider()
                     Button(role: .destructive) {
@@ -192,7 +192,7 @@ struct WorkListScreen: View {
                         Label(swipe.label, systemImage: swipe.systemImage)
                     }
                 }
-            }
+            })
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             if let swipe {

@@ -25,6 +25,7 @@ mod account;
 mod capabilities;
 mod connection;
 mod error;
+mod follows;
 mod helpers;
 mod library;
 mod listing;
@@ -46,6 +47,8 @@ pub use self::recovery::RetrySafety;
 pub use crate::events::OpKind;
 use self::helpers::*;
 
+type OperationTasks = std::collections::HashMap<u64, Vec<(u64, tokio::task::AbortHandle)>>;
+
 /// Abort handles for in-flight tasks, keyed by the UI operation id that
 /// requested them. One operation may spawn more than one task over its
 /// life (a retry after reconnect), so each id holds a small list keyed
@@ -53,7 +56,7 @@ use self::helpers::*;
 /// finishes; cancellation aborts and drops every task under the id.
 #[derive(Default, Clone)]
 pub(crate) struct OperationRegistry {
-    inner: Arc<std::sync::Mutex<std::collections::HashMap<u64, Vec<(u64, tokio::task::AbortHandle)>>>>,
+    inner: Arc<std::sync::Mutex<OperationTasks>>,
 }
 
 impl OperationRegistry {
@@ -326,7 +329,7 @@ mod operation_registry_tests {
         assert!(ops.is_tracking(2), "the other op is untouched");
 
         let slow_result = slow.await;
-        assert!(slow_result.as_ref().err().map_or(false, |e| e.is_cancelled()),
+        assert!(slow_result.as_ref().err().is_some_and(|e| e.is_cancelled()),
                 "cancelled op's task is aborted");
         ops.finished(slow_entry.0, slow_entry.1);
 

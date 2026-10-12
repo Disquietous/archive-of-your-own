@@ -322,6 +322,30 @@ struct ReadingSettingsSheetView: View {
                 .tracking(0.08 * 13)
                 .foregroundStyle(theme.ink3)
 
+            Toggle(isOn: $theme.readJustified) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Justify text")
+                        .font(Typography.uiBody())
+                        .foregroundStyle(theme.ink)
+                    Text("Even left and right edges. On a narrow screen, pair it with hyphenation to avoid wide gaps.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+            }
+            .tint(theme.accent)
+
+            Toggle(isOn: $theme.readHyphenation) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Hyphenation")
+                        .font(Typography.uiBody())
+                        .foregroundStyle(theme.ink)
+                    Text("Break long words at line ends.")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                }
+            }
+            .tint(theme.accent)
+
             Toggle(isOn: $theme.fullscreenReading) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Open reader with chrome hidden")

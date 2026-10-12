@@ -1,9 +1,9 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Durable UI preferences + device-local follows. Both live in the encrypted
-// DB (not platform defaults) so they travel with the library and are shared
-// across platforms.
+// Durable UI preferences. They live in the encrypted DB (not platform
+// defaults) so they travel with the library and are shared across platforms.
+// Follows moved to `follows.rs`.
 // ---------------------------------------------------------------------------
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
@@ -20,26 +20,5 @@ impl AO3App {
     pub fn get_pref(&self, key: String) -> Result<Option<String>, AO3Error> {
         let s = self.storage.blocking_lock();
         s.get_state(&format!("pref:{key}")).map_err(AO3Error::from)
-    }
-
-    /// Device-local follows (`kind` is "fandom" or "author"), in the order
-    /// they were added. User library data — encrypted DB, not UserDefaults.
-    pub fn get_followed(&self, kind: String) -> Result<Vec<String>, AO3Error> {
-        let s = self.storage.blocking_lock();
-        s.get_followed(&kind).map_err(AO3Error::from)
-    }
-
-    pub fn add_followed(&self, kind: String, name: String) -> Result<(), AO3Error> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Ok(());
-        }
-        let s = self.storage.blocking_lock();
-        s.add_followed(&kind, name).map_err(AO3Error::from)
-    }
-
-    pub fn remove_followed(&self, kind: String, name: String) -> Result<(), AO3Error> {
-        let s = self.storage.blocking_lock();
-        s.remove_followed(&kind, &name).map_err(AO3Error::from)
     }
 }

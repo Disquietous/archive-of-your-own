@@ -88,13 +88,15 @@ private struct CurrentlyReadingScreen: View {
             swipe: .init(label: "Remove", systemImage: "minus.circle") { work in
                 state.resetProgress(work.id)
             },
-            menuItems: AnyView(
+            header: state.bulkDownload != nil ? AnyView(BulkDownloadStatusBar()) : nil,
+            menuItems: AnyView(Group {
+                BulkDownloadMenuItem { state.currentlyReading.map(\.id) }
                 Button(role: .destructive) {
                     confirmRemoveAll = true
                 } label: {
                     Label("Remove All", systemImage: "trash")
                 }
-            )
+            })
         )
         .confirmationDialog("Remove every work from Currently Reading?",
                             isPresented: $confirmRemoveAll, titleVisibility: .visible) {
@@ -156,8 +158,8 @@ private struct WhatsNewScreen: View {
             rawWorks: { state.newWorkIDs.compactMap { state.work(byID: $0) } },
             empty: .init(systemImage: "bell.badge", title: "Nothing new",
                          subtitle: state.ao3Username == nil
-                            ? "Sign in and subscribe on AO3 — updates land here after a check."
-                            : "Updates to the works and authors you follow land here after a check."),
+                            ? "Sign in, then follow authors, works or series — updates land here after a check."
+                            : "Updates to the authors, works and series you follow land here after a check."),
             marksNew: true,
             swipe: .init(label: "Remove", systemImage: "minus.circle") { work in
                 state.removeNewWork(work.id)
@@ -166,13 +168,20 @@ private struct WhatsNewScreen: View {
                 state.markNewWorkSeen(work.id)
                 nav.openWork(work.id)
             },
+            header: state.isCheckingWhatsNew ? AnyView(WhatsNewCheckStatusBar()) : nil,
             menuItems: AnyView(Group {
                 Button {
-                    Task { await state.checkSubscriptions(force: true) }
+                    state.startWhatsNewCheck(all: false)
                 } label: {
-                    Label("Check Now", systemImage: "arrow.clockwise")
+                    Label("Check What’s Due", systemImage: "arrow.clockwise")
                 }
-                .disabled(state.isCheckingSubscriptions || state.ao3Username == nil)
+                .disabled(state.isCheckingWhatsNew || state.ao3Username == nil)
+                Button {
+                    state.startWhatsNewCheck(all: true)
+                } label: {
+                    Label("Check Everything", systemImage: "arrow.clockwise.circle")
+                }
+                .disabled(state.isCheckingWhatsNew || state.ao3Username == nil)
                 Button(role: .destructive) {
                     confirmClear = true
                 } label: {

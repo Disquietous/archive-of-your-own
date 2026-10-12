@@ -49,22 +49,18 @@ extension ListPaneViewController {
         return button
     }
 
-    /// Author view: the same follow bell as the work detail's byline —
-    /// toggles the device-local follow that lists the author under Authors.
+    /// Author view: the author's follow bell — opens the Followed /
+    /// Subscribed menu (the author card's AO3 subscription lives here too).
     func authorFollowButton(username: String) -> ToolButton {
         let button = authorFollowBtn ?? ToolButton(theme: theme, symbol: "bell", tooltip: "Follow") { [weak self] in
-            guard let self, let user = model.author.username else { return }
-            if model.follows.followedAuthorNames.contains(user) {
-                model.follows.unfollowAuthor(user)
-            } else {
-                model.follows.followAuthor(user)
-            }
+            guard let self, let user = model.author.username, let anchor = authorFollowBtn else { return }
+            FollowBellMenu.show(for: .author(user), follows: model.follows, from: anchor)
         }
         authorFollowBtn = button
-        let following = model.follows.followedAuthorNames.contains(username)
-        button.setSymbol(following ? "bell.fill" : "bell")
-        button.tintOverride = following ? theme.nsAccent : nil
-        button.toolTip = following ? "Unfollow" : "Follow"
+        let shaded = model.follows.isShaded(.author(username))
+        button.setSymbol(shaded ? "bell.fill" : "bell")
+        button.tintOverride = shaded ? theme.nsAccent : nil
+        button.toolTip = "Followed / Subscribed — choose how to track \(username)"
         return button
     }
 

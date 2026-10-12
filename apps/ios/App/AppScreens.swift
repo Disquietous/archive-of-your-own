@@ -12,18 +12,20 @@ enum AppScreens {
             ReaderView(workID: workID, chapterIndex: chapterIndex, entireWork: entireWork)
         case .collectionsBrowse:
             CollectionsBrowseView()
+        case .latestWorks:
+            BrowseView()
         case .collectionWorks(let name, let title):
             CollectionWorksView(name: name, title: title)
         case .readingList(let listID, let name):
             ReadingListView(listID: listID, listName: name)
-        case .authorWorks(let username):
-            AuthorProfileView(username: username)
-        case .inbox:
-            InboxView()
+        case .authorWorks(let username, let pane):
+            AuthorProfileView(username: username, initialPane: pane)
         case .inboxThread:
             InboxThreadView()
         case .accountManagement:
             AccountManagementView()
+        case .diagnostics:
+            SettingsView(page: .diagnostics)
         case .routeTimeouts:
             RouteTimeoutsScreen()
         case .logRetention:

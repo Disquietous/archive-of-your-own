@@ -5,13 +5,6 @@ use crate::models::*;
 
 use super::{sel, text};
 
-/// Parse AO3's subscriptions page to extract subscription entries.
-///
-/// Each subscription is an `li` or `dl` element containing links that indicate
-/// the subscription type via URL pattern:
-/// - `/users/{name}/pseuds` or `/users/{name}` => author subscription
-/// - `/works/{id}` => work subscription
-/// - `/series/{id}` => series subscription
 /// The subscribe form on a work or user profile page: where to POST,
 /// whether the user is currently subscribed (the form flips into a delete
 /// with the subscription id in its action), and the CSRF token to submit.

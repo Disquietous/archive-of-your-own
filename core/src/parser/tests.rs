@@ -1,315 +1,312 @@
-#[cfg(test)]
-mod tests {
-    use crate::parser::*;
-    use crate::models::*;
-    use std::fs;
+use crate::parser::*;
+use crate::models::*;
+use std::fs;
 
-    #[test]
-    fn test_parse_listing_works_total() {
-        // Paginated author listing heading.
-        let ranged = r#"<div id="main"><h2 class="heading">1 - 20 of 1,234 Works by someauthor</h2></div>"#;
-        assert_eq!(parse_listing_works_total(ranged), Some(1234));
-        // Unpaginated author listing heading.
-        let single = r#"<div id="main"><h2 class="heading">5 Works by someauthor</h2></div>"#;
-        assert_eq!(parse_listing_works_total(single), Some(5));
-        // Series stats block.
-        let series = r#"<dl class="series meta group"><dt>Works:</dt><dd class="works">12</dd></dl>"#;
-        assert_eq!(parse_listing_works_total(series), Some(12));
-        // No count anywhere — unknown, never zero.
-        let none = r#"<div id="main"><h2 class="heading">Works</h2></div>"#;
-        assert_eq!(parse_listing_works_total(none), None);
-    }
+#[test]
+fn test_parse_listing_works_total() {
+    // Paginated author listing heading.
+    let ranged = r#"<div id="main"><h2 class="heading">1 - 20 of 1,234 Works by someauthor</h2></div>"#;
+    assert_eq!(parse_listing_works_total(ranged), Some(1234));
+    // Unpaginated author listing heading.
+    let single = r#"<div id="main"><h2 class="heading">5 Works by someauthor</h2></div>"#;
+    assert_eq!(parse_listing_works_total(single), Some(5));
+    // Series stats block.
+    let series = r#"<dl class="series meta group"><dt>Works:</dt><dd class="works">12</dd></dl>"#;
+    assert_eq!(parse_listing_works_total(series), Some(12));
+    // No count anywhere — unknown, never zero.
+    let none = r#"<div id="main"><h2 class="heading">Works</h2></div>"#;
+    assert_eq!(parse_listing_works_total(none), None);
+}
 
-    #[test]
-    fn test_parse_chapter_images() {
-        let html = r#"<div class="userstuff">
-            <p>Before the art.</p>
-            <p><img src="https://example.com/a.png" alt="fan art"></p>
-            <blockquote><p><img src="//cdn.example.com/b.jpg"></p></blockquote>
-            <p><img src="/system/images/c.gif" alt=""></p>
-            <p><img src="data:image/png;base64,xyz"></p>
-        </div>"#;
-        let doc = Html::parse_document(html);
-        let el = doc.select(&sel("div.userstuff")).next().unwrap();
-        let blocks = parse_element_children(&el);
-        fn walk<'a>(blocks: &'a [ContentBlock], out: &mut Vec<(&'a str, &'a str)>) {
-            for b in blocks {
-                match b {
-                    ContentBlock::Image { src, alt } => out.push((src, alt)),
-                    ContentBlock::Blockquote { blocks } => walk(blocks, out),
-                    ContentBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
-                    _ => {}
-                }
+#[test]
+fn test_parse_chapter_images() {
+    let html = r#"<div class="userstuff">
+        <p>Before the art.</p>
+        <p><img src="https://example.com/a.png" alt="fan art"></p>
+        <blockquote><p><img src="//cdn.example.com/b.jpg"></p></blockquote>
+        <p><img src="/system/images/c.gif" alt=""></p>
+        <p><img src="data:image/png;base64,xyz"></p>
+    </div>"#;
+    let doc = Html::parse_document(html);
+    let el = doc.select(&sel("div.userstuff")).next().unwrap();
+    let blocks = parse_element_children(&el);
+    fn walk<'a>(blocks: &'a [ContentBlock], out: &mut Vec<(&'a str, &'a str)>) {
+        for b in blocks {
+            match b {
+                ContentBlock::Image { src, alt } => out.push((src, alt)),
+                ContentBlock::Blockquote { blocks } => walk(blocks, out),
+                ContentBlock::List { items, .. } => items.iter().for_each(|i| walk(i, out)),
+                _ => {}
             }
         }
-        let mut images = Vec::new();
-        walk(&blocks, &mut images);
-        assert_eq!(images, vec![
-            ("https://example.com/a.png", "fan art"),
-            ("https://cdn.example.com/b.jpg", ""),
-            ("https://archiveofourown.org/system/images/c.gif", ""),
-        ], "absolute kept, protocol-relative and rooted resolved, data: dropped");
-        // Round-trips through the stored JSON encoding.
-        let json = serde_json::to_string(&blocks).unwrap();
-        let back: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
-        assert_eq!(blocks, back);
     }
+    let mut images = Vec::new();
+    walk(&blocks, &mut images);
+    assert_eq!(images, vec![
+        ("https://example.com/a.png", "fan art"),
+        ("https://cdn.example.com/b.jpg", ""),
+        ("https://archiveofourown.org/system/images/c.gif", ""),
+    ], "absolute kept, protocol-relative and rooted resolved, data: dropped");
+    // Round-trips through the stored JSON encoding.
+    let json = serde_json::to_string(&blocks).unwrap();
+    let back: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
+    assert_eq!(blocks, back);
+}
 
-    #[test]
-    fn test_parse_results_total() {
-        // Search results heading.
-        let search = r#"<div id="main"><h3 class="heading">1,234 Found</h3></div>"#;
-        assert_eq!(parse_results_total(search), Some(1234));
-        // Real fixture carries "3 Found".
-        let html = fs::read_to_string("tests/fixtures/search_results.html").unwrap();
-        assert_eq!(parse_results_total(&html), Some(3));
-        // Tag listing shape falls through to the works-heading parser.
-        let tag = r#"<div id="main"><h2 class="heading">1 - 20 of 567 Works in Some Tag</h2></div>"#;
-        assert_eq!(parse_results_total(tag), Some(567));
-        // Nothing recognizable → unknown, never zero.
-        assert_eq!(parse_results_total("<p>hi</p>"), None);
-    }
+#[test]
+fn test_parse_results_total() {
+    // Search results heading.
+    let search = r#"<div id="main"><h3 class="heading">1,234 Found</h3></div>"#;
+    assert_eq!(parse_results_total(search), Some(1234));
+    // Real fixture carries "3 Found".
+    let html = fs::read_to_string("tests/fixtures/search_results.html").unwrap();
+    assert_eq!(parse_results_total(&html), Some(3));
+    // Tag listing shape falls through to the works-heading parser.
+    let tag = r#"<div id="main"><h2 class="heading">1 - 20 of 567 Works in Some Tag</h2></div>"#;
+    assert_eq!(parse_results_total(tag), Some(567));
+    // Nothing recognizable → unknown, never zero.
+    assert_eq!(parse_results_total("<p>hi</p>"), None);
+}
 
-    #[test]
-    fn test_parse_search_results() {
-        let html = fs::read_to_string("tests/fixtures/search_results.html")
-            .expect("Failed to read search results fixture");
-        let works = parse_work_listings(&html).expect("Failed to parse");
-        assert!(!works.is_empty(), "Should parse at least one work");
+#[test]
+fn test_parse_search_results() {
+    let html = fs::read_to_string("tests/fixtures/search_results.html")
+        .expect("Failed to read search results fixture");
+    let works = parse_work_listings(&html).expect("Failed to parse");
+    assert!(!works.is_empty(), "Should parse at least one work");
 
-        let first = &works[0];
-        assert!(first.id > 0, "Work should have a valid ID");
-        assert!(!first.title.is_empty(), "Work should have a title");
-        assert!(!first.authors.is_empty(), "Work should have authors");
-        assert!(!first.fandoms.is_empty(), "Work should have fandoms");
-    }
+    let first = &works[0];
+    assert!(first.id > 0, "Work should have a valid ID");
+    assert!(!first.title.is_empty(), "Work should have a title");
+    assert!(!first.authors.is_empty(), "Work should have authors");
+    assert!(!first.fandoms.is_empty(), "Work should have fandoms");
+}
 
-    #[test]
-    fn test_listing_fails_closed_on_unrecognized_markup() {
-        // No #main at all — a maintenance page, Cloudflare interstitial, or
-        // a markup change that renamed the region. Must error, not "0 works".
-        assert!(parse_work_listings("<html><body><p>Down for maintenance</p></body></html>").is_err());
-        assert!(parse_bookmark_listings("<html><body><p>Down for maintenance</p></body></html>").is_err());
+#[test]
+fn test_listing_fails_closed_on_unrecognized_markup() {
+    // No #main at all — a maintenance page, Cloudflare interstitial, or
+    // a markup change that renamed the region. Must error, not "0 works".
+    assert!(parse_work_listings("<html><body><p>Down for maintenance</p></body></html>").is_err());
+    assert!(parse_bookmark_listings("<html><body><p>Down for maintenance</p></body></html>").is_err());
 
-        // #main present but neither blurbs, an index container, nor an
-        // empty-state notice — the blurb selectors no longer match.
-        let drifted = r#"<div id="main"><ol class="listing collection"><li class="item">renamed</li></ol></div>"#;
-        assert!(parse_work_listings(drifted).is_err());
-        assert!(parse_bookmark_listings(drifted).is_err());
-    }
+    // #main present but neither blurbs, an index container, nor an
+    // empty-state notice — the blurb selectors no longer match.
+    let drifted = r#"<div id="main"><ol class="listing collection"><li class="item">renamed</li></ol></div>"#;
+    assert!(parse_work_listings(drifted).is_err());
+    assert!(parse_bookmark_listings(drifted).is_err());
+}
 
-    #[test]
-    fn test_blurb_series() {
-        let html = r#"<div id="main"><ol class="work index group">
-          <li id="work_11" class="work blurb group">
-            <div class="header module"><h4 class="heading"><a href="/works/11">T</a>
-              <a rel="author" href="/users/u/pseuds/u">u</a></h4></div>
-            <ul class="series">
-              <li>Part <strong>2</strong> of <a href="/series/501">1st Series</a></li>
-              <li>Part <strong>1</strong> of <a href="/series/502">Other</a></li>
-            </ul>
-            <dl class="stats"></dl>
-          </li></ol></div>"#;
-        let works = parse_work_listings(html).unwrap();
-        assert_eq!(works.len(), 1);
-        let s = &works[0].series;
-        assert_eq!(s.len(), 2);
-        assert_eq!((s[0].series_id, s[0].part, s[0].name.as_str()), (501, 2, "1st Series"));
-        assert_eq!((s[1].series_id, s[1].part), (502, 1));
-        assert!(s[0].prev_work_id.is_none() && s[0].next_work_id.is_none());
-    }
+#[test]
+fn test_blurb_series() {
+    let html = r#"<div id="main"><ol class="work index group">
+      <li id="work_11" class="work blurb group">
+        <div class="header module"><h4 class="heading"><a href="/works/11">T</a>
+          <a rel="author" href="/users/u/pseuds/u">u</a></h4></div>
+        <ul class="series">
+          <li>Part <strong>2</strong> of <a href="/series/501">1st Series</a></li>
+          <li>Part <strong>1</strong> of <a href="/series/502">Other</a></li>
+        </ul>
+        <dl class="stats"></dl>
+      </li></ol></div>"#;
+    let works = parse_work_listings(html).unwrap();
+    assert_eq!(works.len(), 1);
+    let s = &works[0].series;
+    assert_eq!(s.len(), 2);
+    assert_eq!((s[0].series_id, s[0].part, s[0].name.as_str()), (501, 2, "1st Series"));
+    assert_eq!((s[1].series_id, s[1].part), (502, 1));
+    assert!(s[0].prev_work_id.is_none() && s[0].next_work_id.is_none());
+}
 
-    #[test]
-    fn test_listing_accepts_genuinely_empty_pages() {
-        // Empty index list still present.
-        let empty_index = r#"<div id="main"><ol class="work index group"></ol></div>"#;
-        assert!(parse_work_listings(empty_index).unwrap().is_empty());
+#[test]
+fn test_listing_accepts_genuinely_empty_pages() {
+    // Empty index list still present.
+    let empty_index = r#"<div id="main"><ol class="work index group"></ol></div>"#;
+    assert!(parse_work_listings(empty_index).unwrap().is_empty());
 
-        // Zero-state notice without an index container.
-        let no_results = r#"<div id="main"><p>No results found. You may want to edit your search to make it less specific.</p></div>"#;
-        assert!(parse_work_listings(no_results).unwrap().is_empty());
+    // Zero-state notice without an index container.
+    let no_results = r#"<div id="main"><p>No results found. You may want to edit your search to make it less specific.</p></div>"#;
+    assert!(parse_work_listings(no_results).unwrap().is_empty());
 
-        let no_bookmarks = r#"<div id="main"><div class="bookmark index"><p>You don't have any bookmarks yet. There are no bookmarks to display.</p></div></div>"#;
-        assert!(parse_bookmark_listings(no_bookmarks).unwrap().is_empty());
-    }
+    let no_bookmarks = r#"<div id="main"><div class="bookmark index"><p>You don't have any bookmarks yet. There are no bookmarks to display.</p></div></div>"#;
+    assert!(parse_bookmark_listings(no_bookmarks).unwrap().is_empty());
+}
 
-    #[test]
-    fn test_parse_search_results_stats() {
-        let html = fs::read_to_string("tests/fixtures/search_results.html")
-            .expect("Failed to read search results fixture");
-        let works = parse_work_listings(&html).expect("Failed to parse");
-        let first = &works[0];
+#[test]
+fn test_parse_search_results_stats() {
+    let html = fs::read_to_string("tests/fixtures/search_results.html")
+        .expect("Failed to read search results fixture");
+    let works = parse_work_listings(&html).expect("Failed to parse");
+    let first = &works[0];
 
-        assert!(first.word_count > 0 || first.chapter_count > 0,
-            "Should parse some stats: words={}, chapters={}",
-            first.word_count, first.chapter_count);
-    }
+    assert!(first.word_count > 0 || first.chapter_count > 0,
+        "Should parse some stats: words={}, chapters={}",
+        first.word_count, first.chapter_count);
+}
 
-    #[test]
-    fn test_parse_work_page() {
-        let html = fs::read_to_string("tests/fixtures/work_page.html")
-            .expect("Failed to read work page fixture");
-        let result = parse_work_page(&html);
-        assert!(result.is_ok(), "Should parse work page: {:?}", result.err());
-        let (summary, chapters) = result.unwrap();
+#[test]
+fn test_parse_work_page() {
+    let html = fs::read_to_string("tests/fixtures/work_page.html")
+        .expect("Failed to read work page fixture");
+    let result = parse_work_page(&html);
+    assert!(result.is_ok(), "Should parse work page: {:?}", result.err());
+    let (summary, chapters) = result.unwrap();
 
-        assert!(summary.id > 0, "Should have valid work ID");
-        assert!(!summary.title.is_empty(), "Should have title");
-        assert!(!chapters.is_empty(), "Should have at least one chapter");
-        assert!(!chapters[0].content.is_empty(), "Chapter should have content blocks");
-    }
+    assert!(summary.id > 0, "Should have valid work ID");
+    assert!(!summary.title.is_empty(), "Should have title");
+    assert!(!chapters.is_empty(), "Should have at least one chapter");
+    assert!(!chapters[0].content.is_empty(), "Chapter should have content blocks");
+}
 
-    #[test]
-    fn test_parse_work_page_series() {
-        let html = fs::read_to_string("tests/fixtures/work_series.html")
-            .expect("Failed to read series work page fixture");
-        let (summary, _) = parse_work_page(&html).expect("Should parse series work page");
+#[test]
+fn test_parse_work_page_series() {
+    let html = fs::read_to_string("tests/fixtures/work_series.html")
+        .expect("Failed to read series work page fixture");
+    let (summary, _) = parse_work_page(&html).expect("Should parse series work page");
 
-        assert_eq!(summary.series.len(), 2, "Should find both memberships");
+    assert_eq!(summary.series.len(), 2, "Should find both memberships");
 
-        let alpha = &summary.series[0];
-        assert_eq!(alpha.series_id, 9000001);
-        assert_eq!(alpha.name, "Alpha Test Series");
-        assert_eq!(alpha.part, 2);
-        assert_eq!(alpha.prev_work_id, Some(2000010));
-        assert_eq!(alpha.next_work_id, Some(2000012));
+    let alpha = &summary.series[0];
+    assert_eq!(alpha.series_id, 9000001);
+    assert_eq!(alpha.name, "Alpha Test Series");
+    assert_eq!(alpha.part, 2);
+    assert_eq!(alpha.prev_work_id, Some(2000010));
+    assert_eq!(alpha.next_work_id, Some(2000012));
 
-        let beta = &summary.series[1];
-        assert_eq!(beta.series_id, 9000002);
-        assert_eq!(beta.name, "Beta Test Series");
-        assert_eq!(beta.part, 1);
-        assert_eq!(beta.prev_work_id, None);
-        assert_eq!(beta.next_work_id, Some(2000013));
-    }
+    let beta = &summary.series[1];
+    assert_eq!(beta.series_id, 9000002);
+    assert_eq!(beta.name, "Beta Test Series");
+    assert_eq!(beta.part, 1);
+    assert_eq!(beta.prev_work_id, None);
+    assert_eq!(beta.next_work_id, Some(2000013));
+}
 
-    #[test]
-    fn test_parse_work_page_no_series() {
-        let html = fs::read_to_string("tests/fixtures/work_page.html")
-            .expect("Failed to read work page fixture");
-        let (summary, _) = parse_work_page(&html).expect("Should parse work page");
-        assert!(summary.series.is_empty(), "Work not in a series should have none");
-    }
+#[test]
+fn test_parse_work_page_no_series() {
+    let html = fs::read_to_string("tests/fixtures/work_page.html")
+        .expect("Failed to read work page fixture");
+    let (summary, _) = parse_work_page(&html).expect("Should parse work page");
+    assert!(summary.series.is_empty(), "Work not in a series should have none");
+}
 
-    #[test]
-    fn test_extract_series_edge_cases() {
-        // No prev/next links, comma-grouped part number.
-        let html = r#"<dl class="work meta group"><dd class="series">
-            <span class="series">
-              <span class="position">Part 1,002 of <a href="/series/77">Long Haul</a></span>
-            </span>
-        </dd></dl>"#;
-        let doc = Html::parse_document(html);
-        let series = extract_work_page_series(&doc);
-        assert_eq!(series.len(), 1);
-        assert_eq!(series[0].series_id, 77);
-        assert_eq!(series[0].part, 1002);
-        assert_eq!(series[0].prev_work_id, None);
-        assert_eq!(series[0].next_work_id, None);
+#[test]
+fn test_extract_series_edge_cases() {
+    // No prev/next links, comma-grouped part number.
+    let html = r#"<dl class="work meta group"><dd class="series">
+        <span class="series">
+          <span class="position">Part 1,002 of <a href="/series/77">Long Haul</a></span>
+        </span>
+    </dd></dl>"#;
+    let doc = Html::parse_document(html);
+    let series = extract_work_page_series(&doc);
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].series_id, 77);
+    assert_eq!(series[0].part, 1002);
+    assert_eq!(series[0].prev_work_id, None);
+    assert_eq!(series[0].next_work_id, None);
 
-        // No leading number → part 0, membership still captured.
-        let html = r#"<dd class="series"><span class="series">
-            <span class="position">A work in <a href="/series/88">Numberless</a></span>
-        </span></dd>"#;
-        let doc = Html::parse_document(html);
-        let series = extract_work_page_series(&doc);
-        assert_eq!(series.len(), 1);
-        assert_eq!(series[0].part, 0);
-        assert_eq!(series[0].name, "Numberless");
+    // No leading number → part 0, membership still captured.
+    let html = r#"<dd class="series"><span class="series">
+        <span class="position">A work in <a href="/series/88">Numberless</a></span>
+    </span></dd>"#;
+    let doc = Html::parse_document(html);
+    let series = extract_work_page_series(&doc);
+    assert_eq!(series.len(), 1);
+    assert_eq!(series[0].part, 0);
+    assert_eq!(series[0].name, "Numberless");
 
-        // Series name starting with a digit: part comes from text before the
-        // link, never from the name.
-        let html = r#"<dd class="series"><span class="series">
-            <span class="position">Part 3 of <a href="/series/99">2 Fast 2 Fictional</a></span>
-        </span></dd>"#;
-        let doc = Html::parse_document(html);
-        let series = extract_work_page_series(&doc);
-        assert_eq!(series[0].part, 3);
-        assert_eq!(series[0].name, "2 Fast 2 Fictional");
+    // Series name starting with a digit: part comes from text before the
+    // link, never from the name.
+    let html = r#"<dd class="series"><span class="series">
+        <span class="position">Part 3 of <a href="/series/99">2 Fast 2 Fictional</a></span>
+    </span></dd>"#;
+    let doc = Html::parse_document(html);
+    let series = extract_work_page_series(&doc);
+    assert_eq!(series[0].part, 3);
+    assert_eq!(series[0].name, "2 Fast 2 Fictional");
 
-        // span.series with no /series/ link is skipped, not an error.
-        let html = r#"<dd class="series"><span class="series">
-            <span class="position">Part 1 of a mystery</span>
-        </span></dd>"#;
-        let doc = Html::parse_document(html);
-        assert!(extract_work_page_series(&doc).is_empty());
-    }
+    // span.series with no /series/ link is skipped, not an error.
+    let html = r#"<dd class="series"><span class="series">
+        <span class="position">Part 1 of a mystery</span>
+    </span></dd>"#;
+    let doc = Html::parse_document(html);
+    assert!(extract_work_page_series(&doc).is_empty());
+}
 
-    #[test]
-    fn test_parse_kudos_usernames() {
-        let html = r#"<div id="kudos"><p class="kudos">
-            <a href="/users/MockReaderOne">MockReaderOne</a>,
-            <a href="/users/MockReaderTwo/pseuds/AltPseud">AltPseud</a>,
-            and <a href="/works/123?show_comments=true">12 more users</a>
-            as well as 30 guests left kudos on this work!</p></div>"#;
-        let names = parse_kudos_usernames(html);
-        assert_eq!(names, vec!["MockReaderOne", "AltPseud"]);
+#[test]
+fn test_parse_kudos_usernames() {
+    let html = r#"<div id="kudos"><p class="kudos">
+        <a href="/users/MockReaderOne">MockReaderOne</a>,
+        <a href="/users/MockReaderTwo/pseuds/AltPseud">AltPseud</a>,
+        and <a href="/works/123?show_comments=true">12 more users</a>
+        as well as 30 guests left kudos on this work!</p></div>"#;
+    let names = parse_kudos_usernames(html);
+    assert_eq!(names, vec!["MockReaderOne", "AltPseud"]);
 
-        // No kudos section at all.
-        assert!(parse_kudos_usernames("<div id='main'></div>").is_empty());
-    }
+    // No kudos section at all.
+    assert!(parse_kudos_usernames("<div id='main'></div>").is_empty());
+}
 
-    #[test]
-    fn test_inline_whitespace_collapses() {
-        // Authors' HTML often wraps source lines mid-paragraph; rendered
-        // text must treat those newlines as ordinary spaces.
-        let html = "<p>measured distance. Three\n            days of separate meals and\t\tavoided eye contact</p>";
-        let doc = Html::parse_fragment(html);
-        let p = doc.select(&sel("p")).next().unwrap();
-        let inlines = parse_inline_content(&p);
-        assert_eq!(inlines.len(), 1);
-        let InlineContent::Text { value } = &inlines[0] else {
-            panic!("expected text, got {:?}", inlines[0]);
-        };
-        assert_eq!(value, "measured distance. Three days of separate meals and avoided eye contact");
+#[test]
+fn test_inline_whitespace_collapses() {
+    // Authors' HTML often wraps source lines mid-paragraph; rendered
+    // text must treat those newlines as ordinary spaces.
+    let html = "<p>measured distance. Three\n            days of separate meals and\t\tavoided eye contact</p>";
+    let doc = Html::parse_fragment(html);
+    let p = doc.select(&sel("p")).next().unwrap();
+    let inlines = parse_inline_content(&p);
+    assert_eq!(inlines.len(), 1);
+    let InlineContent::Text { value } = &inlines[0] else {
+        panic!("expected text, got {:?}", inlines[0]);
+    };
+    assert_eq!(value, "measured distance. Three days of separate meals and avoided eye contact");
 
-        // The space between a text node and an inline element survives.
-        let html = "<p>word <b>bold</b>\nand more</p>";
-        let doc = Html::parse_fragment(html);
-        let p = doc.select(&sel("p")).next().unwrap();
-        let inlines = parse_inline_content(&p);
-        assert_eq!(inlines.len(), 3);
-        assert!(matches!(&inlines[0], InlineContent::Text { value } if value == "word "));
-        assert!(matches!(&inlines[2], InlineContent::Text { value } if value == " and more"));
-    }
+    // The space between a text node and an inline element survives.
+    let html = "<p>word <b>bold</b>\nand more</p>";
+    let doc = Html::parse_fragment(html);
+    let p = doc.select(&sel("p")).next().unwrap();
+    let inlines = parse_inline_content(&p);
+    assert_eq!(inlines.len(), 3);
+    assert!(matches!(&inlines[0], InlineContent::Text { value } if value == "word "));
+    assert!(matches!(&inlines[2], InlineContent::Text { value } if value == " and more"));
+}
 
-    #[test]
-    fn test_parse_chapters_format() {
-        assert_eq!(parse_chapters("1/1"), (1, Some(1)));
-        assert_eq!(parse_chapters("3/12"), (3, Some(12)));
-        assert_eq!(parse_chapters("1/?"), (1, None));
-        assert_eq!(parse_chapters("24/30"), (24, Some(30)));
-    }
+#[test]
+fn test_parse_chapters_format() {
+    assert_eq!(parse_chapters("1/1"), (1, Some(1)));
+    assert_eq!(parse_chapters("3/12"), (3, Some(12)));
+    assert_eq!(parse_chapters("1/?"), (1, None));
+    assert_eq!(parse_chapters("24/30"), (24, Some(30)));
+}
 
-    #[test]
-    fn test_rating_from_tag() {
-        assert_eq!(Rating::from_ao3_tag("General Audiences"), Rating::General);
-        assert_eq!(Rating::from_ao3_tag("Teen And Up Audiences"), Rating::Teen);
-        assert_eq!(Rating::from_ao3_tag("Mature"), Rating::Mature);
-        assert_eq!(Rating::from_ao3_tag("Explicit"), Rating::Explicit);
-        assert_eq!(Rating::from_ao3_tag("Not Rated"), Rating::NotRated);
-    }
+#[test]
+fn test_rating_from_tag() {
+    assert_eq!(Rating::from_ao3_tag("General Audiences"), Rating::General);
+    assert_eq!(Rating::from_ao3_tag("Teen And Up Audiences"), Rating::Teen);
+    assert_eq!(Rating::from_ao3_tag("Mature"), Rating::Mature);
+    assert_eq!(Rating::from_ao3_tag("Explicit"), Rating::Explicit);
+    assert_eq!(Rating::from_ao3_tag("Not Rated"), Rating::NotRated);
+}
 
-    #[test]
-    fn test_inline_content_parsing() {
-        let html = r#"<p>Hello <b>world</b> and <em>italic</em> text with a <a href="/tags/foo">link</a>.</p>"#;
-        let doc = Html::parse_fragment(html);
-        let p = doc.select(&sel("p")).next().unwrap();
-        let inlines = parse_inline_content(&p);
+#[test]
+fn test_inline_content_parsing() {
+    let html = r#"<p>Hello <b>world</b> and <em>italic</em> text with a <a href="/tags/foo">link</a>.</p>"#;
+    let doc = Html::parse_fragment(html);
+    let p = doc.select(&sel("p")).next().unwrap();
+    let inlines = parse_inline_content(&p);
 
-        assert!(inlines.len() >= 5, "Should have multiple inline elements, got: {:?}", inlines);
+    assert!(inlines.len() >= 5, "Should have multiple inline elements, got: {:?}", inlines);
 
-        // Check bold
-        let has_bold = inlines.iter().any(|i| matches!(i, InlineContent::Bold { .. }));
-        assert!(has_bold, "Should have bold content");
+    // Check bold
+    let has_bold = inlines.iter().any(|i| matches!(i, InlineContent::Bold { .. }));
+    assert!(has_bold, "Should have bold content");
 
-        // Check italic
-        let has_italic = inlines.iter().any(|i| matches!(i, InlineContent::Italic { .. }));
-        assert!(has_italic, "Should have italic content");
+    // Check italic
+    let has_italic = inlines.iter().any(|i| matches!(i, InlineContent::Italic { .. }));
+    assert!(has_italic, "Should have italic content");
 
-        // Check link
-        let has_link = inlines.iter().any(|i| matches!(i, InlineContent::Link { .. }));
-        assert!(has_link, "Should have link content");
-    }
+    // Check link
+    let has_link = inlines.iter().any(|i| matches!(i, InlineContent::Link { .. }));
+    assert!(has_link, "Should have link content");
 }
 
 #[cfg(test)]

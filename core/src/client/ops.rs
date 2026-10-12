@@ -501,7 +501,7 @@ impl AO3Client {
 
     // -- Subscription operations -----------------------------------------------
 
-    /// Shared page-fetch subscription toggler for works and users: reads the
+    /// Shared page-fetch subscription toggler for works, series and users: reads the
     /// page's live form (create vs destroy) and submits it only when the
     /// state actually differs — intent-aware, so a retry after an ambiguous
     /// direct POST can never double-toggle. `default_type` fills in when the
@@ -549,6 +549,13 @@ impl AO3Client {
         self.set_subscription_via_page(&page_url, subscribe, "Work").await
     }
 
+    /// Series subscription, page-fetch path (see set_subscription_via_page).
+    pub async fn set_series_subscription(&self, series_id: u64, subscribe: bool)
+        -> Result<(bool, Option<String>), AppError> {
+        let page_url = format!("{BASE_URL}/series/{series_id}");
+        self.set_subscription_via_page(&page_url, subscribe, "Series").await
+    }
+
     /// Shared direct subscribe using the cached CSRF token — one POST, no
     /// page fetch. Ok(Some(id)) is definite success; Ok(None) means no
     /// cached token (caller should use the page-fetch path). Success
@@ -574,6 +581,12 @@ impl AO3Client {
     pub async fn subscribe_work_direct(&self, username: &str, work_id: u64)
         -> Result<Option<String>, AppError> {
         self.subscribe_direct(username, &work_id.to_string(), "Work").await
+    }
+
+    /// Direct series subscribe (see subscribe_direct).
+    pub async fn subscribe_series_direct(&self, username: &str, series_id: u64)
+        -> Result<Option<String>, AppError> {
+        self.subscribe_direct(username, &series_id.to_string(), "Series").await
     }
 
     /// Direct unsubscribe using a stored record id + cached CSRF token —

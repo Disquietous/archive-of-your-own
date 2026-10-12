@@ -1,9 +1,12 @@
 import SwiftUI
 
-/// The Browse tab: AO3's latest-works listing, ordered and filtered by the
-/// shared list model under the tab's own persisted Sort & Filter prefs and
-/// session list filter — the same controls every work list carries.
+/// Latest Works (the former Browse tab, now pushed from the Search
+/// landing): AO3's latest-works listing, ordered and filtered by the
+/// shared list model under its own persisted Sort & Filter prefs (the
+/// `.browse` slot) and session list filter. Opening it is the only thing
+/// that loads the listing.
 struct BrowseView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
     @Environment(NavigationState.self) private var nav
@@ -65,8 +68,7 @@ struct BrowseView: View {
                                 work: work,
                                 blurExplicit: state.hideExplicit && work.rating == .explicit,
                                 onAuthorTap: UInt64(work.id) != nil ? {
-                                    nav.browsePath.append(AppDestination.authorWorks(
-                                        username: AppState.canonicalAuthorUsername(work.author)))
+                                    nav.openAuthor(AppState.canonicalAuthorUsername(work.author))
                                 } : nil,
                                 onTap: { nav.openWork(work.id) }
                             )
@@ -105,6 +107,7 @@ struct BrowseView: View {
             .padding(.bottom, 32)
         }
         .background { ThemeBackgroundView() }
+        .libraryScreen()
         .task {
             if state.browseResults.isEmpty && state.bridge.isInitialized {
                 await state.browseLatestWorks()
@@ -164,9 +167,18 @@ struct BrowseView: View {
 
     private var masthead: some View {
         HStack(spacing: 8) {
-            Text("Browse")
-                .font(Typography.browseTitle())
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(theme.ink)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(IconButtonPressStyle())
+            .accessibilityLabel("Back")
+            Text("Latest Works")
+                .font(Typography.uiBody())
                 .foregroundStyle(theme.ink)
+                .lineLimit(1)
             Spacer()
             ChromeIconButton(symbol: "arrow.clockwise", isBusy: state.isBrowsing) {
                 state.bridge.invalidateSessionCache(key: "browse")
@@ -212,25 +224,6 @@ struct BrowseView: View {
             }
 
             Spacer()
-
-            Button {
-                nav.openCollections()
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Collections")
-                        .font(Typography.uiSmall())
-                }
-                .foregroundStyle(theme.ink3)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(
-                    RoundedRectangle(cornerRadius: Radius.chip)
-                        .fill(theme.surface2)
-                )
-            }
-            .buttonStyle(ChipPressStyle())
         }
     }
 }

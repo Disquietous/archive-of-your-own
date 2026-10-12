@@ -79,7 +79,10 @@ struct BookmarkEditSheet: View {
                             .font(.custom("HankenGrotesk", size: 15).weight(.medium))
                             .foregroundStyle(theme.ink)
                             .tint(theme.accent)
-                        Text("Off = the bookmark stays on this device only. On = saving also creates it on your AO3 account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).")
+                        Text("""
+                            Off = the bookmark stays on this device only. On = saving also creates it on your AO3 \
+                            account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).
+                            """)
                             .font(.custom("HankenGrotesk", size: 12))
                             .foregroundStyle(theme.ink3)
                             .fixedSize(horizontal: false, vertical: true)

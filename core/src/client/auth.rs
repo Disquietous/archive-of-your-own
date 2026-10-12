@@ -380,7 +380,7 @@ impl AO3Client {
         ];
 
         let result = tokio::time::timeout(timeout, async {
-            client.post(&format!("{BASE_URL}/users/logout"))
+            client.post(format!("{BASE_URL}/users/logout"))
                 .form(&params)
                 .send()
                 .await

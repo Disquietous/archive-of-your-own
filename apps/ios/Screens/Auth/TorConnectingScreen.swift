@@ -58,7 +58,10 @@ struct TorConnectingScreen: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your connection will no longer be routed through Tor. Your traffic to AO3 will be visible to your network provider and will reveal your IP address to AO3 and Cloudflare.")
+            Text("""
+                Your connection will no longer be routed through Tor. Your traffic to AO3 will be visible to your \
+                network provider and will reveal your IP address to AO3 and Cloudflare.
+                """)
         }
     }
 

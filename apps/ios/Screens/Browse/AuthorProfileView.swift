@@ -11,6 +11,9 @@ struct AuthorProfileView: View {
     @Environment(AuthorProfileModel.self) private var author
 
     let username: String
+    /// Pane to land on (an opened link to a user's bookmarks, say); nil =
+    /// the profile's default.
+    var initialPane: AuthorProfileModel.Pane?
 
     /// Open once per screen instance: onAppear fires again when a work
     /// detail pushed on top is popped, and re-opening would cancel a crawl.
@@ -18,11 +21,12 @@ struct AuthorProfileView: View {
     @State private var avatarImage: UIImage?
     @State private var pendingModeration: ModerationAction?
     /// The AO3 subscription change awaiting confirmation (true = subscribe).
-    @State private var pendingSubscription: Bool?
     @State private var newListFor: Work?
     @State private var newListName = ""
     @State private var exportedEpub: EpubExporter.Exported?
     @State private var exportError: String?
+    /// "Mark all as read" awaiting confirmation (true = mark, false = unmark).
+    @State private var pendingMarkAllRead: Bool?
 
     private enum ModerationAction {
         case block, mute
@@ -36,6 +40,9 @@ struct AuthorProfileView: View {
     private var isCurrent: Bool { author.username == username }
 
     private var works: [Work] { isCurrent ? author.works : [] }
+    private var allWorksFinished: Bool {
+        !works.isEmpty && works.allSatisfy { state.finishedWorkIDs.contains($0.id) }
+    }
     private var bookmarks: [UBookmarkHit] { isCurrent ? author.bookmarks : [] }
     private var collections: [UCollection] { isCurrent ? author.collections : [] }
 
@@ -73,10 +80,7 @@ struct AuthorProfileView: View {
 
             VStack(spacing: 8) {
                 ScreenChrome(title: profile?.username ?? username, subtitle: chromeSubtitle) {
-                    ChromeIconButton(symbol: paneBusy ? "xmark.circle" : "arrow.clockwise") {
-                        refreshOrCancelActivePane()
-                    }
-                    .accessibilityLabel(paneBusy ? "Cancel refresh" : "Refresh from AO3")
+                    paneMenu
                 }
                 if let opID = bannerOpID {
                     RequestProgressBanner(opID: opID) {
@@ -93,6 +97,7 @@ struct AuthorProfileView: View {
             guard !didOpen else { return }
             didOpen = true
             author.open(username)
+            if let initialPane { author.showPane(initialPane) }
         }
         .task {
             await loadAvatar()
@@ -118,30 +123,28 @@ struct AuthorProfileView: View {
             Text(moderationMessage)
         }
         .confirmationDialog(
-            pendingSubscription == true
-                ? "Subscribe to \(username) on AO3?"
-                : "Unsubscribe from \(username) on AO3?",
+            pendingMarkAllRead == true ? "Mark all as read?" : "Unmark all as read?",
             isPresented: Binding(
-                get: { pendingSubscription != nil },
-                set: { if !$0 { pendingSubscription = nil } }
+                get: { pendingMarkAllRead != nil },
+                set: { if !$0 { pendingMarkAllRead = nil } }
             ),
             titleVisibility: .visible
         ) {
-            // Every control that changes the user's real AO3 subscription
-            // routes through here, so the request only ever fires from the
-            // confirmed branch — and sends the exact action confirmed.
-            Button(pendingSubscription == true ? "Subscribe" : "Unsubscribe",
-                   role: pendingSubscription == true ? nil : .destructive) {
-                if let subscribe = pendingSubscription {
-                    state.setAuthorSubscription(username, subscribed: subscribe)
+            // The flag is manual-only, so a whole-list rewrite always
+            // passes through this confirmed branch.
+            Button(pendingMarkAllRead == true ? "Mark All as Read" : "Unmark All",
+                   role: pendingMarkAllRead == true ? nil : .destructive) {
+                if let mark = pendingMarkAllRead {
+                    state.setFinished(works.map(\.id), finished: mark)
                 }
-                pendingSubscription = nil
+                pendingMarkAllRead = nil
             }
-            Button("Cancel", role: .cancel) { pendingSubscription = nil }
+            Button("Cancel", role: .cancel) { pendingMarkAllRead = nil }
         } message: {
-            Text(pendingSubscription == true
-                 ? "This changes your AO3 account: AO3 will notify you when \(username) posts a new work. The request is sent over Tor."
-                 : "This changes your AO3 account: AO3 will stop notifying you when \(username) posts. The request is sent over Tor.")
+            let count = works.count == 1 ? "1 work" : "\(works.count) works"
+            Text(pendingMarkAllRead == true
+                 ? "This flags all \(count) in this list as finished reading."
+                 : "This clears the finished-reading flag on all \(count) in this list.")
         }
         .sheet(item: $exportedEpub) { exported in
             ShareSheet(items: [exported.url])
@@ -219,6 +222,41 @@ struct AuthorProfileView: View {
         }
     }
 
+    /// The active pane's AO3 actions — full-list refreshes are long
+    /// crawls, so they sit in this menu rather than on a one-tap button.
+    private var paneMenu: some View {
+        Menu {
+            if paneBusy {
+                Button { refreshOrCancelActivePane() } label: {
+                    Label("Cancel Refresh", systemImage: "xmark.circle")
+                }
+            } else {
+                if author.pane == .works, let stop = author.worksCrawlStop {
+                    Button { author.refreshWorks(resume: true) } label: {
+                        Label("Resume (page \(stop.nextPage) of \(stop.totalPages))", systemImage: "arrow.clockwise")
+                    }
+                }
+                Button { refreshOrCancelActivePane() } label: {
+                    Label(refreshTitle, systemImage: "arrow.clockwise")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(theme.ink2)
+                .frame(width: 36, height: 36)
+        }
+        .accessibilityLabel("More")
+    }
+
+    private var refreshTitle: String {
+        switch author.pane {
+        case .works: author.worksCrawlStop == nil ? "Refresh Works from AO3" : "Refresh All Works from AO3"
+        case .bookmarks: "Refresh Bookmarks from AO3"
+        case .collections: "Refresh Collections from AO3"
+        }
+    }
+
     private func cancelActivePane(_ opID: UInt64) {
         state.bridge.cancelOperation(opID)
         if author.pane == .works { author.cancelWorksRefresh() }
@@ -264,8 +302,9 @@ struct AuthorProfileView: View {
 
                 Spacer()
 
+                // Followed / Subscribed — following needs no account.
+                FollowBellMenu(target: .author(username), glyphSize: 16, hitSize: 36)
                 if state.ao3Username != nil {
-                    subscribeButton
                     moderationMenu
                 }
             }
@@ -290,12 +329,6 @@ struct AuthorProfileView: View {
                     .foregroundStyle(theme.ink3)
             }
 
-            if let error = state.userActionError("sub", username) {
-                Text("Couldn’t update AO3 subscription: \(error)")
-                    .font(Typography.uiCaption())
-                    .foregroundStyle(Color(hex: "CE514D"))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .padding(.top, 8)
         .padding(.bottom, 4)
@@ -319,32 +352,6 @@ struct AuthorProfileView: View {
         }
         .frame(width: 56, height: 56)
         .clipShape(Circle())
-    }
-
-    /// The envelope is the AO3 subscription (a real account change, always
-    /// confirmed); the local follow bell lives on work bylines.
-    private var subscribeButton: some View {
-        let subscribed = state.isSubscribedToAuthor(username)
-        let busy = state.isUserActionBusy("sub", username)
-        return Button {
-            pendingSubscription = !subscribed
-        } label: {
-            Group {
-                if busy {
-                    ProgressView().controlSize(.small).tint(theme.ink2)
-                } else {
-                    Image(systemName: subscribed ? "envelope.fill" : "envelope")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(subscribed ? theme.accent : theme.ink2)
-                }
-            }
-            .frame(width: 36, height: 36)
-        }
-        .buttonStyle(IconButtonPressStyle())
-        .disabled(busy)
-        .accessibilityLabel(subscribed
-                            ? "Stop AO3 notifying you when \(username) posts a new work"
-                            : "Have AO3 notify you when \(username) posts a new work")
     }
 
     private var moderationMenu: some View {
@@ -491,7 +498,9 @@ struct AuthorProfileView: View {
                 .buttonStyle(ButtonPressStyle())
             }
         } else if let error = author.worksError {
-            NetworkErrorView(message: error, onRetry: { author.refreshWorks() })
+            NetworkErrorView(message: error, onRetry: { author.refreshWorks(resume: author.worksCrawlStop != nil) })
+        } else if let stop = author.worksCrawlStop {
+            CrawlStoppedRow(stop: stop) { author.refreshWorks(resume: true) }
         } else if author.worksCrawledAt == nil || author.worksCrawledAt?.isEmpty == true {
             fetchButton("Fetch complete works list from AO3") { author.refreshWorks() }
         }
@@ -504,6 +513,7 @@ struct AuthorProfileView: View {
                     .padding(.top, 24)
             }
         } else {
+            markAllReadToggle
             LazyVStack(spacing: theme.rowGap) {
                 ForEach(works) { work in
                     WorkCardView(
@@ -621,6 +631,28 @@ struct AuthorProfileView: View {
         }
     }
 
+    /// Toggle above the works list: mark every listed work as finished, or
+    /// unmark them all once they are. Both directions confirm first.
+    private var markAllReadToggle: some View {
+        let all = allWorksFinished
+        return Button {
+            pendingMarkAllRead = !all
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: all ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 13, weight: .semibold))
+                Text(all ? "All marked as read" : "Mark all as read")
+                    .font(Typography.smallButtonLabel())
+                Spacer()
+            }
+            .foregroundStyle(all ? theme.sage : theme.ink2)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ButtonPressStyle())
+    }
+
     private func fetchButton(_ label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -658,8 +690,8 @@ struct BookmarkHitCard: View {
     @Environment(NavigationState.self) private var nav
 
     let hit: UBookmarkHit
-    var onNewReadingList: ((Work) -> Void)? = nil
-    var onExportEpub: ((Work) -> Void)? = nil
+    var onNewReadingList: ((Work) -> Void)?
+    var onExportEpub: ((Work) -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

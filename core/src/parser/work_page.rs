@@ -36,7 +36,7 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
     if date_updated.is_empty() {
         date_updated = date_published.clone();
     }
-    let complete = total_chapters.map_or(false, |t| chapter_count >= t);
+    let complete = total_chapters.is_some_and(|t| chapter_count >= t);
     let series = extract_work_page_series(&doc);
 
     let chapters = parse_chapters_content(&doc);
@@ -120,7 +120,9 @@ fn extract_work_page_authors(doc: &Html) -> Vec<String> {
     doc.select(&s).map(|el| text(&el)).collect()
 }
 
-fn extract_work_meta(doc: &Html) -> (Rating, Vec<Warning>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+type WorkMeta = (Rating, Vec<Warning>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+
+fn extract_work_meta(doc: &Html) -> WorkMeta {
     let rating_sel = sel("dd.rating.tags a.tag");
     let rating = doc.select(&rating_sel)
         .next()
@@ -258,8 +260,7 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
     // Use ID selector to avoid matching nested div.chapter.preface elements
     let mut chapters = Vec::new();
 
-    const CHAPTER_PARSE_CAP: usize = 200;
-    for i in 1..=CHAPTER_PARSE_CAP {
+    for i in 1.. {
         let ch_sel_str = format!("div#chapter-{i}");
         let Ok(ch_sel) = Selector::parse(&ch_sel_str) else { break };
         let Some(ch) = doc.select(&ch_sel).next() else { break };
@@ -329,11 +330,6 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
         });
     }
 
-    if chapters.len() == CHAPTER_PARSE_CAP {
-        // Surfaced, not silent: a 200+-chapter work is truncated here.
-        log_error!("parser",
-            "Chapter parse hit the {CHAPTER_PARSE_CAP}-chapter cap — later chapters were not parsed");
-    }
     if !chapters.is_empty() {
         return chapters;
     }
@@ -466,7 +462,7 @@ fn parse_list_items(list: &ElementRef) -> Vec<Vec<ContentBlock>> {
     list.select(&li_sel)
         .map(|li| {
             let has_block_children = li.children().any(|c| {
-                c.value().as_element().map_or(false, |e| {
+                c.value().as_element().is_some_and(|e| {
                     matches!(e.name(), "p" | "blockquote" | "ul" | "ol" | "div")
                 })
             });
@@ -567,10 +563,10 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
             }
         }
     }
-    while inlines.first().map_or(false, |i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+    while inlines.first().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
         inlines.remove(0);
     }
-    while inlines.last().map_or(false, |i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+    while inlines.last().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
         inlines.pop();
     }
     inlines

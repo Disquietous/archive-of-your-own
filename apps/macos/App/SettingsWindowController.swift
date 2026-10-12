@@ -13,7 +13,7 @@ struct SettingsRootView: View {
     private enum Tab: String, CaseIterable {
         case general = "General"
         case reading = "Reading"
-        case requests = "Requests"
+        case diagnostics = "Diagnostics"
         case privacy = "Privacy"
         case sync = "Sync"
 
@@ -21,7 +21,7 @@ struct SettingsRootView: View {
             switch self {
             case .general: "gearshape"
             case .reading: "textformat.size"
-            case .requests: "network"
+            case .diagnostics: "stethoscope"
             case .privacy: "shield.lefthalf.filled"
             case .sync: "icloud"
             }
@@ -43,8 +43,8 @@ struct SettingsRootView: View {
                         GeneralSettingsPane(theme: theme, appState: appState, model: model)
                     case .reading:
                         ReadingSettingsView(theme: theme, themedBackground: false)
-                    case .requests:
-                        RequestsSettingsPane(theme: theme, appState: appState)
+                    case .diagnostics:
+                        RequestsSettingsPane(theme: theme, appState: appState, model: model)
                     case .privacy:
                         PrivacySettingsPane(theme: theme, appState: appState, model: model)
                     case .sync:
@@ -123,7 +123,7 @@ struct SettingsCard<Content: View>: View {
 struct SettingsToggleRow: View {
     @Bindable var theme: AppTheme
     let label: String
-    var sublabel: String? = nil
+    var sublabel: String?
     @Binding var isOn: Bool
 
     var body: some View {
@@ -188,7 +188,10 @@ struct GeneralSettingsPane: View {
 
             SettingsGroup(theme: theme, label: "Links") {
                 ExternalLinkAppRow(theme: theme, appState: appState)
-                Text("Links that leave the app open in this application. Anything opened this way travels over that app's own connection, not this app's private one.")
+                Text("""
+                    Links that leave the app open in this application. Anything opened this way travels over that \
+                    app's own connection, not this app's private one.
+                    """)
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -196,32 +199,6 @@ struct GeneralSettingsPane: View {
 
             AccountSection(theme: theme, appState: appState)
 
-            SettingsGroup(theme: theme, label: "Sample Data") {
-                SettingsCard(theme: theme) {
-                    SettingsInfoRow(theme: theme, label: "Sample works",
-                                    value: model.sampleDataLoaded ? "Loaded" : "Not loaded")
-                }
-                Button {
-                    if model.sampleDataLoaded {
-                        model.clearSampleData()
-                    } else {
-                        model.loadSampleData()
-                    }
-                } label: {
-                    Text(model.sampleDataLoaded ? "Remove Sample Data" : "Load Sample Data")
-                        .font(Font(MacFont.ui(13, weight: .bold)))
-                        .foregroundStyle(model.sampleDataLoaded ? Color(hex: "CE514D") : theme.ink)
-                        .frame(maxWidth: .infinity, minHeight: 34)
-                        .background(theme.surface)
-                        .clipShape(RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                Text("Fictional works for testing and demos. Samples live in memory only — they never enter your encrypted library or touch the archive, and they disappear on quit.")
-                    .font(Font(MacFont.ui(11.5)))
-                    .foregroundStyle(theme.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .padding(16)
     }
@@ -275,9 +252,13 @@ private struct ExternalLinkAppRow: View {
 /// Everything about how the app talks to the archive: the global request
 /// timeout, and per-page overrides for request shapes that deserve more
 /// (an entire work) or less (an autocomplete) patience.
+/// Settings › Diagnostics: request timeouts, log retention and (debug
+/// builds) sample data — tools for troubleshooting, kept out of the
+/// everyday panes.
 struct RequestsSettingsPane: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
+    @Bindable var model: MacAppModel
 
     private let timeouts = [15, 30, 60, 120]
 
@@ -341,6 +322,39 @@ struct RequestsSettingsPane: View {
                     .foregroundStyle(theme.ink3)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // A testing tool: debug builds only.
+            #if DEBUG
+            SettingsGroup(theme: theme, label: "Sample Data") {
+                SettingsCard(theme: theme) {
+                    SettingsInfoRow(theme: theme, label: "Sample works",
+                                    value: model.sampleDataLoaded ? "Loaded" : "Not loaded")
+                }
+                Button {
+                    if model.sampleDataLoaded {
+                        model.clearSampleData()
+                    } else {
+                        model.loadSampleData()
+                    }
+                } label: {
+                    Text(model.sampleDataLoaded ? "Remove Sample Data" : "Load Sample Data")
+                        .font(Font(MacFont.ui(13, weight: .bold)))
+                        .foregroundStyle(model.sampleDataLoaded ? Color(hex: "CE514D") : theme.ink)
+                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .background(theme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                Text("""
+                    Fictional works for testing and demos. Samples live in memory only — they never enter your \
+                    encrypted library or touch the archive, and they disappear on quit.
+                    """)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            #endif
         }
         .padding(16)
     }
@@ -744,7 +758,10 @@ struct PrivacySettingsPane: View {
         if appState.autoLockMinutes == 0 {
             return "Auto-lock is disabled. Enter a number of minutes to lock the library after inactivity."
         }
-        return "After \(appState.autoLockMinutes) idle minute\(appState.autoLockMinutes == 1 ? "" : "s"), the library locks and the app returns to the unlock screen. Any activity in the app resets the timer. 0 disables."
+        return """
+            After \(appState.autoLockMinutes) idle minute\(appState.autoLockMinutes == 1 ? "" : "s"), the library \
+            locks and the app returns to the unlock screen. Any activity in the app resets the timer. 0 disables.
+            """
     }
 
     private var historyModeCaption: String {
@@ -813,7 +830,10 @@ struct PasswordChangeSheet: View {
                         .font(.system(size: 16, design: .monospaced).weight(.bold))
                         .foregroundStyle(theme.ink)
                         .textSelection(.enabled)
-                    Text("Write this down and keep it safe. If you forget your password, this is the only way to recover your data. It will not be shown again.")
+                    Text("""
+                        Write this down and keep it safe. If you forget your password, this is the only way to recover \
+                        your data. It will not be shown again.
+                        """)
                         .font(Font(MacFont.ui(12, weight: .medium)))
                         .foregroundStyle(Color(hex: "CE514D"))
                         .fixedSize(horizontal: false, vertical: true)

@@ -257,21 +257,6 @@ impl Storage {
         })
     }
 
-    /// Escape LIKE metacharacters so a search term is matched literally
-    /// (queries pair this with `ESCAPE '\'`).
-    pub(super) fn escape_like(term: &str) -> String {
-        term.trim()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    }
-
-    /// Map the search functions' `limit` to SQL: 0 means no limit, which
-    /// SQLite spells as a negative LIMIT.
-    pub(super) fn sql_limit(limit: u32) -> i64 {
-        if limit == 0 { -1 } else { limit as i64 }
-    }
-
     /// Local autocomplete: substring match, alphabetical. Answered from the
     /// in-memory tag cache — no SQL.
     pub fn search_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {

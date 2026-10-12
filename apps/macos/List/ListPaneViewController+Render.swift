@@ -31,11 +31,13 @@ extension ListPaneViewController {
         case .reading, .history, .bookmarks, .downloads:
             works = model.works(for: section)
             let meta = sectionMeta(for: section)
-            toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
+            let downloading = section == .reading ? bulkDownload.statusSuffix : ""
+            toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)\(downloading)")
             toolbar.setLeading([])
             var trailing: [NSView] = [sortFilterMenu.makeButton(for: section), worksFilterButton(for: section)]
             if section == .reading && !works.isEmpty {
                 trailing.insert(removeAllReadingButton(), at: 0)
+                trailing.insert(bulkDownload.update(ids: works.map(\.id)), at: 0)
             }
             if section == .history && !works.isEmpty {
                 trailing.insert(clearHistoryButton(), at: 0)
@@ -70,10 +72,10 @@ extension ListPaneViewController {
                     // A running check owns the queue; clearing it underneath
                     // that loop ends it early and the guard refuses the new
                     // one, so the click would do nothing useful.
-                    guard !self.appState.isCheckingSubscriptions else { return }
+                    guard !self.appState.isCheckingWhatsNew else { return }
                     Task {
-                        self.appState.bridge.resetSubscriptionCheck()
-                        await self.appState.checkSubscriptions(force: true)
+                        self.appState.bridge.resetWhatsNewCheck()
+                        await self.appState.runWhatsNewCheck(force: true)
                     }
                 })
                 buttons.append(sortFilterMenu.makeButton(for: .whatsNew))
@@ -81,8 +83,8 @@ extension ListPaneViewController {
                 toolbar.setLeading([])
                 toolbar.setTrailing(buttons)
                 let overlay: AnyView?
-                if !appState.isCheckingSubscriptions && works.isEmpty {
-                    let checkStatus = appState.subscriptionCheckTask.statusMessage
+                if !appState.isCheckingWhatsNew && works.isEmpty {
+                    let checkStatus = appState.whatsNewCheckTask.statusMessage
                     overlay = AnyView(EmptyStateMac(theme: theme, icon: "bell",
                                                     title: "Nothing new",
                                                     message: checkStatus ?? "Updates from works and authors you follow appear here."))
@@ -95,7 +97,6 @@ extension ListPaneViewController {
         case .subscriptions:
             do {
                 displayedSubscriptions = model.lists.filteredSubscriptions
-                displayedLastChecked = appState.subscriptionLastChecked
                 works = []
                 let subtitle: String
                 if appState.isLoadingSubscriptions {
@@ -105,16 +106,17 @@ extension ListPaneViewController {
                 } else {
                     subtitle = "\(displayedSubscriptions.count) subscriptions"
                 }
-                toolbar.configure(title: "Following", sub: subtitle)
-                let followingFilter = filterButton(key: "following", active: !model.lists.subscriptionListFilter.isEmpty) { [theme, model] in
+                toolbar.configure(title: "Subscriptions", sub: subtitle)
+                let subscriptionsFilter = filterButton(key: "following", active: !model.lists.subscriptionListFilter.isEmpty) { [theme, model] in
                     AnyView(SingleFieldFilterView(theme: theme, model: model,
-                                                  title: "Filter Following",
+                                                  title: "Filter Subscriptions",
                                                   placeholder: "Name",
                                                   text: Binding(get: { model.lists.subscriptionListFilter },
                                                                 set: { model.lists.subscriptionListFilter = $0 })))
                 }
                 toolbar.setLeading([])
-                toolbar.setTrailing([followingFilter, ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Refresh list from AO3") { [weak self] in
+                toolbar.setTrailing([subscriptionsFilter, ToolButton(theme: theme, symbol: "arrow.down.circle",
+                                                                     tooltip: "Refresh list from AO3") { [weak self] in
                     guard let self else { return }
                     guard appState.ao3Username != nil else {
                         appState.subscriptionError = "Sign in to AO3 in Settings first"
@@ -122,7 +124,7 @@ extension ListPaneViewController {
                     }
                     guard !appState.isLoadingSubscriptions else { return }
                     appState.subscriptionError = nil
-                    Task { await self.appState.loadSubscriptions(force: true) }
+                    Task { await self.appState.loadSubscriptions(force: true, userInitiated: true) }
                 }])
                 let overlay: AnyView?
                 if let err = appState.subscriptionError, !err.isEmpty, !appState.isLoadingSubscriptions {
@@ -215,18 +217,15 @@ extension ListPaneViewController {
                 showAuthorProfileContent(username: author, activePane: model.author.pane)
                 break
             }
-            let count = model.follows.followedAuthorNames.count + model.appState.followedAuthors.count
-            toolbar.configure(title: "Authors", sub: "\(count) followed")
+            let count = model.follows.follows(of: .author).count + model.follows.follows(of: .work).count
+                + model.follows.follows(of: .series).count
+            toolbar.configure(title: "Following", sub: "\(count) followed")
             toolbar.setLeading([])
             let followButton = ToolButton(theme: theme, symbol: "plus", tooltip: "Follow an author") { [model] in
                 model.lists.showFollowAuthorField.toggle()
             }
             followButton.isOn = model.lists.showFollowAuthorField
-            let sourceFiltered = !(model.lists.authorsIncludeFollowed && model.lists.authorsIncludeSubscribed)
-            toolbar.setTrailing([followButton,
-                                 filterButton(key: "authors", active: sourceFiltered) { [theme, model] in
-                AnyView(AuthorsSourceFilterView(theme: theme, model: model))
-            }])
+            toolbar.setTrailing([followButton])
             showVariant(AuthorsList(theme: theme, appState: appState, model: model), section: section)
 
         case .stats:
@@ -244,15 +243,15 @@ extension ListPaneViewController {
 
         switch section {
         case .whatsNew:
-            if appState.subscriptionCheckTask.isReconnecting,
-               let msg = appState.subscriptionCheckTask.statusMessage {
+            if appState.whatsNewCheckTask.isReconnecting,
+               let msg = appState.whatsNewCheckTask.statusMessage {
                 message = msg
                 active = true
-            } else if appState.isCheckingSubscriptions {
-                let done = appState.subscriptionCheckTotal - appState.subscriptionCheckRemaining
-                message = "Checking \(done) of \(appState.subscriptionCheckTotal)"
+            } else if appState.isCheckingWhatsNew {
+                let done = appState.whatsNewCheckTotal - appState.whatsNewCheckRemaining
+                message = "Checking \(done) of \(appState.whatsNewCheckTotal)"
                 active = true
-            } else if let msg = appState.subscriptionCheckTask.statusMessage, !msg.isEmpty {
+            } else if let msg = appState.whatsNewCheckTask.statusMessage, !msg.isEmpty {
                 message = msg
             }
         case .subscriptions:
@@ -273,10 +272,18 @@ extension ListPaneViewController {
         default:
             break
         }
+        // A bell-menu outcome ("Subscribed on AO3 and followed on this
+        // device.") shows here on any section until it auto-clears.
+        var isError = false
+        if let notice = model.follows.notice {
+            message = notice.message
+            active = false
+            isError = notice.isError
+        }
 
         if let message {
             statusLabel.stringValue = message
-            statusLabel.textColor = theme.nsInk3
+            statusLabel.textColor = isError ? NSColor(Color(hex: "CE514D")) : theme.nsInk3
             statusBar.layer?.backgroundColor = theme.nsSurface.cgColor
             statusBarHeight.constant = 26
             statusBar.isHidden = false

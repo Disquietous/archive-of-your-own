@@ -143,13 +143,6 @@ final class AppState {
         didSet { UserDefaults.standard.set(lockOnBackground, forKey: "lockOnBackground") }
     }
 
-    /// iOS: opt-in background subscription check (a Tor bootstrap per run,
-    /// so off by default — the minimal-traffic policy says no unrequested
-    /// refresh). Foreground checks are unaffected.
-    var backgroundCheckEnabled: Bool = UserDefaults.standard.bool(forKey: "backgroundCheckEnabled") {
-        didSet { UserDefaults.standard.set(backgroundCheckEnabled, forKey: "backgroundCheckEnabled") }
-    }
-
     /// When the app last left the foreground (iOS); nil while active.
     @ObservationIgnored var backgroundedAt: Date?
 
@@ -227,16 +220,27 @@ final class AppState {
     /// Works a census confirmed are no longer listed on AO3 — cached copies
     /// are retained everywhere; views may badge them.
     var goneWorkIDs: Set<String> = []
-    var isCheckingSubscriptions = false
-    let subscriptionCheckTask = NetworkTask()
+    /// Works the user flagged as finished reading. Manual only — never
+    /// inferred from progress; the detail header toggle and "mark all as
+    /// read" are the only writers.
+    var finishedWorkIDs: Set<String> = [] {
+        // The list engine's finished filter reads the flag: memoized
+        // orderings go stale when it changes.
+        didSet { worksGeneration &+= 1 }
+    }
+    var isCheckingWhatsNew = false
+    let whatsNewCheckTask = NetworkTask()
     /// Live picture of the check for monitor UIs (queue, current item,
     /// outcomes, pause/stop requests).
-    let checkMonitor = SubscriptionCheckMonitor()
-    var subscriptionCheckTotal: Int = 0
-    var subscriptionCheckRemaining: Int = 0
-    /// Per-subscription last-completed-check stamps ("subType:subId" →
-    /// DB datetime), mirrored from subscription_snapshots for row labels.
-    var subscriptionLastChecked: [String: String] = [:]
+    let checkMonitor = WhatsNewCheckMonitor()
+    var whatsNewCheckTotal: Int = 0
+    var whatsNewCheckRemaining: Int = 0
+    /// Per-follow last-completed-check stamps ("kind:target_id" lowercased
+    /// → DB datetime), mirrored from the follows table for row labels.
+    var followLastChecked: [String: String] = [:]
+    /// Subscriptions with no follow, found by a user-initiated reload —
+    /// each platform shows one "Follow All / Not Now" prompt for them.
+    var pendingFollowAll: [USubscription]?
 
     init() {
         bridge.recoveryObserver = RecoveryObserver(state: self)
@@ -307,9 +311,6 @@ final class AppState {
     /// Same, for the detail pane's kudos POST.
     let kudosOp = TrackedOperation()
 
-    /// Work IDs with a subscription toggle in flight (disables the button).
-    var subscriptionTogglingWorkIDs: Set<String> = []
-
     /// Fetched profiles keyed by lowercased username.
     var userProfiles: [String: UUserProfile] = [:]
     /// Usernames with a profile fetch in flight.
@@ -345,6 +346,10 @@ final class AppState {
     var ao3AccountCount = 0
 
     var downloadingWorkIDs: Set<String> = []
+    /// A running "Download all": works finished so far of the batch.
+    var bulkDownload: BulkDownloadProgress?
+    /// Stop requested: the batch ends after the work in flight.
+    @ObservationIgnored var bulkDownloadStopRequested = false
 
     /// The user's per-image size cap (AppTheme persists it in UserDefaults;
     /// read directly here to keep AppState theme-independent). 0 = no limit.
@@ -353,11 +358,26 @@ final class AppState {
         return UInt64(max(0, mb)) * 1_048_576
     }
 
-    var subscriptionCheckFailed: Int = 0
+    var whatsNewCheckFailed: Int = 0
 
     /// Platform hook: called with the number of works newly added to What's
     /// New by a completed check. macOS posts a system notification from it.
     @ObservationIgnored var onNewWorksFound: ((Int) -> Void)?
+
+    /// Launch found a follow unchecked for longer than
+    /// `whatsNewOverdueSecs`. Each platform shows a warning offering to
+    /// check now; the check never starts on its own.
+    var whatsNewCheckOverdue = false
+    static let whatsNewOverdueSecs: UInt64 = 24 * 3600
+    /// The overdue warning as the platforms present it: held until the
+    /// network is usable. With Tor on, nothing shows before the circuit and
+    /// the Cloudflare check are in place (the launch gate's own condition)
+    /// and Tor is currently connected.
+    var showWhatsNewOverdue: Bool {
+        whatsNewCheckOverdue && bridge.launchState == .ready && !bridge.networkBlocked
+    }
+    /// The warning shows at most once per app run.
+    @ObservationIgnored var whatsNewOverdueWarned = false
 
     // MARK: - Browse & Search state
 
@@ -453,7 +473,7 @@ final class AppState {
         // Load notifications and What's New works
         loadNotifications()
         loadNewWorks()
-        loadSubscriptionLastChecked()
+        loadFollowLastChecked()
 
         // Persisted subscriptions load inside reloadLibraryFromStorage, but
         // the username only became known just above.
@@ -468,15 +488,13 @@ final class AppState {
         // iCloud sync starts once the library is readable (no-op when off).
         cloudSync.attach(self)
 
-        // Auto-check subscriptions when due. Rust decides per row: any
-        // subscription whose own last-checked stamp is missing or stale
-        // (or a leftover queue from an interrupted round) makes the check
-        // due — the old single global date claimed round-end freshness for
-        // rows actually checked much earlier.
-        if ao3Username != nil {
-            let follows = bridge.getFollowed(kind: "author")
-            if bridge.isSubscriptionCheckDue(extraAuthors: follows) {
-                Task { await checkSubscriptions() }
+        // No automatic check at launch — warn instead when a full check is
+        // overdue. Rust decides per row: any checked follow whose
+        // own last-checked stamp is missing or older than the threshold.
+        if ao3Username != nil, !whatsNewOverdueWarned {
+            if bridge.isWhatsNewCheckOverdue(maxAgeSecs: Self.whatsNewOverdueSecs) {
+                whatsNewOverdueWarned = true
+                whatsNewCheckOverdue = true
             }
         }
     }
@@ -485,8 +503,8 @@ final class AppState {
     var allKnownWorks: [Work] {
         var seen = Set<String>()
         var result: [Work] = []
-        for w in cachedWorks + fetchedWorks.values + browseResults + searchResults {
-            if seen.insert(w.id).inserted { result.append(w) }
+        for w in cachedWorks + fetchedWorks.values + browseResults + searchResults where seen.insert(w.id).inserted {
+            result.append(w)
         }
         return result
     }

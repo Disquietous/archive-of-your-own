@@ -7,13 +7,6 @@ struct PrivacySheetView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var circuitTask: Task<Void, Never>?
-    @State private var showAddAccount = false
-    @State private var addUsername = ""
-    @State private var addPassword = ""
-    @State private var addError: String?
-    @State private var isAddingAccount = false
-    @State private var showLogoutConfirm = false
-    @State private var isLoggingOut = false
     @State private var showDisconnectConfirm = false
     @State private var requestingNewNodes = false
 
@@ -23,14 +16,6 @@ struct PrivacySheetView: View {
 
     private var isPrivate: Bool {
         state.bridge.torStatus.isConnected && !isInProgress
-    }
-
-    private var accounts: [(id: String, username: String, isActive: Bool)] {
-        state.bridge.getAccounts()
-    }
-
-    private var activeUsername: String {
-        accounts.first(where: \.isActive)?.username ?? "Guest"
     }
 
     var body: some View {
@@ -43,14 +28,8 @@ struct PrivacySheetView: View {
 
             ScrollView {
                 VStack(spacing: 16) {
-                    // Account selector + inbox
+                    // Signed-in identity (accounts are managed in Settings)
                     accountRow
-
-                    // Add account form
-                    if showAddAccount {
-                        addAccountForm
-                            .padding(.horizontal, theme.pad)
-                    }
 
                     // Tor status
                     torSection
@@ -86,159 +65,45 @@ struct PrivacySheetView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Your connection will no longer be routed through Tor. Your IP address will be visible to AO3 and your network provider will be able to see that you are accessing AO3.")
-        }
-        .alert("Log Out?", isPresented: $showLogoutConfirm) {
-            Button("Log out", role: .destructive) {
-                isLoggingOut = true
-                Task {
-                    await state.bridge.logoutAccount()
-                    state.refreshAO3Username()
-                    isLoggingOut = false
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The session will be ended on AO3. You'll need to sign in again to use this account.")
+            Text("""
+                Your connection will no longer be routed through Tor. Your IP address will be visible to AO3 and your \
+                network provider will be able to see that you are accessing AO3.
+                """)
         }
     }
 
-    // MARK: - Account Row
+    // MARK: - Account
 
+    /// Who requests go out as. Switching, adding and signing out live in
+    /// Settings › AO3 Accounts; this row only shows the identity and links
+    /// there.
     private var accountRow: some View {
         HStack(spacing: 12) {
-            // Account dropdown
-            Menu {
-                ForEach(accounts, id: \.id) { account in
-                    Button {
-                        if !account.isActive {
-                            state.switchAccount(account.id)
-                        }
-                    } label: {
-                        HStack {
-                            Text(account.username)
-                            if account.isActive {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-
-                Divider()
-
-                Button {
-                    showAddAccount = true
-                    addUsername = ""
-                    addPassword = ""
-                    addError = nil
-                } label: {
-                    Label("Add account", systemImage: "plus")
-                }
-
-                if state.ao3Username != nil {
-                    Button(role: .destructive) {
-                        showLogoutConfirm = true
-                    } label: {
-                        Label("Log out", systemImage: "rectangle.portrait.and.arrow.right")
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(theme.ink2)
-                    Text(activeUsername)
-                        .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
-                        .foregroundStyle(theme.ink)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(theme.ink3)
-                }
-                .padding(.horizontal, 14)
-                .frame(height: 40)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-
-            Spacer()
-
-            // Inbox button
-            if state.ao3Username != nil {
-                Button {
-                    nav.openInbox()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "tray")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Inbox")
-                            .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
-                        if state.inboxUnreadCount > 0 {
-                            Text("\(state.inboxUnreadCount)")
-                                .font(.custom("HankenGrotesk", size: 11).weight(.bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 5)
-                                .frame(minWidth: 18, minHeight: 18)
-                                .background(Color(hex: "CE514D"))
-                                .clipShape(Capsule())
-                        }
-                    }
+            HStack(spacing: 6) {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.ink2)
+                Text(state.ao3Username ?? "Not signed in")
+                    .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
                     .foregroundStyle(theme.ink)
-                    .padding(.horizontal, 14)
-                    .frame(height: 40)
-                    .background(theme.surface2)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                dismiss()
+                nav.selectedTab = .settings
+                nav.settingsPath = NavigationPath([AppDestination.accountManagement])
+            } label: {
+                Text("Accounts")
+                    .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
+                    .foregroundStyle(theme.accent)
             }
         }
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(theme.surface2)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
         .padding(.horizontal, theme.pad)
-    }
-
-    // MARK: - Add Account Form
-
-    private var addAccountForm: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("Username", text: $addUsername)
-                .font(Typography.uiBody())
-                .textContentType(.username)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .padding(10)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            SecureFieldWithToggle(placeholder: "Password", text: $addPassword)
-                .font(Typography.uiBody())
-                .padding(10)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if let addError {
-                Text(addError)
-                    .font(Typography.uiCaption())
-                    .foregroundStyle(Color(hex: "CE514D"))
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    Task { await addAccount() }
-                } label: {
-                    Text(isAddingAccount ? "Signing in…" : "Sign in")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.onAccent)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.accent))
-                }
-                .disabled(isAddingAccount || addUsername.isEmpty || addPassword.isEmpty)
-
-                Button { showAddAccount = false } label: {
-                    Text("Cancel")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.ink3)
-                }
-            }
-        }
     }
 
     // MARK: - Tor Section
@@ -448,32 +313,6 @@ struct PrivacySheetView: View {
             }
         }
         .padding(.horizontal, theme.pad)
-    }
-
-    // MARK: - Add Account
-
-    private func addAccount() async {
-        guard !state.bridge.networkBlocked else {
-            addError = "Connect to Tor first."
-            return
-        }
-        isAddingAccount = true
-        addError = nil
-        do {
-            _ = try await state.bridge.addAccount(username: addUsername, password: addPassword)
-            state.refreshAO3Username()
-            showAddAccount = false
-        } catch {
-            let desc = "\(error)"
-            if desc.contains("timeout") {
-                addError = "Request timed out. Try getting a new circuit first."
-            } else if desc.contains("Login failed") {
-                addError = "Login failed. Check your credentials."
-            } else {
-                addError = error.localizedDescription
-            }
-        }
-        isAddingAccount = false
     }
 
     // MARK: - Status

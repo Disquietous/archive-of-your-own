@@ -34,8 +34,7 @@ struct LibraryView: View {
                 }
                 hubGroup("Discover") {
                     hubRow(.fandoms, "flame", "Fandoms", count: follows.followedFandoms.count)
-                    hubRow(.authors, "person", "Authors",
-                           count: follows.followedAuthorNames.count + state.followedAuthors.count)
+                    hubRow(.authors, "person", "Following", count: follows.checkedFollowCount)
                 }
                 hubGroup("Following") {
                     hubRow(.whatsNew, "bell.badge", "What’s New", badge: state.newUnviewedWorkCount)
@@ -66,12 +65,14 @@ struct LibraryView: View {
 
             Spacer()
 
-            // Subscription check button
+            // What's New check button
             if state.ao3Username != nil {
+                // Checks what's due (and resumes a stopped run); the
+                // status bar below carries progress and Stop.
                 Button {
-                    Task { await state.checkSubscriptions(force: true) }
+                    state.startWhatsNewCheck(all: false)
                 } label: {
-                    if state.isCheckingSubscriptions {
+                    if state.isCheckingWhatsNew {
                         ProgressView()
                             .controlSize(.small)
                             .tint(theme.ink2)
@@ -82,7 +83,7 @@ struct LibraryView: View {
                     }
                 }
                 .buttonStyle(IconButtonPressStyle())
-                .disabled(state.isCheckingSubscriptions)
+                .disabled(state.isCheckingWhatsNew)
             }
 
             PrivacyPillView {
@@ -95,13 +96,15 @@ struct LibraryView: View {
 
     private var lastCheckedLabel: some View {
         Group {
-            if state.ao3Username != nil, let ts = state.bridge.getLastSubscriptionCheck(),
+            if state.ao3Username != nil, let ts = state.bridge.getLastWhatsNewCheck(),
                let date = DBTimestamp.date(ts) {
                 Text("Last checked: \(date.formatted(.relative(presentation: .named)))")
                     .font(.custom("HankenGrotesk", size: 11).weight(.medium))
                     .foregroundStyle(theme.ink3)
                     .padding(.horizontal, theme.pad)
             }
+            WhatsNewCheckStatusBar()
+                .padding(.horizontal, theme.pad)
         }
     }
 
@@ -134,6 +137,10 @@ struct LibraryView: View {
         .padding(.horizontal, theme.pad)
     }
 
+    /// Hub row glyphs track the text size like the labels beside them.
+    @ScaledMetric(relativeTo: .body) private var hubIconSize: CGFloat = 15
+    @ScaledMetric(relativeTo: .body) private var hubChevronSize: CGFloat = 12
+
     private func hubRow(_ section: LibrarySection, _ icon: String, _ label: String,
                         count: Int? = nil, badge: Int = 0) -> some View {
         Button {
@@ -141,13 +148,13 @@ struct LibraryView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: hubIconSize, weight: .medium))
                     .foregroundStyle(theme.ink3)
-                    .frame(width: 22)
+                    .frame(width: hubIconSize + 7)
                 Text(label)
                     .font(.custom("HankenGrotesk", size: 15).weight(.medium))
                     .foregroundStyle(theme.ink)
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Spacer(minLength: 4)
                 if badge > 0 {
                     Text("\(badge)")
@@ -163,7 +170,7 @@ struct LibraryView: View {
                         .foregroundStyle(theme.ink3)
                 }
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: hubChevronSize, weight: .semibold))
                     .foregroundStyle(theme.ink3)
             }
             .padding(.horizontal, 14)

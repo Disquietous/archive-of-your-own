@@ -9,94 +9,176 @@ use super::consts::*;
 use super::works_cache::WorkEntity;
 use super::{map_sql, Storage};
 
+/// (sub_type, sub_id, name, ao3_id)
+pub type SubscriptionRow = (String, String, String, Option<String>);
+/// (total_works, last_census_at, census_state)
+pub type FollowCensusMeta = (Option<u32>, Option<String>, Option<String>);
+
+/// One follow as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowRow {
+    pub kind: String,
+    pub target_id: String,
+    pub name: String,
+    pub added_at: String,
+    pub last_checked_at: Option<String>,
+}
+
 impl Storage {
     // -------------------------------------------------------------------
-    // Followed items (device-local fandom/author follows)
+    // Follows (library-level; the What's New check's only input)
     // -------------------------------------------------------------------
 
-    /// The user's follows of `kind` ("fandom" or "author"), in the order
-    /// they were added — matching the list order the UI always showed.
-    pub fn get_followed(&self, kind: &str) -> Result<Vec<String>, AppError> {
+    /// Follows of `kind` (all kinds when None), in the order they were added.
+    pub fn get_follows(&self, kind: Option<&str>) -> Result<Vec<FollowRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT name FROM followed_items WHERE kind = ?1 ORDER BY rowid"
+            "SELECT kind, target_id, name, added_at, last_checked_at FROM follows
+             WHERE ?1 IS NULL OR kind = ?1 ORDER BY rowid"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![kind], |row| row.get::<_, String>(0))
+        let rows = stmt.query_map(params![kind], |r| Ok(FollowRow {
+            kind: r.get(0)?,
+            target_id: r.get(1)?,
+            name: r.get(2)?,
+            added_at: r.get(3)?,
+            last_checked_at: r.get(4)?,
+        })).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    pub fn is_followed(&self, kind: &str, target_id: &str) -> Result<bool, AppError> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM follows WHERE kind = ?1 AND target_id = ?2",
+            params![kind, target_id], |r| r.get(0),
+        ).map_err(map_sql)?;
+        Ok(count > 0)
+    }
+
+    /// True when the follow was created (false: it already existed).
+    pub fn add_follow(&self, kind: &str, target_id: &str, name: &str) -> Result<bool, AppError> {
+        let n = self.conn.execute(
+            "INSERT OR IGNORE INTO follows (kind, target_id, name) VALUES (?1, ?2, ?3)",
+            params![kind, target_id, name],
+        ).map_err(map_sql)?;
+        Ok(n > 0)
+    }
+
+    /// True when a follow was removed. Its check state goes with it.
+    pub fn remove_follow(&self, kind: &str, target_id: &str) -> Result<bool, AppError> {
+        let n = self.conn.execute(
+            "DELETE FROM follows WHERE kind = ?1 AND target_id = ?2",
+            params![kind, target_id],
+        ).map_err(map_sql)?;
+        Ok(n > 0)
+    }
+
+    /// Everything a What's New round covers: (kind, target_id, name) for
+    /// every checkable follow, sorted by display name so the request order
+    /// is predictable.
+    pub fn get_check_targets(&self) -> Result<Vec<(String, String, String)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, target_id, name FROM follows
+             WHERE kind IN ('author', 'work', 'series')
+             ORDER BY name COLLATE NOCASE"
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
 
-    pub fn add_followed(&self, kind: &str, name: &str) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO followed_items (kind, name) VALUES (?1, ?2)",
-            params![kind, name],
-        ).map_err(map_sql)?;
+    // -------------------------------------------------------------------
+    // Subscriptions (the signed-in account's AO3 subscriptions only)
+    // -------------------------------------------------------------------
+
+    /// The account subscription data belongs to: the active account's
+    /// username. None when no account is active — no subscription data is
+    /// readable or writable then.
+    pub fn subscription_account(&self) -> Option<String> {
+        self.get_active_account().ok().flatten()
+            .map(|(_, username, _)| username)
+            .filter(|u| !u.is_empty())
+    }
+
+    /// Drop every subscription row. Runs on every account transition
+    /// (activate another account, sign out, remove the active account).
+    pub fn clear_subscriptions(&self) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM subscriptions", []).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn remove_followed(&self, kind: &str, name: &str) -> Result<(), AppError> {
-        self.conn.execute(
-            "DELETE FROM followed_items WHERE kind = ?1 AND name = ?2",
-            params![kind, name],
-        ).map_err(map_sql)?;
-        Ok(())
-    }
-
-    // -------------------------------------------------------------------
-    // Subscriptions (persisted list)
-    // -------------------------------------------------------------------
-
-    pub fn save_subscriptions(&self, subs: &[(String, String, String, Option<String>)]) -> Result<(), AppError> {
+    /// Replace `account`'s subscription list.
+    pub fn save_subscriptions(&self, account: &str,
+                              subs: &[(String, String, String, Option<String>)]) -> Result<(), AppError> {
         let mut seen = std::collections::HashSet::new();
         for (sub_type, sub_id, name, _) in subs {
-            if !seen.insert((sub_type.as_str(), sub_id.as_str())) {
+            if !seen.insert((sub_type.as_str(), sub_id.to_lowercase())) {
                 crate::dlog("WARN", "storage",
                     &format!("Duplicate subscription: type={sub_type} id={sub_id} name={name}"));
             }
         }
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
-        tx.execute("DELETE FROM subscriptions", []).map_err(map_sql)?;
+        tx.execute("DELETE FROM subscriptions WHERE account = ?1", params![account]).map_err(map_sql)?;
         let mut stmt = tx.prepare(SQL_UPSERT_SUBSCRIPTION).map_err(map_sql)?;
         for (sub_type, sub_id, name, ao3_id) in subs {
-            stmt.execute(params![sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
+            stmt.execute(params![account, sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
         }
         drop(stmt);
         tx.commit().map_err(map_sql)
     }
 
-    pub fn add_subscription(&self, sub_type: &str, sub_id: &str, name: &str,
+    pub fn add_subscription(&self, account: &str, sub_type: &str, sub_id: &str, name: &str,
                             ao3_id: Option<&str>) -> Result<(), AppError> {
         self.conn.execute(
             SQL_UPSERT_SUBSCRIPTION,
-            params![sub_type, sub_id, name, ao3_id],
+            params![account, sub_type, sub_id, name, ao3_id],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn remove_subscription(&self, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
+    pub fn remove_subscription(&self, account: &str, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
         self.conn.execute(
-            "DELETE FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id],
+            "DELETE FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3",
+            params![account, sub_type, sub_id],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_subscriptions(&self) -> Result<Vec<(String, String, String, Option<String>)>, AppError> {
+    pub fn get_subscriptions(&self, account: &str) -> Result<Vec<SubscriptionRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT sub_type, sub_id, name, ao3_id FROM subscriptions"
+            "SELECT sub_type, sub_id, name, ao3_id FROM subscriptions WHERE account = ?1"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![account], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
 
-    /// AO3's subscription record id for a local subscription, when known.
-    pub fn get_subscription_ao3_id(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
+    /// `account`'s subscriptions with no matching follow.
+    pub fn get_unfollowed_subscriptions(&self, account: &str)
+        -> Result<Vec<SubscriptionRow>, AppError>
+    {
         let mut stmt = self.conn.prepare(
-            "SELECT ao3_id FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2"
+            "SELECT s.sub_type, s.sub_id, s.name, s.ao3_id FROM subscriptions s
+             WHERE s.account = ?1 AND NOT EXISTS (
+                 SELECT 1 FROM follows f
+                 WHERE f.kind = s.sub_type AND f.target_id = s.sub_id)
+             ORDER BY s.name COLLATE NOCASE"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![sub_type, sub_id],
+        let rows = stmt.query_map(params![account], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
+    /// AO3's subscription record id for one of `account`'s subscriptions.
+    pub fn get_subscription_ao3_id(&self, account: &str, sub_type: &str, sub_id: &str)
+        -> Result<Option<String>, AppError>
+    {
+        let mut stmt = self.conn.prepare(
+            "SELECT ao3_id FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![account, sub_type, sub_id],
                                       |row| row.get::<_, Option<String>>(0)).map_err(map_sql)?;
         match rows.next() {
             Some(Ok(id)) => Ok(id),
@@ -104,49 +186,50 @@ impl Storage {
         }
     }
 
-    pub fn has_subscription(&self, sub_type: &str, sub_id: &str) -> Result<bool, AppError> {
+    pub fn has_subscription(&self, account: &str, sub_type: &str, sub_id: &str) -> Result<bool, AppError> {
         let count: u32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM subscriptions WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id], |row| row.get(0)
+            "SELECT COUNT(*) FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3",
+            params![account, sub_type, sub_id], |row| row.get(0)
         ).map_err(map_sql)?;
         Ok(count > 0)
     }
 
     // -------------------------------------------------------------------
-    // Subscription snapshots (one date per subscription)
+    // Follow check state (on the follow row). Writes are UPDATE-only: the
+    // check never creates a follow, and a target unfollowed mid-check
+    // simply absorbs nothing.
     // -------------------------------------------------------------------
 
-    pub fn save_subscription_snapshot(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-        date_updated: &str,
-    ) -> Result<(), AppError> {
-        // Upsert, NOT INSERT OR REPLACE: replace would null out the census
-        // columns (total_works, last_census_at, census_state) on every check.
-        self.conn
-            .execute(
-                "INSERT INTO subscription_snapshots (sub_type, sub_id, date_updated)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(sub_type, sub_id) DO UPDATE SET date_updated = ?3",
-                params![sub_type, sub_id, date_updated],
-            )
-            .map_err(map_sql)?;
-        Ok(())
+    /// The newest update date the last check saw. Ok(None) = no follow row
+    /// or never checked (the next check seeds silently).
+    pub fn get_follow_baseline(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT date_updated FROM follows WHERE kind = ?1 AND target_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![kind, target_id], |row| {
+            row.get::<_, Option<String>>(0)
+        }).map_err(map_sql)?;
+        match rows.next() {
+            Some(Ok(d)) => Ok(d.filter(|d| !d.is_empty())),
+            Some(Err(e)) => Err(map_sql(e)),
+            None => Ok(None),
+        }
     }
 
-    /// Census metadata for one subscription: (total_works, last_census_at,
-    /// census_state). All None when the row doesn't exist yet.
-    pub fn get_snapshot_census_meta(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-    ) -> Result<(Option<u32>, Option<String>, Option<String>), AppError> {
+    pub fn set_follow_baseline(&self, kind: &str, target_id: &str, date_updated: &str) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "date_updated", &date_updated)
+    }
+
+    /// Census metadata for one follow: (total_works, last_census_at,
+    /// census_state). All None when the follow doesn't exist.
+    pub fn get_follow_census_meta(&self, kind: &str, target_id: &str)
+        -> Result<FollowCensusMeta, AppError>
+    {
         let mut stmt = self.conn.prepare(
             "SELECT total_works, last_census_at, census_state
-             FROM subscription_snapshots WHERE sub_type = ?1 AND sub_id = ?2"
+             FROM follows WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+        let mut rows = stmt.query_map(params![kind, target_id], |row| {
             Ok((
                 row.get::<_, Option<u32>>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -160,82 +243,31 @@ impl Storage {
         }
     }
 
-    pub fn set_snapshot_total_works(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-        total: u32,
-    ) -> Result<(), AppError> {
-        self.ensure_snapshot_row(sub_type, sub_id)?;
-        self.conn.execute(
-            "UPDATE subscription_snapshots SET total_works = ?3
-             WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id, total],
-        ).map_err(map_sql)?;
-        Ok(())
+    pub fn set_follow_total_works(&self, kind: &str, target_id: &str, total: u32) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "total_works", &total)
     }
 
     /// Persist (or clear, with None) the in-progress census JSON.
-    pub fn set_snapshot_census_state(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-        state: Option<&str>,
-    ) -> Result<(), AppError> {
-        self.ensure_snapshot_row(sub_type, sub_id)?;
-        self.conn.execute(
-            "UPDATE subscription_snapshots SET census_state = ?3
-             WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id, state],
-        ).map_err(map_sql)?;
-        Ok(())
+    pub fn set_follow_census_state(&self, kind: &str, target_id: &str, state: Option<&str>) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "census_state", &state)
     }
 
-    pub fn set_snapshot_last_census(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-        at: &str,
-    ) -> Result<(), AppError> {
-        self.ensure_snapshot_row(sub_type, sub_id)?;
-        self.conn.execute(
-            "UPDATE subscription_snapshots SET last_census_at = ?3
-             WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id, at],
-        ).map_err(map_sql)?;
-        Ok(())
+    pub fn set_follow_last_census(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "last_census_at", &at)
     }
 
-    pub fn set_works_crawled_at(&self, sub_type: &str, sub_id: &str, at: &str) -> Result<(), AppError> {
-        self.ensure_snapshot_row(sub_type, sub_id)?;
-        self.conn.execute(
-            "UPDATE subscription_snapshots SET works_crawled_at = ?3
-             WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id, at],
-        ).map_err(map_sql)?;
-        Ok(())
+    /// Stamp "this follow's own check completed now" — per-row, so an
+    /// interrupted round can't misrepresent when each target was actually
+    /// checked (the global queue-drain time only describes the round).
+    pub fn set_follow_last_checked(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "last_checked_at", &at)
     }
 
-    /// Stamp "this subscription's own check completed now" — per-row, so an
-    /// interrupted round can't misrepresent when each subscription was
-    /// actually checked (the global queue-drain time only describes the
-    /// round, never individual rows).
-    pub fn set_snapshot_last_checked(&self, sub_type: &str, sub_id: &str, at: &str) -> Result<(), AppError> {
-        self.ensure_snapshot_row(sub_type, sub_id)?;
-        self.conn.execute(
-            "UPDATE subscription_snapshots SET last_checked_at = ?3
-             WHERE sub_type = ?1 AND sub_id = ?2",
-            params![sub_type, sub_id, at],
-        ).map_err(map_sql)?;
-        Ok(())
-    }
-
-    pub fn get_snapshot_last_checked(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
+    pub fn get_follow_last_checked(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT last_checked_at FROM subscription_snapshots
-             WHERE sub_type = ?1 AND sub_id = ?2"
+            "SELECT last_checked_at FROM follows WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
+        let mut rows = stmt.query_map(params![kind, target_id], |row| {
             row.get::<_, Option<String>>(0)
         }).map_err(map_sql)?;
         match rows.next() {
@@ -245,56 +277,36 @@ impl Storage {
         }
     }
 
-    /// Every stamped (sub_type, sub_id, last_checked_at) — one query so list
-    /// UIs can label rows without a per-row round trip.
-    pub fn get_all_snapshot_last_checked(&self) -> Result<Vec<(String, String, String)>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT sub_type, sub_id, last_checked_at FROM subscription_snapshots
-             WHERE last_checked_at IS NOT NULL AND last_checked_at != ''"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-        }).map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
-    }
-
-    pub fn get_works_crawled_at(&self, sub_type: &str, sub_id: &str) -> Result<Option<String>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT works_crawled_at FROM subscription_snapshots
-             WHERE sub_type = ?1 AND sub_id = ?2"
-        ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
-            row.get::<_, Option<String>>(0)
-        }).map_err(map_sql)?;
-        match rows.next() {
-            Some(Ok(v)) => Ok(v),
-            Some(Err(e)) => Err(map_sql(e)),
-            None => Ok(None),
-        }
-    }
-
-    fn ensure_snapshot_row(&self, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
+    fn update_follow_column(&self, kind: &str, target_id: &str, column: &str,
+                            value: &dyn rusqlite::ToSql) -> Result<(), AppError> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO subscription_snapshots (sub_type, sub_id, date_updated)
-             VALUES (?1, ?2, '')",
-            params![sub_type, sub_id],
+            &format!("UPDATE follows SET {column} = ?3 WHERE kind = ?1 AND target_id = ?2"),
+            params![kind, target_id, value],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_subscription_snapshot(
-        &self,
-        sub_type: &str,
-        sub_id: &str,
-    ) -> Result<Option<String>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT date_updated FROM subscription_snapshots WHERE sub_type = ?1 AND sub_id = ?2"
+    // -------------------------------------------------------------------
+    // Works crawls (Refresh Works stamp per author/series)
+    // -------------------------------------------------------------------
+
+    pub fn set_works_crawled_at(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT INTO crawl_stamps (kind, target_id, crawled_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(kind, target_id) DO UPDATE SET crawled_at = ?3",
+            params![kind, target_id, at],
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![sub_type, sub_id], |row| {
-            row.get::<_, String>(0)
-        }).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_works_crawled_at(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT crawled_at FROM crawl_stamps WHERE kind = ?1 AND target_id = ?2"
+        ).map_err(map_sql)?;
+        let mut rows = stmt.query_map(params![kind, target_id], |row| row.get::<_, String>(0))
+            .map_err(map_sql)?;
         match rows.next() {
-            Some(Ok(d)) => Ok(Some(d)),
+            Some(Ok(v)) => Ok(Some(v)),
             Some(Err(e)) => Err(map_sql(e)),
             None => Ok(None),
         }
@@ -344,6 +356,24 @@ impl Storage {
         self.with_savepoint(Savepoint::WorksGone, || {
             self.works_cache.set_gone(&self.conn, work_ids, gone)
         })
+    }
+
+    /// Set (or clear) the user's finished-reading flag. Purely manual —
+    /// nothing in the core ever derives it from progress.
+    pub fn set_works_finished(&self, work_ids: &[u64], finished: bool) -> Result<(), AppError> {
+        self.with_savepoint(Savepoint::WorksFinished, || {
+            self.works_cache.set_finished(&self.conn, work_ids, finished)
+        })
+    }
+
+    /// Works the user has flagged as finished. Answered from the works cache.
+    pub fn get_finished_work_ids(&self) -> Result<Vec<u64>, AppError> {
+        Ok(self.works_cache
+            .all()
+            .into_iter()
+            .filter(|e| e.finished)
+            .map(|e| e.summary.id)
+            .collect())
     }
 
     /// Answered from the works cache.

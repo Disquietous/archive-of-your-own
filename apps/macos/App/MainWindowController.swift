@@ -16,9 +16,9 @@ final class MainWindowController: NSWindowController {
         self.appState = appState
         self.model = model
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                              backing: .buffered, defer: false)
+        let window = LinkDropWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+                                    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                    backing: .buffered, defer: false)
         window.title = "AoYO"
         // Panes draw their own 52px toolbars (per the design); the system
         // titlebar is hidden and the traffic lights float over the sidebar head.
@@ -27,6 +27,13 @@ final class MainWindowController: NSWindowController {
         window.minSize = NSSize(width: 1000, height: 600)
         window.center()
         window.setFrameAutosaveName("MainWindow")
+        // AO3 links dropped on the window open like ⌘L; not while the
+        // launch gate (setup / unlock) is up.
+        window.openLink = { [unowned model] raw in model.openAO3URL(raw) }
+        window.acceptsLinks = { [unowned appState] in
+            appState.bridge.isInitialized && !appState.bridge.showingRecoveryKey
+        }
+        window.enableLinkDrops()
         super.init(window: window)
 
         // Route between the launch gate (database setup / unlock) and the

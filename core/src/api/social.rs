@@ -181,8 +181,15 @@ impl AO3App {
 
     // -- Subscription notifications --
 
-    pub async fn fetch_subscriptions(&self, username: String) -> Result<Vec<USubscription>, AO3Error> {
+    /// Reload the signed-in account's subscription list from AO3 and store
+    /// it as that account's list. Subscription data only — follows are
+    /// never touched here. A result that lands after the account changed is
+    /// discarded (the switch already emptied subscriptions).
+    pub async fn sync_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
+            let Some(username) = storage.lock().await.subscription_account() else {
+                return Err(AO3Error::Network { message: "Sign in to AO3 in Settings first".to_string() });
+            };
             let mut all_subs = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
@@ -232,62 +239,15 @@ impl AO3App {
                 log_db("upsert_ao3_user", s.upsert_ao3_user(&profile));
             }
 
-            Ok(all_subs)
-        }).await
-    }
-
-    /// Toggle the AO3 subscription for a work and mirror the result into
-    /// the local subscriptions table. Prefers the direct one-POST paths
-    /// (cached CSRF token; stored record id for unsubscribe) and falls back
-    /// to the intent-aware page-fetch path when those can't run or fail.
-    /// Returns the new state: true = now subscribed.
-    pub async fn toggle_work_subscription(&self, work_id: u64, username: Option<String>)
-        -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
-            let id = work_id.to_string();
-            let (locally_subscribed, stored_ao3_id) = {
-                let s = storage.lock().await;
-                (s.has_subscription("work", &id).unwrap_or(false),
-                 s.get_subscription_ao3_id("work", &id).unwrap_or(None))
-            };
-            let want = !locally_subscribed;
-
-            let c = client.read().await;
-            let mut outcome: Option<(bool, Option<String>)> = None;
-            if let Some(user) = username.as_deref().filter(|u| !u.is_empty()) {
-                if want {
-                    if let Ok(Some(new_id)) = c.subscribe_work_direct(user, work_id).await {
-                        outcome = Some((true, Some(new_id)));
-                    }
-                } else if let Some(ref ao3_id) = stored_ao3_id {
-                    if let Ok(true) = c.unsubscribe_work_direct(user, ao3_id).await {
-                        outcome = Some((false, None));
-                    }
-                }
-            }
-            drop(c);
-            // Ambiguous or impossible direct path: the page-fetch path reads
-            // live state and only submits when it differs from `want`. This
-            // is the one branch above that propagates a hard error, so it's
-            // the one worth routing through the recovery engine.
-            let (subscribed, ao3_id) = match outcome {
-                Some(o) => o,
-                None => with_recovery(client, storage.clone(), OpKind::Fetch { label: "work_subscribe".to_string() }, RetrySafety::Idempotent,
-                    move |client| async move {
-                        client.read().await.set_work_subscription(work_id, want).await.map_err(AO3Error::from)
-                    }).await?,
-            };
-
             let s = storage.lock().await;
-            if subscribed {
-                let name = s.get_work(work_id).ok().flatten()
-                    .map(|w| w.title)
-                    .unwrap_or_else(|| format!("Work {work_id}"));
-                log_db("add_subscription", s.add_subscription("work", &id, &name, ao3_id.as_deref()));
-            } else {
-                log_db("remove_subscription", s.remove_subscription("work", &id));
+            if s.subscription_account().as_deref() != Some(username.as_str()) {
+                return Err(AO3Error::Cancelled);
             }
-            Ok(subscribed)
+            let tuples: Vec<(String, String, String, Option<String>)> = all_subs.iter()
+                .map(|u| (u.sub_type.clone(), u.id.clone(), u.name.clone(), u.ao3_id.clone()))
+                .collect();
+            s.save_subscriptions(&username, &tuples).map_err(AO3Error::from)?;
+            Ok(all_subs)
         }).await
     }
 
@@ -302,8 +262,9 @@ impl AO3App {
     }
 
     /// Fetch a user's profile from AO3, cache it, and mirror the live
-    /// subscription state into the local subscriptions table (only when
-    /// the session was signed in — a logged-out page carries no signal).
+    /// subscription state into the signed-in account's subscriptions (only
+    /// when the session was signed in — a logged-out page carries no
+    /// signal). Never touches follows.
     pub async fn fetch_user_profile(&self, username: String) -> Result<UUserProfile, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let (username, _) = split_author_byline(&username);
@@ -316,12 +277,13 @@ impl AO3App {
                 }).await?;
             let s = storage.lock().await;
             log_db("upsert_user_profile", s.upsert_user_profile(&profile));
-            if profile.viewer_signed_in {
+            // Subscription data only — never follows.
+            if let (true, Some(account)) = (profile.viewer_signed_in, s.subscription_account()) {
                 if profile.subscribed {
-                    log_db("add_subscription", s.add_subscription("author", &profile.username,
+                    log_db("add_subscription", s.add_subscription(&account, "author", &profile.username,
                         &profile.username, profile.subscription_ao3_id.as_deref()));
                 } else {
-                    log_db("remove_subscription", s.remove_subscription("author", &profile.username));
+                    log_db("remove_subscription", s.remove_subscription(&account, "author", &profile.username));
                 }
             }
             Ok(UUserProfile::from(profile))
@@ -398,77 +360,6 @@ impl AO3App {
         }).await
     }
 
-    /// Toggle the AO3 subscription for a user based on the local mirror.
-    /// Returns the new state: true = now subscribed.
-    pub async fn toggle_user_subscription(&self, target: String, username: Option<String>)
-        -> Result<bool, AO3Error> {
-        let (canonical, _) = split_author_byline(&target);
-        let locally_subscribed = {
-            let s = self.storage.lock().await;
-            s.has_subscription("author", &canonical).unwrap_or(false)
-        };
-        self.set_user_subscription(target, !locally_subscribed, username).await
-    }
-
-    /// Set the AO3 subscription for a user to exactly `subscribe` and mirror
-    /// the result into the local subscriptions table (sub_type "author", so
-    /// it shows under Subscriptions → Following immediately). Intent is
-    /// explicit — a confirmed "Subscribe to X" never becomes an unsubscribe
-    /// because the local mirror was stale. Prefers the direct one-POST
-    /// paths and falls back to the intent-aware profile-page path, which
-    /// is a harmless no-op when AO3 already has the desired state.
-    /// Returns the new state: true = now subscribed.
-    pub async fn set_user_subscription(&self, target: String, subscribe: bool, username: Option<String>)
-        -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
-            let (target, _) = split_author_byline(&target);
-            let (stored_ao3_id, numeric_id) = {
-                let s = storage.lock().await;
-                (s.get_subscription_ao3_id("author", &target).unwrap_or(None),
-                 s.get_user_profile(&target).ok().flatten().and_then(|p| p.numeric_id))
-            };
-            let want = subscribe;
-
-            let c = client.read().await;
-            let mut outcome: Option<(bool, Option<String>)> = None;
-            if let Some(user) = username.as_deref().filter(|u| !u.is_empty()) {
-                if want {
-                    if let Some(ref nid) = numeric_id {
-                        if let Ok(Some(new_id)) = c.subscribe_user_direct(user, nid).await {
-                            outcome = Some((true, Some(new_id)));
-                        }
-                    }
-                } else if let Some(ref ao3_id) = stored_ao3_id {
-                    // The unsubscribe endpoint is type-agnostic — same
-                    // record-id POST works for user subscriptions.
-                    if let Ok(true) = c.unsubscribe_work_direct(user, ao3_id).await {
-                        outcome = Some((false, None));
-                    }
-                }
-            }
-            drop(c);
-            let (subscribed, ao3_id) = match outcome {
-                Some(o) => o,
-                None => {
-                    let target_for_fetch = target.clone();
-                    with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_subscribe".to_string() }, RetrySafety::Idempotent,
-                        move |client| {
-                            let target = target_for_fetch.clone();
-                            async move { client.read().await.set_user_subscription(&target, want).await.map_err(AO3Error::from) }
-                        }).await?
-                }
-            };
-
-            let s = storage.lock().await;
-            if subscribed {
-                log_db("add_subscription", s.add_subscription("author", &target, &target, ao3_id.as_deref()));
-            } else {
-                log_db("remove_subscription", s.remove_subscription("author", &target));
-            }
-            Ok(subscribed)
-        }).await
-    }
-
     /// Toggle blocking a user on AO3 and mirror the result locally.
     /// Returns the new state: true = now blocked.
     pub async fn toggle_user_block(&self, target: String, username: String)
@@ -483,20 +374,13 @@ impl AO3App {
         self.toggle_user_moderation(target, username, "muted").await
     }
 
-    // -- Subscription persistence (user-triggered refresh) --
+    // -- Subscription persistence --
 
-    pub fn persist_subscriptions(&self, subscriptions: Vec<USubscription>) -> Result<(), AO3Error> {
-        let s = self.storage.blocking_lock();
-        let tuples: Vec<(String, String, String, Option<String>)> = subscriptions
-            .into_iter()
-            .map(|u| (u.sub_type, u.id, u.name, u.ao3_id))
-            .collect();
-        s.save_subscriptions(&tuples).map_err(AO3Error::from)
-    }
-
+    /// The signed-in account's stored subscriptions. Empty when signed out.
     pub fn get_persisted_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
         let s = self.storage.blocking_lock();
-        let rows = s.get_subscriptions().map_err(AO3Error::from)?;
+        let Some(account) = s.subscription_account() else { return Ok(Vec::new()) };
+        let rows = s.get_subscriptions(&account).map_err(AO3Error::from)?;
         Ok(rows.into_iter()
             .map(|(t, id, name, ao3_id)| USubscription { sub_type: t, id, name, ao3_id })
             .collect())

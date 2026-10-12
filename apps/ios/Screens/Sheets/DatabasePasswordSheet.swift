@@ -82,7 +82,10 @@ struct DatabasePasswordSheet: View {
                             .multilineTextAlignment(.center)
                             .textSelection(.enabled)
 
-                        Text("Write this down and keep it safe. If you forget your password, this is the only way to recover your data. It will not be shown again.")
+                        Text("""
+                            Write this down and keep it safe. If you forget your password, this is the only way to \
+                            recover your data. It will not be shown again.
+                            """)
                             .font(.custom("HankenGrotesk", size: 12).weight(.medium))
                             .foregroundStyle(Color(hex: "CE514D"))
                             .multilineTextAlignment(.center)
@@ -235,6 +238,8 @@ struct DatabasePasswordSheet: View {
         }
 
         if state.bridge.changePassword(to: password) {
+            // The stored password is stale now; the user re-enables it.
+            BiometricUnlock.disable()
             let key = RecoveryKey.generate()
             if let blob = RecoveryKey.encryptPassword(password, withRecoveryKey: key) {
                 RecoveryKey.storeEncryptedBlob(blob)
@@ -263,6 +268,7 @@ struct DatabasePasswordSheet: View {
             return
         }
         if state.bridge.removePassword() {
+            BiometricUnlock.disable()
             RecoveryKey.deleteEncryptedBlob()
             success = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {

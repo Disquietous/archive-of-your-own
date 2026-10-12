@@ -1,10 +1,8 @@
 import SwiftUI
-import BackgroundTasks
 import UserNotifications
 
 @main
 struct ArchiveApp: App {
-    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var theme = AppTheme()
@@ -12,22 +10,11 @@ struct ArchiveApp: App {
     @State private var models: AppModels
     @State private var nav = NavigationState()
 
-    private static let subscriptionCheckIdentifier = "com.archiveofyourown.reader.subscriptioncheck"
-
     init() {
         let appState = AppState()
         _appState = State(initialValue: appState)
         _models = State(initialValue: AppModels(appState: appState))
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: Self.subscriptionCheckIdentifier,
-            using: nil
-        ) { [appState] task in
-            guard let bgTask = task as? BGProcessingTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            Self.handleSubscriptionCheck(bgTask, appState: appState)
-        }
+        Self.retireBackgroundCheck()
     }
 
     var body: some Scene {
@@ -40,6 +27,7 @@ struct ArchiveApp: App {
                 }
             }
             .modifier(privacyCover)
+            .modifier(TextSizeRange())
             .onChange(of: scenePhase) { _, newPhase in
                 handleScenePhase(newPhase)
             }
@@ -55,6 +43,7 @@ struct ArchiveApp: App {
                 WorkWindowRootView(value: value)
                     .modifier(sharedEnvironment)
                     .modifier(privacyCover)
+                    .modifier(TextSizeRange())
             }
         }
     }
@@ -75,10 +64,12 @@ struct ArchiveApp: App {
     @ViewBuilder
     private var normalLaunchView: some View {
         let bridge = appState.bridge
+        // swiftlint:disable redundant_discardable_let
         let _ = bridge.isInitialized
         let _ = bridge.showingRecoveryKey
         let _ = bridge.hasDbPassword
         let _ = bridge.torHasConnectedOnce
+        // swiftlint:enable redundant_discardable_let
         switch bridge.launchState {
         case .ready:
             ContentView()
@@ -91,17 +82,6 @@ struct ArchiveApp: App {
                     // Library file swapped underneath the core (iCloud copy
                     // adopted, backup restored): reload the models' caches.
                     appState.onLibraryReplaced = { models.loadPersisted() }
-                    installNewWorksHooks()
-                    Self.updateBackgroundCheckSchedule(enabled: appState.backgroundCheckEnabled)
-                }
-                .onChange(of: appState.backgroundCheckEnabled) { _, enabled in
-                    Self.updateBackgroundCheckSchedule(enabled: enabled)
-                    if enabled { Self.requestNotificationPermission() }
-                }
-                .onChange(of: appState.newUnviewedWorkCount, initial: true) { _, count in
-                    // No-op until the user has granted badge permission; the
-                    // number is the same one the What's New surface shows.
-                    UNUserNotificationCenter.current().setBadgeCount(count)
                 }
         case .locked:
             DatabaseUnlockScreen()
@@ -131,120 +111,31 @@ struct ArchiveApp: App {
 
     private func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
-        case .background: appState.didEnterBackground()
+        case .background:
+            appState.didEnterBackground()
+            // iOS suspends the app shortly: end works crawls now so they
+            // land in a clean "Stopped — Resume" state instead of dying
+            // mid-request.
+            if models.author.isLoadingWorks { models.author.cancelWorksRefresh() }
+            if models.subscriptionWorks.isLoading { models.subscriptionWorks.cancelRefresh() }
         case .active: appState.didBecomeActive()
         default: break
         }
     }
 
-    // MARK: - New-works notification
+    // MARK: - Retired background check
 
-    /// A completed check that added works to What's New posts a local
-    /// notification when the app is not in front (a background run, or the
-    /// user left mid-check); in the foreground the badge is enough. The
-    /// notification tap lands on the Library tab.
-    private func installNewWorksHooks() {
-        appState.onNewWorksFound = { count in
-            guard UIApplication.shared.applicationState != .active else { return }
-            Self.postNewWorksNotification(count)
-        }
-        appDelegate.onOpenWhatsNew = { [nav] in
-            nav.goHome()
-            nav.openLibrarySection(.whatsNew)
-        }
-    }
-
-    private static func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) { _, _ in }
-    }
-
-    private static func postNewWorksNotification(_ count: Int) {
+    /// New works reach the phone through a foreground check or a synced
+    /// library; there is no background check, notification or app badge.
+    /// Clears what an older build left behind: a badge number and
+    /// delivered "works updated" notifications. (A task request it queued
+    /// can't launch the app: the identifier is gone from Info.plist.)
+    private static func retireBackgroundCheck() {
         let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized
-                    || settings.authorizationStatus == .provisional else { return }
-            let content = UNMutableNotificationContent()
-            content.title = count == 1 ? "1 work updated" : "\(count) works updated"
-            content.body = "Works you follow have new chapters waiting."
-            content.threadIdentifier = "whats-new"
-            let request = UNNotificationRequest(identifier: "whats-new-\(UUID().uuidString)",
-                                                content: content, trigger: nil)
-            center.add(request)
-        }
-    }
-
-    // MARK: - Background Task (opt-in)
-
-    private static func updateBackgroundCheckSchedule(enabled: Bool) {
-        if enabled {
-            scheduleSubscriptionCheck()
-        } else {
-            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: subscriptionCheckIdentifier)
-        }
-    }
-
-    static func scheduleSubscriptionCheck() {
-        let request = BGProcessingTaskRequest(identifier: subscriptionCheckIdentifier)
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 2 * 60 * 60)
-        request.requiresNetworkConnectivity = true
-        request.requiresExternalPower = false
-        try? BGTaskScheduler.shared.submit(request)
-    }
-
-    private static func handleSubscriptionCheck(_ task: BGProcessingTask, appState: AppState) {
-        // The toggle may have been switched off after this run was queued.
-        guard appState.backgroundCheckEnabled else {
-            task.setTaskCompleted(success: true)
-            return
-        }
-        let workItem = Task {
-            // Connect Tor if needed
-            let useTor = UserDefaults.standard.bool(forKey: "useTorByDefault")
-            if useTor {
-                await appState.connectTor()
-            }
-
-            await appState.checkSubscriptions()
-
-            // Schedule next check
-            scheduleSubscriptionCheck()
-            task.setTaskCompleted(success: true)
-        }
-
-        task.expirationHandler = {
-            workItem.cancel()
-            task.setTaskCompleted(success: false)
-        }
-    }
-}
-
-// MARK: - App delegate (notification taps)
-
-final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    /// Set by the app once the UI is up; routes a notification tap.
-    var onOpenWhatsNew: (() -> Void)?
-
-    func application(_ application: UIApplication,
-                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        UNUserNotificationCenter.current().delegate = self
-        return true
-    }
-
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                didReceive response: UNNotificationResponse,
-                                withCompletionHandler completionHandler: @escaping () -> Void) {
-        DispatchQueue.main.async { [weak self] in
-            self?.onOpenWhatsNew?()
-        }
-        completionHandler()
-    }
-
-    /// Foreground delivery: the badge already reflects the count, so a
-    /// banner would only duplicate it.
-    func userNotificationCenter(_ center: UNUserNotificationCenter,
-                                willPresent notification: UNNotification,
-                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([])
+        center.setBadgeCount(0)
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        UserDefaults.standard.removeObject(forKey: "backgroundCheckEnabled")
     }
 }
 
@@ -265,7 +156,18 @@ struct SharedEnvironmentModifier: ViewModifier {
             .environment(models.subscriptionWorks)
             .environment(models.search)
             .environment(models.ops)
+            .environment(models.tts)
             .preferredColorScheme(theme.preferredColorScheme)
+    }
+}
+
+/// App chrome follows the system text size (custom fonts scale with the
+/// body style) across the standard range. The accessibility sizes are
+/// capped at the largest standard size: the chrome's fixed control heights
+/// would clip beyond it. The reader's text has its own size setting.
+struct TextSizeRange: ViewModifier {
+    func body(content: Content) -> some View {
+        content.dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 }
 

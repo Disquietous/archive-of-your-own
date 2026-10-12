@@ -219,7 +219,7 @@ impl TagCache {
         let mut hits: Vec<Arc<TagEntity>> = inner
             .by_id
             .values()
-            .filter(|e| tag_type.map_or(true, |t| e.tag_type == t))
+            .filter(|e| tag_type.is_none_or(|t| e.tag_type == t))
             .filter(|e| e.name.to_ascii_lowercase().contains(&needle))
             .cloned()
             .collect();

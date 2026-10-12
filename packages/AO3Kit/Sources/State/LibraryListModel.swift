@@ -214,7 +214,8 @@ final class LibraryListModel {
             wordsExpr: f.words,
             tags: Array(f.tags),
             fandoms: Array(f.fandoms),
-            completedOnly: f.completed)
+            completedOnly: f.completed,
+            finished: f.finished.rawValue)
     }
 
     /// Run a work list through the Rust core's filter/sort engine. Sample
@@ -263,6 +264,8 @@ final class LibraryListModel {
         /// Only works whose chapter count equals the declared total
         /// (32/32); an unknown total (5/?) never matches.
         var completed = false
+        /// The user's manual finished-reading flag.
+        var finished: FinishedFilter = .any
         var isActive: Bool {
             !text.trimmingCharacters(in: .whitespaces).isEmpty
                 || !kudos.trimmingCharacters(in: .whitespaces).isEmpty
@@ -270,18 +273,27 @@ final class LibraryListModel {
                 || !tags.isEmpty
                 || !fandoms.isEmpty
                 || completed
+                || finished != .any
+        }
+    }
+
+    enum FinishedFilter: String, CaseIterable {
+        case any, unfinished, finished
+        var label: String {
+            switch self {
+            case .any: "Any"
+            case .unfinished: "Not finished"
+            case .finished: "Finished"
+            }
         }
     }
 
     /// Per-section work-list filter (text over title/author/summary + tag toggles).
     var workListFilters: [Section: WorkListFilter] = [:]
-    /// Following list: subscription name.
+    /// Subscriptions list: subscription name.
     var subscriptionListFilter = ""
-    /// Authors list: username.
+    /// Following list: name.
     var authorsListFilter = ""
-    /// Authors list source filters (header popover checkboxes).
-    var authorsIncludeFollowed = true
-    var authorsIncludeSubscribed = true
     /// Whether the "Follow an author" input is showing (header + button).
     var showFollowAuthorField = false
     /// Fandoms list: fandom name.

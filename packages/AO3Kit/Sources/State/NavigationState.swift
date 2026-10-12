@@ -1,17 +1,20 @@
 import SwiftUI
 
 enum AppTab: String, Hashable {
-    case library, browse, search, settings
+    case library, search, settings
 }
 
 enum AppDestination: Hashable {
     case workDetail(workID: String)
     case reader(workID: String, chapterIndex: Int, entireWork: Bool = false)
     case collectionsBrowse
+    /// AO3's latest works (the former Browse tab), from the Search landing.
+    case latestWorks
     case collectionWorks(name: String, title: String)
     case readingList(listID: Int64, name: String)
-    case authorWorks(username: String)
-    case inbox
+    /// `pane`: the profile pane to show (a link to a user's bookmarks);
+    /// nil = the profile's own default.
+    case authorWorks(username: String, pane: AuthorProfileModel.Pane? = nil)
     case inboxThread
     case accountManagement
     /// Settings › Requests drill-ins (iOS).
@@ -21,6 +24,8 @@ enum AppDestination: Hashable {
     /// Settings › iCloud Sync › Backups (iOS).
     case libraryBackups
     case debugLog
+    /// Settings › Diagnostics (iOS): timeouts, logs, sample data.
+    case diagnostics
     /// A Library hub section (iOS): one list screen per macOS sidebar entry.
     case librarySection(LibrarySection)
     /// Fandoms drill-in: the library's works in one fandom.
@@ -60,7 +65,6 @@ enum SheetType: Identifiable, Hashable {
 final class NavigationState {
     var selectedTab: AppTab = .library
     var libraryPath = NavigationPath()
-    var browsePath = NavigationPath()
     var searchPath = NavigationPath()
     var settingsPath = NavigationPath()
     var presentedSheet: SheetType?
@@ -112,7 +116,6 @@ final class NavigationState {
         let dest = AppDestination.readingList(listID: listId, name: name)
         switch selectedTab {
         case .library: libraryPath.append(dest)
-        case .browse: browsePath.append(dest)
         case .search: searchPath.append(dest)
         case .settings: settingsPath.append(dest)
         }
@@ -157,11 +160,14 @@ final class NavigationState {
         run()
     }
 
+    func openLatestWorks() {
+        push(.latestWorks)
+    }
+
     func openCollections() {
         let dest = AppDestination.collectionsBrowse
         switch selectedTab {
         case .library: libraryPath.append(dest)
-        case .browse: browsePath.append(dest)
         case .search: searchPath.append(dest)
         case .settings: settingsPath.append(dest)
         }
@@ -171,7 +177,6 @@ final class NavigationState {
         let dest = AppDestination.collectionWorks(name: name, title: title)
         switch selectedTab {
         case .library: libraryPath.append(dest)
-        case .browse: browsePath.append(dest)
         case .search: searchPath.append(dest)
         case .settings: settingsPath.append(dest)
         }
@@ -203,6 +208,10 @@ final class NavigationState {
         push(.fandomWorks(tag: tag))
     }
 
+    func openAuthor(_ username: String, pane: AuthorProfileModel.Pane? = nil) {
+        push(.authorWorks(username: username, pane: pane))
+    }
+
     func openSubscriptionWorks(id: String, name: String, subType: String) {
         push(.subscriptionWorks(id: id, name: name, subType: subType))
     }
@@ -211,7 +220,6 @@ final class NavigationState {
     private func push(_ dest: AppDestination) {
         switch selectedTab {
         case .library: libraryPath.append(dest)
-        case .browse: browsePath.append(dest)
         case .search: searchPath.append(dest)
         case .settings: settingsPath.append(dest)
         }
@@ -222,23 +230,11 @@ final class NavigationState {
         detailPath = NavigationPath()
         readerImmersive = false
         libraryPath = NavigationPath()
-        browsePath = NavigationPath()
         searchPath = NavigationPath()
         settingsPath = NavigationPath()
         presentedSheet = nil
         selectedTab = .library
         goHomeRequested = true
-    }
-
-    func openInbox() {
-        let dest = AppDestination.inbox
-        switch selectedTab {
-        case .library: libraryPath.append(dest)
-        case .browse: browsePath.append(dest)
-        case .search: searchPath.append(dest)
-        case .settings: settingsPath.append(dest)
-        }
-        presentedSheet = nil
     }
 
     func goBack() {
@@ -248,7 +244,6 @@ final class NavigationState {
         }
         switch selectedTab {
         case .library: if !libraryPath.isEmpty { libraryPath.removeLast() }
-        case .browse: if !browsePath.isEmpty { browsePath.removeLast() }
         case .search: if !searchPath.isEmpty { searchPath.removeLast() }
         case .settings: if !settingsPath.isEmpty { settingsPath.removeLast() }
         }

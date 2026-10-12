@@ -16,7 +16,6 @@ extension AppState {
         isConnectingTor = true
         defer { isConnectingTor = false }
 
-        let wasConnected = bridge.torStatus.isConnected
         // Always persist session cookies before the transport swap wipes the
         // jar — the Rust side refuses to overwrite authenticated cookies with
         // an anonymous jar, so this is safe even when logged out. (Previously

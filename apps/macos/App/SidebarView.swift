@@ -31,8 +31,10 @@ struct SidebarView: View {
                     topGroup
                     group("Discover") {
                         item(.fandoms, "flame", "Fandoms", count: model.follows.followedFandoms.count)
-                        item(.authors, "person", "Authors",
-                             count: model.follows.followedAuthorNames.count + model.appState.followedAuthors.count)
+                        item(.authors, "person", "Following",
+                             count: model.follows.follows(of: .author).count
+                                 + model.follows.follows(of: .work).count
+                                 + model.follows.follows(of: .series).count)
                     }
                     group("Following") {
                         item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)
@@ -141,7 +143,6 @@ struct SidebarView: View {
         .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
         .padding(.horizontal, 8)
     }
-
 
     /// The app-state hub pill: identity on the first line, the circuit's
     /// node country codes on the second. Clicking opens the full hub

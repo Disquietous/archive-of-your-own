@@ -28,7 +28,10 @@ struct LibraryBackupsScreen: View {
         ZStack(alignment: .top) {
             List {
                 if sync.backups.isEmpty {
-                    Text("No backups yet. One is made whenever this library is replaced — by the iCloud copy, or by restoring a backup — and whenever this device replaces another device's iCloud copy.")
+                    Text("""
+                        No backups yet. One is made whenever this library is replaced — by the iCloud copy, or by \
+                        restoring a backup — and whenever this device replaces another device's iCloud copy.
+                        """)
                         .font(Typography.uiSmall())
                         .foregroundStyle(theme.ink3)
                         .fixedSize(horizontal: false, vertical: true)

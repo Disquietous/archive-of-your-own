@@ -27,6 +27,13 @@ pub fn extract_user_icon_url(html: &str) -> Option<String> {
 // Subscription page parser (/users/{username}/subscriptions)
 // ---------------------------------------------------------------------------
 
+/// Parse AO3's subscriptions page to extract subscription entries.
+///
+/// Each subscription is an `li` or `dl` element containing links that indicate
+/// the subscription type via URL pattern:
+/// - `/users/{name}/pseuds` or `/users/{name}` => author subscription
+/// - `/works/{id}` => work subscription
+/// - `/series/{id}` => series subscription
 pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppError> {
     let doc = Html::parse_document(html);
     let mut subs = Vec::new();

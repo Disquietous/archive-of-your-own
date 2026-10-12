@@ -4,33 +4,31 @@ use super::*;
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
-    // -- Sequential subscription check queue --
+    // -- Sequential What's New check queue (follows only) --
 
-    /// Build (or extend) the What's-New check queue. `extra_authors` are
-    /// device-local follows — they join the queue as author checks,
-    /// deduplicated against real author subscriptions. Leftover queue items
-    /// (an interrupted round, census continuations) keep their place at the
-    /// front; everything else joins behind them sorted alphabetically by
-    /// display name so the user can predict the request order. With
-    /// `only_stale`, a subscription joins only when its own
+    /// Build (or extend) the What's New check queue from the follows.
+    /// Leftover queue items (an interrupted round, census continuations)
+    /// keep their place at the front; everything else joins behind them
+    /// sorted alphabetically by display name so the user can predict the
+    /// request order. With `only_stale`, a follow joins only when its own
     /// `last_checked_at` is missing or older than CHECK_INTERVAL_SECS —
     /// per-row freshness, so a resumed round re-checks exactly the rows
     /// that need it and nothing that was already checked recently.
-    pub fn start_subscription_check(&self, extra_authors: Vec<String>, only_stale: bool) -> Result<u32, AO3Error> {
+    pub fn start_whats_new_check(&self, only_stale: bool) -> Result<u32, AO3Error> {
         self.census_cycle_used.store(false, std::sync::atomic::Ordering::Relaxed);
         let s = self.storage.blocking_lock();
         let mut queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
 
-        for (t, id, name) in check_entries(&s, &extra_authors)? {
+        for (kind, id, name) in s.get_check_targets().map_err(AO3Error::from)? {
             let queued = queue.iter().any(|q|
-                q["sub_type"].as_str() == Some(t.as_str())
-                    && q["sub_id"].as_str() == Some(id.as_str()));
-            if queued || (only_stale && !snapshot_check_due(&s, &t, &id)) {
+                q["kind"].as_str() == Some(kind.as_str())
+                    && q["target_id"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(&id)));
+            if queued || (only_stale && !follow_check_due(&s, &kind, &id)) {
                 continue;
             }
-            queue.push(serde_json::json!({"sub_type": t, "sub_id": id, "name": name}));
+            queue.push(serde_json::json!({"kind": kind, "target_id": id, "name": name}));
         }
         let json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
         s.set_check_queue(&json).map_err(AO3Error::from)?;
@@ -38,11 +36,11 @@ impl AO3App {
     }
 
     /// Would a check round have anything to do? True when leftover queue
-    /// items exist or any subscription's own `last_checked_at` is missing
-    /// or stale. This replaces gating on the global queue-drain time, which
+    /// items exist or any follow's own `last_checked_at` is missing or
+    /// stale. This replaces gating on the global queue-drain time, which
     /// only describes when a round finished — after an interrupted round it
     /// overstates the freshness of every row checked before the break.
-    pub fn is_subscription_check_due(&self, extra_authors: Vec<String>) -> Result<bool, AO3Error> {
+    pub fn is_whats_new_check_due(&self) -> Result<bool, AO3Error> {
         let s = self.storage.blocking_lock();
         if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
             let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
@@ -50,26 +48,38 @@ impl AO3App {
                 return Ok(true);
             }
         }
-        Ok(check_entries(&s, &extra_authors)?
+        Ok(s.get_check_targets().map_err(AO3Error::from)?
             .iter()
-            .any(|(t, id, _)| snapshot_check_due(&s, t, id)))
+            .any(|(kind, id, _)| follow_check_due(&s, kind, id)))
+    }
+
+    /// Has a full check gone unrun for longer than `max_age_secs`? True
+    /// when any checked follow was last checked longer ago than that (or
+    /// never). Per-row, like `is_whats_new_check_due`: a round counts as
+    /// full once every row has its own recent stamp, however many
+    /// interrupted runs it took to get there.
+    pub fn is_whats_new_check_overdue(&self, max_age_secs: u64) -> Result<bool, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_check_targets().map_err(AO3Error::from)?
+            .iter()
+            .any(|(kind, id, _)| follow_older_than(&s, kind, id, max_age_secs)))
     }
 
     /// The persisted check queue as it stands — front item first. Read by
     /// the monitor window between items; empty when no round is pending.
-    pub fn get_subscription_check_queue(&self) -> Result<Vec<UCheckQueueItem>, AO3Error> {
+    pub fn get_whats_new_check_queue(&self) -> Result<Vec<UCheckQueueItem>, AO3Error> {
         let s = self.storage.blocking_lock();
         let queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
         Ok(queue.iter().map(|q| {
-            let sub_type = q["sub_type"].as_str().unwrap_or("").to_string();
-            let sub_id = q["sub_id"].as_str().unwrap_or("").to_string();
+            let kind = q["kind"].as_str().unwrap_or("").to_string();
+            let target_id = q["target_id"].as_str().unwrap_or("").to_string();
             let census = q["census"].as_bool().unwrap_or(false);
             // The page cursor lives in the persisted census state, not the
-            // queue marker (see check_next_subscription).
+            // queue marker (see check_next_follow).
             let (page, total_pages) = if census {
-                s.get_snapshot_census_meta(&sub_type, &sub_id)
+                s.get_follow_census_meta(&kind, &target_id)
                     .ok()
                     .and_then(|(_, _, state)| state)
                     .and_then(|json| serde_json::from_str::<CensusState>(&json).ok())
@@ -79,8 +89,8 @@ impl AO3App {
                 (0, 0)
             };
             UCheckQueueItem {
-                sub_type,
-                sub_id,
+                kind,
+                target_id,
                 name: q["name"].as_str().unwrap_or("").to_string(),
                 census,
                 page,
@@ -89,7 +99,7 @@ impl AO3App {
         }).collect())
     }
 
-    pub fn reset_subscription_check(&self) -> Result<(), AO3Error> {
+    pub fn reset_whats_new_check(&self) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
         s.clear_check_queue().map_err(AO3Error::from)
     }
@@ -118,6 +128,18 @@ impl AO3App {
     pub fn get_gone_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
         let s = self.storage.blocking_lock();
         s.get_gone_work_ids().map_err(AO3Error::from)
+    }
+
+    /// Works the user flagged as finished reading (manual only).
+    pub fn get_finished_work_ids(&self) -> Result<Vec<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.get_finished_work_ids().map_err(AO3Error::from)
+    }
+
+    /// Set or clear the user's finished-reading flag on a batch of works.
+    pub fn set_works_finished(&self, work_ids: Vec<u64>, finished: bool) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.set_works_finished(&work_ids, finished).map_err(AO3Error::from)
     }
 
     /// Stamp that the user opened a chapter of this work right now —
@@ -149,26 +171,15 @@ impl AO3App {
     }
 
     /// Stamp "a full works crawl for this author/series completed now".
-    pub fn set_works_crawled_now(&self, sub_type: String, sub_id: String) -> Result<(), AO3Error> {
+    pub fn set_works_crawled_now(&self, kind: String, target_id: String) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
-        s.set_works_crawled_at(&sub_type, &sub_id, &now_utc()).map_err(AO3Error::from)
-    }
-
-    /// Every subscription's own last-completed-check stamp, keyed
-    /// "sub_type:sub_id" (UTC "YYYY-MM-DD HH:MM:SS" values). One call for
-    /// the whole map so list rows never make per-row storage trips.
-    pub fn get_subscription_last_checked(&self) -> Result<std::collections::HashMap<String, String>, AO3Error> {
-        let s = self.storage.blocking_lock();
-        Ok(s.get_all_snapshot_last_checked().map_err(AO3Error::from)?
-            .into_iter()
-            .map(|(t, id, at)| (format!("{t}:{id}"), at))
-            .collect())
+        s.set_works_crawled_at(&kind, &target_id, &now_utc()).map_err(AO3Error::from)
     }
 
     /// UTC "YYYY-MM-DD HH:MM:SS" of the last completed works crawl, or None.
-    pub fn get_works_crawled_at(&self, sub_type: String, sub_id: String) -> Result<Option<String>, AO3Error> {
+    pub fn get_works_crawled_at(&self, kind: String, target_id: String) -> Result<Option<String>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.get_works_crawled_at(&sub_type, &sub_id).map_err(AO3Error::from)
+        s.get_works_crawled_at(&kind, &target_id).map_err(AO3Error::from)
     }
 
     pub fn remove_new_work(&self, work_id: u64) -> Result<(), AO3Error> {
@@ -181,7 +192,7 @@ impl AO3App {
         s.clear_new_work_ids().map_err(AO3Error::from)
     }
 
-    pub async fn check_next_subscription(&self) -> Result<Option<USubscriptionCheckResult>, AO3Error> {
+    pub async fn check_next_follow(&self) -> Result<Option<UFollowCheckResult>, AO3Error> {
         let census_cycle_used = self.census_cycle_used.clone();
         self.run_on_runtime(move |client, storage| async move {
             let s = storage.lock().await;
@@ -193,9 +204,19 @@ impl AO3App {
             if queue.is_empty() {
                 return Ok(None);
             }
-            let item = queue.remove(0);
-            let sub_type = item["sub_type"].as_str().unwrap_or("").to_string();
-            let sub_id = item["sub_id"].as_str().unwrap_or("").to_string();
+            // Items whose follow was removed since they were queued are
+            // dropped — an unfollowed target is never fetched.
+            let mut item = queue.remove(0);
+            while !s.is_followed(item["kind"].as_str().unwrap_or(""),
+                                 item["target_id"].as_str().unwrap_or("")).unwrap_or(false) {
+                if queue.is_empty() {
+                    log_db("set_check_queue", s.set_check_queue("[]"));
+                    return Ok(None);
+                }
+                item = queue.remove(0);
+            }
+            let sub_type = item["kind"].as_str().unwrap_or("").to_string();
+            let sub_id = item["target_id"].as_str().unwrap_or("").to_string();
             let sub_name = item["name"].as_str().unwrap_or("").to_string();
             let is_census = item["census"].as_bool().unwrap_or(false);
 
@@ -208,7 +229,7 @@ impl AO3App {
             // Census continuations read their page cursor from the persisted
             // state, not the queue marker — cancel/crash resumes cleanly.
             let census_state: Option<CensusState> = if is_census {
-                s.get_snapshot_census_meta(&sub_type, &sub_id)
+                s.get_follow_census_meta(&sub_type, &sub_id)
                     .ok()
                     .and_then(|(_, _, state)| state)
                     .and_then(|json| serde_json::from_str(&json).ok())
@@ -219,8 +240,8 @@ impl AO3App {
 
             if is_census && census_state.is_none() {
                 // Orphaned marker — its state was cleared elsewhere.
-                return Ok(Some(USubscriptionCheckResult {
-                    sub_type, sub_id, name: sub_name, changed: false, remaining, error: None,
+                return Ok(Some(UFollowCheckResult {
+                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining, error: None,
                 }));
             }
 
@@ -233,9 +254,9 @@ impl AO3App {
                 ("series", None) => format!("{base}/series/{sub_id}"),
                 ("series", Some(p)) => format!("{base}/series/{sub_id}?page={p}"),
                 ("work", _) => format!("{base}/works/{sub_id}?view_adult=true"),
-                _ => return Ok(Some(USubscriptionCheckResult {
-                    sub_type, sub_id, name: sub_name, changed: false, remaining,
-                    error: Some(format!("Unknown subscription type")),
+                _ => return Ok(Some(UFollowCheckResult {
+                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
+                    error: Some("Unknown subscription type".to_string()),
                 })),
             };
 
@@ -283,8 +304,8 @@ impl AO3App {
                             }
                         }
                     }
-                    return Ok(Some(USubscriptionCheckResult {
-                        sub_type, sub_id, name: sub_name, changed: false,
+                    return Ok(Some(UFollowCheckResult {
+                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
                         remaining: if retryable { remaining + 1 } else { remaining },
                         error: Some(msg),
                     }));
@@ -303,8 +324,8 @@ impl AO3App {
                         Ok(w) => w,
                         Err(e) => {
                             log_error!("sub_check", "Parse failed for {sub_type} '{sub_name}' ({url}): {e}");
-                            return Ok(Some(USubscriptionCheckResult {
-                                sub_type, sub_id, name: sub_name, changed: false,
+                            return Ok(Some(UFollowCheckResult {
+                                kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
                                 remaining, error: Some(format!("{e}")),
                             }));
                         }
@@ -361,15 +382,15 @@ impl AO3App {
                     finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
                 } else {
                     state.next_page += 1;
-                    log_db("set_snapshot_census_state", s.set_snapshot_census_state(&sub_type,
+                    log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
                         &sub_id, serde_json::to_string(&state).ok().as_deref()));
                     remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
                 }
                 if remaining == 0 {
                     log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
                 }
-                return Ok(Some(USubscriptionCheckResult {
-                    sub_type, sub_id, name: sub_name, changed, remaining, error: None,
+                return Ok(Some(UFollowCheckResult {
+                    kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining, error: None,
                 }));
             }
 
@@ -377,10 +398,9 @@ impl AO3App {
             // The snapshot's job here: distinguish a first run (seed
             // silently) from a repeat check. An empty date also counts as
             // first run — census bookkeeping may create the row early.
-            let first_run = s.get_subscription_snapshot(&sub_type, &sub_id)
+            let first_run = s.get_follow_baseline(&sub_type, &sub_id)
                 .unwrap_or(None)
-                .map(|d| d.is_empty())
-                .unwrap_or(true);
+                .is_none();
 
             let (updated_ids, unseen) = if first_run {
                 log_info!("whats_new",
@@ -407,12 +427,12 @@ impl AO3App {
 
             // Save snapshot (always, even on first run)
             if !newest_date.is_empty() {
-                log_db("save_subscription_snapshot", s.save_subscription_snapshot(&sub_type, &sub_id, &newest_date));
+                log_db("set_follow_baseline", s.set_follow_baseline(&sub_type, &sub_id, &newest_date));
             }
             // This subscription's check completed — stamp its own freshness.
             // Error paths above return before this line, so a failed check
             // stays stale and re-qualifies for the next round.
-            log_db("set_snapshot_last_checked", s.set_snapshot_last_checked(&sub_type, &sub_id, &now_utc()));
+            log_db("set_follow_last_checked", s.set_follow_last_checked(&sub_type, &sub_id, &now_utc()));
             log_db("commit check page", tx.commit());
 
             // ---- Census escalation (listings only) ----
@@ -425,7 +445,7 @@ impl AO3App {
             if sub_type == "author" || sub_type == "series" {
                 let header_total = crate::parser::parse_listing_works_total(&html);
                 let (prev_total, last_census_at, existing_state) =
-                    s.get_snapshot_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
+                    s.get_follow_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
 
                 let mut census_reason: Option<String> = None;
                 if existing_state.is_some() {
@@ -490,14 +510,14 @@ impl AO3App {
                         // Single-page listing: page 1 was the whole census.
                         finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
                     } else {
-                        log_db("set_snapshot_census_state", s.set_snapshot_census_state(&sub_type,
+                        log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
                             &sub_id, serde_json::to_string(&state).ok().as_deref()));
                         remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
                     }
                 } else if let Some(t) = header_total {
                     // Counts reconcile — adopt the fresh total as the next
                     // check's baseline.
-                    log_db("set_snapshot_total_works", s.set_snapshot_total_works(&sub_type, &sub_id, t));
+                    log_db("set_follow_total_works", s.set_follow_total_works(&sub_type, &sub_id, t));
                 }
             }
 
@@ -506,8 +526,8 @@ impl AO3App {
                 log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
             }
 
-            Ok(Some(USubscriptionCheckResult {
-                sub_type, sub_id, name: sub_name, changed, remaining,
+            Ok(Some(UFollowCheckResult {
+                kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining,
                 error: None,
             }))
         }).await
@@ -708,8 +728,8 @@ impl AO3App {
         storage.clear_read_notifications().map_err(AO3Error::from)
     }
 
-    /// Get the last time subscriptions were checked.
-    pub fn get_last_subscription_check(&self) -> Result<Option<String>, AO3Error> {
+    /// When the last What's New round drained its queue.
+    pub fn get_last_whats_new_check(&self) -> Result<Option<String>, AO3Error> {
         let storage = self.storage.blocking_lock();
         storage.get_last_check_time().map_err(AO3Error::from)
     }

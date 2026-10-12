@@ -190,6 +190,7 @@ impl BookmarksCache {
     /// refreshes its AO3 id — locally edited details stay put; a new row
     /// records what the listing showed (public by construction). Returns
     /// the row id.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn cache_fetched(&self, conn: &Connection, account_id: &str,
                                 target: BookmarkTarget, ao3_bookmark_id: u64, note: &str,
                                 tag_string: &str, rec: bool, now: &str)

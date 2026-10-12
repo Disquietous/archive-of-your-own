@@ -341,7 +341,6 @@ final class RustBridge {
         registerRecoveryHooks()
     }
 
-
     var hasDbPassword: Bool = UserDefaults.standard.bool(forKey: "userSetDbPassword") {
         didSet { Self.persistDbPasswordFlag(hasDbPassword) }
     }
@@ -467,7 +466,7 @@ final class RustBridge {
     /// The per-route timeout catalog: every request shape the app makes,
     /// with its current override (nil = follows the global timeout).
     func getRouteTimeouts() -> [URouteTimeout] {
-        (try? app?.getRouteTimeouts()) ?? []
+        app?.getRouteTimeouts() ?? []
     }
 
     /// Set (positive seconds) or clear (nil) one route's timeout override.
@@ -872,7 +871,6 @@ final class RustBridge {
         return true
     }
 
-
     // MARK: - Bookmark Sync
 
     func updateBookmarkNote(_ workId: UInt64, note: String) {
@@ -921,15 +919,6 @@ final class RustBridge {
         return try await app.deleteAo3Bookmark(workId: workId)
     }
 
-    /// Toggle the AO3 subscription for a work; returns the new state
-    /// (true = now subscribed). The Rust side prefers direct POSTs (cached
-    /// token + stored record id) and mirrors the result into the local
-    /// subscriptions table.
-    func toggleWorkSubscription(workId: UInt64, username: String?) async throws -> Bool {
-        guard let app else { throw BridgeError.notInitialized }
-        return try await app.toggleWorkSubscription(workId: workId, username: username)
-    }
-
     // MARK: - User profiles (subscribe / block / mute)
 
     /// The locally cached profile for a user — instant, DB-only.
@@ -939,17 +928,11 @@ final class RustBridge {
     }
 
     /// Fetch a user's profile from AO3 and cache it. Also mirrors live
-    /// subscription state into the local subscriptions table.
+    /// subscription state into the signed-in account's subscriptions
+    /// (never follows).
     func fetchUserProfile(username: String) async throws -> UUserProfile {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchUserProfile(username: username)
-    }
-
-    /// Set the AO3 subscription for a user to exactly `subscribe`; returns
-    /// the new state.
-    func setUserSubscription(target: String, subscribe: Bool, username: String?) async throws -> Bool {
-        guard let app else { throw BridgeError.notInitialized }
-        return try await app.setUserSubscription(target: target, subscribe: subscribe, username: username)
     }
 
     /// Toggle blocking a user on AO3; returns the new state.
@@ -1063,8 +1046,47 @@ final class RustBridge {
         (try? app?.getPref(key: key)) ?? nil
     }
 
-    func getFollowed(kind: String) -> [String] {
-        (try? app?.getFollowed(kind: kind)) ?? []
+    // MARK: - Follows
+
+    /// Follows of `kind` (every kind when nil), in the order they were added.
+    func getFollows(kind: String? = nil) -> [UFollow] {
+        (try? app?.getFollows(kind: kind)) ?? []
+    }
+
+    /// Local follow — never an AO3 request. True when newly created.
+    @discardableResult
+    func addFollow(kind: String, targetId: String, name: String) -> Bool {
+        (try? app?.addFollow(kind: kind, targetId: targetId, name: name)) ?? false
+    }
+
+    /// Local unfollow. Throws while the signed-in account is subscribed to
+    /// the target — that change goes through `applyFollowChange`.
+    @discardableResult
+    func removeFollow(kind: String, targetId: String) throws -> Bool {
+        guard let app else { throw BridgeError.notInitialized }
+        return try app.removeFollow(kind: kind, targetId: targetId)
+    }
+
+    /// A confirmed bell-menu change: bring the target to exactly
+    /// (followed, subscribed). AO3 request first; nothing local changes
+    /// when it fails.
+    func applyFollowChange(kind: String, targetId: String, name: String,
+                           followed: Bool, subscribed: Bool) async throws -> UFollowChange {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.applyFollowChange(kind: kind, targetId: targetId, name: name,
+                                               wantFollowed: followed, wantSubscribed: subscribed)
+    }
+
+    /// The signed-in account's subscriptions with no follow.
+    func getUnfollowedSubscriptions() -> [USubscription] {
+        (try? app?.getUnfollowedSubscriptions()) ?? []
+    }
+
+    /// Follow every given subscription's target (one transaction, no AO3
+    /// request). Returns how many follows were created.
+    func followSubscriptions(_ subscriptions: [USubscription]) throws -> Int {
+        guard let app else { throw BridgeError.notInitialized }
+        return Int(try app.followSubscriptions(subscriptions: subscriptions))
     }
 
     // MARK: - iCloud library sync + backups (CloudLibrarySync is the transport)
@@ -1117,14 +1139,6 @@ final class RustBridge {
     /// Backups/) — where the transport stages files for it.
     nonisolated static func stateDirectory() -> URL {
         URL(fileURLWithPath: databasePath()).deletingLastPathComponent()
-    }
-
-    func addFollowed(kind: String, name: String) {
-        try? app?.addFollowed(kind: kind, name: name)
-    }
-
-    func removeFollowed(kind: String, name: String) {
-        try? app?.removeFollowed(kind: kind, name: name)
     }
 
     /// Rust-side filter/sort of a section's work list; falls back to the
@@ -1245,16 +1259,14 @@ final class RustBridge {
 
     // MARK: - Subscription Notifications
 
-    func fetchSubscriptions(username: String) async throws -> [USubscription] {
+    /// Reload the signed-in account's subscription list from AO3 and store
+    /// it. Subscription data only — follows are never touched.
+    func syncSubscriptions() async throws -> [USubscription] {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.fetchSubscriptions(username: username)
+        return try await app.syncSubscriptions()
     }
 
-    func persistSubscriptions(_ subscriptions: [USubscription]) throws {
-        guard let app else { throw BridgeError.notInitialized }
-        try app.persistSubscriptions(subscriptions: subscriptions)
-    }
-
+    /// The signed-in account's stored subscriptions (empty when signed out).
     func getPersistedSubscriptions() -> [USubscription] {
         (try? app?.getPersistedSubscriptions()) ?? []
     }
@@ -1273,27 +1285,27 @@ final class RustBridge {
         (try? app?.getWorksByAuthor(username: username)) ?? []
     }
 
-    func startSubscriptionCheck(extraAuthors: [String] = [], onlyStale: Bool) throws -> UInt32 {
+    // MARK: - What's New check (follows only)
+
+    func startWhatsNewCheck(onlyStale: Bool) throws -> UInt32 {
         guard let app else { throw BridgeError.notInitialized }
-        return try app.startSubscriptionCheck(extraAuthors: extraAuthors, onlyStale: onlyStale)
+        return try app.startWhatsNewCheck(onlyStale: onlyStale)
     }
 
-    /// True when any subscription's own last-checked stamp is missing or
-    /// stale, or leftover queue items exist. Replaces gating on the global
-    /// round-completion date, which overstated freshness for rows checked
-    /// early in an interrupted round.
     /// The persisted What's New queue, front item first.
-    func getSubscriptionCheckQueue() -> [UCheckQueueItem] {
-        (try? app?.getSubscriptionCheckQueue()) ?? []
+    func getWhatsNewCheckQueue() -> [UCheckQueueItem] {
+        (try? app?.getWhatsNewCheckQueue()) ?? []
     }
 
-    func isSubscriptionCheckDue(extraAuthors: [String] = []) -> Bool {
-        (try? app?.isSubscriptionCheckDue(extraAuthors: extraAuthors)) ?? false
+    /// True when any checked follow's own last-checked stamp is missing or
+    /// stale, or leftover queue items exist.
+    func isWhatsNewCheckDue() -> Bool {
+        (try? app?.isWhatsNewCheckDue()) ?? false
     }
 
-    /// Per-subscription last-completed-check stamps, keyed "subType:subId".
-    func getSubscriptionLastChecked() -> [String: String] {
-        (try? app?.getSubscriptionLastChecked()) ?? [:]
+    /// True when any checked follow was last checked over `maxAgeSecs` ago.
+    func isWhatsNewCheckOverdue(maxAgeSecs: UInt64) -> Bool {
+        (try? app?.isWhatsNewCheckOverdue(maxAgeSecs: maxAgeSecs)) ?? false
     }
 
     // MARK: - Library-scoped search (cached data only, no network)
@@ -1365,13 +1377,13 @@ final class RustBridge {
         (try? app?.getLibraryCollectionBookmarks(name: name)) ?? []
     }
 
-    func checkNextSubscription() async throws -> USubscriptionCheckResult? {
+    func checkNextFollow() async throws -> UFollowCheckResult? {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.checkNextSubscription()
+        return try await app.checkNextFollow()
     }
 
-    func resetSubscriptionCheck() {
-        try? app?.resetSubscriptionCheck()
+    func resetWhatsNewCheck() {
+        try? app?.resetWhatsNewCheck()
     }
 
     func getNewWorkIds() -> [UInt64] {
@@ -1408,6 +1420,14 @@ final class RustBridge {
         (try? app?.getGoneWorkIds()) ?? []
     }
 
+    func getFinishedWorkIds() -> [UInt64] {
+        (try? app?.getFinishedWorkIds()) ?? []
+    }
+
+    func setWorksFinished(_ workIds: [UInt64], finished: Bool) {
+        try? app?.setWorksFinished(workIds: workIds, finished: finished)
+    }
+
     /// Cache-only lookup for a chapter-embedded image.
     func cachedChapterImage(url: String) -> Data? {
         guard let bytes = (try? app?.getCachedChapterImage(url: url)) ?? nil else { return nil }
@@ -1428,13 +1448,13 @@ final class RustBridge {
     }
 
     /// Stamp "a full works crawl for this author/series completed now".
-    func setWorksCrawledNow(subType: String, subId: String) {
-        try? app?.setWorksCrawledNow(subType: subType, subId: subId)
+    func setWorksCrawledNow(kind: String, targetId: String) {
+        try? app?.setWorksCrawledNow(kind: kind, targetId: targetId)
     }
 
-    /// Unix-seconds string of the last completed works crawl, or nil.
-    func getWorksCrawledAt(subType: String, subId: String) -> String? {
-        (try? app?.getWorksCrawledAt(subType: subType, subId: subId)) ?? nil
+    /// UTC datetime of the last completed works crawl, or nil.
+    func getWorksCrawledAt(kind: String, targetId: String) -> String? {
+        (try? app?.getWorksCrawledAt(kind: kind, targetId: targetId)) ?? nil
     }
 
     func removeNewWork(_ workId: UInt64) {
@@ -1494,8 +1514,8 @@ final class RustBridge {
         try? app?.clearReadNotifications()
     }
 
-    func getLastSubscriptionCheck() -> String? {
-        try? app?.getLastSubscriptionCheck()
+    func getLastWhatsNewCheck() -> String? {
+        try? app?.getLastWhatsNewCheck()
     }
 
     // MARK: - Community Actions

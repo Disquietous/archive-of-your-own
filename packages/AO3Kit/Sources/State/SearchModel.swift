@@ -607,28 +607,31 @@ final class SearchModel {
         for name in Set(request.fieldValues.keys).union(request.checkboxValues.keys) {
             let value = (request.fieldValues[name] ?? "").trimmingCharacters(in: .whitespaces)
             let checked = request.checkboxValues[name] ?? []
-            if name.hasSuffix("[query]") { c.query = value }
-            else if name.hasSuffix("[title]") { c.title = value }
-            else if name.hasSuffix("[creators]") { c.creators = value }
-            else if name.hasSuffix("[revised_at]") { c.revisedAt = value }
-            else if name.hasSuffix("[complete]") { c.complete = value }
-            else if name.hasSuffix("[crossover]") { c.crossover = value }
-            else if name.hasSuffix("[single_chapter]") { c.singleChapter = checked.contains("1") || value == "1" }
-            else if name.hasSuffix("[word_count]") { c.wordCount = value }
-            else if name.hasSuffix("[language_id]") { c.language = labels(name, value, checked).first ?? "" }
-            else if name.hasSuffix("[fandom_names]") { c.fandomNames = value }
-            else if name.hasSuffix("[character_names]") { c.characterNames = value }
-            else if name.hasSuffix("[relationship_names]") { c.relationshipNames = value }
-            else if name.hasSuffix("[freeform_names]") { c.freeformNames = value }
-            else if name.contains("[rating_ids]") { c.ratings = labels(name, value, checked) }
-            else if name.contains("[archive_warning_ids]") { c.warnings = labels(name, value, checked) }
-            else if name.contains("[category_ids]") { c.categories = labels(name, value, checked) }
-            else if name.hasSuffix("[hits]") { c.hits = value }
-            else if name.hasSuffix("[kudos_count]") { c.kudosCount = value }
-            else if name.hasSuffix("[comments_count]") { c.commentsCount = value }
-            else if name.hasSuffix("[bookmarks_count]") { c.bookmarksCount = value }
-            else if name.hasSuffix("[sort_column]") { c.sortColumn = value }
-            else if name.hasSuffix("[sort_direction]") { c.sortDirection = value }
+            switch name {
+            case _ where name.hasSuffix("[query]"): c.query = value
+            case _ where name.hasSuffix("[title]"): c.title = value
+            case _ where name.hasSuffix("[creators]"): c.creators = value
+            case _ where name.hasSuffix("[revised_at]"): c.revisedAt = value
+            case _ where name.hasSuffix("[complete]"): c.complete = value
+            case _ where name.hasSuffix("[crossover]"): c.crossover = value
+            case _ where name.hasSuffix("[single_chapter]"): c.singleChapter = checked.contains("1") || value == "1"
+            case _ where name.hasSuffix("[word_count]"): c.wordCount = value
+            case _ where name.hasSuffix("[language_id]"): c.language = labels(name, value, checked).first ?? ""
+            case _ where name.hasSuffix("[fandom_names]"): c.fandomNames = value
+            case _ where name.hasSuffix("[character_names]"): c.characterNames = value
+            case _ where name.hasSuffix("[relationship_names]"): c.relationshipNames = value
+            case _ where name.hasSuffix("[freeform_names]"): c.freeformNames = value
+            case _ where name.contains("[rating_ids]"): c.ratings = labels(name, value, checked)
+            case _ where name.contains("[archive_warning_ids]"): c.warnings = labels(name, value, checked)
+            case _ where name.contains("[category_ids]"): c.categories = labels(name, value, checked)
+            case _ where name.hasSuffix("[hits]"): c.hits = value
+            case _ where name.hasSuffix("[kudos_count]"): c.kudosCount = value
+            case _ where name.hasSuffix("[comments_count]"): c.commentsCount = value
+            case _ where name.hasSuffix("[bookmarks_count]"): c.bookmarksCount = value
+            case _ where name.hasSuffix("[sort_column]"): c.sortColumn = value
+            case _ where name.hasSuffix("[sort_direction]"): c.sortDirection = value
+            default: break
+            }
         }
         return c
     }

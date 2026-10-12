@@ -701,6 +701,50 @@ pub struct USubscription {
     pub ao3_id: Option<String>,
 }
 
+/// A follow: a target (author / work / series / fandom) the What's New
+/// check watches (fandoms are not checked). Library data, not account data.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UFollow {
+    pub kind: String,
+    /// author: AO3 username; work/series: numeric id; fandom: tag name.
+    pub target_id: String,
+    pub name: String,
+    pub added_at: String,
+    /// When this follow's own What's New check last succeeded. None = never.
+    pub last_checked_at: Option<String>,
+}
+
+impl From<crate::storage::FollowRow> for UFollow {
+    fn from(r: crate::storage::FollowRow) -> Self {
+        UFollow {
+            kind: r.kind,
+            target_id: r.target_id,
+            name: r.name,
+            added_at: r.added_at,
+            last_checked_at: r.last_checked_at,
+        }
+    }
+}
+
+/// A target's bell state. `subscribed` is the signed-in account's AO3
+/// subscription (always false when signed out).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UFollowState {
+    pub followed: bool,
+    pub subscribed: bool,
+}
+
+/// What a confirmed bell-menu change did.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UFollowChange {
+    pub followed: bool,
+    pub subscribed: bool,
+    /// An AO3 subscribe/unsubscribe request was made and succeeded.
+    pub subscription_changed: bool,
+    pub follow_added: bool,
+    pub follow_removed: bool,
+}
+
 impl From<crate::models::Subscription> for USubscription {
     fn from(s: crate::models::Subscription) -> Self {
         USubscription {
@@ -765,8 +809,8 @@ impl From<crate::models::UserProfile> for UUserProfile {
 /// One pending item of the What's New check queue, for the monitor UI.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UCheckQueueItem {
-    pub sub_type: String,
-    pub sub_id: String,
+    pub kind: String,
+    pub target_id: String,
     pub name: String,
     /// A census continuation (deeper listing pages) rather than a page-1
     /// check.
@@ -780,9 +824,9 @@ pub struct UCheckQueueItem {
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
-pub struct USubscriptionCheckResult {
-    pub sub_type: String,
-    pub sub_id: String,
+pub struct UFollowCheckResult {
+    pub kind: String,
+    pub target_id: String,
     pub name: String,
     pub changed: bool,
     pub remaining: u32,
@@ -831,6 +875,9 @@ pub struct UWorkListQuery {
     /// Keep only works whose posted chapter count equals the declared
     /// total (32/32). An unknown total (5/?) never matches.
     pub completed_only: bool,
+    /// The user's manual finished-reading flag: "any" | "finished" |
+    /// "unfinished".
+    pub finished: String,
 }
 
 /// The filter dialog's suggestion pools for one work list.

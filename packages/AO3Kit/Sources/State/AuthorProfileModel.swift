@@ -23,6 +23,8 @@ final class AuthorProfileModel {
     var worksCrawledAt: String?
     var isLoadingWorks = false
     var worksError: String?
+    /// A works crawl that stopped part-way — the profile offers to resume.
+    var worksCrawlStop: AppState.CrawlStop?
     /// Progress line while a full works crawl is running.
     var worksFetchStatus: String?
     /// The in-flight works crawl (request-tracking standard) — its opID
@@ -66,6 +68,7 @@ final class AuthorProfileModel {
         cancelWorksRefresh()
         let changed = self.username != username
         if changed {
+            worksCrawlStop = nil
             resetPanes()
             paneAutoSelect = true
         }
@@ -74,7 +77,7 @@ final class AuthorProfileModel {
         worksFetchStatus = nil
         isLoadingWorks = false
 
-        worksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
+        worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
         let cached = appState.bridge.getWorksByAuthor(username: username)
         let works = cached.map(AppState.workFromSummary)
         for work in works { appState.fetchedWorks[work.id] = work }
@@ -95,8 +98,13 @@ final class AuthorProfileModel {
     }
 
     /// Fetch the author's complete works list — every page on AO3.
-    func refreshWorks() {
+    /// `resume` picks a stopped crawl up at the page it stopped on.
+    func refreshWorks(resume: Bool = false) {
         guard let username, !isLoadingWorks else { return }
+        let stop = resume ? worksCrawlStop : nil
+        let seed = stop == nil ? [] : works
+        worksCrawlStop = nil
+        var lastPage: (page: UInt32, total: UInt32)? = stop.map { ($0.nextPage - 1, $0.totalPages) }
         worksError = nil
         isLoadingWorks = true
         let task = NetworkTask()
@@ -112,15 +120,17 @@ final class AuthorProfileModel {
                             try await appState.bridge.fetchAuthorWorks(username: username, page: $0, opID: opID)
                         },
                         task: task,
+                        startPage: stop?.nextPage ?? 1, seed: seed,
                         status: { [weak self] in self?.worksFetchStatus = $0 },
                         partial: { [weak self] works in
                             guard let self, self.username == username else { return }
                             self.works = works
-                        })
+                        },
+                        pageDone: { lastPage = ($0, $1) })
                 }
                 if self.username == username && !task.isCancelled {
-                    appState.bridge.setWorksCrawledNow(subType: "author", subId: username)
-                    worksCrawledAt = appState.bridge.getWorksCrawledAt(subType: "author", subId: username)
+                    appState.bridge.setWorksCrawledNow(kind: "author", targetId: username)
+                    worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
                     appState.mergeCachedWorks(all)
                     // Show the cache union, not just the crawl result: works
                     // that disappeared from AO3 stay on the author's list.
@@ -137,6 +147,9 @@ final class AuthorProfileModel {
             if self.username == username {
                 isLoadingWorks = false
                 worksFetchStatus = nil
+                if task.isCancelled || worksError != nil, let last = lastPage, last.page < last.total {
+                    worksCrawlStop = AppState.CrawlStop(nextPage: last.page + 1, totalPages: last.total)
+                }
             }
         }
     }
@@ -156,6 +169,7 @@ final class AuthorProfileModel {
         username = nil
         works = []
         worksError = nil
+        worksCrawlStop = nil
         worksFetchStatus = nil
         resetPanes()
     }

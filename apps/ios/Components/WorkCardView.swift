@@ -17,7 +17,7 @@ struct WorkCardView: View {
     /// Quick bookmark toggle on the stat row.
     var showsBookmarkToggle: Bool = true
     /// Tap on the byline (open the author).
-    var onAuthorTap: (() -> Void)? = nil
+    var onAuthorTap: (() -> Void)?
     var onTap: () -> Void
 
     @State private var revealed = false
@@ -28,7 +28,7 @@ struct WorkCardView: View {
     private static let collapsedTagCount = 4
 
     var body: some View {
-        Button(action: {
+        Button {
             if isGated {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     revealed = true
@@ -36,7 +36,7 @@ struct WorkCardView: View {
             } else {
                 onTap()
             }
-        }) {
+        } label: {
             HStack(spacing: 0) {
                 // Spine
                 RoundedRectangle(cornerRadius: 2)
@@ -170,19 +170,8 @@ struct WorkCardView: View {
                     .foregroundStyle(theme.ink2)
                     .lineLimit(1)
             }
-            if showsFollowBell, let follows, !work.author.isEmpty {
-                let followState = follows.authorFollowState(work.author)
-                Button {
-                    follows.toggleAuthorFollow(work.author)
-                } label: {
-                    Image(systemName: followState.shaded ? "bell.fill" : "bell")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(followState.shaded ? theme.accent : theme.ink3)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(followState == .followed ? "Unfollow author" : "Follow author")
+            if showsFollowBell, follows != nil, !work.author.isEmpty {
+                FollowBellMenu(target: .author(work.author), glyphSize: 11, hitSize: 22)
             }
         }
     }
@@ -220,7 +209,9 @@ struct WorkCardView: View {
 
     private var statRow: some View {
         HStack(spacing: 10) {
-            statItem(icon: "heart", value: work.kudos.abbreviated)
+            // Red, filled heart once the user has left kudos (mac row parity).
+            statItem(icon: kudosGiven ? "heart.fill" : "heart", value: work.kudos.abbreviated,
+                     iconColor: kudosGiven ? Self.kudosRed : nil)
             statItem(icon: "text.word.spacing", value: work.words.abbreviated)
 
             let chapterText = work.totalChapters > 0
@@ -237,6 +228,17 @@ struct WorkCardView: View {
                         .font(.custom("HankenGrotesk", size: 11).weight(.semibold))
                         .foregroundStyle(theme.sage)
                 }
+            }
+
+            if appState.finishedWorkIDs.contains(work.id) {
+                HStack(spacing: 3) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                    Text("Finished")
+                        .font(.custom("HankenGrotesk", size: 11).weight(.semibold))
+                }
+                .foregroundStyle(theme.ink2)
+                .accessibilityElement(children: .combine)
             }
 
             Spacer()
@@ -259,11 +261,18 @@ struct WorkCardView: View {
         .padding(.top, 2)
     }
 
-    private func statItem(icon: String, value: String) -> some View {
+    private var kudosGiven: Bool {
+        appState.kudosGivenWorkIDs.contains(work.id)
+    }
+
+    /// The reader's kudos red (mac `WorkRowCellView` uses the same value).
+    private static let kudosRed = Color(red: 0xCE / 255, green: 0x51 / 255, blue: 0x4D / 255)
+
+    private func statItem(icon: String, value: String, iconColor: Color? = nil) -> some View {
         HStack(spacing: 3) {
             Image(systemName: icon)
                 .font(.system(size: 11))
-                .foregroundStyle(theme.ink3)
+                .foregroundStyle(iconColor ?? theme.ink3)
             Text(value)
                 .font(.custom("HankenGrotesk", size: 12).weight(.medium))
                 .foregroundStyle(theme.ink3)
@@ -292,7 +301,10 @@ struct WorkCardView: View {
         comments: 156,
         published: "2023-09-04",
         updated: "2024-01-15",
-        summary: "When a series of impossible thefts plague the British Museum, Holmes finds himself entangled in a web of secrets that hits closer to home than he'd like.",
+        summary: """
+            When a series of impossible thefts plague the British Museum, Holmes finds himself entangled in a web of \
+            secrets that hits closer to home than he'd like.
+            """,
         initialProgress: 0,
         lastChapter: nil,
         downloaded: false,

@@ -27,6 +27,8 @@ final class SubscriptionWorksModel {
     /// When this drill-in's works were last fully crawled (epoch-seconds
     /// string from the DB) — drives the "refreshed 3d ago" staleness line.
     var crawledAt: String?
+    /// A crawl that stopped part-way — the drill-in offers to resume it.
+    var crawlStop: AppState.CrawlStop?
     /// The in-flight crawl (request-tracking standard) — its opID feeds the
     /// progress banner. Idle when nil.
     let refreshOp = TrackedOperation()
@@ -45,6 +47,7 @@ final class SubscriptionWorksModel {
     func open(subscriptionID: String, author: String, subType: String = "author") -> Bool {
         cancelRefresh()
         let changed = subId != subscriptionID
+        if changed { crawlStop = nil }
         title = author
         error = nil
         fetchStatus = nil
@@ -52,7 +55,7 @@ final class SubscriptionWorksModel {
         loadingSubscriptionID = nil
         self.subType = subType
         subId = subscriptionID
-        crawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subscriptionID)
+        crawledAt = appState.bridge.getWorksCrawledAt(kind: subType, targetId: subscriptionID)
 
         let cached = appState.bridge.getSubscriptionWorks(subType: subType, subId: subscriptionID)
         let works = cached.map(AppState.workFromSummary)
@@ -63,9 +66,14 @@ final class SubscriptionWorksModel {
 
     /// Fetch the subscription's complete works list — every page on AO3.
     /// Author subscriptions crawl /users/{name}/works; series crawl /series/{id}.
-    func refresh() {
+    /// `resume` picks a stopped crawl up at the page it stopped on.
+    func refresh(resume: Bool = false) {
         guard let subId, !isLoading else { return }
         let subType = subType
+        let stop = resume ? crawlStop : nil
+        let seed = stop == nil ? [] : works
+        crawlStop = nil
+        var lastPage: (page: UInt32, total: UInt32)? = stop.map { ($0.nextPage - 1, $0.totalPages) }
         error = nil
         isLoading = true
         loadingSubscriptionID = subId
@@ -89,18 +97,20 @@ final class SubscriptionWorksModel {
                     }
                     return try await appState.crawlAllWorks(
                         fetchPage: fetchPage, task: task,
+                        startPage: stop?.nextPage ?? 1, seed: seed,
                         status: { [weak self] in self?.fetchStatus = $0 },
                         partial: { [weak self] works in
                             guard let self, self.subId == subId else { return }
                             self.works = works
-                        })
+                        },
+                        pageDone: { lastPage = ($0, $1) })
                 }
                 if self.subId == subId && !task.isCancelled {
                     works = all
                     // Membership is derived from the crawled works
                     // themselves (byline / series part) — nothing to save.
-                    appState.bridge.setWorksCrawledNow(subType: subType, subId: subId)
-                    crawledAt = appState.bridge.getWorksCrawledAt(subType: subType, subId: subId)
+                    appState.bridge.setWorksCrawledNow(kind: subType, targetId: subId)
+                    crawledAt = appState.bridge.getWorksCrawledAt(kind: subType, targetId: subId)
                     // The crawl rewrote works in the DB (author renames,
                     // updated stats) — merge them into the snapshot too.
                     appState.mergeCachedWorks(all)
@@ -114,6 +124,9 @@ final class SubscriptionWorksModel {
                 isLoading = false
                 fetchStatus = nil
                 loadingSubscriptionID = nil
+                if task.isCancelled || self.error != nil, let last = lastPage, last.page < last.total {
+                    crawlStop = AppState.CrawlStop(nextPage: last.page + 1, totalPages: last.total)
+                }
             }
         }
     }
@@ -135,5 +148,6 @@ final class SubscriptionWorksModel {
         error = nil
         fetchStatus = nil
         subId = nil
+        crawlStop = nil
     }
 }

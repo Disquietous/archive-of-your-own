@@ -35,7 +35,6 @@ enum ScreenshotState {
 
         state.unreadNotificationCount = 3
 
-
         return state
     }
 
@@ -78,7 +77,10 @@ enum ScreenshotState {
 
     static let mockComments: [ParsedComment] = {
         let comment1Json = paragraphsToContentJSON([
-            "I cannot stop thinking about the fog description in chapter one. \"A string of paper lanterns hung for some occasion the city had forgotten to attend\" — that is so beautiful it hurts.",
+            """
+                I cannot stop thinking about the fog description in chapter one. \"A string of paper lanterns hung for \
+                some occasion the city had forgotten to attend\" — that is so beautiful it hurts.
+                """,
         ])
         let reply1Json = paragraphsToContentJSON([
             "That line stopped me in my tracks too. The whole first page reads like a love letter to London.",
@@ -90,7 +92,10 @@ enum ScreenshotState {
             "Twelve chapters of pure comfort reading. I rationed them out one a night like some kind of fic advent calendar and I have no regrets.",
         ])
         let comment3Json = paragraphsToContentJSON([
-            "\"Suspense. They are not at all the same thing, and the difference between them is the whole of my profession.\" I am going to be thinking about this line for weeks.",
+            """
+                \"Suspense. They are not at all the same thing, and the difference between them is the whole of my \
+                profession.\" I am going to be thinking about this line for weeks.
+                """,
         ])
 
         return [

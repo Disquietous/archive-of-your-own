@@ -1,13 +1,13 @@
 import SwiftUI
 
-// MARK: - User profiles (author subscribe / block / mute) & avatars
+// MARK: - User profiles (block / mute) & avatars — subscribe lives in FollowModel
 
 extension AppState {
     /// The real AO3 username behind an author string. Bylines and
     /// subscription names arrive as "Pseud (Username)" when the pseud
     /// differs — the account name is the part in parentheses. Actual AO3
     /// usernames never contain spaces or parens.
-    static func canonicalAuthorUsername(_ author: String) -> String {
+    nonisolated static func canonicalAuthorUsername(_ author: String) -> String {
         authorIdentity(author).username
     }
 
@@ -16,7 +16,7 @@ extension AppState {
     /// differs from the account name. Profile/subscribe/block/mute are
     /// user-level (username); works lists are pseud-scoped when a pseud
     /// is present (/users/{username}/pseuds/{pseud}/works).
-    static func authorIdentity(_ author: String) -> (username: String, pseud: String?) {
+    nonisolated static func authorIdentity(_ author: String) -> (username: String, pseud: String?) {
         let trimmed = author.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let open = trimmed.lastIndex(of: "("), trimmed.hasSuffix(")") else {
             return (trimmed, nil)
@@ -44,8 +44,8 @@ extension AppState {
         userProfileLoading.contains(Self.profileKey(username))
     }
 
-    /// Whether a subscribe/block/mute toggle is in flight for this user.
-    /// `kind` is "sub", "block", or "mute".
+    /// Whether a block/mute toggle is in flight for this user.
+    /// `kind` is "block" or "mute".
     func isUserActionBusy(_ kind: String, _ username: String) -> Bool {
         userProfileToggling.contains("\(kind):\(Self.profileKey(username))")
     }
@@ -83,7 +83,8 @@ extension AppState {
             userProfiles[key] = fresh
             userProfileErrors[key] = nil
             // The fetch mirrors AO3's live subscription state into the
-            // local table — pick that up too.
+            // signed-in account's subscriptions (never follows) — pick that
+            // up too.
             subscriptions = bridge.getPersistedSubscriptions()
         } catch {
             userProfileErrors[key] = Self.readableError(error)
@@ -91,42 +92,10 @@ extension AppState {
         }
     }
 
-    /// Last failure message for a subscribe/block/mute action on this
-    /// user, or nil when the most recent attempt succeeded.
+    /// Last failure message for a block/mute action on this user, or nil
+    /// when the most recent attempt succeeded.
     func userActionError(_ kind: String, _ username: String) -> String? {
         userActionErrors["\(kind):\(Self.profileKey(username))"]
-    }
-
-    /// Subscribe to or unsubscribe from an author on AO3 — the exact
-    /// action the user confirmed, never a flip of the local mirror. On
-    /// success the subscriptions list and cached profile are refreshed;
-    /// on failure the message is recorded for inline display.
-    func setAuthorSubscription(_ username: String, subscribed: Bool) {
-        let username = Self.canonicalAuthorUsername(username)
-        let key = "sub:\(username.lowercased())"
-        guard !userProfileToggling.contains(key) else { return }
-        userProfileToggling.insert(key)
-        userActionErrors[key] = nil
-        Task { @MainActor in
-            do {
-                let newState = try await bridge.setUserSubscription(
-                    target: username, subscribe: subscribed, username: ao3Username)
-                subscriptions = bridge.getPersistedSubscriptions()
-                if var p = userProfiles[username.lowercased()] {
-                    p.subscribed = newState
-                    userProfiles[username.lowercased()] = p
-                }
-            } catch {
-                userActionErrors[key] = Self.readableError(error)
-                NSLog("[profile] subscription change for %@ failed: %@", username, "\(error)")
-            }
-            userProfileToggling.remove(key)
-        }
-    }
-
-    /// Flip the AO3 subscription relative to the local mirror.
-    func toggleAuthorSubscription(_ username: String) {
-        setAuthorSubscription(username, subscribed: !isSubscribedToAuthor(username))
     }
 
     func toggleAuthorBlock(_ username: String) {

@@ -220,7 +220,10 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 let tag = model.fandomWorksTag ?? "this fandom"
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "flame",
                                                 title: "Nothing in your library yet",
-                                                message: "Works from \(tag) you’ve opened or downloaded appear here. Press Search AO3 above to find works on the archive."))
+                                                message: """
+                                                    Works from \(tag) you’ve opened or downloaded appear here. Press \
+                                                    Search AO3 above to find works on the archive.
+                                                    """))
             } else {
                 overlay = nil
             }
@@ -263,7 +266,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         // Follow-bell inputs, read on every render path so the relay
         // re-renders the moment a follow or AO3 subscription toggles
         // (see ListPaneViewController.showWorksContent).
-        _ = model.follows.followedAuthorNames
+        _ = model.follows.follows
         _ = appState.subscriptions
 
         // Content-aware signature — data refreshes must repaint rows even
@@ -284,7 +287,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
-                cell.setFollowState(model.follows.authorFollowState(works[row].author))
+                cell.setFollowShaded(model.follows.isShaded(.author(works[row].author)))
             }
         }
         renderedWorkIDs = ids
@@ -319,7 +322,8 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
-                       followState: model.follows.authorFollowState(work.author),
+                       followShaded: model.follows.isShaded(.author(work.author)),
+                       finished: appState.finishedWorkIDs.contains(work.id),
                        summaryExpanded: true,
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: max(100, tableWidth - 45))
@@ -332,8 +336,9 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         cell.onAuthorClick = { [weak self] in
             self?.model.openAuthorProfile(work.author)
         }
-        cell.onToggleFollow = { [weak self] in
-            self?.model.follows.toggleAuthorFollow(work.author)
+        cell.onFollowBell = { [weak self] bell in
+            guard let self else { return }
+            FollowBellMenu.show(for: .author(work.author), follows: model.follows, from: bell)
         }
     }
 

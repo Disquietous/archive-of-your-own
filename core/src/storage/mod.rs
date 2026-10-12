@@ -28,6 +28,7 @@ use bookmarks_cache::BookmarksCache;
 use collections_cache::CollectionsCache;
 use series_cache::SeriesCache;
 use consts::*;
+pub use subscriptions::FollowRow;
 use state_cache::StateCache;
 use tag_cache::TagCache;
 use users_cache::UsersCache;
@@ -262,7 +263,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 19;
+    pub(crate) const SCHEMA_VERSION: u32 = 21;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -323,6 +324,8 @@ impl Storage {
                 // library at 18 has one shape.
                 18 => self.drop_abandoned_sync_bookkeeping(),
                 19 => self.add_request_log_transport(),
+                20 => self.add_works_finished(),
+                21 => self.migrate_v21_follows(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -370,6 +373,146 @@ impl Storage {
                 .map_err(map_sql)?;
         }
         Ok(())
+    }
+
+    /// v20 — `works.finished`: the user's manual "done reading" flag
+    /// (0 by default, never derived from progress). Kept out of save_work
+    /// like the other library-state columns.
+    fn add_works_finished(&self) -> Result<(), AppError> {
+        if !self.column_exists("works", "finished")? {
+            self.conn
+                .execute("ALTER TABLE works ADD COLUMN finished INTEGER NOT NULL DEFAULT 0", [])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// v21 — follows drive What's New (2026-10):
+    /// * `follows` replaces `followed_items` AND `subscription_snapshots`:
+    ///   one row per followed target, carrying that target's check state
+    ///   (1:1, so it lives on the row). `target_id` is NOCASE — AO3
+    ///   usernames are case-insensitive, and the original spelling is kept
+    ///   for URLs. Author follows stored as "Pseud (user)" bylines key on
+    ///   the account username.
+    /// * Every pre-v21 subscription becomes a follow (one-time: until now
+    ///   every subscription was checked; this keeps that true).
+    /// * `crawl_stamps`: the Refresh Works stamp, which describes a target's
+    ///   cached works list rather than a follow (drill-ins crawl unfollowed
+    ///   targets too).
+    /// * `subscriptions` is rebuilt account-scoped. Pre-v21 rows can't be
+    ///   attributed to an account, so they're dropped; the next load
+    ///   refetches for whoever is signed in.
+    /// * The check queue is cleared — its items name the old keys. An
+    ///   interrupted census resumes from `census_state` on the next check.
+    fn migrate_v21_follows(&self) -> Result<(), AppError> {
+        // Every step tolerates a library that already has part of the v21
+        // shape (tests rewind user_version over a current schema; a v1
+        // baseline may predate some of the old tables).
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS follows (
+                kind            TEXT NOT NULL,
+                target_id       TEXT NOT NULL COLLATE NOCASE,
+                name            TEXT NOT NULL,
+                added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                date_updated    TEXT,
+                last_checked_at TEXT,
+                total_works     INTEGER,
+                last_census_at  TEXT,
+                census_state    TEXT,
+                PRIMARY KEY (kind, target_id)
+             );
+             CREATE TABLE IF NOT EXISTS crawl_stamps (
+                kind       TEXT NOT NULL,
+                target_id  TEXT NOT NULL COLLATE NOCASE,
+                crawled_at TEXT NOT NULL,
+                PRIMARY KEY (kind, target_id)
+             );"
+        ).map_err(map_sql)?;
+
+        // Device follows first (they keep their add order), then every
+        // subscription not already followed.
+        if self.table_exists("followed_items")? {
+            let followed: Vec<(String, String)> = {
+                let mut stmt = self.conn
+                    .prepare("SELECT kind, name FROM followed_items ORDER BY rowid")
+                    .map_err(map_sql)?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(map_sql)?;
+                rows.collect::<Result<_, _>>().map_err(map_sql)?
+            };
+            for (kind, name) in followed {
+                let name = name.trim();
+                let target = if kind == SUB_TYPE_AUTHOR {
+                    crate::models::split_author_byline(name).0
+                } else {
+                    name.to_string()
+                };
+                if target.is_empty() {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO follows (kind, target_id, name) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![kind, target, name],
+                ).map_err(map_sql)?;
+            }
+            self.conn.execute_batch("DROP TABLE followed_items;").map_err(map_sql)?;
+        }
+        if self.table_exists("subscriptions")? && !self.column_exists("subscriptions", "account")? {
+            self.conn.execute_batch(
+                "INSERT OR IGNORE INTO follows (kind, target_id, name)
+                     SELECT sub_type, sub_id, name FROM subscriptions;
+                 DROP TABLE subscriptions;"
+            ).map_err(map_sql)?;
+        }
+        if self.table_exists("subscription_snapshots")? {
+            let has_last_checked = self.column_exists("subscription_snapshots", "last_checked_at")?;
+            let has_crawled = self.column_exists("subscription_snapshots", "works_crawled_at")?;
+            let last_checked = if has_last_checked { "s.last_checked_at" } else { "NULL" };
+            // Check state onto the follow rows. On a case collision the most
+            // recently checked snapshot wins.
+            self.conn.execute_batch(&format!(
+                "UPDATE follows SET
+                     (date_updated, last_checked_at, total_works, last_census_at, census_state) =
+                     (SELECT NULLIF(s.date_updated, ''), {last_checked}, s.total_works,
+                             s.last_census_at, s.census_state
+                      FROM subscription_snapshots s
+                      WHERE s.sub_type = follows.kind
+                        AND s.sub_id = follows.target_id COLLATE NOCASE
+                      ORDER BY {last_checked} IS NULL, {last_checked} DESC
+                      LIMIT 1)
+                 WHERE EXISTS (SELECT 1 FROM subscription_snapshots s
+                               WHERE s.sub_type = follows.kind
+                                 AND s.sub_id = follows.target_id COLLATE NOCASE);"
+            )).map_err(map_sql)?;
+            if has_crawled {
+                self.conn.execute_batch(
+                    "INSERT OR REPLACE INTO crawl_stamps (kind, target_id, crawled_at)
+                         SELECT sub_type, sub_id, works_crawled_at FROM subscription_snapshots
+                         WHERE works_crawled_at IS NOT NULL AND works_crawled_at != ''
+                         ORDER BY works_crawled_at;"
+                ).map_err(map_sql)?;
+            }
+            self.conn.execute_batch("DROP TABLE subscription_snapshots;").map_err(map_sql)?;
+        }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS subscriptions (
+                 account  TEXT NOT NULL COLLATE NOCASE,
+                 sub_type TEXT NOT NULL,
+                 sub_id   TEXT NOT NULL COLLATE NOCASE,
+                 name     TEXT NOT NULL,
+                 ao3_id   TEXT,
+                 PRIMARY KEY (account, sub_type, sub_id)
+             );
+             UPDATE app_state SET value = '[]' WHERE key = 'subscription_check_queue';"
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool, AppError> {
+        let n: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table], |r| r.get(0),
+        ).map_err(map_sql)?;
+        Ok(n > 0)
     }
 
     /// v2 — storage hygiene (2026-08):

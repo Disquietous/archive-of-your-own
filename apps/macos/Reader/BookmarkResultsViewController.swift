@@ -155,7 +155,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         // Follow-bell inputs, read on every render path so the relay
         // re-renders the moment a follow or AO3 subscription toggles
         // (see ListPaneViewController.showWorksContent).
-        _ = model.follows.followedAuthorNames
+        _ = model.follows.follows
         _ = appState.subscriptions
 
         // Content-aware signature — data refreshes must repaint rows even
@@ -172,7 +172,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                 guard let self,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? BookmarkRowCellView
                 else { return }
-                cell.updateFollowBells { self.model.follows.authorFollowState($0) }
+                cell.updateFollowBells { self.model.follows.isShaded(.author($0)) }
             }
         }
         renderedHitIDs = ids
@@ -208,8 +208,8 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                        workTagsExpanded: expandedWorkTags.contains(key),
                        bookmarkerTagsExpanded: expandedBookmarkerTags.contains(key),
                        availableTextWidth: max(100, tableWidth - 45),
-                       followState: { [weak self] in
-                           self?.model.follows.authorFollowState($0) ?? .none
+                       followShaded: { [weak self] in
+                           self?.model.follows.isShaded(.author($0)) ?? false
                        })
         cell.onToggleWorkTags = { [weak self] in
             self?.toggleTags(key: key, in: \.expandedWorkTags)
@@ -220,8 +220,9 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         cell.onAuthorClick = { [weak self] author in
             self?.model.openAuthorProfile(author)
         }
-        cell.onToggleFollow = { [weak self] author in
-            self?.model.follows.toggleAuthorFollow(author)
+        cell.onFollowBell = { [weak self] author, bell in
+            guard let self else { return }
+            FollowBellMenu.show(for: .author(author), follows: model.follows, from: bell)
         }
     }
 

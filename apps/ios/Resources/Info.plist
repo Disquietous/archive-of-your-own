@@ -44,9 +44,11 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
-    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Unlock your encrypted library with Face ID instead of typing its password. Only used if you turn it on in Settings.</string>
+    <key>UIBackgroundModes</key>
     <array>
-        <string>com.archiveofyourown.reader.subscriptioncheck</string>
+        <string>audio</string>
     </array>
     <key>UIAppFonts</key>
     <array>

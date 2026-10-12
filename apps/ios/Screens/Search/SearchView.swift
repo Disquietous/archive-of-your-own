@@ -15,7 +15,7 @@ struct SearchView: View {
 
     var initialShowFilters: Bool = false
     /// Screenshot harness only: seed the criteria fields without a library.
-    var initialFormFields: [UFormField]? = nil
+    var initialFormFields: [UFormField]?
 
     @State private var showFilters = false
     @State private var didApplyInitialFilters = false
@@ -137,11 +137,37 @@ struct SearchView: View {
             if !search.showingResults {
                 scopeControl
                 sourceControl
+                browseEntries
             }
         }
         .padding(.horizontal, theme.pad)
         .padding(.top, 8)
         .padding(.bottom, 10)
+    }
+
+    /// The former Browse tab's two lists, reached from here.
+    private var browseEntries: some View {
+        HStack(spacing: 8) {
+            browseChip("Latest Works", systemImage: "clock.arrow.circlepath") { nav.openLatestWorks() }
+            browseChip("Collections", systemImage: "square.grid.2x2") { nav.openCollections() }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func browseChip(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(title)
+                    .font(Typography.uiSmall())
+            }
+            .foregroundStyle(theme.ink2)
+            .padding(.horizontal, 12)
+            .frame(height: 32)
+            .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.surface2))
+        }
+        .buttonStyle(ChipPressStyle())
     }
 
     /// Wrapping scope control — never a sideways strip.

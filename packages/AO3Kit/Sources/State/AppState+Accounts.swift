@@ -7,6 +7,9 @@ extension AppState {
         let active = bridge.getActiveAccountUsername()
         ao3Username = active.isEmpty ? nil : active
         ao3AccountCount = bridge.getAccounts().count
+        // Sign-in, sign-out and account changes all pass through here;
+        // the core emptied subscriptions on any account transition.
+        reloadSubscriptionsFromStorage()
     }
 
     func switchAccount(_ accountId: String) {
@@ -17,10 +20,10 @@ extension AppState {
             needsReauth = true
         }
 
-        // Invalidate per-account network data so views refetch
-        subscriptionsLoadedForAccount = nil
+        // Invalidate per-account network data so views refetch. The core
+        // emptied subscriptions on the switch (they're account data).
         bookmarksLoadedForAccount = nil
-        subscriptions = []
+        reloadSubscriptionsFromStorage()
 
         // Reload per-account data from storage
         bookmarkedWorkIDs = Set(bridge.getBookmarkedWorkIds().map { String($0) })

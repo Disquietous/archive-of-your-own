@@ -94,6 +94,26 @@ extension AppState {
         }
     }
 
+    /// Flip the user's finished-reading flag on one work.
+    func toggleFinished(_ id: String) {
+        setFinished([id], finished: !finishedWorkIDs.contains(id))
+    }
+
+    /// Set or clear the finished-reading flag on a batch of works
+    /// ("mark all as read" and its undo). Sample works stay in-memory only.
+    func setFinished(_ ids: [String], finished: Bool) {
+        guard !ids.isEmpty else { return }
+        if finished {
+            finishedWorkIDs.formUnion(ids)
+        } else {
+            finishedWorkIDs.subtract(ids)
+        }
+        let real = ids.compactMap { UInt64($0) }
+        if !real.isEmpty {
+            bridge.setWorksFinished(real, finished: finished)
+        }
+    }
+
     func toggleDownload(_ id: String) {
         if downloadedWorkIDs.contains(id) {
             downloadedWorkIDs.remove(id)
@@ -127,6 +147,41 @@ extension AppState {
             downloadedWorkIDs.remove(id)
         }
         downloadingWorkIDs.remove(id)
+    }
+
+    /// Works in `ids` that "Download all" would fetch: real works not
+    /// already offline.
+    func pendingDownloads(_ ids: [String]) -> [String] {
+        ids.filter { UInt64($0) != nil && !downloadedWorkIDs.contains($0) }
+    }
+
+    /// "Download all" for a list: each work not yet offline, one after
+    /// another (the core paces the requests). Stop ends the batch after the
+    /// work in flight, so nothing is left half-saved. One batch at a time.
+    func downloadAll(_ ids: [String]) {
+        guard bulkDownload == nil else { return }
+        let pending = pendingDownloads(ids)
+        guard !pending.isEmpty else { return }
+        bulkDownloadStopRequested = false
+        bulkDownload = BulkDownloadProgress(done: 0, total: pending.count)
+        Task { @MainActor in
+            for id in pending {
+                if bulkDownloadStopRequested { break }
+                if !downloadedWorkIDs.contains(id), let workId = UInt64(id) {
+                    downloadedWorkIDs.insert(id)
+                    bridge.markDownloaded(workId)
+                    await downloadWork(id)
+                }
+                bulkDownload?.done += 1
+            }
+            bulkDownload = nil
+            bulkDownloadStopRequested = false
+        }
+    }
+
+    func stopBulkDownload() {
+        guard bulkDownload != nil else { return }
+        bulkDownloadStopRequested = true
     }
 
     func isDownloading(_ id: String) -> Bool {
@@ -197,5 +252,16 @@ extension AppState {
         if let workId = UInt64(id) {
             bridge.markWorkDetailViewed(workId)
         }
+    }
+}
+
+/// Progress of a running "Download all".
+struct BulkDownloadProgress: Equatable {
+    var done: Int
+    var total: Int
+
+    /// "Downloading 3 of 12" — the work in flight is `done + 1`.
+    var label: String {
+        "Downloading \(min(done + 1, total)) of \(total)"
     }
 }

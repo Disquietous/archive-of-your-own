@@ -74,7 +74,7 @@ impl AO3App {
 
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn search_works_raw(&self, keys: Vec<String>, values: Vec<String>, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
-        let pairs: Vec<(String, String)> = keys.into_iter().zip(values.into_iter()).collect();
+        let pairs: Vec<(String, String)> = keys.into_iter().zip(values).collect();
         self.run_listing_fetch("search", op_id, move |client| {
             let pairs = pairs.clone();
             async move {

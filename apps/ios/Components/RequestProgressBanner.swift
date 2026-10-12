@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Floating banner shown over a screen while a user-initiated fetch runs:

@@ -10,7 +10,7 @@ struct AuthorAvatarView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
     let username: String
-    var urlHint: String? = nil
+    var urlHint: String?
     var size: CGFloat = 28
     var fetchable = true
 

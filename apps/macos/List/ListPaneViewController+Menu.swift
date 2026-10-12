@@ -107,6 +107,15 @@ extension ListPaneViewController: NSMenuDelegate {
         sub.subType.lowercased().contains("series") ? "series" : "author"
     }
 
+    /// The bell target for a subscription row — the same target its
+    /// follow (if any) is keyed by.
+    func followTarget(for sub: USubscription) -> FollowModel.Target {
+        let type = sub.subType.lowercased()
+        let kind: FollowModel.Kind = type.contains("series") ? .series
+            : (type.contains("author") || type.contains("user")) ? .author : .work
+        return FollowModel.Target(kind: kind, id: sub.id, name: sub.name)
+    }
+
     /// Star button on the search toolbar — names and saves the current criteria.
     @objc private func menuCopySubscriptionLink(_ sender: NSMenuItem) {
         guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }

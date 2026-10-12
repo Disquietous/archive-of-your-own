@@ -1,17 +1,17 @@
+//! Background log upkeep: a periodic task on the app's runtime that trims
+//! the debug and request logs to the user's settings. Every knob is a
+//! pref (see `LogTrimSettings::read`), re-read each cycle so settings
+//! changes apply without a restart. Deletes run in batches that release
+//! the relevant lock between batches, so a large backlog never stalls
+//! live work.
+//!
+//! Each setting follows the age-OR-rows contract: age and row-count
+//! limits are independently optional, and when both are set the age trim
+//! runs first, then the row trim — old entries go even when the table is
+//! under its row cap.
+
 use super::*;
 use std::time::Duration;
-
-/// Background log upkeep: a periodic task on the app's runtime that trims
-/// the debug and request logs to the user's settings. Every knob is a
-/// pref (see `LogTrimSettings::read`), re-read each cycle so settings
-/// changes apply without a restart. Deletes run in batches that release
-/// the relevant lock between batches, so a large backlog never stalls
-/// live work.
-///
-/// Each setting follows the age-OR-rows contract: age and row-count
-/// limits are independently optional, and when both are set the age trim
-/// runs first, then the row trim — old entries go even when the table is
-/// under its row cap.
 
 const BATCH: u32 = 1_000;
 /// Settings poll cadence — also the delay before the first trim, so a

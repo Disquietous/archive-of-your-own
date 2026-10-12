@@ -37,7 +37,13 @@ struct CloudSyncSettingsPane: View {
                     conflictCard(conflict)
                 }
                 actionButton("Sync Now", enabled: sync.enabled && !sync.busy) { sync.syncNow() }
-                Text("One device at a time owns the iCloud copy and refreshes it every few minutes while its library changes, and again when the app closes. When you open the app on another device, it notices the copy came from elsewhere and asks whether to use that copy here or replace it with this device's library. Whichever library is replaced is kept as a backup below. The copy is encrypted with a key that travels only through iCloud Keychain.")
+                Text("""
+                    One device at a time owns the iCloud copy and refreshes it every few minutes while its library \
+                    changes, and again when the app closes. When you open the app on another device, it notices the \
+                    copy came from elsewhere and asks whether to use that copy here or replace it with this device's \
+                    library. Whichever library is replaced is kept as a backup below. The copy is encrypted with a key \
+                    that travels only through iCloud Keychain.
+                    """)
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -46,7 +52,10 @@ struct CloudSyncSettingsPane: View {
             SettingsGroup(theme: theme, label: "Backups") {
                 SettingsCard(theme: theme) {
                     if sync.backups.isEmpty {
-                        Text("No backups yet. One is made whenever this library is replaced — by the iCloud copy, or by restoring a backup — and whenever this device replaces another device's iCloud copy.")
+                        Text("""
+                            No backups yet. One is made whenever this library is replaced — by the iCloud copy, or by \
+                            restoring a backup — and whenever this device replaces another device's iCloud copy.
+                            """)
                             .font(Font(MacFont.ui(12.5)))
                             .foregroundStyle(theme.ink3)
                             .padding(.vertical, 9)

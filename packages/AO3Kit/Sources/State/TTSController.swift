@@ -1,5 +1,8 @@
 import SwiftUI
 import AVFoundation
+#if os(iOS)
+import MediaPlayer
+#endif
 
 @MainActor
 @Observable
@@ -15,6 +18,18 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
     var rate: Float = 1.0
     var selectedVoiceId: String?
 
+    /// What is being read: the work and 0-based chapter the paragraphs came
+    /// from. In memory only, never shown outside the app — the lock screen
+    /// entry is anonymous (`nowPlayingTitle`).
+    private(set) var source: (workID: String, chapter: Int)?
+    /// The reader that started (or re-adopted) playback. Leaving that
+    /// reader stops speech; a reader torn down by the app locking does not.
+    var owner: UUID?
+
+    /// The only thing the system Now Playing surfaces (lock screen, Control
+    /// Center, headphones) ever show — nothing derived from the work.
+    static let nowPlayingTitle = "AOYO - Reading Work"
+
     private static let rates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 
     override init() {
@@ -24,6 +39,22 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         if let savedRate = UserDefaults.standard.object(forKey: "ttsRate") as? Float {
             rate = savedRate
         }
+        #if os(iOS)
+        observeAudioSession()
+        #endif
+    }
+
+    /// Start reading a chapter for a reader: replaces whatever was playing.
+    func start(_ blocks: [ParsedContentBlock], workID: String, chapter: Int, owner: UUID) {
+        self.owner = owner
+        source = (workID, chapter)
+        setContent(blocks)
+        play()
+    }
+
+    /// True while this work's speech is the active session.
+    func isReading(workID: String) -> Bool {
+        isActive && source?.workID == workID
     }
 
     func setContent(_ blocks: [ParsedContentBlock]) {
@@ -49,6 +80,7 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
             synthesizer.continueSpeaking()
             isPlaying = true
             isPaused = false
+            updateNowPlaying()
             return
         }
         speakCurrent()
@@ -71,6 +103,7 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.pauseSpeaking(at: .word)
         isPlaying = false
         isPaused = true
+        updateNowPlaying()
     }
 
     func stop() {
@@ -79,7 +112,10 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         isPaused = false
         isActive = false
         currentParagraphIndex = 0
+        source = nil
+        owner = nil
         #if os(iOS)
+        clearNowPlaying()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
     }
@@ -156,8 +192,7 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
 
     private func speakCurrent() {
         guard currentParagraphIndex < paragraphs.count else {
-            isPlaying = false
-            isActive = false
+            finish()
             return
         }
         let text = paragraphs[currentParagraphIndex].text
@@ -171,6 +206,16 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
         }
         isPlaying = true
         synthesizer.speak(utterance)
+        updateNowPlaying()
+    }
+
+    /// Reached the end of the chapter's paragraphs.
+    private func finish() {
+        isPlaying = false
+        isActive = false
+        #if os(iOS)
+        clearNowPlaying()
+        #endif
     }
 
     private func avRate() -> Float {
@@ -231,12 +276,115 @@ final class TTSController: NSObject, AVSpeechSynthesizerDelegate {
                 currentParagraphIndex += 1
                 speakCurrent()
             } else {
-                isPlaying = false
-                isActive = false
+                finish()
             }
         }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
     }
+
+    // MARK: - System Now Playing (iOS)
+
+    /// Keeps the lock screen / Control Center entry in step with playback.
+    /// Only `nowPlayingTitle` and the play state are published: no artist,
+    /// artwork, chapter, progress or duration.
+    private func updateNowPlaying() {
+        #if os(iOS)
+        guard isActive else { return }
+        installRemoteCommands()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: Self.nowPlayingTitle,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+        ]
+        MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+        #endif
+    }
+
+    #if os(iOS)
+    private var remoteCommandsInstalled = false
+
+    private func clearNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
+    }
+
+    /// Play/pause and paragraph skip from the lock screen, Control Center
+    /// and headphones. Installed once; handlers act on whatever is loaded.
+    private func installRemoteCommands() {
+        guard !remoteCommandsInstalled else { return }
+        remoteCommandsInstalled = true
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.remotePlay() ?? .noActionableNowPlayingItem }
+        }
+        center.pauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated { self?.remotePause() ?? .noActionableNowPlayingItem }
+        }
+        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .noActionableNowPlayingItem }
+                return self.isPlaying ? self.remotePause() : self.remotePlay()
+            }
+        }
+        center.nextTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isActive else { return .noActionableNowPlayingItem }
+                self.skipForward()
+                return .success
+            }
+        }
+        center.previousTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isActive else { return .noActionableNowPlayingItem }
+                self.skipBack()
+                return .success
+            }
+        }
+    }
+
+    private func remotePlay() -> MPRemoteCommandHandlerStatus {
+        guard isActive, !paragraphs.isEmpty else { return .noActionableNowPlayingItem }
+        play()
+        return .success
+    }
+
+    private func remotePause() -> MPRemoteCommandHandlerStatus {
+        guard isPlaying else { return .commandFailed }
+        pause()
+        return .success
+    }
+
+    /// Calls, Siri and other audio pause speech; it resumes when the system
+    /// says so. Unplugging headphones pauses rather than moving to the
+    /// speaker.
+    private func observeAudioSession() {
+        let center = NotificationCenter.default
+        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init)
+            let options = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+                .map(AVAudioSession.InterruptionOptions.init) ?? []
+            MainActor.assumeIsolated {
+                guard let self, self.isActive else { return }
+                switch type {
+                case .began:
+                    if self.isPlaying { self.pause() }
+                case .ended:
+                    if options.contains(.shouldResume), self.isPaused { self.play() }
+                default:
+                    break
+                }
+            }
+        }
+        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init)
+            MainActor.assumeIsolated {
+                guard let self, reason == .oldDeviceUnavailable, self.isPlaying else { return }
+                self.pause()
+            }
+        }
+    }
+    #endif
 }

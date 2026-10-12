@@ -59,9 +59,16 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
         self.toolbar = PaneToolbarView(theme: theme)
         self.content = NSViewController()
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                              backing: .buffered, defer: false)
+        let window = LinkDropWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+                                    styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                                    backing: .buffered, defer: false)
+        // A link dropped here routes through the main window, like ⌘L —
+        // it never replaces this window's reader.
+        window.openLink = { [unowned model] raw in model.openAO3URL(raw) }
+        window.acceptsLinks = { [unowned appState] in
+            appState.bridge.isInitialized && !appState.bridge.showingRecoveryKey
+        }
+        window.enableLinkDrops()
         window.minSize = NSSize(width: 480, height: 420)
         window.collectionBehavior = [.fullScreenPrimary]
         window.tabbingMode = .disallowed
@@ -174,7 +181,7 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
             if let editor = window.firstResponder as? NSTextView, editor.isEditable {
                 return event
             }
-            let hasModifiers = !event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+            let hasModifiers = !event.modifierFlags.isDisjoint(with: [.command, .option, .control])
             guard !hasModifiers else { return event }
             switch event.keyCode {
             case 123: // ←

@@ -6,10 +6,9 @@ import SwiftUI
 
 // MARK: - Author follow bell (list-item standard)
 
-/// The shaded follow bell used across list items — the work detail
-/// byline's control: filled + accent while the author is followed locally
-/// or subscribed on AO3. Clicking only toggles the device-local follow;
-/// AO3 subscribe/unsubscribe lives solely in the Subscriptions view.
+/// The follow bell for an author name in SwiftUI-hosted list items: filled
+/// + accent while followed (or subscribed on AO3); clicking opens the
+/// Followed / Subscribed menu.
 struct AuthorFollowBell: View {
     @Bindable var theme: AppTheme
     @Bindable var model: MacAppModel
@@ -17,29 +16,10 @@ struct AuthorFollowBell: View {
     var size: CGFloat = 12
 
     var body: some View {
-        let state = model.follows.authorFollowState(author)
-        Button {
-            model.follows.toggleAuthorFollow(author)
-        } label: {
-            Image(systemName: state.shaded ? "bell.fill" : "bell")
-                .font(.system(size: size, weight: .medium))
-                .foregroundStyle(state.shaded ? theme.accent : theme.ink3)
-                .frame(width: 20, height: 20)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(helpText(for: state))
-    }
-
-    private func helpText(for state: MacAppModel.AuthorFollowState) -> String {
-        switch state {
-        case .followed:
-            "Unfollow \(author)"
-        case .subscribedOnly:
-            "Subscribed to \(author) on AO3 — click to also follow on this device"
-        case .none:
-            "Follow \(author) — adds them to Authors → Following"
-        }
+        let target = FollowModel.Target.author(author)
+        FollowBell(theme: theme, follows: model.follows, target: target,
+                   shaded: model.follows.isShaded(target), size: size)
+            .frame(width: size + 8, height: size + 8)
     }
 }
 
@@ -202,11 +182,11 @@ struct EmptyStateMac: View {
 struct LoadingStateMac: View {
     @Bindable var theme: AppTheme
     let message: String
-    var detail: String? = nil
+    var detail: String?
     /// Other requests in flight, shown as a summary beneath the primary
     /// message so the user sees everything underway, not just this one.
     var otherActivity: [String] = []
-    var onCancel: (() -> Void)? = nil
+    var onCancel: (() -> Void)?
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -665,7 +645,7 @@ struct AuthorCollectionsView: View {
     }
 }
 
-// MARK: - Authors (followed locally + AO3 subscriptions)
+// MARK: - Following (authors, works and series the What's New check watches)
 
 struct AuthorsList: View {
     @Bindable var theme: AppTheme
@@ -674,32 +654,18 @@ struct AuthorsList: View {
 
     @State private var newAuthor = ""
 
-    /// Local follows and AO3 subscription authors in one alphabetical list
-    /// (source shown per row, never used for ordering), narrowed by the
-    /// header's source checkboxes and the in-list username filter.
-    /// `username` is the canonical AO3 username (subscription display names
-    /// can differ) — used for opening works and fetching avatars.
-    private var authors: [(name: String, username: String, source: String)] {
-        var seen = Set<String>()
-        var result: [(String, String, String)] = []
-        if model.lists.authorsIncludeFollowed {
-            for name in model.follows.followedAuthorNames where seen.insert(name).inserted {
-                result.append((name, name, "Followed"))
-            }
-        }
-        if model.lists.authorsIncludeSubscribed {
-            for sub in model.appState.followedAuthors where seen.insert(sub.name).inserted {
-                result.append((sub.name, sub.id, "Subscribed on AO3"))
-            }
-        }
-        result.sort { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+    /// One kind's follows, alphabetical, narrowed by the in-list filter.
+    private func rows(_ kind: FollowModel.Kind) -> [UFollow] {
         let needle = model.lists.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return result }
-        return result.filter { $0.0.lowercased().contains(needle) || $0.1.lowercased().contains(needle) }
+        return model.follows.follows(of: kind)
+            .filter { needle.isEmpty || $0.name.lowercased().contains(needle)
+                || $0.targetId.lowercased().contains(needle) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
+        let authors = rows(.author), works = rows(.work), series = rows(.series)
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if model.lists.showFollowAuthorField {
@@ -710,21 +676,34 @@ struct AuthorsList: View {
                     .padding(.init(top: model.lists.showFollowAuthorField ? 0 : 12,
                                    leading: 16, bottom: 2, trailing: 16))
 
-                if authors.isEmpty {
-                    EmptyStateMac(theme: theme, icon: "person",
-                                  title: "No authors yet",
-                                  message: "Follow an author by username, or sign in to see your AO3 author subscriptions.")
+                if authors.isEmpty && works.isEmpty && series.isEmpty {
+                    EmptyStateMac(theme: theme, icon: "bell",
+                                  title: "Nothing followed yet",
+                                  message: "Follow an author by username, or use a bell on any author, work or series. What’s New checks what you follow.")
                         .frame(minHeight: 260)
                 } else {
-                    VStack(spacing: 0) {
-                        ForEach(authors, id: \.name) { author in
-                            authorRow(author.name, username: author.username, source: author.source)
-                        }
+                    VStack(alignment: .leading, spacing: 0) {
+                        section("Authors", authors)
+                        section("Works", works)
+                        section("Series", series)
                     }
                 }
             }
         }
-        .onAppear { appState.loadSubscriptionLastChecked() }
+    }
+
+    @ViewBuilder
+    private func section(_ title: String, _ follows: [UFollow]) -> some View {
+        if !follows.isEmpty {
+            Text(title.uppercased())
+                .font(Font(MacFont.ui(10.5, weight: .semibold)))
+                .tracking(0.6)
+                .foregroundStyle(theme.ink3)
+                .padding(.init(top: 12, leading: 16, bottom: 4, trailing: 16))
+            ForEach(follows, id: \.targetId) { follow in
+                followRow(follow)
+            }
+        }
     }
 
     private var followField: some View {
@@ -737,7 +716,7 @@ struct AuthorsList: View {
                 .font(Font(MacFont.ui(12.5)))
                 .foregroundStyle(theme.ink)
                 .onSubmit {
-                    model.follows.followAuthor(newAuthor)
+                    model.follows.follow(.author(newAuthor))
                     newAuthor = ""
                     model.lists.showFollowAuthorField = false
                 }
@@ -754,7 +733,7 @@ struct AuthorsList: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(theme.ink3)
-            TextField("Filter by username", text: Binding(
+            TextField("Filter by name", text: Binding(
                 get: { model.lists.authorsListFilter },
                 set: { model.lists.authorsListFilter = $0 }))
                 .textFieldStyle(.plain)
@@ -779,51 +758,80 @@ struct AuthorsList: View {
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
     }
 
-    /// DB-cached AO3 avatar; the letter disc shows until (or unless) the
-    /// one-time fetch delivers.
-    private func authorAvatar(name: String, username: String) -> some View {
+    /// DB-cached AO3 avatar for authors (the letter disc shows until, or
+    /// unless, the one-time fetch delivers); a glyph disc for works/series.
+    private func avatar(_ follow: UFollow) -> some View {
         Group {
-            if let data = appState.authorAvatars[username], let image = NSImage(data: data) {
+            if follow.kind == "author",
+               let data = appState.authorAvatars[follow.targetId], let image = NSImage(data: data) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else {
                 Circle()
-                    .fill(Fandom.spineColorForHue(abs(name.hashValue % 360)))
+                    .fill(Fandom.spineColorForHue(abs(follow.name.hashValue % 360)))
                     .overlay {
-                        Text(String(name.prefix(1)).uppercased())
-                            .font(Font(MacFont.serif(18, weight: .semibold)))
-                            .foregroundStyle(theme.onAccent)
+                        if follow.kind == "author" {
+                            Text(String(follow.name.prefix(1)).uppercased())
+                                .font(Font(MacFont.serif(18, weight: .semibold)))
+                                .foregroundStyle(theme.onAccent)
+                        } else {
+                            Image(systemName: follow.kind == "work" ? "book.closed" : "books.vertical")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(theme.onAccent)
+                        }
                     }
             }
         }
         .frame(width: 40, height: 40)
         .clipShape(Circle())
-        .onAppear { appState.loadAuthorAvatar(username) }
+        .onAppear {
+            if follow.kind == "author" { appState.loadAuthorAvatar(follow.targetId) }
+        }
     }
 
-    private func authorRow(_ name: String, username: String, source: String) -> some View {
+    private func subtitle(_ follow: UFollow, _ target: FollowModel.Target) -> String {
+        let kind = switch follow.kind {
+        case "work": "Work"
+        case "series": "Series"
+        default: "Author"
+        }
+        return model.follows.isSubscribed(target) ? "\(kind) · Subscribed on AO3" : kind
+    }
+
+    private func open(_ follow: UFollow) {
+        switch follow.kind {
+        case "work": model.openWorkByID(follow.targetId)
+        case "series": model.openSeries(id: follow.targetId, name: follow.name)
+        default: model.openAuthor(follow.targetId)
+        }
+    }
+
+    private func followRow(_ follow: UFollow) -> some View {
+        let kind = FollowModel.Kind(rawValue: follow.kind) ?? .author
+        let target = FollowModel.Target(kind: kind, id: follow.targetId, name: follow.name)
         // Same selection treatment as the work lists: accent-soft fill
         // with a 3pt accent bar on the leading edge.
-        let selected = model.author.username == username
-        // All author checks run under sub_type "author" whether the row is a
-        // local follow or an AO3 subscription.
-        let lastChecked = appState.subscriptionLastChecked["author:\(username)"]
+        let selected = kind == .author && model.author.username == follow.targetId
+        let lastChecked = follow.lastCheckedAt
         return Button {
-            model.openAuthor(username)
+            open(follow)
         } label: {
             HStack(spacing: 12) {
-                authorAvatar(name: name, username: username)
+                avatar(follow)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(name)
+                    Text(follow.name)
                         .font(Font(MacFont.ui(14.5, weight: .semibold)))
                         .foregroundStyle(theme.ink)
-                    Text(source)
+                        .lineLimit(1)
+                    Text(subtitle(follow, target))
                         .font(Font(MacFont.ui(12)))
                         .foregroundStyle(theme.ink3)
                 }
                 Spacer()
-                AuthorFollowBell(theme: theme, model: model, author: name)
+                FollowBell(theme: theme, follows: model.follows, target: target,
+                           shaded: model.follows.isShaded(target))
+                    .frame(width: 20, height: 20)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(theme.ink3)

@@ -74,7 +74,10 @@ struct MacBookmarkEditView: View {
                             .controlSize(.small)
                             .font(Font(MacFont.ui(12.5, weight: .medium)))
                             .foregroundStyle(theme.ink2)
-                        Text("Off = the bookmark stays on this device only. On = saving also creates it on your AO3 account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).")
+                        Text("""
+                            Off = the bookmark stays on this device only. On = saving also creates it on your AO3 \
+                            account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).
+                            """)
                             .font(Font(MacFont.ui(11)))
                             .foregroundStyle(theme.ink3)
                             .fixedSize(horizontal: false, vertical: true)

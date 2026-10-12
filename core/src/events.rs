@@ -409,6 +409,8 @@ mod tests {
         }
     }
 
+    // Holding a std lock across the await is the point of this test.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn emit_never_blocks_on_an_unrelated_lock() {
         // Shares the same serialization as every other test here — without

@@ -14,6 +14,9 @@ final class AppModels {
     let author: AuthorProfileModel
     let subscriptionWorks: SubscriptionWorksModel
     let ops: OperationsModel
+    /// App-wide so speech outlives the reader view: locking the app
+    /// replaces the view tree, and listening must carry on (M4).
+    let tts = TTSController()
 
     init(appState: AppState) {
         search = SearchModel()
@@ -38,5 +41,7 @@ final class AppModels {
     func loadPersisted() {
         lists.loadPersistedPrefs()
         follows.load()
+        // A replaced library brings its own follows.
+        follows.reload()
     }
 }

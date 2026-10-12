@@ -39,41 +39,22 @@ pub(super) fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crat
     }
 }
 
-/// How old a subscription's own `last_checked_at` may be before it joins
-/// the next check round (mirrored by the Swift auto-check gate's cadence).
+/// How old a follow's own `last_checked_at` may be before it joins the
+/// next check round.
 pub(super) const CHECK_INTERVAL_SECS: u64 = 3600;
 
-/// Everything a check round covers: persisted subscriptions plus
-/// device-local followed authors, deduplicated.
-pub(super) fn check_entries(s: &Storage, extra_authors: &[String])
-    -> Result<Vec<(String, String, String)>, AO3Error> {
-    let subs = s.get_subscriptions().map_err(AO3Error::from)?;
-    let mut entries: Vec<(String, String, String)> = subs.into_iter()
-        .map(|(t, id, name, _)| (t, id, name))
-        .collect();
-    for follow in extra_authors {
-        let display = follow.trim();
-        let (user, _) = split_author_byline(display);
-        if user.is_empty() {
-            continue;
-        }
-        let duplicate = entries.iter().any(|(t, id, _)|
-            t == "author" && id.eq_ignore_ascii_case(&user));
-        if !duplicate {
-            entries.push(("author".to_string(), user, display.to_string()));
-        }
-    }
-    entries.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
-    Ok(entries)
+/// Is this follow's own check stale? A missing follow, NULL, or
+/// unparseable stamp all count as never-checked.
+pub(super) fn follow_check_due(s: &Storage, kind: &str, target_id: &str) -> bool {
+    follow_older_than(s, kind, target_id, CHECK_INTERVAL_SECS)
 }
 
-/// Is this subscription's own check stale? Missing row, NULL, or
-/// unparseable all count as never-checked.
-pub(super) fn snapshot_check_due(s: &Storage, sub_type: &str, sub_id: &str) -> bool {
-    match s.get_snapshot_last_checked(sub_type, sub_id) {
+/// Was this follow last checked more than `max_age_secs` ago (or never)?
+pub(super) fn follow_older_than(s: &Storage, kind: &str, target_id: &str, max_age_secs: u64) -> bool {
+    match s.get_follow_last_checked(kind, target_id) {
         Ok(Some(at)) if !at.is_empty() => {
             let then = crate::timefmt::datetime_to_epoch(&at).unwrap_or(0);
-            crate::timefmt::epoch_now().saturating_sub(then) > CHECK_INTERVAL_SECS
+            crate::timefmt::epoch_now().saturating_sub(then) > max_age_secs
         }
         _ => true,
     }
@@ -194,9 +175,9 @@ pub(super) fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_nam
     }
     // A reappearance (undeleted, un-anonymized, unrestricted) clears the flag.
     log_db("set_works_gone", s.set_works_gone(&state.seen_ids, false));
-    log_db("set_snapshot_total_works", s.set_snapshot_total_works(sub_type, sub_id, seen.len() as u32));
-    log_db("set_snapshot_last_census", s.set_snapshot_last_census(sub_type, sub_id, &now_utc()));
-    log_db("set_snapshot_census_state", s.set_snapshot_census_state(sub_type, sub_id, None));
+    log_db("set_follow_total_works", s.set_follow_total_works(sub_type, sub_id, seen.len() as u32));
+    log_db("set_follow_last_census", s.set_follow_last_census(sub_type, sub_id, &now_utc()));
+    log_db("set_follow_census_state", s.set_follow_census_state(sub_type, sub_id, None));
     log_info!("whats_new",
         "Census complete for {} subscription '{}' ({}): {} works listed{}",
         sub_type, sub_name, state.reason, seen.len(),
@@ -210,8 +191,8 @@ pub(super) fn requeue_census_marker(s: &Storage, sub_type: &str, sub_id: &str, n
     let queue_json = s.get_check_queue().ok().flatten().unwrap_or_else(|| "[]".to_string());
     let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json).unwrap_or_default();
     queue.push(serde_json::json!({
-        "sub_type": sub_type,
-        "sub_id": sub_id,
+        "kind": sub_type,
+        "target_id": sub_id,
         "name": name,
         "census": true,
     }));
@@ -230,11 +211,10 @@ pub(super) fn collect_image_srcs(blocks: &[crate::models::ContentBlock], out: &m
     use crate::models::ContentBlock;
     for block in blocks {
         match block {
-            ContentBlock::Image { src, .. } => {
-                if !out.contains(src) {
+            ContentBlock::Image { src, .. }
+                if !out.contains(src) => {
                     out.push(src.clone());
                 }
-            }
             ContentBlock::Blockquote { blocks } => collect_image_srcs(blocks, out),
             ContentBlock::List { items, .. } => {
                 for item in items {
@@ -252,27 +232,6 @@ pub(super) fn now_utc() -> String {
     crate::timefmt::now_utc_datetime()
 }
 
-pub(super) use crate::models::split_author_byline;
-
-// scaffolding is in lib.rs
-
-#[cfg(test)]
-mod byline_tests {
-    use crate::models::split_author_byline;
-
-    #[test]
-    fn test_split_author_byline() {
-        assert_eq!(split_author_byline("tealvneu"), ("tealvneu".to_string(), None));
-        assert_eq!(split_author_byline("saltedriceball (tealvneu)"),
-                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
-        assert_eq!(split_author_byline("saltedriceball(tealvneu)"),
-                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
-        assert_eq!(split_author_byline("  plain_name  "), ("plain_name".to_string(), None));
-        // Same pseud as username still splits to the clean account name.
-        assert_eq!(split_author_byline("astolat (astolat)"),
-                   ("astolat".to_string(), Some("astolat".to_string())));
-    }
-}
 
 /// Cache everything a bookmark listing showed, target first so the
 /// bookmarks target-exists trigger passes: the work (or series) blurb,
@@ -319,5 +278,25 @@ pub(super) fn hit_from_listing(l: BookmarkListing, id: Option<i64>) -> BookmarkH
         mystery_collection_title: l.mystery_collection_title,
         work: l.work_summary,
         series: l.series_summary,
+    }
+}
+
+// scaffolding is in lib.rs
+
+#[cfg(test)]
+mod byline_tests {
+    use crate::models::split_author_byline;
+
+    #[test]
+    fn test_split_author_byline() {
+        assert_eq!(split_author_byline("tealvneu"), ("tealvneu".to_string(), None));
+        assert_eq!(split_author_byline("saltedriceball (tealvneu)"),
+                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
+        assert_eq!(split_author_byline("saltedriceball(tealvneu)"),
+                   ("tealvneu".to_string(), Some("saltedriceball".to_string())));
+        assert_eq!(split_author_byline("  plain_name  "), ("plain_name".to_string(), None));
+        // Same pseud as username still splits to the clean account name.
+        assert_eq!(split_author_byline("astolat (astolat)"),
+                   ("astolat".to_string(), Some("astolat".to_string())));
     }
 }

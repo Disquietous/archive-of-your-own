@@ -82,6 +82,44 @@ final class ReaderBodyTextView: UITextView {
     }
 }
 
+/// Find target for the reading column: the text view does the searching
+/// and match highlighting; revealing a match is redirected to the
+/// enclosing scroll view, since the text view itself never scrolls.
+final class ReaderFindTarget: NSObject, UITextSearching {
+    private let textView: UITextView
+    private let reveal: (CGRect) -> Void
+
+    init(textView: UITextView, reveal: @escaping (CGRect) -> Void) {
+        self.textView = textView
+        self.reveal = reveal
+    }
+
+    typealias DocumentIdentifier = UITextView.DocumentIdentifier
+
+    var selectedTextRange: UITextRange? { textView.selectedTextRange }
+
+    func compare(_ foundRange: UITextRange, toRange: UITextRange, document: DocumentIdentifier?) -> ComparisonResult {
+        textView.compare(foundRange, toRange: toRange, document: document)
+    }
+
+    func performTextSearch(queryString: String, options: UITextSearchOptions,
+                           resultAggregator: UITextSearchAggregator<DocumentIdentifier>) {
+        textView.performTextSearch(queryString: queryString, options: options, resultAggregator: resultAggregator)
+    }
+
+    func decorate(foundTextRange: UITextRange, document: DocumentIdentifier?, usingStyle style: UITextSearchFoundTextStyle) {
+        textView.decorate(foundTextRange: foundTextRange, document: document, usingStyle: style)
+    }
+
+    func clearAllDecoratedFoundText() {
+        textView.clearAllDecoratedFoundText()
+    }
+
+    func scrollRangeToVisible(_ range: UITextRange, inDocument document: DocumentIdentifier?) {
+        reveal(textView.firstRect(for: range))
+    }
+}
+
 /// The reading column: one TextKit 2 text view holding every chapter the
 /// reader shows (one, or the entire work), in a scroll view, followed by
 /// the SwiftUI end-of-chapter content. Owns the text-anchored position —
@@ -155,6 +193,8 @@ final class ReaderTextViewController: UIViewController {
     private var pendingPersist: DispatchWorkItem?
     private var visibleChapter: Int?
     private var lastReportedY: CGFloat = 0
+    private var findTarget: ReaderFindTarget?
+    private var findInteraction: UIFindInteraction?
 
     init(theme: AppTheme) {
         self.theme = theme
@@ -186,6 +226,10 @@ final class ReaderTextViewController: UIViewController {
         textView.delegate = self
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.onLayout = { [weak self] in self?.geometryDidChange() }
+        findTarget = ReaderFindTarget(textView: textView) { [weak self] rect in self?.reveal(rect) }
+        let find = UIFindInteraction(sessionDelegate: self)
+        textView.addInteraction(find)
+        findInteraction = find
 
         endHost.view.backgroundColor = .clear
         endHost.sizingOptions = [.intrinsicContentSize]
@@ -249,7 +293,10 @@ final class ReaderTextViewController: UIViewController {
         let height = scrollView.contentSize.height
         let widthChanged = width != lastLayoutWidth
         guard widthChanged || abs(height - lastDocumentHeight) > 0.5 else { return }
-        aoyoPosLog("geometry width \(Int(lastLayoutWidth))->\(Int(width)) height \(Int(lastDocumentHeight))->\(Int(height)) anchor=\(anchorOffset ?? -1) pending=\(pendingRestore != nil)")
+        aoyoPosLog("""
+            geometry width \(Int(lastLayoutWidth))->\(Int(width)) height \(Int(lastDocumentHeight))->\(Int(height)) \
+            anchor=\(anchorOffset ?? -1) pending=\(pendingRestore != nil)
+            """)
         lastLayoutWidth = width
         lastDocumentHeight = height
         // Width changes resize the fixed-width attachments (images, rules),
@@ -454,6 +501,26 @@ final class ReaderTextViewController: UIViewController {
         highlightedRange = range
     }
 
+    /// Show the system find bar over the text shown (the chapter, or the
+    /// whole work in entire-work mode).
+    func presentFind() {
+        textView.becomeFirstResponder()
+        findInteraction?.presentFindNavigator(showingReplace: false)
+    }
+
+    /// Scroll a find match (text-view coordinates) into the middle third
+    /// of the visible area.
+    private func reveal(_ rect: CGRect) {
+        guard !rect.isNull, !rect.isInfinite else { return }
+        let inScroll = textView.convert(rect, to: scrollView)
+        let visible = scrollView.bounds.inset(by: scrollView.adjustedContentInset)
+        guard !visible.insetBy(dx: 0, dy: visible.height / 3).contains(inScroll) else { return }
+        let minY = -scrollView.adjustedContentInset.top
+        let maxY = max(minY, scrollView.contentSize.height + scrollView.adjustedContentInset.bottom - scrollView.bounds.height)
+        let targetY = inScroll.midY - scrollView.adjustedContentInset.top - visible.height / 2
+        scrollView.setContentOffset(CGPoint(x: 0, y: min(max(targetY, minY), maxY)), animated: true)
+    }
+
     func scrollToTop() {
         scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
     }
@@ -640,7 +707,12 @@ final class ReaderTextViewController: UIViewController {
             return
         }
         let clamped = min(offset, length - 1)
-        aoyoPosLog("restore start: offset=\(offset) docLen=\(length) scroll bounds=\(Int(scrollView.bounds.height)) content=\(Int(scrollView.contentSize.height)) inset top=\(Int(scrollView.adjustedContentInset.top)) bottom=\(Int(scrollView.adjustedContentInset.bottom)) y=\(Int(scrollView.contentOffset.y)) textView y=\(Int(textView.frame.minY)) h=\(Int(textView.bounds.height))")
+        aoyoPosLog("""
+            restore start: offset=\(offset) docLen=\(length) scroll bounds=\(Int(scrollView.bounds.height)) \
+            content=\(Int(scrollView.contentSize.height)) inset top=\(Int(scrollView.adjustedContentInset.top)) \
+            bottom=\(Int(scrollView.adjustedContentInset.bottom)) y=\(Int(scrollView.contentOffset.y)) textView \
+            y=\(Int(textView.frame.minY)) h=\(Int(textView.bounds.height))
+            """)
 
         // Converge on VISUAL truth: compare the line at the top of the
         // screen against the anchor's line, and when they differ, move by
@@ -676,7 +748,11 @@ final class ReaderTextViewController: UIViewController {
                 break
             }
             let newY = min(max(minOffset, currentY + delta), maxOffset)
-            aoyoPosLog("pass \(passes): target start=\(target.start) y=\(Int(target.y)) viewportTop=\(Int(viewportTop)) currentTop=\(currentTop ?? -1) currentY=\(Int(currentY)) delta=\(Int(delta)) range=[\(Int(minOffset)),\(Int(maxOffset))] newY=\(Int(newY))")
+            aoyoPosLog("""
+                pass \(passes): target start=\(target.start) y=\(Int(target.y)) viewportTop=\(Int(viewportTop)) \
+                currentTop=\(currentTop ?? -1) currentY=\(Int(currentY)) delta=\(Int(delta)) \
+                range=[\(Int(minOffset)),\(Int(maxOffset))] newY=\(Int(newY))
+                """)
             if abs(newY - currentY) < 0.5 { break }
             UIView.performWithoutAnimation {
                 scrollView.setContentOffset(CGPoint(x: 0, y: newY), animated: false)
@@ -814,6 +890,12 @@ extension ReaderTextViewController: UIScrollViewDelegate {
 }
 
 // MARK: - Links (tap-to-load images, external links)
+
+extension ReaderTextViewController: UIFindInteractionDelegate {
+    func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
+        findTarget.map { UITextSearchingFindSession(searchableObject: $0) }
+    }
+}
 
 extension ReaderTextViewController: UITextViewDelegate {
     func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {

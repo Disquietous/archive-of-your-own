@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// A floating-capable window that shows and controls the What's New check:
@@ -54,7 +55,7 @@ struct WhatsNewMonitorView: View {
 
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
-    private var monitor: SubscriptionCheckMonitor { appState.checkMonitor }
+    private var monitor: WhatsNewCheckMonitor { appState.checkMonitor }
 
     var body: some View {
         let _ = theme.uiFontScale
@@ -154,7 +155,7 @@ struct WhatsNewMonitorView: View {
             parts.append("running \(Self.elapsed(since: at, now: now))")
         }
         if parts.isEmpty {
-            if let last = appState.bridge.getLastSubscriptionCheck(), !last.isEmpty {
+            if let last = appState.bridge.getLastWhatsNewCheck(), !last.isEmpty {
                 return "Last completed check: \(last)"
             }
             return "Start a check to see progress here."
@@ -169,26 +170,26 @@ struct WhatsNewMonitorView: View {
             if monitor.isRunning {
                 if monitor.phase == .pausedByUser {
                     controlButton("Resume", symbol: "play.fill", fill: theme.accent) {
-                        appState.resumeSubscriptionCheck()
+                        appState.resumeWhatsNewCheck()
                     }
                 } else {
                     controlButton("Pause", symbol: "pause.fill", fill: theme.accent2,
                                   disabled: monitor.phase == .stopping || monitor.phase == .connecting) {
-                        appState.pauseSubscriptionCheck()
+                        appState.pauseWhatsNewCheck()
                     }
                 }
                 controlButton("Stop", symbol: "stop.fill", fill: Color(hex: "CE514D"),
                               disabled: monitor.phase == .stopping) {
-                    appState.stopSubscriptionCheck()
+                    appState.stopWhatsNewCheck()
                 }
             } else {
                 controlButton(monitor.pending.isEmpty ? "Start" : "Resume", symbol: "play.fill", fill: theme.accent,
                               disabled: appState.ao3Username == nil) {
-                    appState.startSubscriptionCheck(all: false)
+                    appState.startWhatsNewCheck(all: false)
                 }
                 controlButton("Check All", symbol: "arrow.clockwise", fill: theme.accent2,
                               disabled: appState.ao3Username == nil) {
-                    appState.startSubscriptionCheck(all: true)
+                    appState.startWhatsNewCheck(all: true)
                 }
             }
             Spacer()
@@ -225,7 +226,7 @@ struct WhatsNewMonitorView: View {
     // MARK: - Queue
 
     private var queue: some View {
-        ScrollViewReader { proxy in
+        ScrollViewReader { _ in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                     if let current = monitor.current {
@@ -262,7 +263,7 @@ struct WhatsNewMonitorView: View {
 
     private var pendingRows: [UCheckQueueItem] {
         guard let current = monitor.current, let first = monitor.pending.first,
-              first.subType == current.subType, first.subId == current.subId, first.census == current.census
+              first.kind == current.kind, first.targetId == current.targetId, first.census == current.census
         else { return monitor.pending }
         return Array(monitor.pending.dropFirst())
     }
@@ -317,7 +318,7 @@ struct WhatsNewMonitorView: View {
         .padding(.vertical, 5)
     }
 
-    private func completedRow(_ c: SubscriptionCheckMonitor.Completed) -> some View {
+    private func completedRow(_ c: WhatsNewCheckMonitor.Completed) -> some View {
         let (symbol, color, note): (String, Color, String?) = {
             switch c.outcome {
             case .updated: return ("sparkles", theme.accent, "updated")
@@ -361,11 +362,11 @@ struct WhatsNewMonitorView: View {
     private func kindBadge(_ item: UCheckQueueItem) -> some View {
         let label: String = {
             if item.census { return "CENSUS" }
-            switch item.subType {
+            switch item.kind {
             case "author": return "AUTHOR"
             case "series": return "SERIES"
             case "work": return "WORK"
-            default: return item.subType.uppercased()
+            default: return item.kind.uppercased()
             }
         }()
         return Text(label)

@@ -110,7 +110,7 @@ enum RecoveryKey {
 
     private static func deriveKey(from recoveryKey: String) -> Data {
         let password = recoveryKey.replacingOccurrences(of: "-", with: "")
-        let salt = "ao3-archive-reader-salt".data(using: .utf8)!
+        let salt = Data("ao3-archive-reader-salt".utf8)
         var derivedKey = Data(count: kCCKeySizeAES256)
         _ = derivedKey.withUnsafeMutableBytes { derivedPtr in
             password.withCString { passPtr in

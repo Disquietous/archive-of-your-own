@@ -238,8 +238,11 @@ final class LibraryBootstrap {
         switch source {
         case .new:
             let ok = password.map { bridge.createWithPassword($0) } ?? bridge.createWithAutoKey()
-            if !ok { error = bridge.connectionError ?? "Failed to create database." }
-            else if let password { noteRecoveryKey(for: password) }
+            if !ok {
+                error = bridge.connectionError ?? "Failed to create database."
+            } else if let password {
+                noteRecoveryKey(for: password)
+            }
             return ok
         case .cloud:
             return await adoptCloud(password: password)
@@ -355,7 +358,9 @@ final class LibraryBootstrap {
     private enum BootstrapError: LocalizedError {
         case message(String)
         var errorDescription: String? {
-            switch self { case .message(let m): m }
+            switch self {
+            case .message(let m): m
+            }
         }
     }
 }

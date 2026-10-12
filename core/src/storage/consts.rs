@@ -25,6 +25,7 @@ pub(crate) enum Savepoint {
     SaveCollections,
     SaveCollectionProfile,
     WorksGone,
+    WorksFinished,
     NewWorkIds,
     SaveSeries,
 }
@@ -38,6 +39,7 @@ impl Savepoint {
             Self::SaveCollections => "save_collections",
             Self::SaveCollectionProfile => "save_collection_profile",
             Self::WorksGone => "works_gone",
+            Self::WorksFinished => "works_finished",
             Self::NewWorkIds => "new_work_ids",
             Self::SaveSeries => "save_series",
         }
@@ -56,10 +58,7 @@ pub(super) const SQL_ROLLBACK_TO: &str = "ROLLBACK TO";
 // ---------------------------------------------------------------------------
 
 pub(super) const SQL_UPSERT_SUBSCRIPTION: &str =
-    "INSERT OR REPLACE INTO subscriptions (sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4)";
-
-/// Stub row satisfying collection foreign keys for deep-linked listings —
-/// the next blurb or profile save fills it in.
+    "INSERT OR REPLACE INTO subscriptions (account, sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4, ?5)";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary (work_tags.tag_type / tags.tag_type values)
@@ -149,14 +148,3 @@ pub(super) fn sql_placeholders(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-// ---------------------------------------------------------------------------
-// LIKE pattern builders (input must already be `escape_like`d)
-// ---------------------------------------------------------------------------
-
-pub(super) fn like_contains(escaped: &str) -> String {
-    format!("%{escaped}%")
-}
-
-pub(super) fn like_prefix(escaped: &str) -> String {
-    format!("{escaped}%")
-}

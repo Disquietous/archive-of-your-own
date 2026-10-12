@@ -769,8 +769,8 @@ impl Storage {
                 .unwrap_or(0)
         };
         match c.sort_column.as_str() {
-            "bookmarkable_date" => hits.sort_by(|a, b| updated(&b.0).cmp(&updated(&a.0))),
-            SORT_KEY_WORD_COUNT => hits.sort_by(|a, b| words(&b.0).cmp(&words(&a.0))),
+            "bookmarkable_date" => hits.sort_by_key(|h| std::cmp::Reverse(updated(&h.0))),
+            SORT_KEY_WORD_COUNT => hits.sort_by_key(|h| std::cmp::Reverse(words(&h.0))),
             _ => hits.sort_by(|a, b| b.1.cmp(&a.1)),
         }
         let mut out: Vec<_> = hits.into_iter().map(|(hit, _)| hit).collect();

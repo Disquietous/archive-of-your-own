@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// Floating banner shown over a pane's content area while a user-initiated

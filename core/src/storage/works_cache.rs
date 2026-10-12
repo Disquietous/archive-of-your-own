@@ -35,6 +35,9 @@ pub(super) struct WorkEntity {
     pub last_chapter_read: u32,
     pub last_chapter_read_pos: u32,
     pub gone_from_ao3: bool,
+    /// User-set "I'm done reading this" flag. Never inferred from
+    /// progress — only the header toggle and "mark all as read" write it.
+    pub finished: bool,
 }
 
 /// The works table's in-memory mirror and single write authority (the
@@ -67,7 +70,7 @@ impl WorksCache {
         {
             let sql = format!(
                 "SELECT {}, detail_viewed_at, last_read_dt, last_chapter_read,
-                        last_chapter_read_pos, gone_from_ao3 FROM works",
+                        last_chapter_read_pos, gone_from_ao3, finished FROM works",
                 Storage::work_select("")
             );
             let mut stmt = conn.prepare(&sql).map_err(map_sql)?;
@@ -79,6 +82,7 @@ impl WorksCache {
                     let last_chapter_read: i64 = row.get(22)?;
                     let last_chapter_read_pos: i64 = row.get(23)?;
                     let gone_from_ao3: i64 = row.get(24)?;
+                    let finished: i64 = row.get(25)?;
                     Ok(WorkEntity {
                         summary,
                         tags: Vec::new(),
@@ -87,6 +91,7 @@ impl WorksCache {
                         last_chapter_read: last_chapter_read as u32,
                         last_chapter_read_pos: last_chapter_read_pos as u32,
                         gone_from_ao3: gone_from_ao3 != 0,
+                        finished: finished != 0,
                     })
                 })
                 .map_err(map_sql)?;
@@ -261,6 +266,7 @@ impl WorksCache {
             last_chapter_read: old.as_ref().map(|o| o.last_chapter_read).unwrap_or(0),
             last_chapter_read_pos: old.as_ref().map(|o| o.last_chapter_read_pos).unwrap_or(0),
             gone_from_ao3: old.as_ref().map(|o| o.gone_from_ao3).unwrap_or(false),
+            finished: old.as_ref().map(|o| o.finished).unwrap_or(false),
         };
         map.insert(work.id, Arc::new(entity));
         Ok(())
@@ -404,6 +410,20 @@ impl WorksCache {
         for id in work_ids {
             stmt.execute(params![id, gone as i64]).map_err(map_sql)?;
             self.update_entity(*id, |e| e.gone_from_ao3 = gone);
+        }
+        Ok(())
+    }
+
+    /// Set (or clear) the user's finished-reading flag on works.
+    pub(super) fn set_finished(&self, conn: &Connection, work_ids: &[u64], finished: bool)
+        -> Result<(), AppError>
+    {
+        let mut stmt = conn
+            .prepare_cached("UPDATE works SET finished = ?2 WHERE id = ?1")
+            .map_err(map_sql)?;
+        for id in work_ids {
+            stmt.execute(params![id, finished as i64]).map_err(map_sql)?;
+            self.update_entity(*id, |e| e.finished = finished);
         }
         Ok(())
     }

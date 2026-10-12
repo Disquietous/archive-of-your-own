@@ -39,7 +39,11 @@ extension ListPaneViewController {
                            isLoading: model.subscriptionWorks.loadingSubscriptionID == sub.id,
                            isActive: model.subscriptionWorks.subId == sub.id
                                && model.subscriptionWorks.subType == normalizedSubType(sub),
-                           lastChecked: displayedLastChecked["\(sub.subType):\(sub.id)"])
+                           followShaded: model.follows.isShaded(followTarget(for: sub)))
+            cell.onFollowBell = { [weak self] bell in
+                guard let self else { return }
+                FollowBellMenu.show(for: followTarget(for: sub), follows: model.follows, from: bell)
+            }
             return cell
         }
 
@@ -58,9 +62,10 @@ extension ListPaneViewController {
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        kudosGiven: appState.kudosGivenWorkIDs.contains(work.id),
-                       followState: model.follows.authorFollowState(work.author),
+                       followShaded: model.follows.isShaded(.author(work.author)),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        isRemoved: appState.goneWorkIDs.contains(work.id),
+                       finished: appState.finishedWorkIDs.contains(work.id),
                        summaryExpanded: expandedSummaries.contains(work.id),
                        tagsExpanded: expandedTags.contains(work.id),
                        availableTextWidth: textWidth)
@@ -76,8 +81,9 @@ extension ListPaneViewController {
         cell.onAuthorClick = { [weak self] in
             self?.model.openAuthorProfile(work.author)
         }
-        cell.onToggleFollow = { [weak self] in
-            self?.model.follows.toggleAuthorFollow(work.author)
+        cell.onFollowBell = { [weak self] bell in
+            guard let self else { return }
+            FollowBellMenu.show(for: .author(work.author), follows: model.follows, from: bell)
         }
         return cell
     }
@@ -138,7 +144,7 @@ extension ListPaneViewController {
             // Measure so the centered text block keeps its padding at any
             // app text size / density instead of clipping against a fixed 52.
             subscriptionSizingCell.configure(with: displayedSubscriptions[row],
-                                             isLoading: false, isActive: false)
+                                             isLoading: false, isActive: false, followShaded: false)
             return max(44, subscriptionSizingCell.fittingSize.height)
         }
         if isShowingReadingLists {
@@ -159,6 +165,7 @@ extension ListPaneViewController {
                              selected: false,
                              isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                              isRemoved: appState.goneWorkIDs.contains(work.id),
+                             finished: appState.finishedWorkIDs.contains(work.id),
                              summaryExpanded: expandedSummaries.contains(work.id),
                              tagsExpanded: expandedTags.contains(work.id),
                              availableTextWidth: max(100, width - 45))

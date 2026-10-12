@@ -224,7 +224,7 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
 
     let div_sel = sel("div.comment");
     let div = li.select(&div_sel).next()
-        .or_else(|| Some(*li))?;
+        .or(Some(*li))?;
 
     // Avatar
     let avatar_url = div.select(&sel("img.icon")).next()

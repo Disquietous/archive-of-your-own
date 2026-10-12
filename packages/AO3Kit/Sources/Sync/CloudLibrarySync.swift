@@ -171,8 +171,9 @@ final class CloudLibrarySync {
         default: return
         }
         #if canImport(UIKit)
-        var task = UIBackgroundTaskIdentifier.invalid
-        task = UIApplication.shared.beginBackgroundTask { UIApplication.shared.endBackgroundTask(task) }
+        // No expiration handler: this runs synchronously on the main actor,
+        // so a main-queue expiration callback could only fire after the defer.
+        let task = UIApplication.shared.beginBackgroundTask(expirationHandler: nil)
         defer { UIApplication.shared.endBackgroundTask(task) }
         #endif
         if (try? Self.push(app: app, deviceName: deviceName, folder: dir, key: key)) != nil {

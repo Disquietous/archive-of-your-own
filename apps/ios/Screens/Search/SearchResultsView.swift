@@ -316,47 +316,40 @@ struct SearchResultsView: View {
         }
     }
 
-    /// A user hit — the generic row plus the local follow bell.
+    /// A user hit — the generic row plus the follow bell menu (outside the
+    /// row's button, so the menu gets its own taps).
     private func userRow(_ username: String) -> some View {
-        let followState = follows.authorFollowState(username)
-        return Button {
-            nav.searchPath.append(AppDestination.authorWorks(
-                username: AppState.canonicalAuthorUsername(username)))
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: "person")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 20)
-                    .foregroundStyle(theme.accent)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(username)
-                        .font(Typography.uiBody())
-                        .foregroundStyle(theme.ink)
-                        .lineLimit(1)
-                    Text("AO3 user")
-                        .font(Typography.uiSmall())
-                        .foregroundStyle(theme.ink3)
-                }
-                Spacer()
-                Button {
-                    follows.toggleAuthorFollow(username)
-                } label: {
-                    Image(systemName: followState == .none ? "bell" : "bell.fill")
+        HStack(spacing: 12) {
+            Button {
+                nav.searchPath.append(AppDestination.authorWorks(
+                    username: AppState.canonicalAuthorUsername(username)))
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "person")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(followState == .none ? theme.ink3 : theme.accent)
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
+                        .frame(width: 20)
+                        .foregroundStyle(theme.accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(username)
+                            .font(Typography.uiBody())
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(1)
+                        Text("AO3 user")
+                            .font(Typography.uiSmall())
+                            .foregroundStyle(theme.ink3)
+                    }
+                    Spacer()
                 }
-                .buttonStyle(IconButtonPressStyle())
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(theme.ink3)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            FollowBellMenu(target: .author(username), glyphSize: 14, weight: .medium, hitSize: 32)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(theme.ink3)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .overlay(alignment: .bottom) { theme.line.frame(height: 1) }
     }
 

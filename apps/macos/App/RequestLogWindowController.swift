@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // The UniFFI record already carries a unique `id`; make it usable in Table.

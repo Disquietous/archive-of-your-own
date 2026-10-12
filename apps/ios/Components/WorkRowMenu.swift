@@ -10,10 +10,10 @@ struct WorkRowMenu<Tail: View>: View {
 
     let work: Work
     /// The host's "New Reading List…" handler (it owns the name prompt).
-    var onNewReadingList: ((Work) -> Void)? = nil
+    var onNewReadingList: ((Work) -> Void)?
     /// The host's "Export as EPUB…" handler (it presents the share sheet);
     /// offered for downloaded works when set.
-    var onExportEpub: ((Work) -> Void)? = nil
+    var onExportEpub: ((Work) -> Void)?
     @ViewBuilder var tail: () -> Tail
 
     private var started: Bool {

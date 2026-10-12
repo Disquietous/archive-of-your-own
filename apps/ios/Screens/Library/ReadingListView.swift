@@ -27,7 +27,9 @@ struct ReadingListView: View {
             swipe: .init(label: "Remove", systemImage: "minus.circle") { work in
                 state.removeFromReadingList(listID, workId: work.id)
             },
+            header: state.bulkDownload != nil ? AnyView(BulkDownloadStatusBar()) : nil,
             menuItems: AnyView(Group {
+                BulkDownloadMenuItem { state.worksInReadingList(listID).map(\.id) }
                 Button {
                     renameText = currentName
                     showRenameDialog = true

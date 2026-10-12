@@ -1,7 +1,11 @@
 import SwiftUI
 
-/// AO3 subscriptions grouped by type. Author and series rows drill into
-/// their stored works (`SubscriptionWorksScreen`); work rows open the work.
+/// The signed-in account's AO3 subscriptions grouped by type. Author and
+/// series rows drill into their stored works (`SubscriptionWorksScreen`);
+/// work rows open the work. Each row carries the bell menu, so a
+/// subscription that isn't followed (What's New doesn't check it) is one
+/// tap from being followed. Refresh reloads subscription data only, then
+/// offers one "Follow All" prompt (shown from ContentView).
 struct SubscriptionsScreen: View {
     @Environment(AppTheme.self) private var theme
     @Environment(AppState.self) private var state
@@ -24,8 +28,6 @@ struct SubscriptionsScreen: View {
                                        subtitle: "Your AO3 subscriptions will appear here.")
                             .padding(.top, 40)
                     } else {
-                        lastCheckedLabel
-
                         if state.subscriptions.count > 8 {
                             ListFilterField(text: $lists.subscriptionListFilter, placeholder: "Filter subscriptions")
                         }
@@ -43,7 +45,7 @@ struct SubscriptionsScreen: View {
                             })
                         } else if state.subscriptions.isEmpty {
                             EmptyStateView(systemImage: "bell.slash", title: "No subscriptions",
-                                           subtitle: "Subscribe to authors, works, or series on AO3 to track updates.")
+                                           subtitle: "Use Subscribed in any bell menu, or subscribe on AO3, and your subscriptions appear here.")
                                 .padding(.top, 20)
                         } else {
                             let subs = lists.filteredSubscriptions
@@ -73,13 +75,9 @@ struct SubscriptionsScreen: View {
                 if state.ao3Username != nil {
                     ChromeIconButton(symbol: "arrow.clockwise", isBusy: state.isLoadingSubscriptions) {
                         state.bridge.invalidateSessionCache(key: "subscriptions")
-                        Task { await state.loadSubscriptions(force: true) }
+                        Task { await state.loadSubscriptions(force: true, userInitiated: true) }
                     }
                     .disabled(state.isLoadingSubscriptions)
-                    ChromeIconButton(symbol: "bell.badge", isBusy: state.isCheckingSubscriptions) {
-                        Task { await state.checkSubscriptions(force: true) }
-                    }
-                    .disabled(state.isCheckingSubscriptions)
                 }
             }
         }
@@ -100,16 +98,6 @@ struct SubscriptionsScreen: View {
     private func isAuthor(_ sub: USubscription) -> Bool {
         let t = sub.subType.lowercased()
         return t.contains("author") || t.contains("user")
-    }
-
-    private var lastCheckedLabel: some View {
-        Group {
-            if let ts = state.bridge.getLastSubscriptionCheck(), let date = DBTimestamp.date(ts) {
-                Text("Last checked: \(date.formatted(.relative(presentation: .named)))")
-                    .font(.custom("HankenGrotesk", size: 11).weight(.medium))
-                    .foregroundStyle(theme.ink3)
-            }
-        }
     }
 
     private func group(title: String, icon: String, items: [USubscription]) -> some View {
@@ -153,36 +141,38 @@ struct SubscriptionsScreen: View {
         }
     }
 
+    private func target(_ sub: USubscription) -> FollowModel.Target {
+        let type = sub.subType.lowercased()
+        let kind: FollowModel.Kind = type.contains("work") ? .work
+            : type.contains("series") ? .series : .author
+        return FollowModel.Target(kind: kind, id: sub.id, name: sub.name)
+    }
+
     private func row(_ sub: USubscription) -> some View {
-        let lastChecked = state.subscriptionLastChecked["\(sub.subType):\(sub.id)"]
-        return Button {
-            open(sub)
-        } label: {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 10) {
+            Button {
+                open(sub)
+            } label: {
+                HStack(spacing: 10) {
                     Text(sub.name)
                         .font(.custom("HankenGrotesk", size: 14).weight(.medium))
                         .foregroundStyle(theme.ink)
                         .lineLimit(1)
-                    if let lastChecked, let rel = DBTimestamp.relative(lastChecked) {
-                        Text("Checked \(rel)")
-                            .font(.custom("HankenGrotesk", size: 11))
-                            .foregroundStyle(theme.ink3)
+                    Spacer()
+                    if subscriptionWorks.loadingSubscriptionID == sub.id {
+                        ProgressView().controlSize(.small).tint(theme.ink3)
                     }
                 }
-                Spacer()
-                if subscriptionWorks.loadingSubscriptionID == sub.id {
-                    ProgressView().controlSize(.small).tint(theme.ink3)
-                }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(theme.ink3)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            FollowBellMenu(target: target(sub))
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.ink3)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 
     private func open(_ sub: USubscription) {
@@ -211,30 +201,86 @@ struct SubscriptionWorksScreen: View {
     /// Open once per screen instance: onAppear fires again when a work
     /// detail pushed on top is popped, and re-opening would cancel a crawl.
     @State private var didOpen = false
+    /// Pending "mark all as read" (true) / "unmark all" (false) confirmation.
+    @State private var pendingMarkAllRead: Bool?
+
+    private var storedWorks: [Work] {
+        subscriptionWorks.subId == id ? subscriptionWorks.works : []
+    }
+
+    /// The rows on screen — the list filter applies, as on the mac.
+    private var shownWorks: [Work] {
+        lists.listFiltered(storedWorks, section: .subscriptions)
+    }
+
+    private var allShownFinished: Bool {
+        let shown = shownWorks
+        return !shown.isEmpty && shown.allSatisfy { state.finishedWorkIDs.contains($0.id) }
+    }
 
     var body: some View {
         WorkListScreen(
             section: .subscriptions,
             title: name,
             subtitle: subtitleLine,
-            rawWorks: { subscriptionWorks.subId == id ? subscriptionWorks.works : [] },
+            rawWorks: { storedWorks },
             empty: .init(systemImage: subType == "series" ? "books.vertical" : "person",
                          title: "No stored works",
                          subtitle: "Refresh to fetch the complete list from AO3."),
             usesSectionPrefs: false,
             header: AnyView(header),
-            menuItems: AnyView(
+            menuItems: AnyView(Group {
+                if !subscriptionWorks.isLoading, let stop = subscriptionWorks.crawlStop {
+                    Button {
+                        subscriptionWorks.refresh(resume: true)
+                    } label: {
+                        Label("Resume (page \(stop.nextPage) of \(stop.totalPages))", systemImage: "arrow.clockwise")
+                    }
+                }
                 Button {
                     subscriptionWorks.isLoading ? subscriptionWorks.cancelRefresh() : subscriptionWorks.refresh()
                 } label: {
                     if subscriptionWorks.isLoading {
                         Label("Cancel Refresh", systemImage: "xmark.circle")
                     } else {
-                        Label("Refresh from AO3", systemImage: "arrow.clockwise")
+                        Label(subscriptionWorks.crawlStop == nil ? "Refresh from AO3" : "Refresh All from AO3",
+                              systemImage: "arrow.clockwise")
                     }
                 }
-            )
+                if subType == "author" {
+                    let all = allShownFinished
+                    Button {
+                        pendingMarkAllRead = !all
+                    } label: {
+                        Label(all ? "Unmark All as Read" : "Mark All as Read",
+                              systemImage: all ? "checkmark.circle.fill" : "checkmark.circle")
+                    }
+                    .disabled(shownWorks.isEmpty)
+                }
+            })
         )
+        .confirmationDialog(
+            pendingMarkAllRead == true ? "Mark all as read?" : "Unmark all as read?",
+            isPresented: Binding(
+                get: { pendingMarkAllRead != nil },
+                set: { if !$0 { pendingMarkAllRead = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(pendingMarkAllRead == true ? "Mark All as Read" : "Unmark All",
+                   role: pendingMarkAllRead == true ? nil : .destructive) {
+                if let mark = pendingMarkAllRead {
+                    state.setFinished(shownWorks.map(\.id), finished: mark)
+                }
+                pendingMarkAllRead = nil
+            }
+            Button("Cancel", role: .cancel) { pendingMarkAllRead = nil }
+        } message: {
+            let count = shownWorks.count == 1 ? "1 work" : "\(shownWorks.count) works"
+            Text(pendingMarkAllRead == true
+                 ? "This flags all \(count) in this list as finished reading."
+                 : "This clears the finished-reading flag on all \(count) in this list.")
+        }
         .onAppear {
             guard !didOpen else { return }
             didOpen = true
@@ -269,7 +315,9 @@ struct SubscriptionWorksScreen: View {
                     .buttonStyle(ButtonPressStyle())
             }
         } else if let error = subscriptionWorks.error {
-            NetworkErrorView(message: error, onRetry: { subscriptionWorks.refresh() })
+            NetworkErrorView(message: error, onRetry: { subscriptionWorks.refresh(resume: subscriptionWorks.crawlStop != nil) })
+        } else if let stop = subscriptionWorks.crawlStop {
+            CrawlStoppedRow(stop: stop) { subscriptionWorks.refresh(resume: true) }
         } else if subscriptionWorks.crawledAt == nil || subscriptionWorks.crawledAt?.isEmpty == true {
             Button {
                 subscriptionWorks.refresh()

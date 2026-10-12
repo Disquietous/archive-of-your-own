@@ -4,6 +4,10 @@ use crate::error::AppError;
 use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile};
 
 use super::consts::*;
+
+pub type NotificationRow = (i64, String, u64, String, String, String, String, bool);
+pub type LogRow = (i64, String, String, String, String);
+pub type InboxRow = (u64, String, String, String, String, String, String, bool, String);
 use super::users_cache::comment_byline;
 use super::{map_json, map_sql, Storage};
 
@@ -67,7 +71,7 @@ impl Storage {
     /// Returns Vec of (id, notif_type, work_id, author, title, message, created_at, read).
     pub fn get_notifications(
         &self,
-    ) -> Result<Vec<(i64, String, u64, String, String, String, String, bool)>, AppError> {
+    ) -> Result<Vec<NotificationRow>, AppError> {
         let mut stmt = self
             .conn
             .prepare(
@@ -183,7 +187,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_logs(&self, limit: u32) -> Result<Vec<(i64, String, String, String, String)>, AppError> {
+    pub fn get_logs(&self, limit: u32) -> Result<Vec<LogRow>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, timestamp, level, tag, message FROM debug_log ORDER BY id DESC LIMIT ?1"
         ).map_err(map_sql)?;
@@ -307,7 +311,13 @@ impl Storage {
         Ok(())
     }
 
+    /// Subscriptions are account data: activating a different account
+    /// empties them (the new account's list loads on demand).
     pub fn set_active_account(&self, id: &str) -> Result<(), AppError> {
+        let previous = self.get_active_account()?.map(|(prev, _, _)| prev);
+        if previous.as_deref() != Some(id) {
+            self.clear_subscriptions()?;
+        }
         self.conn.execute("UPDATE accounts SET is_active = 0", []).map_err(map_sql)?;
         self.conn.execute("UPDATE accounts SET is_active = 1 WHERE id = ?1", params![id]).map_err(map_sql)?;
         Ok(())
@@ -324,6 +334,10 @@ impl Storage {
             Some(Ok(r)) => Ok(Some(r)),
             _ => Ok(None),
         }
+    }
+
+    fn is_active_account(&self, id: &str) -> Result<bool, AppError> {
+        Ok(self.get_active_account()?.is_some_and(|(active, _, _)| active == id))
     }
 
     pub fn get_all_accounts(&self) -> Result<Vec<(String, String, bool)>, AppError> {
@@ -344,7 +358,11 @@ impl Storage {
         Ok(())
     }
 
+    /// Signing out. Signing the active account out empties subscriptions.
     pub fn clear_account_cookies(&self, id: &str) -> Result<(), AppError> {
+        if self.is_active_account(id)? {
+            self.clear_subscriptions()?;
+        }
         self.conn.execute(
             "UPDATE accounts SET cookies = '' WHERE id = ?1",
             params![id],
@@ -353,6 +371,9 @@ impl Storage {
     }
 
     pub fn delete_account(&self, id: &str) -> Result<(), AppError> {
+        if self.is_active_account(id)? {
+            self.clear_subscriptions()?;
+        }
         self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![id]).map_err(map_sql)?;
         Ok(())
     }
@@ -418,7 +439,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_inbox_messages(&self, page: u32, per_page: u32) -> Result<Vec<(u64, String, String, String, String, String, String, bool, String)>, AppError> {
+    pub fn get_inbox_messages(&self, page: u32, per_page: u32) -> Result<Vec<InboxRow>, AppError> {
         let offset = (page.saturating_sub(1)) * per_page;
         let mut stmt = self.conn.prepare(
             "SELECT comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json
@@ -520,17 +541,19 @@ impl Storage {
     }
 
     /// The cached profile for a name (account username, byline, or pseud),
-    /// with live subscription state joined in from the local subscriptions
-    /// table. None when the account has never had a profile fetch recorded.
+    /// with the signed-in account's subscription state joined in from the
+    /// local subscriptions table. None when the account has never had a profile fetch recorded.
     pub fn get_user_profile(&self, username: &str) -> Result<Option<UserProfile>, AppError> {
         let Some(entity) = self.users_cache
             .resolve(username)
             .filter(|e| !e.profile_fetched_at.is_empty())
         else { return Ok(None) };
         let mut profile = entity.to_profile();
-        profile.subscribed = self.has_subscription(SUB_TYPE_AUTHOR, &profile.username)?;
-        profile.subscription_ao3_id =
-            self.get_subscription_ao3_id(SUB_TYPE_AUTHOR, &profile.username)?;
+        if let Some(account) = self.subscription_account() {
+            profile.subscribed = self.has_subscription(&account, SUB_TYPE_AUTHOR, &profile.username)?;
+            profile.subscription_ao3_id =
+                self.get_subscription_ao3_id(&account, SUB_TYPE_AUTHOR, &profile.username)?;
+        }
         Ok(Some(profile))
     }
 
@@ -700,11 +723,8 @@ impl Storage {
 
         // Load all comments for this work and find the root thread
         let all = self.get_comments(work_id as u64, 0)?;
-        fn find_root<'a>(comments: &'a [Comment], root_id: u64) -> Option<&'a Comment> {
-            for c in comments {
-                if c.id == root_id { return Some(c); }
-            }
-            None
+        fn find_root(comments: &[Comment], root_id: u64) -> Option<&Comment> {
+            comments.iter().find(|&c| c.id == root_id).map(|v| v as _)
         }
         Ok(find_root(&all, root_id).cloned())
     }

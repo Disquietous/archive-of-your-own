@@ -22,13 +22,44 @@ struct ContentView: View {
         }
         .tint(theme.accent)
         .appSheets()
+        .modifier(SharedLinkRouterModifier())
         .alert("iCloud has \(state.cloudSync.pendingConflict?.deviceName ?? "another device")'s library",
                isPresented: Binding(get: { state.cloudSync.pendingConflict != nil }, set: { _ in })) {
             Button("Use iCloud Copy") { state.cloudSync.resolve(.useCloudCopy) }
             Button("Replace iCloud Copy", role: .destructive) { state.cloudSync.resolve(.overwriteCloudCopy) }
             Button("Not Now", role: .cancel) { state.cloudSync.resolve(.notNow) }
         } message: {
-            Text("Use it on this device (this device's library is kept as a backup), or replace the iCloud copy with this device's library (the iCloud copy is kept as a backup). You can also decide later in Settings.")
+            Text("""
+                Use it on this device (this device's library is kept as a backup), or replace the iCloud copy with \
+                this device's library (the iCloud copy is kept as a backup). You can also decide later in Settings.
+                """)
+        }
+        .alert("What’s New is out of date",
+               isPresented: Binding(get: { state.showWhatsNewOverdue }, set: { if !$0 { state.whatsNewCheckOverdue = false } })) {
+            Button("Check Now") { state.startWhatsNewCheck(all: false) }
+            Button("Later", role: .cancel) {}
+        } message: {
+            Text("Some followed authors, works or series haven’t been checked in over 24 hours.")
+        }
+        // One prompt for every subscription a user-initiated reload found
+        // without a follow — mounted here so it shows on any screen.
+        .alert(followAllPrompt?.title ?? "",
+               isPresented: Binding(get: { state.pendingFollowAll != nil },
+                                    set: { if !$0 { state.pendingFollowAll = nil } })) {
+            Button(FollowModel.BulkFollowPrompt.acceptLabel) {
+                if let subs = state.pendingFollowAll { follows.followAll(subs) }
+                state.pendingFollowAll = nil
+            }
+            Button(FollowModel.BulkFollowPrompt.declineLabel, role: .cancel) {
+                state.pendingFollowAll = nil
+            }
+        } message: {
+            Text(followAllPrompt?.message ?? "")
+        }
+        .overlay(alignment: .bottom) {
+            FollowNoticeBanner()
+                .padding(.bottom, 64)
+                .animation(.easeInOut(duration: 0.25), value: follows.notice)
         }
         .onChange(of: sizeClass, initial: true) { _, size in
             let usesDetail = size == .regular
@@ -49,6 +80,10 @@ struct ContentView: View {
         }
     }
 
+    private var followAllPrompt: FollowModel.BulkFollowPrompt? {
+        state.pendingFollowAll.map { FollowModel.bulkFollowPrompt(for: $0) }
+    }
+
     // MARK: - iPhone (TabView)
 
     private var iPhoneLayout: some View {
@@ -61,12 +96,6 @@ struct ContentView: View {
                 }
             }
             .badge(state.newUnviewedWorkCount + state.inboxUnreadCount)
-            Tab("Browse", systemImage: "square.grid.2x2", value: AppTab.browse) {
-                NavigationStack(path: $nav.browsePath) {
-                    BrowseView()
-                        .navigationDestination(for: AppDestination.self, destination: AppScreens.destination)
-                }
-            }
             Tab("Search", systemImage: "magnifyingglass", value: AppTab.search) {
                 NavigationStack(path: $nav.searchPath) {
                     SearchView()
@@ -100,11 +129,6 @@ struct ContentView: View {
                     LibraryView()
                         .navigationDestination(for: AppDestination.self, destination: AppScreens.destination)
                 }
-            case .browse:
-                NavigationStack(path: $nav.browsePath) {
-                    BrowseView()
-                        .navigationDestination(for: AppDestination.self, destination: AppScreens.destination)
-                }
             case .search:
                 NavigationStack(path: $nav.searchPath) {
                     SearchView()
@@ -135,10 +159,8 @@ struct ContentView: View {
                 sidebarSection(.history, "clock", "History")
             }
             Section("Discover") {
-                sidebarTab(.browse, "square.grid.2x2", "Browse")
                 sidebarSection(.fandoms, "flame", "Fandoms", count: follows.followedFandoms.count)
-                sidebarSection(.authors, "person", "Authors",
-                               count: follows.followedAuthorNames.count + state.followedAuthors.count)
+                sidebarSection(.authors, "person", "Following", count: follows.checkedFollowCount)
             }
             Section("Following") {
                 sidebarSection(.whatsNew, "bell.badge", "What’s New", badge: state.newUnviewedWorkCount)

@@ -12,7 +12,6 @@ struct DetailView: View {
     private var started: Bool { progress > 0 }
     private var currentChapter: Int { appState.progressMap[work.id]?.chapter ?? 1 }
     private var warnOK: Bool { work.warnings.contains("No Archive") }
-    private var followingAuthor: Bool { model.follows.followedAuthorNames.contains(work.author) }
 
     @State private var selectedChapter = 0
     /// Chapter titles for the dropdown — session cache first, then the
@@ -38,23 +37,7 @@ struct DetailView: View {
                     }
                     .buttonStyle(.plain)
                     .help("View \(work.author)’s profile")
-                    Button {
-                        if followingAuthor {
-                            model.follows.unfollowAuthor(work.author)
-                        } else {
-                            model.follows.followAuthor(work.author)
-                        }
-                    } label: {
-                        Image(systemName: followingAuthor ? "bell.fill" : "bell")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(followingAuthor ? theme.accent : theme.ink3)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(followingAuthor
-                          ? "Unfollow \(work.author)"
-                          : "Follow \(work.author) — adds them to Authors → Following")
+                    AuthorFollowBell(theme: theme, model: model, author: work.author, size: 13)
                 }
                 .padding(.bottom, 10)
                 if appState.kudosFailedWorkID == work.id {
@@ -92,9 +75,15 @@ struct DetailView: View {
                 if !work.series.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(work.series, id: \.self) { s in
-                            Text(s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)")
-                                .font(Font(MacFont.ui(13, weight: .semibold)))
-                                .foregroundStyle(theme.ink3)
+                            HStack(spacing: 6) {
+                                Text(s.part > 0 ? "Part \(s.part) of \(s.name)" : "Part of \(s.name)")
+                                    .font(Font(MacFont.ui(13, weight: .semibold)))
+                                    .foregroundStyle(theme.ink3)
+                                let target = FollowModel.Target(kind: .series, id: s.seriesID, name: s.name)
+                                FollowBell(theme: theme, follows: model.follows, target: target,
+                                           shaded: model.follows.isShaded(target), size: 11)
+                                    .frame(width: 18, height: 18)
+                            }
                         }
                     }
                     .padding(.bottom, 20)

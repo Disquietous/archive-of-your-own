@@ -44,6 +44,7 @@ struct ScreenshotHarness: View {
                 .environment(models.subscriptionWorks)
                 .environment(models.search)
                 .environment(models.ops)
+                .environment(models.tts)
                 .preferredColorScheme(theme.preferredColorScheme)
         }
         .task {
@@ -143,7 +144,6 @@ struct ScreenshotHarness: View {
     private func configureNavForScene(_ scene: ScreenshotScene) {
         nav.presentedSheet = nil
         nav.libraryPath = NavigationPath()
-        nav.browsePath = NavigationPath()
         nav.searchPath = NavigationPath()
         nav.settingsPath = NavigationPath()
 
@@ -151,7 +151,9 @@ struct ScreenshotHarness: View {
         case .library, .subscriptions:
             nav.selectedTab = .library
         case .browse:
-            nav.selectedTab = .browse
+            // Latest works now live behind the Search landing.
+            nav.selectedTab = .search
+            nav.searchPath = NavigationPath([AppDestination.latestWorks])
         case .search:
             nav.selectedTab = .search
         case .settings:
@@ -194,11 +196,6 @@ private struct ScreenshotTabView<Content: View>: View {
             Tab("Shelf", systemImage: "book", value: AppTab.library) {
                 NavigationStack {
                     if selectedTab == .library { content() } else { LibraryView() }
-                }
-            }
-            Tab("Browse", systemImage: "square.grid.2x2", value: AppTab.browse) {
-                NavigationStack {
-                    if selectedTab == .browse { content() } else { BrowseView() }
                 }
             }
             Tab("Search", systemImage: "magnifyingglass", value: AppTab.search) {

@@ -1,0 +1,48 @@
+included:
+  - apps
+  - packages
+
+excluded:
+  - packages/AO3Kit/Sources/Generated
+  - packages/AO3Kit/.build
+  - build
+
+disabled_rules:
+  - trailing_comma
+
+nesting:
+  type_level: 2
+
+identifier_name:
+  min_length: 1
+
+line_length:
+  warning: 160
+  error: 220
+  ignores_comments: true
+  ignores_urls: true
+
+redundant_discardable_let:
+  ignore_swiftui_view_bodies: true
+
+# Size limits sit just above today's largest offenders so they stop growth;
+# design/oversized-types-plan.md walks them back down.
+type_body_length:
+  warning: 1250
+  error: 1500
+file_length:
+  warning: 1600
+  error: 2000
+  ignore_comment_only_lines: true
+function_body_length:
+  warning: 260
+  error: 300
+cyclomatic_complexity:
+  warning: 36
+  error: 45
+function_parameter_count:
+  warning: 8
+  error: 10
+large_tuple:
+  warning: 6
+  error: 8

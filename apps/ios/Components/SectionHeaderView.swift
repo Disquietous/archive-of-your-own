@@ -4,8 +4,8 @@ struct SectionHeaderView: View {
     @Environment(AppTheme.self) private var theme
 
     let title: String
-    var more: String? = nil
-    var onMore: (() -> Void)? = nil
+    var more: String?
+    var onMore: (() -> Void)?
 
     var body: some View {
         HStack {

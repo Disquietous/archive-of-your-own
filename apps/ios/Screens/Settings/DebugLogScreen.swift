@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The debug log: the core's log entries, newest first, filterable by
