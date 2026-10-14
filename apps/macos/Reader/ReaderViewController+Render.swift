@@ -52,7 +52,8 @@ extension ReaderViewController {
             titleLabel.stringValue = isLoading || loadError != nil ? "" : "Chapter \(chapterIndex + 1)"
             textView.textStorage?.setAttributedString(NSAttributedString())
             dropCapLabel.isHidden = true
-            [endRule, ornamentLabel, nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { $0.isHidden = true }
+            [endRule, ornamentLabel, chapterEndActions, nextChapterButton, endNoteBig, endNoteSub,
+             nextWorkButton].forEach { $0.isHidden = true }
             footer.applyTheme()
             updateProgress()
             // A scheduled restore bails on the now-empty document and lifts
@@ -79,6 +80,10 @@ extension ReaderViewController {
 
         endRule.isHidden = false
         ornamentLabel.isHidden = false
+        chapterEndActions.isHidden = UInt64(work.id) == nil
+        chapterEndActions.rootView = AnyView(ChapterEndActionsView(
+            theme: theme, appState: appState, workID: work.id,
+            onComments: { [weak self] in self?.onOpenDiscussion?() }))
         endRule.layer?.backgroundColor = theme.nsLine.cgColor
         ornamentLabel.textColor = theme.nsAccent
 

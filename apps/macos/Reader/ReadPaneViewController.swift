@@ -37,6 +37,8 @@ final class ReadPaneViewController: NSViewController {
     var readingListPopover: NSPopover?
 
     let readerController: ReaderViewController
+    /// The Discussion panel beside the reader / work detail.
+    let discussion: DiscussionHost
     var resultsController: SearchResultsViewController?
     /// The author profile's Bookmarks pane — bookmark hits (works and
     /// series), not a works list.
@@ -61,6 +63,7 @@ final class ReadPaneViewController: NSViewController {
         self.model = model
         self.toolbar = PaneToolbarView(theme: theme)
         self.readerController = ReaderViewController(theme: theme, appState: appState, session: model.paneReader)
+        self.discussion = DiscussionHost(theme: theme, appState: appState)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -79,8 +82,13 @@ final class ReadPaneViewController: NSViewController {
 
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         container.translatesAutoresizingMaskIntoConstraints = false
+        let discussionView = discussion.view
+        let slot = discussion.contentSlot
+        discussionView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar)
-        root.addSubview(container)
+        root.addSubview(discussionView)
+        slot.addSubview(container)
+        configureDiscussion()
 
         privacyDot.wantsLayer = true
         privacyDot.layer?.cornerRadius = 4
@@ -105,10 +113,14 @@ final class ReadPaneViewController: NSViewController {
             toolbarTop,
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            discussionView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            discussionView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            discussionView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            discussionView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            container.topAnchor.constraint(equalTo: slot.topAnchor),
+            container.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            container.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
             privacyDot.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
             privacyDot.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
             privacyDot.widthAnchor.constraint(equalToConstant: 8),
@@ -142,8 +154,8 @@ final class ReadPaneViewController: NSViewController {
             guard let self, let id = model.selectedWorkID else { return }
             appState.toggleBookmark(id)
         }
-        commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Chapter comments") { [weak self] in
-            self?.showChapterComments()
+        commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Discussion (⌥⌘C)") { [weak self] in
+            self?.discussion.toggleOpen()
         }
         chaptersButton = ToolButton(theme: theme, symbol: "list.bullet", tooltip: "Chapters") { [weak self] in
             self?.toggleChaptersPopover()
@@ -177,7 +189,7 @@ final class ReadPaneViewController: NSViewController {
         // full-red confirmation down to what reads as the faded state.
         (kudosButton.cell as? NSButtonCell)?.imageDimsWhenDisabled = false
         workCommentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Comments") { [weak self] in
-            self?.showWorkComments()
+            self?.discussion.toggleOpen()
         }
         editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
                                         tooltip: "Edit bookmark — notes, tags, sync to AO3") { [weak self] in
@@ -208,6 +220,8 @@ final class ReadPaneViewController: NSViewController {
             if let editor = window.firstResponder as? NSTextView, editor.isEditable {
                 return event
             }
+            // The discussion panel has its own arrow keys and Escape.
+            if discussion.ownsResponder(window.firstResponder) { return event }
             let hasModifiers = !event.modifierFlags.isDisjoint(with: [.command, .option, .control])
             switch event.keyCode {
             case 123 where model.readerOpen && !hasModifiers: // ←

@@ -180,6 +180,9 @@ final class AppTheme {
     var onAccent: Color { Color(hex: activeTheme.onAccent) }
     var sage: Color { Color(hex: activeTheme.sage) }
 
+    /// Error/destructive text — the app's fixed red, as one token.
+    var danger: Color { Color(hex: "CE514D") }
+
     // Derived colors (not in ThemeDefinition, derived from theme tokens)
     var surface3: Color {
         // Slightly darker/more saturated than surface2

@@ -118,7 +118,7 @@ struct AuthorsList: View {
     /// unless, the one-time fetch delivers); a glyph disc for works/series.
     private func avatar(_ follow: UFollow) -> some View {
         Group {
-            if follow.kind == "author",
+            if follow.kind == "author", theme.imageAutoLoad,
                let data = appState.authorAvatars[follow.targetId], let image = NSImage(data: data) {
                 Image(nsImage: image)
                     .resizable()
@@ -142,7 +142,10 @@ struct AuthorsList: View {
         .frame(width: 40, height: 40)
         .clipShape(Circle())
         .onAppear {
-            if follow.kind == "author" { appState.loadAuthorAvatar(follow.targetId) }
+            if follow.kind == "author" && theme.imageAutoLoad { appState.loadAuthorAvatar(follow.targetId) }
+        }
+        .onChange(of: theme.imageAutoLoad) { _, on in
+            if on && follow.kind == "author" { appState.loadAuthorAvatar(follow.targetId) }
         }
     }
 

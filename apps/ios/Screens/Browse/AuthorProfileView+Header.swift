@@ -139,7 +139,7 @@ extension AuthorProfileView {
 
     var avatarView: some View {
         Group {
-            if let avatarImage {
+            if theme.imageAutoLoad, let avatarImage {
                 Image(uiImage: avatarImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -237,7 +237,7 @@ extension AuthorProfileView {
     }
 
     func loadAvatar() async {
-        guard avatarImage == nil else { return }
+        guard theme.imageAutoLoad, avatarImage == nil else { return }
         if let cached = state.authorAvatars[username], let image = UIImage(data: cached) {
             avatarImage = image
             return

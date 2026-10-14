@@ -11,6 +11,8 @@ use crate::models::Rating;
 
 mod accounts;
 mod consts;
+mod drafts;
+pub use drafts::CommentDraft;
 mod library;
 pub mod library_file;
 mod subscriptions;
@@ -263,7 +265,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 21;
+    pub(crate) const SCHEMA_VERSION: u32 = 22;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -326,6 +328,7 @@ impl Storage {
                 19 => self.add_request_log_transport(),
                 20 => self.add_works_finished(),
                 21 => self.migrate_v21_follows(),
+                22 => self.migrate_v22_comment_drafts(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -505,6 +508,38 @@ impl Storage {
              UPDATE app_state SET value = '[]' WHERE key = 'subscription_check_queue';"
         ).map_err(map_sql)?;
         Ok(())
+    }
+
+    /// v22 — comments discussion panel (2026-10):
+    /// * `comments` keeps the "on Chapter N" label, AO3's notice for a
+    ///   bodiless comment (deleted/hidden), and the size of a cut-off
+    ///   thread continuation, so cached reads render like live ones.
+    /// * `comment_drafts`: one unposted draft per composer — an account's
+    ///   whole-work or chapter comment box — with the reply target it was
+    ///   aimed at (0 = top-level). Rows exist only while text does.
+    fn migrate_v22_comment_drafts(&self) -> Result<(), AppError> {
+        for (column, decl) in [
+            ("chapter_label", "TEXT NOT NULL DEFAULT ''"),
+            ("notice", "TEXT NOT NULL DEFAULT ''"),
+            ("more_replies", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !self.column_exists("comments", column)? {
+                self.conn
+                    .execute(&format!("ALTER TABLE comments ADD COLUMN {column} {decl}"), [])
+                    .map_err(map_sql)?;
+            }
+        }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS comment_drafts (
+                account_id        TEXT    NOT NULL COLLATE NOCASE,
+                work_id           INTEGER NOT NULL,
+                chapter_id        INTEGER NOT NULL DEFAULT 0,
+                parent_comment_id INTEGER NOT NULL DEFAULT 0,
+                body              TEXT    NOT NULL,
+                updated_at        TEXT    NOT NULL,
+                PRIMARY KEY (account_id, work_id, chapter_id)
+            );",
+        ).map_err(map_sql)
     }
 
     fn table_exists(&self, table: &str) -> Result<bool, AppError> {

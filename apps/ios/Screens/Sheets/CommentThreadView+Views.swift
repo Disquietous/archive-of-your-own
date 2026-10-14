@@ -11,14 +11,19 @@ extension CommentThreadView {
                     avatarView(comment)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        if !comment.authorProfileUrl.isEmpty {
-                            Text(comment.authorName)
-                                .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
-                                .foregroundStyle(theme.accent)
-                        } else {
-                            Text(comment.authorName)
-                                .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
-                                .foregroundStyle(theme.ink)
+                        HStack(spacing: 6) {
+                            if !comment.authorProfileUrl.isEmpty {
+                                Text(comment.displayName)
+                                    .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
+                                    .foregroundStyle(theme.accent)
+                            } else {
+                                Text(comment.displayName)
+                                    .font(.custom("HankenGrotesk", size: 14).weight(.semibold))
+                                    .foregroundStyle(theme.ink)
+                            }
+                            if isCreator(comment) { badge("Author", tint: theme.accent) }
+                            if comment.isGuest { badge("Guest", tint: theme.ink3) }
+                            if !comment.chapterChip.isEmpty { badge(comment.chapterChip, tint: theme.ink3) }
                         }
 
                         Text(comment.postedAt)
@@ -29,14 +34,18 @@ extension CommentThreadView {
                     Spacer()
                 }
 
-                // Comment body
+                // Comment body (or AO3's notice for a deleted/hidden one)
                 let blocks = ParsedContentBlock.fromJSON(comment.contentJson)
-                if !blocks.isEmpty {
+                if !comment.notice.isEmpty {
+                    Text(comment.notice)
+                        .font(.custom("HankenGrotesk", size: 13).weight(.medium).italic())
+                        .foregroundStyle(theme.ink3)
+                } else if !blocks.isEmpty {
                     ContentBlockView(blocks: blocks, compact: true)
                 }
 
                 // Reply button
-                if isLoggedIn {
+                if isLoggedIn && comment.notice.isEmpty {
                     Button {
                         if replyingTo == comment.id {
                             replyingTo = nil
@@ -45,6 +54,7 @@ extension CommentThreadView {
                             replyText = ""
                             replyError = nil
                             replySuccess = false
+                            restoreReplyDraft(for: comment.id)
                         }
                     } label: {
                         Text("Reply")
@@ -81,12 +91,29 @@ extension CommentThreadView {
         )
     }
 
+    /// The comment's author is credited on the work.
+    func isCreator(_ comment: ParsedComment) -> Bool {
+        guard !comment.isGuest, let author = state.work(byID: workID)?.author else { return false }
+        return author.split(separator: ",")
+            .map { AppState.canonicalAuthorUsername(String($0)).lowercased() }
+            .contains(comment.authorId.lowercased())
+    }
+
+    func badge(_ label: String, tint: Color) -> some View {
+        Text(label)
+            .font(.custom("HankenGrotesk", size: 10.5).weight(.semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(tint.opacity(0.14)))
+    }
+
     // MARK: - Avatar
 
     @ViewBuilder
     func avatarView(_ comment: ParsedComment) -> some View {
         let size: CGFloat = 32
-        if let cached = avatarCache[comment.authorId] {
+        if theme.imageAutoLoad, let cached = avatarCache[comment.authorId] {
             Image(uiImage: cached)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
@@ -108,7 +135,7 @@ extension CommentThreadView {
     }
 
     func loadAvatar(for comment: ParsedComment) async {
-        guard !comment.authorAvatarUrl.isEmpty,
+        guard theme.imageAutoLoad, !comment.authorAvatarUrl.isEmpty,
               avatarCache[comment.authorId] == nil else { return }
         do {
             let data = try await state.bridge.fetchImage(url: comment.authorAvatarUrl)
@@ -131,6 +158,7 @@ extension CommentThreadView {
                     .foregroundStyle(theme.sage)
             } else {
                 TextEditor(text: $replyText)
+                    .onChange(of: replyText) { _, _ in scheduleReplyDraftSave(parentId: parentId) }
                     .font(.custom("HankenGrotesk", size: 14).weight(.medium))
                     .foregroundStyle(theme.ink)
                     .scrollContentBackground(.hidden)
@@ -142,7 +170,7 @@ extension CommentThreadView {
                 if let replyError {
                     Text(replyError)
                         .font(Typography.uiCaption())
-                        .foregroundStyle(Color(hex: "CE514D"))
+                        .foregroundStyle(theme.danger)
                 }
 
                 HStack(spacing: 8) {

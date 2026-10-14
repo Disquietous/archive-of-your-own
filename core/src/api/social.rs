@@ -44,7 +44,11 @@ impl AO3App {
         s.get_kudos_given().map_err(AO3Error::from)
     }
 
-    pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<bool, AO3Error> {
+    /// Post a top-level comment on a work (`chapter_id` 0) or a chapter.
+    /// The result carries the new comment as AO3 rendered it when it can be
+    /// found on the page AO3 redirected to; that page's comments are cached
+    /// like a fetch of the same scope.
+    pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<UPostResult, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             {
                 let c = client.read().await;
@@ -68,13 +72,21 @@ impl AO3App {
                         (endpoint.clone(), controller, form_page.clone(), comment.clone());
                     async move {
                         client.read().await.post_comment_direct(&endpoint, controller, &form_page, &comment)
-                            .await.map(|body| body.is_some()).map_err(AO3Error::from)
+                            .await.map_err(AO3Error::from)
                     }
                 }).await?;
             let c = client.read().await;
             let s = storage.lock().await;
             persist_posting_credentials(&c, &s);
-            Ok(posted)
+            let Some(body) = posted else { return Ok(UPostResult { posted: false, comment_json: String::new() }) };
+            let page = crate::parser::parse_comments(&body).comments;
+            let (cache_work, cache_chapter) = if chapter_id == 0 { (work_id, 0) } else { (0, chapter_id) };
+            for comment in &page {
+                log_db("save_comment", s.save_comment(cache_work, cache_chapter, comment));
+            }
+            log_db("clear_comment_draft", s.clear_comment_draft(work_id, chapter_id));
+            let account = s.subscription_account();
+            Ok(posted_result(&page, account.as_deref()))
         }).await
     }
 
@@ -123,7 +135,10 @@ impl AO3App {
         Ok(serde_json::to_string(&json_comments).unwrap_or("[]".to_string()))
     }
 
-    pub async fn post_reply(&self, parent_comment_id: u64, comment: String) -> Result<bool, AO3Error> {
+    /// Reply under a comment. `work_id`/`chapter_id` name the composer the
+    /// reply was written in, so its draft is cleared on success.
+    pub async fn post_reply(&self, parent_comment_id: u64, comment: String,
+                            work_id: u64, chapter_id: u64) -> Result<UPostResult, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             {
                 let c = client.read().await;
@@ -143,7 +158,8 @@ impl AO3App {
                 let s = storage.lock().await;
                 persist_posting_credentials(&c, &s);
             }
-            let Some(page) = posted else { return Ok(false) };
+            let Some(page) = posted else { return Ok(UPostResult { posted: false, comment_json: String::new() }) };
+            log_db("clear_comment_draft", storage.lock().await.clear_comment_draft(work_id, chapter_id));
 
             // The reply is live on AO3. Fold it into the cached thread so the
             // next view of that thread — inbox or work comments — shows it
@@ -160,6 +176,11 @@ impl AO3App {
                     }).await?;
                 parent = find_comment(&subtree, parent_comment_id);
             }
+            let account = storage.lock().await.subscription_account();
+            let result = match parent.as_ref() {
+                Some(p) => posted_result(std::slice::from_ref(p), account.as_deref()),
+                None => UPostResult { posted: true, comment_json: String::new() },
+            };
             match parent {
                 Some(parent) => {
                     let s = storage.lock().await;
@@ -175,8 +196,49 @@ impl AO3App {
                     log_info!("comment", "Reply to {parent_comment_id} posted; parent not found on the thread page");
                 }
             }
-            Ok(true)
+            Ok(result)
         }).await
+    }
+
+    /// The replies AO3 cut off behind "N more comments in this thread":
+    /// fetches the comment's thread page (always a request — user-initiated
+    /// only) and returns that comment with its full reply tree as
+    /// CommentJson, folded into the cache in place. Empty when the page
+    /// doesn't carry the comment.
+    pub async fn fetch_comment_replies(&self, comment_id: u64) -> Result<String, AO3Error> {
+        self.run_on_runtime(move |client, storage| async move {
+            let subtree = with_recovery(client, storage.clone(),
+                OpKind::Fetch { label: "comment thread".to_string() }, RetrySafety::Idempotent,
+                move |client| async move {
+                    client.read().await.fetch_comment_subtree(comment_id).await.map_err(AO3Error::from)
+                }).await?;
+            let Some(found) = find_comment(&subtree, comment_id) else { return Ok(String::new()) };
+            log_db("save_comment_in_place", storage.lock().await.save_comment_in_place(&found));
+            Ok(serde_json::to_string(&CommentJson::from(found)).unwrap_or_default())
+        }).await
+    }
+
+    // -- Comment drafts --
+
+    /// The signed-in account's unposted draft for a composer (`chapter_id`
+    /// 0 = the work's whole-work comments). None when there is none.
+    pub fn get_comment_draft(&self, work_id: u64, chapter_id: u64) -> Result<Option<UCommentDraft>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_comment_draft(work_id, chapter_id).map_err(AO3Error::from)?
+            .map(|d| UCommentDraft { parent_comment_id: d.parent_comment_id, body: d.body, updated_at: d.updated_at }))
+    }
+
+    /// Save a composer's text and reply target (0 = top-level); a blank
+    /// body deletes the draft.
+    pub fn save_comment_draft(&self, work_id: u64, chapter_id: u64,
+                              parent_comment_id: u64, body: String) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.save_comment_draft(work_id, chapter_id, parent_comment_id, &body).map_err(AO3Error::from)
+    }
+
+    pub fn clear_comment_draft(&self, work_id: u64, chapter_id: u64) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.clear_comment_draft(work_id, chapter_id).map_err(AO3Error::from)
     }
 
     // -- Subscription notifications --
@@ -529,6 +591,31 @@ impl AO3App {
             Ok(bytes)
         }).await
     }
+}
+
+/// The comment a post just created, found on the page AO3 redirected to:
+/// the newest (highest id — AO3 ids are sequential) comment by the posting
+/// account anywhere in `trees`.
+fn newest_by_account(trees: &[Comment], account: &str) -> Option<Comment> {
+    let mut best: Option<&Comment> = None;
+    fn walk<'a>(list: &'a [Comment], account: &str, best: &mut Option<&'a Comment>) {
+        for c in list {
+            if c.author.id.eq_ignore_ascii_case(account) && best.is_none_or(|b| c.id > b.id) {
+                *best = Some(c);
+            }
+            walk(&c.replies, account, best);
+        }
+    }
+    walk(trees, account, &mut best);
+    best.cloned()
+}
+
+fn posted_result(trees: &[Comment], account: Option<&str>) -> UPostResult {
+    let comment_json = account
+        .and_then(|a| newest_by_account(trees, a))
+        .map(|c| serde_json::to_string(&CommentJson::from(c)).unwrap_or_default())
+        .unwrap_or_default();
+    UPostResult { posted: true, comment_json }
 }
 
 /// The comment with `id` anywhere in the trees, with its replies.

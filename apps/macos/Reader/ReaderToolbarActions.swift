@@ -15,33 +15,6 @@ enum ReaderToolbarActions {
         }
     }
 
-    /// Comments for the whole work.
-    static func presentWorkComments(theme: AppTheme, appState: AppState, work: Work,
-                                    presenter: NSViewController) {
-        presentSheet(on: presenter) { dismiss in
-            AnyView(MacCommentsView(theme: theme, appState: appState,
-                                    workID: work.id, chapterID: nil,
-                                    title: work.title, subtitle: nil,
-                                    onClose: dismiss))
-        }
-    }
-
-    /// Comments for one chapter (0-based `chapterIndex`) of the work.
-    static func presentChapterComments(theme: AppTheme, appState: AppState, work: Work,
-                                       chapterIndex: Int, presenter: NSViewController) {
-        var chapterId: UInt64?
-        if let chapters = appState.chaptersForWork(work.id), chapterIndex < chapters.count {
-            let id = chapters[chapterIndex].chapterId
-            chapterId = id > 0 ? UInt64(id) : nil
-        }
-        presentSheet(on: presenter) { dismiss in
-            AnyView(MacCommentsView(theme: theme, appState: appState,
-                                    workID: work.id, chapterID: chapterId,
-                                    title: work.title, subtitle: "Chapter \(chapterIndex + 1)",
-                                    onClose: dismiss))
-        }
-    }
-
     static func presentBookmarkEdit(theme: AppTheme, appState: AppState, work: Work,
                                     presenter: NSViewController) {
         presentSheet(on: presenter) { dismiss in

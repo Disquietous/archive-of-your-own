@@ -16,7 +16,7 @@ struct AuthorAvatarView: View {
 
     var body: some View {
         Group {
-            if let data = appState.authorAvatars[username], let image = NSImage(data: data) {
+            if theme.imageAutoLoad, let data = appState.authorAvatars[username], let image = NSImage(data: data) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -32,10 +32,14 @@ struct AuthorAvatarView: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .onAppear {
-            if fetchable {
-                appState.loadAuthorAvatar(username, urlHint: urlHint)
-            }
+        .onAppear(perform: load)
+        .onChange(of: theme.imageAutoLoad) { _, _ in load() }
+    }
+
+    /// Only when images load automatically — off means letter discs only.
+    private func load() {
+        if fetchable && theme.imageAutoLoad {
+            appState.loadAuthorAvatar(username, urlHint: urlHint)
         }
     }
 }

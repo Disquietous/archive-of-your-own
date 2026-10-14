@@ -128,7 +128,7 @@ struct AuthorsScreen: View {
     private func avatar(_ target: FollowModel.Target) -> some View {
         Group {
             if target.kind == .author {
-                if let data = state.authorAvatars[target.id], let image = UIImage(data: data) {
+                if theme.imageAutoLoad, let data = state.authorAvatars[target.id], let image = UIImage(data: data) {
                     Image(uiImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -153,7 +153,8 @@ struct AuthorsScreen: View {
         }
         .frame(width: 40, height: 40)
         .clipShape(Circle())
-        .onAppear { if target.kind == .author { state.loadAuthorAvatar(target.id) } }
+        .onAppear { if theme.imageAutoLoad && target.kind == .author { state.loadAuthorAvatar(target.id) } }
+        .onChange(of: theme.imageAutoLoad) { _, on in if on && target.kind == .author { state.loadAuthorAvatar(target.id) } }
     }
 
     private func open(_ target: FollowModel.Target) {

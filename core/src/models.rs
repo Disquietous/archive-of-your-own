@@ -484,6 +484,15 @@ pub struct Comment {
     pub posted_at: String,
     pub content: Vec<ContentBlock>,
     pub replies: Vec<Comment>,
+    /// "on Chapter N" from the byline — set on whole-work comment pages,
+    /// where comments from every chapter are listed together.
+    pub chapter_label: Option<String>,
+    /// AO3's message in place of a body ("(Previous comment deleted.)",
+    /// hidden/awaiting-moderation notices). None for a normal comment.
+    pub notice: Option<String>,
+    /// Replies AO3 left off this page behind an "N more comments in this
+    /// thread" link (fetched on demand via the comment's thread page).
+    pub more_replies: u32,
 }
 
 #[derive(Debug, Clone)]

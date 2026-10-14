@@ -223,14 +223,43 @@ extension RustBridge {
         return try await app.leaveKudos(workId: workId, opId: opID)
     }
 
-    func postComment(workId: UInt64, chapterId: UInt64, comment: String) async throws -> Bool {
+    /// `chapterId` 0 = a whole-work comment. On success the composer's
+    /// draft is cleared in Rust.
+    func postComment(workId: UInt64, chapterId: UInt64, comment: String) async throws -> UPostResult {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.postComment(workId: workId, chapterId: chapterId, comment: comment)
     }
 
-    func postReply(parentCommentId: UInt64, comment: String) async throws -> Bool {
+    /// `workId`/`chapterId` name the composer the reply came from, so its
+    /// draft is cleared on success.
+    func postReply(parentCommentId: UInt64, comment: String,
+                   workId: UInt64, chapterId: UInt64) async throws -> UPostResult {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.postReply(parentCommentId: parentCommentId, comment: comment)
+        return try await app.postReply(parentCommentId: parentCommentId, comment: comment,
+                                       workId: workId, chapterId: chapterId)
+    }
+
+    /// The replies AO3 cut off behind "N more comments in this thread" —
+    /// always a request. The comment with its full reply tree, or nil.
+    func fetchCommentReplies(commentId: UInt64) async throws -> ParsedComment? {
+        guard let app else { throw BridgeError.notInitialized }
+        return ParsedComment.single(fromJSON: try await app.fetchCommentReplies(commentId: commentId))
+    }
+
+    // MARK: - Comment drafts
+
+    func getCommentDraft(workId: UInt64, chapterId: UInt64) -> UCommentDraft? {
+        (try? app?.getCommentDraft(workId: workId, chapterId: chapterId)) ?? nil
+    }
+
+    /// A blank body deletes the draft.
+    func saveCommentDraft(workId: UInt64, chapterId: UInt64, parentCommentId: UInt64, body: String) {
+        try? app?.saveCommentDraft(workId: workId, chapterId: chapterId,
+                                   parentCommentId: parentCommentId, body: body)
+    }
+
+    func clearCommentDraft(workId: UInt64, chapterId: UInt64) {
+        try? app?.clearCommentDraft(workId: workId, chapterId: chapterId)
     }
 
     func fetchChapterComments(workId: UInt64, chapterId: UInt64, page: UInt32) async throws -> UCommentsPage {

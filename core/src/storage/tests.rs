@@ -2505,7 +2505,7 @@ fn test_save_comment_in_place_keeps_thread_context() {
     let comment = |id: u64, who: &str, replies: Vec<Comment>| Comment {
         id, author: user(who), posted_at: "1 Jan 2026".into(),
         content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
-        replies,
+        replies, chapter_label: None, notice: None, more_replies: 0,
     };
     // A fetched thread: root 10 by ann, reply 11 by bob, cached under
     // work 7 / chapter 70.
@@ -2752,4 +2752,55 @@ fn request_log_transport_column_round_trips() {
     // Newest first.
     assert_eq!(got[0].10, None);
     assert_eq!(got[1].10.as_deref(), Some("circ=Circ 1.1 exit=abcd1234 guard=ef567890 connect=200ms first_tx=+0ms first_rx=+230ms"));
+}
+
+#[test]
+fn test_comment_drafts_per_composer_and_account() {
+    let db = open_test_db();
+    // Signed out: nothing is stored.
+    db.save_comment_draft(1, 0, 0, "hello").unwrap();
+    assert!(db.get_comment_draft(1, 0).unwrap().is_none());
+
+    db.create_account("a", "Alice", "cookie").unwrap();
+    db.create_account("b", "Bob", "cookie").unwrap();
+    db.set_active_account("a").unwrap();
+    db.save_comment_draft(1, 0, 0, "whole work").unwrap();
+    db.save_comment_draft(1, 11, 500, "reply draft").unwrap();
+    // One row per composer: re-aiming the reply replaces it.
+    db.save_comment_draft(1, 11, 0, "now top-level").unwrap();
+    let d = db.get_comment_draft(1, 11).unwrap().unwrap();
+    assert_eq!((d.parent_comment_id, d.body.as_str()), (0, "now top-level"));
+    assert_eq!(db.get_comment_draft(1, 0).unwrap().unwrap().body, "whole work");
+
+    // Another account never sees Alice's drafts.
+    db.set_active_account("b").unwrap();
+    assert!(db.get_comment_draft(1, 0).unwrap().is_none());
+    db.set_active_account("a").unwrap();
+
+    // A blank body deletes; clear deletes.
+    db.save_comment_draft(1, 0, 0, "   ").unwrap();
+    assert!(db.get_comment_draft(1, 0).unwrap().is_none());
+    db.clear_comment_draft(1, 11).unwrap();
+    assert!(db.get_comment_draft(1, 11).unwrap().is_none());
+}
+
+#[test]
+fn test_comment_extras_round_trip_through_cache() {
+    use crate::models::Comment;
+    let db = open_test_db();
+    let c = Comment {
+        id: 42,
+        author: AO3User { id: "ann".into(), username: "ann".into(), profile_url: None, avatar_url: None },
+        posted_at: "1 Jan 2026".into(),
+        content: vec![],
+        replies: vec![],
+        chapter_label: Some("on Chapter 2".into()),
+        notice: Some("(Previous comment deleted.)".into()),
+        more_replies: 3,
+    };
+    db.save_comment(9, 0, &c).unwrap();
+    let back = &db.get_comments(9, 0).unwrap()[0];
+    assert_eq!(back.chapter_label.as_deref(), Some("on Chapter 2"));
+    assert_eq!(back.notice.as_deref(), Some("(Previous comment deleted.)"));
+    assert_eq!(back.more_replies, 3);
 }

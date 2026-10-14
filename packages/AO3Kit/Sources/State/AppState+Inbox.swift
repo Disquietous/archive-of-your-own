@@ -134,7 +134,9 @@ extension AppState {
     /// core has already folded the reply into the cached thread, so the
     /// view re-reads the library rather than fetching again.
     func postInboxReply(parentId: UInt64, text: String) async throws -> Bool {
-        let posted = try await bridge.postReply(parentCommentId: parentId, comment: text)
+        // The inbox has no draft composer: no work/chapter draft to clear.
+        let posted = try await bridge.postReply(parentCommentId: parentId, comment: text,
+                                                workId: 0, chapterId: 0).posted
         if posted { loadCachedInboxThread() }
         return posted
     }

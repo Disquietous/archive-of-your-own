@@ -491,11 +491,23 @@ pub struct CommentJson {
     pub posted_at: String,
     pub content_json: String,
     pub replies: Vec<CommentJson>,
+    /// Posted without an AO3 account (byline carries "(Guest)").
+    pub is_guest: bool,
+    /// "on Chapter N" on whole-work comment pages; empty otherwise.
+    pub chapter_label: String,
+    /// AO3's message for a bodiless comment (deleted/hidden); empty otherwise.
+    pub notice: String,
+    /// Replies cut off behind AO3's "N more comments in this thread" link.
+    pub more_replies: u32,
 }
 
 impl From<Comment> for CommentJson {
     fn from(c: Comment) -> Self {
         CommentJson {
+            is_guest: c.author.profile_url.is_none() && c.author.id.starts_with("guest:"),
+            chapter_label: c.chapter_label.unwrap_or_default(),
+            notice: c.notice.unwrap_or_default(),
+            more_replies: c.more_replies,
             id: c.id,
             author_id: c.author.id,
             author_name: c.author.username,
@@ -506,6 +518,24 @@ impl From<Comment> for CommentJson {
             replies: c.replies.into_iter().map(CommentJson::from).collect(),
         }
     }
+}
+
+/// The outcome of posting a comment or reply. `posted` false = the
+/// archive rejected it. When posted, `comment_json` is the new comment as
+/// AO3 rendered it (CommentJson) — empty when it couldn't be located on the
+/// page AO3 redirected to, in which case the caller reloads.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UPostResult {
+    pub posted: bool,
+    pub comment_json: String,
+}
+
+/// An unposted comment draft for one composer.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UCommentDraft {
+    pub parent_comment_id: u64,
+    pub body: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]

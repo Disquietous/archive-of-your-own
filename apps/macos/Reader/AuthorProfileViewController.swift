@@ -212,16 +212,26 @@ final class AuthorProfileViewController: NSViewController {
                 await appState.loadUserProfile(canonical)
             }
         }
-        if loadedAvatarFor != canonical {
-            loadedAvatarFor = canonical
-            Task { @MainActor in
-                if let data = try? await appState.bridge.fetchAuthorAvatar(canonical),
-                   let image = NSImage(data: data), self.username == canonical {
-                    avatarView.image = image
-                }
+        render()
+    }
+
+    /// The avatar only when images load automatically; off clears it.
+    /// Runs from render, so flipping the setting applies live.
+    private func syncAvatar() {
+        guard theme.imageAutoLoad else {
+            avatarView.image = nil
+            loadedAvatarFor = nil
+            return
+        }
+        let canonical = username
+        guard loadedAvatarFor != canonical else { return }
+        loadedAvatarFor = canonical
+        Task { @MainActor in
+            if let data = try? await appState.bridge.fetchAuthorAvatar(canonical),
+               let image = NSImage(data: data), self.username == canonical, theme.imageAutoLoad {
+                avatarView.image = image
             }
         }
-        render()
     }
 
     // MARK: - Render
@@ -229,6 +239,7 @@ final class AuthorProfileViewController: NSViewController {
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
         guard !username.isEmpty else { return }
+        syncAvatar()
 
         let profile = appState.userProfile(username)
 

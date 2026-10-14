@@ -1,10 +1,14 @@
 import SwiftUI
 
 /// Renders a comment body's ParsedContentBlock tree in the mac chrome type.
-/// Shared by the inbox thread view and the work/chapter comments view.
+/// Shared by the inbox thread view and the discussion panel. Text is
+/// selectable and links are live — the host decides where a link goes via
+/// the `openURL` environment. `highlight` tints case-insensitive matches
+/// (find in comments).
 struct CommentContentView: View {
     let theme: AppTheme
     let blocks: [ParsedContentBlock]
+    var highlight: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -12,15 +16,17 @@ struct CommentContentView: View {
                 AnyView(blockView(block))
             }
         }
+        .textSelection(.enabled)
     }
 
     @ViewBuilder
     private func blockView(_ block: ParsedContentBlock) -> some View {
         switch block {
         case .paragraph(let inlines):
-            inlineText(inlines)
+            Text(attributed(inlines))
                 .font(Font(MacFont.ui(13)))
                 .foregroundStyle(theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
         case .heading(_, let text):
             Text(text)
                 .font(Font(MacFont.ui(13, weight: .bold)))
@@ -67,31 +73,57 @@ struct CommentContentView: View {
         }
     }
 
-    private func inlineText(_ inlines: [ParsedInlineContent]) -> Text {
-        inlines.reduce(Text("")) { result, inline in
-            result + renderInline(inline)
+    private func attributed(_ inlines: [ParsedInlineContent]) -> AttributedString {
+        var result = inlines.reduce(into: AttributedString()) { $0 += render($1) }
+        if let query = highlight?.trimmingCharacters(in: .whitespaces), !query.isEmpty {
+            var searchStart = result.startIndex
+            while searchStart < result.endIndex,
+                  let range = result[searchStart...].range(of: query, options: .caseInsensitive) {
+                result[range].backgroundColor = theme.accent.opacity(0.28)
+                searchStart = range.upperBound
+            }
         }
+        return result
     }
 
-    private func renderInline(_ inline: ParsedInlineContent) -> Text {
+    /// Add an intent run by run, so bold inside italic keeps both.
+    private func adding(_ intent: InlinePresentationIntent, to string: AttributedString) -> AttributedString {
+        var s = string
+        for run in string.runs {
+            s[run.range].inlinePresentationIntent = (run.inlinePresentationIntent ?? []).union(intent)
+        }
+        return s
+    }
+
+    private func render(_ inline: ParsedInlineContent) -> AttributedString {
+        func joined(_ content: [ParsedInlineContent]) -> AttributedString {
+            content.reduce(into: AttributedString()) { $0 += render($1) }
+        }
         switch inline {
         case .text(let value):
-            return Text(value)
+            return AttributedString(value)
         case .bold(let content):
-            return content.reduce(Text("")) { $0 + renderInline($1) }.bold()
+            return adding(.stronglyEmphasized, to: joined(content))
         case .italic(let content):
-            return content.reduce(Text("")) { $0 + renderInline($1) }.italic()
-        case .link(_, let content):
-            return content.reduce(Text("")) { $0 + renderInline($1) }
-                .foregroundColor(Color(theme.accent))
+            return adding(.emphasized, to: joined(content))
+        case .link(let href, let content):
+            var s = joined(content)
+            s.foregroundColor = theme.accent
+            if let url = URL(string: href, relativeTo: URL(string: "https://archiveofourown.org")) {
+                s.link = url.absoluteURL
+            }
+            return s
         case .strikethrough(let content):
-            return content.reduce(Text("")) { $0 + renderInline($1) }.strikethrough()
+            var s = joined(content)
+            s.strikethroughStyle = .single
+            return s
         case .superscript(let content):
-            return content.reduce(Text("")) { $0 + renderInline($1) }
-                .font(Font(MacFont.ui(10)))
-                .baselineOffset(4)
+            var s = joined(content)
+            s.font = Font(MacFont.ui(10))
+            s.baselineOffset = 4
+            return s
         case .lineBreak:
-            return Text("\n")
+            return AttributedString("\n")
         }
     }
 }

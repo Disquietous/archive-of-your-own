@@ -36,6 +36,10 @@ final class ReaderViewController: NSViewController {
     let dropCapLabel = NSTextField(labelWithString: "")
     let endRule = NSView()
     let ornamentLabel = NSTextField(labelWithString: "· · ·")
+    /// Kudos + "Comments · Leave a comment" under each chapter.
+    let chapterEndActions = NSHostingView(rootView: AnyView(EmptyView()))
+    /// Set by the host: open its Discussion panel with the composer focused.
+    var onOpenDiscussion: (() -> Void)?
     let nextChapterButton = NSButton(title: "Next chapter", target: nil, action: nil)
     let endNoteBig = NSTextField(labelWithString: "")
     let endNoteSub = NSTextField(labelWithString: "")
@@ -214,7 +218,7 @@ final class ReaderViewController: NSViewController {
         column.spacing = 0
         column.setContentCompressionResistancePriority(.init(1), for: .horizontal)
         column.edgeInsets = NSEdgeInsets(top: 46, left: 0, bottom: 120, right: 0)
-        [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel,
+        [metaLabel, titleLabel, titleRule, bodyContainer, endRule, ornamentLabel, chapterEndActions,
          nextChapterButton, endNoteBig, endNoteSub, nextWorkButton].forEach { column.addArrangedSubview($0) }
         column.setCustomSpacing(18, after: endNoteSub)
         column.setCustomSpacing(10, after: metaLabel)
@@ -223,6 +227,8 @@ final class ReaderViewController: NSViewController {
         column.setCustomSpacing(46, after: bodyContainer)
         column.setCustomSpacing(30, after: endRule)
         column.setCustomSpacing(20, after: ornamentLabel)
+        column.setCustomSpacing(26, after: chapterEndActions)
+        chapterEndActions.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         column.setCustomSpacing(4, after: endNoteBig)
 
         titleRule.heightAnchor.constraint(equalToConstant: 1).isActive = true

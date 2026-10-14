@@ -26,6 +26,7 @@ struct CommentThreadView: View {
     @State var isSubmittingReply = false
     @State var replyError: String?
     @State var replySuccess = false
+    @State var replyDraftSaveTask: Task<Void, Never>?
     @State var avatarCache: [String: UIImage] = [:]
 
     var overrideLoggedIn: Bool = false
@@ -265,11 +266,17 @@ struct CommentThreadView: View {
         guard !trimmed.isEmpty else { return }
         isSubmittingReply = true
         replyError = nil
+        replyDraftSaveTask?.cancel()
         do {
-            let posted = try await state.bridge.postReply(parentCommentId: parentId, comment: trimmed)
-            if posted {
+            let result = try await state.bridge.postReply(
+                parentCommentId: parentId, comment: trimmed,
+                workId: UInt64(workID) ?? 0, chapterId: chapterID ?? 0)
+            if result.posted {
                 replySuccess = true
                 replyText = ""
+                if let posted = ParsedComment.single(fromJSON: result.commentJson) {
+                    comments = Self.appending(posted, under: parentId, in: comments)
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     replyingTo = nil
                     replySuccess = false
@@ -281,5 +288,39 @@ struct CommentThreadView: View {
             replyError = error.localizedDescription
         }
         isSubmittingReply = false
+    }
+
+    static func appending(_ reply: ParsedComment, under parentID: UInt64,
+                          in list: [ParsedComment]) -> [ParsedComment] {
+        list.map { c in
+            var copy = c
+            if c.id == parentID {
+                if !copy.replies.contains(where: { $0.id == reply.id }) { copy.replies.append(reply) }
+            } else {
+                copy.replies = appending(reply, under: parentID, in: c.replies)
+            }
+            return copy
+        }
+    }
+
+    // MARK: - Reply draft (one per work/chapter composer, persisted in Rust)
+
+    /// Opening a reply: restore the saved draft when it was aimed at this
+    /// same comment.
+    func restoreReplyDraft(for parentId: UInt64) {
+        guard let wid = UInt64(workID),
+              let draft = state.bridge.getCommentDraft(workId: wid, chapterId: chapterID ?? 0),
+              draft.parentCommentId == parentId else { return }
+        replyText = draft.body
+    }
+
+    func scheduleReplyDraftSave(parentId: UInt64) {
+        replyDraftSaveTask?.cancel()
+        replyDraftSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, !replyText.isEmpty, let wid = UInt64(workID) else { return }
+            state.bridge.saveCommentDraft(workId: wid, chapterId: chapterID ?? 0,
+                                          parentCommentId: parentId, body: replyText)
+        }
     }
 }

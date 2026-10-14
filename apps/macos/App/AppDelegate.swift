@@ -425,10 +425,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         EpubExporter.export(work: work, appState: appState)
     }
 
-    /// Grey out Export when there's no exportable (real, numeric-ID) selection.
+    // MARK: - Discussion panel (View menu)
+
+    /// The key window's discussion panel — the reading pane's or a work
+    /// window's.
+    private var keyDiscussion: DiscussionHost? {
+        DiscussionHost.host(in: NSApp.keyWindow)
+    }
+
+    @objc func toggleDiscussion() {
+        keyDiscussion?.toggleOpen()
+    }
+
+    @objc func toggleDiscussionExpanded() {
+        keyDiscussion?.toggleExpanded()
+    }
+
+    /// Grey out Export when there's no exportable (real, numeric-ID)
+    /// selection, and the discussion items where there's no work to discuss.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(exportSelectedWork) {
             guard let work = exportableWork, UInt64(work.id) != nil else { return false }
+            return true
+        }
+        if menuItem.action == #selector(toggleDiscussion) || menuItem.action == #selector(toggleDiscussionExpanded) {
+            guard let host = keyDiscussion, host.isAvailable else { return false }
+            if menuItem.action == #selector(toggleDiscussion) {
+                menuItem.title = host.isOpen ? "Hide Discussion" : "Show Discussion"
+            } else {
+                menuItem.title = host.isOpen && host.isExpanded ? "Show Reader Beside Discussion" : "Discussion Fills Reader"
+            }
             return true
         }
         return true

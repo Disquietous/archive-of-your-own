@@ -101,15 +101,16 @@ extension ReaderView {
         return srcs
     }
 
-    /// Synchronously adopt already-cached images (downloaded works, earlier
-    /// taps this session), and start fetches for the rest when auto-load is
-    /// on. Tap-to-load is the default: uncached images stay placeholders.
+    /// With auto-load on: adopt already-cached images synchronously and
+    /// fetch the rest. With it off, every image stays a tap-to-load
+    /// placeholder — cached or not.
     func primeAndLoadImages(in blocks: [ParsedContentBlock]) {
         for src in Self.imageSrcs(in: blocks) where loadedImages[src] == nil {
+            guard theme.imageAutoLoad else { continue }
             if let data = state.bridge.cachedChapterImage(url: src),
                let image = UIImage(data: data) {
                 loadedImages[src] = image
-            } else if theme.imageAutoLoad {
+            } else {
                 loadImage(src)
             }
         }

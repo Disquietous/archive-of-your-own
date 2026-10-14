@@ -982,4 +982,50 @@ mod comment_tests {
         assert!(text.contains("First line of the story."));
         assert!(!text.contains("down for maintenance"));
     }
+
+    #[test]
+    fn test_comment_chapter_label_notice_and_continuation() {
+        // Synthetic markup: a whole-work page comment "on Chapter 3", a
+        // deleted comment (message instead of a body) with a reply, and a
+        // thread cut off behind "2 more comments in this thread".
+        let html = r#"<ol class="thread">
+  <li class="comment group" id="comment_100" role="article">
+    <div class="comment">
+      <h4 class="heading byline"><a href="/users/reader1">reader1</a>
+        <span class="parent">on Chapter 3</span>
+        <span class="posted datetime"><span class="date">1</span></span></h4>
+      <blockquote class="userstuff"><p>Lovely.</p></blockquote>
+    </div>
+  </li>
+  <li>
+    <ol class="thread">
+      <li class="comment group" id="comment_101" role="article">
+        <div class="comment">
+          <h4 class="heading byline"><a href="/users/reader2">reader2</a></h4>
+          <blockquote class="userstuff"><p>Agreed.</p></blockquote>
+          <ul class="actions"><li><a href="/comments/100">Parent Thread</a></li></ul>
+        </div>
+      </li>
+      <li><a href="/comments/101">2 more comments in this thread</a></li>
+    </ol>
+  </li>
+  <li class="comment group" id="comment_200" role="article">
+    <div class="comment">
+      <p class="message">(Previous comment deleted.)</p>
+    </div>
+  </li>
+</ol>"#;
+        let page = parse_comments(html);
+        assert_eq!(page.comments.len(), 2);
+        let first = &page.comments[0];
+        assert_eq!(first.chapter_label.as_deref(), Some("on Chapter 3"));
+        assert_eq!(first.author.username, "reader1");
+        assert!(first.notice.is_none());
+        assert_eq!(first.replies.len(), 1);
+        assert_eq!(first.replies[0].more_replies, 2);
+        assert_eq!(first.more_replies, 0);
+        let deleted = &page.comments[1];
+        assert!(deleted.content.is_empty());
+        assert_eq!(deleted.notice.as_deref(), Some("(Previous comment deleted.)"));
+    }
 }

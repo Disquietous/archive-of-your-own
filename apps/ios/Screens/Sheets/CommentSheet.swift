@@ -12,6 +12,11 @@ struct CommentSheet: View {
     @State private var isSubmitting = false
     @State private var error: String?
     @State private var success = false
+    /// The draft's reply target when it was started as a reply (on this
+    /// device or another — drafts sync with the library); 0 = top-level.
+    @State private var draftParentID: UInt64 = 0
+    @State private var draftSaveTask: Task<Void, Never>?
+    @State private var draftLoaded = false
 
     private var isLoggedIn: Bool {
         state.bridge.getCredentials() != nil
@@ -54,6 +59,9 @@ struct CommentSheet: View {
         }
         .background(theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: Radius.sheet))
+        .onAppear(perform: loadDraft)
+        .onChange(of: commentText) { _, _ in scheduleDraftSave() }
+        .onDisappear(perform: flushDraft)
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.hidden)
     }
@@ -103,6 +111,19 @@ struct CommentSheet: View {
 
     private var commentFormView: some View {
         VStack(spacing: 12) {
+            if draftParentID > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrowshape.turn.up.left.fill").font(.system(size: 11))
+                    Text("Draft reply to a comment")
+                    Spacer()
+                    Button("Make top-level") {
+                        draftParentID = 0
+                        scheduleDraftSave()
+                    }
+                }
+                .font(Typography.uiCaption())
+                .foregroundStyle(theme.ink3)
+            }
             TextEditor(text: $commentText)
                 .font(.custom("HankenGrotesk", size: 15).weight(.medium))
                 .foregroundStyle(theme.ink)
@@ -125,7 +146,7 @@ struct CommentSheet: View {
             if let error {
                 Text(error)
                     .font(Typography.uiSmall())
-                    .foregroundStyle(Color(hex: "CE514D"))
+                    .foregroundStyle(theme.danger)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -211,13 +232,19 @@ struct CommentSheet: View {
         isSubmitting = true
         error = nil
 
+        draftSaveTask?.cancel()
         do {
-            let posted = try await state.bridge.postComment(
-                workId: workId,
-                chapterId: chapterID ?? 0,
-                comment: commentText.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-            if posted {
+            let body = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let result = draftParentID > 0
+                ? try await state.bridge.postReply(parentCommentId: draftParentID, comment: body,
+                                                   workId: workId, chapterId: chapterID ?? 0)
+                : try await state.bridge.postComment(workId: workId, chapterId: chapterID ?? 0, comment: body)
+            if result.posted {
+                // Rust cleared the draft on success.
+                draftLoaded = false
+                commentText = ""
+                draftParentID = 0
+                draftLoaded = true
                 success = true
             } else {
                 error = "Failed to post comment. Please try again."
@@ -227,6 +254,41 @@ struct CommentSheet: View {
         }
 
         isSubmitting = false
+    }
+
+    // MARK: - Draft (persisted in Rust, one per work/chapter composer)
+
+    private func loadDraft() {
+        guard !draftLoaded else { return }
+        if let workId = UInt64(workID),
+           let draft = state.bridge.getCommentDraft(workId: workId, chapterId: chapterID ?? 0) {
+            commentText = draft.body
+            draftParentID = draft.parentCommentId
+        }
+        draftLoaded = true
+    }
+
+    private func scheduleDraftSave() {
+        guard draftLoaded else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            saveDraft()
+        }
+    }
+
+    private func flushDraft() {
+        guard draftSaveTask != nil else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = nil
+        saveDraft()
+    }
+
+    private func saveDraft() {
+        guard let workId = UInt64(workID), isLoggedIn, !success else { return }
+        state.bridge.saveCommentDraft(workId: workId, chapterId: chapterID ?? 0,
+                                      parentCommentId: draftParentID, body: commentText)
     }
 }
 

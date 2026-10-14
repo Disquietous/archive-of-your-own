@@ -112,21 +112,51 @@ extension ReadPaneViewController {
         readingListPopover = popover
     }
 
-    /// Comments for the whole work (detail-mode toolbar), as a sheet.
-    func showWorkComments() {
-        guard let work = model.selectedWork else { return }
-        ReaderToolbarActions.presentWorkComments(theme: theme, appState: appState, work: work, presenter: self)
-    }
-
     func showBookmarkEditSheet() {
         guard let work = model.selectedWork else { return }
         ReaderToolbarActions.presentBookmarkEdit(theme: theme, appState: appState, work: work, presenter: self)
     }
 
-    /// Comments for the chapter currently open in the reader, as a sheet.
-    func showChapterComments() {
-        guard let work = model.selectedWork else { return }
-        ReaderToolbarActions.presentChapterComments(theme: theme, appState: appState, work: work,
-                                                    chapterIndex: model.readerChapter, presenter: self)
+    /// Links, sign-in and toolbar state for the Discussion panel.
+    func configureDiscussion() {
+        discussion.actions = DiscussionActions(
+            openAuthor: { [weak self] name in self?.model.openAuthorProfile(name) },
+            openURL: { [weak self] url in
+                guard let self else { return }
+                if model.openAO3URL(url.absoluteString) != nil {
+                    ExternalLinkOpener.open(url, bridge: appState.bridge)
+                }
+            })
+        discussion.onSignIn = { [weak self] in self?.model.goSection(.settings) }
+        discussion.onStateChange = { [weak self] in
+            guard let self else { return }
+            let tint = discussion.isOpen ? theme.nsAccent : nil
+            commentsButton.tintOverride = tint
+            workCommentsButton.tintOverride = tint
+        }
+        readerController.onOpenDiscussion = { [weak self] in
+            self?.discussion.setOpen(true, focusComposer: true)
+        }
+    }
+
+    /// Point the Discussion panel at what the pane now shows: the work's
+    /// comments in detail mode, the reader's chapter while reading (it
+    /// follows chapter changes); unavailable in every other mode.
+    func updateDiscussion(for mode: Mode, from previous: Mode?) {
+        switch mode {
+        case .detail(let workID):
+            discussion.isAvailable = true
+            discussion.model.showWholeWork(workID: workID)
+        case .reading(let workID, let chapter):
+            discussion.isAvailable = true
+            if case .reading = previous {
+                discussion.model.follow(workID: workID, chapterIndex: chapter)
+            } else {
+                discussion.model.showChapter(workID: workID, chapterIndex: chapter)
+            }
+        default:
+            discussion.model.flushDraft()
+            discussion.isAvailable = false
+        }
     }
 }

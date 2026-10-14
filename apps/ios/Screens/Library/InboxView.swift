@@ -202,7 +202,7 @@ struct InboxView: View {
     @ViewBuilder
     private func avatarView(_ item: InboxItem) -> some View {
         let size: CGFloat = 32
-        if let cached = avatarCache[item.author] {
+        if theme.imageAutoLoad, let cached = avatarCache[item.author] {
             Image(uiImage: cached)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
@@ -224,7 +224,7 @@ struct InboxView: View {
     }
 
     private func loadAvatar(for item: InboxItem) async {
-        guard !item.avatarUrl.isEmpty, avatarCache[item.author] == nil else { return }
+        guard theme.imageAutoLoad, !item.avatarUrl.isEmpty, avatarCache[item.author] == nil else { return }
         do {
             let data = try await state.bridge.fetchImage(url: item.avatarUrl)
             if let image = UIImage(data: data) {

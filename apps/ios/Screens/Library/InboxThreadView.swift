@@ -133,7 +133,7 @@ struct InboxThreadView: View {
     @ViewBuilder
     private func avatar(_ comment: InboxThreadComment) -> some View {
         let size: CGFloat = 26
-        if let cached = avatarCache[comment.author] {
+        if theme.imageAutoLoad, let cached = avatarCache[comment.author] {
             Image(uiImage: cached)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
@@ -149,7 +149,7 @@ struct InboxThreadView: View {
                         .foregroundStyle(theme.ink3)
                 }
                 .task {
-                    guard !comment.avatarUrl.isEmpty, avatarCache[comment.author] == nil else { return }
+                    guard theme.imageAutoLoad, !comment.avatarUrl.isEmpty, avatarCache[comment.author] == nil else { return }
                     if let data = try? await state.bridge.fetchImage(url: comment.avatarUrl),
                        let image = UIImage(data: data) {
                         avatarCache[comment.author] = image

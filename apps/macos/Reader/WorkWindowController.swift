@@ -20,6 +20,7 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
     private let reader: ReaderViewController
     private let content: NSViewController
     private let toolbar: PaneToolbarView
+    private let discussion: DiscussionHost
     private let requestProgressOverlay = RequestProgressOverlay()
 
     private var showInMainButton: ToolButton!
@@ -57,6 +58,7 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
         self.session = ReaderSession(appState: appState, theme: theme, layout: .window)
         self.reader = ReaderViewController(theme: theme, appState: appState, session: session)
         self.toolbar = PaneToolbarView(theme: theme)
+        self.discussion = DiscussionHost(theme: theme, appState: appState)
         self.content = NSViewController()
 
         let window = LinkDropWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
@@ -142,11 +144,10 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
                                    tooltip: "Refresh chapter from AO3") { [weak self] in
             self?.reader.refreshChaptersFromAO3()
         }
-        commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Chapter comments") { [weak self] in
-            guard let self, let work else { return }
-            ReaderToolbarActions.presentChapterComments(theme: theme, appState: appState, work: work,
-                                                        chapterIndex: session.chapter, presenter: content)
+        commentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Discussion (⌥⌘C)") { [weak self] in
+            self?.discussion.toggleOpen()
         }
+        configureDiscussion()
         bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark") { [weak self] in
             guard let self, let id = session.workID else { return }
             appState.toggleBookmark(id)
@@ -157,19 +158,56 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
 
         content.addChild(reader)
         let readerView = reader.view
+        let host = discussion.view
+        let slot = discussion.contentSlot
         toolbar.translatesAutoresizingMaskIntoConstraints = false
         readerView.translatesAutoresizingMaskIntoConstraints = false
+        host.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar)
-        root.addSubview(readerView)
+        root.addSubview(host)
+        slot.addSubview(readerView)
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: root.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            readerView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            readerView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            readerView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            readerView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            host.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            host.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            host.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            host.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            readerView.topAnchor.constraint(equalTo: slot.topAnchor),
+            readerView.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+            readerView.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+            readerView.bottomAnchor.constraint(equalTo: slot.bottomAnchor),
         ])
+    }
+
+    /// The discussion panel's links and sign-in go through the main
+    /// window — this window only ever shows its one work.
+    private func configureDiscussion() {
+        discussion.actions = DiscussionActions(
+            openAuthor: { [weak self] name in
+                self?.model.openAuthorProfile(name)
+                Self.mainWindow?.makeKeyAndOrderFront(nil)
+            },
+            openURL: { [weak self] url in
+                guard let self else { return }
+                if model.openAO3URL(url.absoluteString) == nil {
+                    Self.mainWindow?.makeKeyAndOrderFront(nil)
+                } else {
+                    ExternalLinkOpener.open(url, bridge: appState.bridge)
+                }
+            })
+        discussion.onSignIn = { [weak self] in
+            self?.model.goSection(.settings)
+            Self.mainWindow?.makeKeyAndOrderFront(nil)
+        }
+        discussion.onStateChange = { [weak self] in
+            guard let self else { return }
+            commentsButton.tintOverride = discussion.isOpen ? theme.nsAccent : nil
+        }
+        reader.onOpenDiscussion = { [weak self] in
+            self?.discussion.setOpen(true, focusComposer: true)
+        }
     }
 
     /// ← / → change chapters; Escape leaves native full screen. Only for
@@ -181,6 +219,8 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
             if let editor = window.firstResponder as? NSTextView, editor.isEditable {
                 return event
             }
+            // The discussion panel has its own arrow-key navigation.
+            if discussion.ownsResponder(window.firstResponder) { return event }
             let hasModifiers = !event.modifierFlags.isDisjoint(with: [.command, .option, .control])
             guard !hasModifiers else { return event }
             switch event.keyCode {
@@ -225,6 +265,8 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
         window?.title = work.title
         let total = work.complete ? String(work.totalChapters) : "?"
         window?.subtitle = "Chapter \(chapter + 1) of \(total)"
+
+        discussion.model.follow(workID: id, chapterIndex: chapter)
 
         let bookmarked = appState.bookmarkedWorkIDs.contains(id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
@@ -347,6 +389,7 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
         // The last debounced position lands before the reader goes away;
         // an in-flight chapter fetch is this window's alone to abort.
         reader.flushPendingPersist()
+        discussion.model.flushDraft()
         reader.chapterTask.cancel()
         if let opID = session.chapterFetchOp.opID {
             appState.bridge.cancelOperation(opID)

@@ -301,9 +301,11 @@ struct ChapterImageView: View {
             }
         }
         .onAppear {
+            // Off means nothing shows until tapped, even if cached.
+            guard theme.imageAutoLoad else { return }
             if let data = state.bridge.cachedChapterImage(url: src) {
                 image = UIImage(data: data)
-            } else if theme.imageAutoLoad {
+            } else {
                 load()
             }
         }

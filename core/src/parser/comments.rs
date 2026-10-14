@@ -151,9 +151,53 @@ pub fn parse_comments(html: &str) -> CommentsPage {
         comments
     };
 
+    let mut comments = comments;
+    for (comment_id, count) in thread_continuations(&doc) {
+        if let Some(c) = find_comment_mut(&mut comments, comment_id) {
+            c.more_replies = count;
+        }
+    }
+
     let (current_page, total_pages) = parse_comment_pagination(&doc, &pagination_sel);
 
     CommentsPage { comments, current_page, total_pages }
+}
+
+/// AO3 cuts deep threads off with a "N more comments in this thread" link
+/// to the thread page of the comment they continue under. Returns
+/// (comment id, N) for each; the wording is matched loosely so a markup
+/// tweak degrades to "no continuation" rather than a wrong count.
+fn thread_continuations(doc: &Html) -> Vec<(u64, u32)> {
+    let mut found = Vec::new();
+    for a in doc.select(&sel("a[href*='/comments/']")) {
+        let label = text(&a).to_lowercase();
+        if !(label.contains("more comment") && label.contains("thread")) {
+            continue;
+        }
+        let count: u32 = label.split(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let href = a.value().attr("href").unwrap_or("");
+        let id = href.split('#').next().unwrap_or(href)
+            .split("/comments/").nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse::<u64>().ok());
+        if let (Some(id), true) = (id, count > 0) {
+            found.push((id, count));
+        }
+    }
+    found
+}
+
+fn find_comment_mut(comments: &mut [Comment], id: u64) -> Option<&mut Comment> {
+    for c in comments.iter_mut() {
+        if c.id == id { return Some(c); }
+        if let Some(found) = find_comment_mut(&mut c.replies, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn build_comment_tree(flat: Vec<(Comment, Option<u64>)>) -> Vec<Comment> {
@@ -286,6 +330,25 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         Vec::new()
     };
 
+    // "on Chapter N" rides inside the byline heading on whole-work pages.
+    let chapter_label = heading
+        .and_then(|h| h.select(&sel("span.parent")).next())
+        .map(|s| text(&s).split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|s| !s.is_empty());
+
+    // No body: AO3 shows a message paragraph instead (deleted, hidden,
+    // awaiting moderation). Direct children only, so a nested reply's
+    // text is never mistaken for it.
+    let notice = if content.is_empty() {
+        div.children()
+            .filter_map(ElementRef::wrap)
+            .find(|e| e.value().name() == "p")
+            .map(|p| text(&p).split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
     // Extract parent comment ID from this comment's own actions ul (direct child of div,
     // not from nested reply comments)
     let parent_comment_id = {
@@ -313,7 +376,8 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         found
     };
 
-    Some((Comment { id, author, posted_at, content, replies: Vec::new() }, parent_comment_id))
+    Some((Comment { id, author, posted_at, content, replies: Vec::new(),
+                    chapter_label, notice, more_replies: 0 }, parent_comment_id))
 }
 
 fn parse_comment_pagination(doc: &Html, pagination_sel: &Selector) -> (u32, u32) {

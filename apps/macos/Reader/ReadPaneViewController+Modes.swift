@@ -19,6 +19,7 @@ extension ReadPaneViewController {
         if !showControllerMode(mode) {
             showHostedMode(mode)
         }
+        updateDiscussion(for: mode, from: renderedMode)
         renderedMode = mode
     }
 

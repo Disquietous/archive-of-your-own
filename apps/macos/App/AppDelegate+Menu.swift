@@ -117,6 +117,16 @@ extension AppDelegate {
         toggleSidebar.keyEquivalentModifierMask = [.command, .control]
         viewMenu.addItem(toggleSidebar)
         viewMenu.addItem(.separator())
+        let discussion = NSMenuItem(title: "Show Discussion", action: #selector(toggleDiscussion), keyEquivalent: "c")
+        discussion.keyEquivalentModifierMask = [.command, .option]
+        discussion.target = self
+        viewMenu.addItem(discussion)
+        let fill = NSMenuItem(title: "Discussion Fills Reader", action: #selector(toggleDiscussionExpanded),
+                              keyEquivalent: "c")
+        fill.keyEquivalentModifierMask = [.command, .option, .shift]
+        fill.target = self
+        viewMenu.addItem(fill)
+        viewMenu.addItem(.separator())
         let monitor = NSMenuItem(title: "What's New Check…", action: #selector(openWhatsNewMonitor), keyEquivalent: "u")
         monitor.keyEquivalentModifierMask = [.command, .option]
         monitor.target = self
