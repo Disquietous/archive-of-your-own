@@ -487,6 +487,10 @@ pub struct Comment {
     /// "on Chapter N" from the byline — set on whole-work comment pages,
     /// where comments from every chapter are listed together.
     pub chapter_label: Option<String>,
+    /// The chapter the comment is on, from the "on Chapter N" link (whole-
+    /// work pages) or the stored row. None when AO3 doesn't say — a
+    /// chapter page, or a one-chapter work.
+    pub chapter_id: Option<u64>,
     /// AO3's message in place of a body ("(Previous comment deleted.)",
     /// hidden/awaiting-moderation notices). None for a normal comment.
     pub notice: Option<String>,

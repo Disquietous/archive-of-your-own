@@ -139,7 +139,7 @@ final class DiscussionLinkCell: DiscussionGuideCell {
     private var onPress: (() -> Void)?
     private var xOffset: CGFloat = 0
 
-    required override init(frame: NSRect) {
+    required init(frame: NSRect) {
         super.init(frame: frame)
         button.isBordered = false
         button.target = self
@@ -212,7 +212,7 @@ final class DiscussionPendingCell: DiscussionGuideCell {
     private var buttons: [NSButton] = []
     private var item: DiscussionModel.Pending?
 
-    required override init(frame: NSRect) {
+    required init(frame: NSRect) {
         super.init(frame: frame)
         spinner.style = .spinning
         spinner.controlSize = .mini

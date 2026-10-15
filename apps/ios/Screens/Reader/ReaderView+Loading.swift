@@ -15,7 +15,8 @@ extension ReaderView {
             // chapter being opened — a work updated since the last fetch
             // falls through to the network for the new chapter.
             let cached = state.bridge.getCachedChapters(workId)
-            if !cached.isEmpty, chapterIndex < cached.count {
+            // A stub chapter (text never fetched or purged) needs the network.
+            if !cached.isEmpty, chapterIndex < cached.count, !cached[chapterIndex].isStub {
                 state.fetchedChapters[workID] = cached
                 if state.fetchedWorks[workID] == nil, let w = state.bridge.getCachedWork(workId) {
                     state.fetchedWorks[workID] = AppState.workFromSummary(w)

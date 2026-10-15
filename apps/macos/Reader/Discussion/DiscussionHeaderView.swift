@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// The panel's top bar: title + count, scope (this chapter / whole work),
-/// sort, author-replies filter, find, expand-to-fill and close. The find
+/// The panel's top bar: title, count and when the list was last fetched,
+/// scope (this chapter / whole work), check for new comments, sort,
+/// author-replies filter, find, expand-to-fill and close. The find
 /// field drops in under it while finding.
 struct DiscussionHeaderView: View {
     @Bindable var theme: AppTheme
@@ -24,8 +25,18 @@ struct DiscussionHeaderView: View {
                         .font(Font(MacFont.ui(11)))
                         .foregroundStyle(theme.ink3)
                         .lineLimit(1)
+                    if let fetchedText {
+                        Text(fetchedText)
+                            .font(Font(MacFont.ui(11)))
+                            .foregroundStyle(theme.ink3)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 4)
+                toggle("arrow.clockwise", on: model.isLoadingAll, help: checkHelp) {
+                    model.checkForNewComments()
+                }
+                .disabled(model.isLoading || model.isLoadingAll || !model.canCheckForNew)
                 toggle("arrow.up.arrow.down", on: model.sortNewestFirst,
                        help: model.sortNewestFirst ? "Newest first — show oldest first" : "Oldest first — show newest first") {
                     model.sortNewestFirst.toggle()
@@ -94,6 +105,22 @@ struct DiscussionHeaderView: View {
         if model.isLoading && loaded == 0 { return model.scopeTitle }
         let more = model.hasMorePages ? "+" : ""
         return "\(loaded)\(more) comment\(loaded == 1 && more.isEmpty ? "" : "s") · \(model.scopeTitle)"
+    }
+
+    /// "Last fetched: …" once every page has been fetched; nothing while
+    /// the first load runs.
+    private var fetchedText: String? {
+        if let date = model.lastFetched {
+            return "Last fetched: \(date.formatted(date: .abbreviated, time: .shortened))"
+        }
+        if model.isLoading || model.isLoadingAll || model.loadError != nil { return nil }
+        return model.hasMorePages ? "Last fetched: not every page yet" : nil
+    }
+
+    private var checkHelp: String {
+        model.scope == .work || model.chapterID == nil
+            ? "Check AO3 for new comments on the whole work"
+            : "Check AO3 for new comments on Chapter \(model.chapterIndex + 1)"
     }
 
     private func toggle(_ symbol: String, on: Bool, help: String, action: @escaping () -> Void) -> some View {

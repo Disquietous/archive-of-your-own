@@ -273,16 +273,13 @@ impl AO3Client {
         }
     }
 
+    /// Every chapter's comments, page by page. Always the comments
+    /// endpoint: /works/{id}?show_comments=true redirects a multi-chapter
+    /// work to its chapter 1 page without the comments (works#show).
     pub async fn fetch_comments_for_work(&self, work_id: u64, page: u32) -> Result<CommentsPage, AppError> {
-        if page <= 1 {
-            let url = format!("{BASE_URL}/works/{work_id}?show_comments=true&view_adult=true");
-            let html = self.fetch(&url).await?;
-            Ok(parser::parse_comments(&html))
-        } else {
-            let url = format!("{BASE_URL}/comments/show_comments?work_id={work_id}&page={page}");
-            let html = self.fetch_ajax(&url).await?;
-            Ok(parser::parse_comments(&html))
-        }
+        let url = format!("{BASE_URL}/comments/show_comments?work_id={work_id}&page={}", page.max(1));
+        let html = self.fetch_ajax(&url).await?;
+        Ok(parser::parse_comments(&html))
     }
 
     pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {

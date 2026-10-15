@@ -24,6 +24,10 @@ struct TagTokenField: View {
     @State private var lookupError: String?
     @FocusState private var focused: Bool
 
+    private static let rowHeight: CGFloat = 23
+    /// About ten rows; more scroll.
+    private static let maxListHeight: CGFloat = 230
+
     private var tokens: [String] {
         value.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -98,8 +102,13 @@ struct TagTokenField: View {
     private var suggestionList: some View {
         VStack(alignment: .leading, spacing: 0) {
             if !localSuggestions.isEmpty {
-                suggestionHeader("From your library")
-                ForEach(localSuggestions, id: \.self) { suggestionRow($0) }
+                suggestionHeader("From your library (\(localSuggestions.count))")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(localSuggestions, id: \.self) { suggestionRow($0) }
+                    }
+                }
+                .frame(height: min(CGFloat(localSuggestions.count) * Self.rowHeight, Self.maxListHeight))
             }
             if !remoteSuggestions.isEmpty {
                 suggestionHeader("From AO3")
@@ -160,7 +169,7 @@ struct TagTokenField: View {
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
-                .padding(.vertical, 4)
+                .frame(height: Self.rowHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -175,9 +184,10 @@ struct TagTokenField: View {
             localSuggestions = []
             return
         }
+        // Every local match — the list scrolls.
         let names = tagType.isEmpty
-            ? appState.bridge.searchLibraryTags(term, limit: 12).map(\.name)
-            : appState.bridge.searchLocalTags(tagType: tagType, term: term)
+            ? appState.bridge.searchLibraryTags(term).map(\.name)
+            : appState.bridge.searchLocalTags(tagType: tagType, term: term, limit: 0)
         localSuggestions = names.filter { !tokens.contains($0) }
     }
 

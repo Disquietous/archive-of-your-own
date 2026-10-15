@@ -2505,7 +2505,7 @@ fn test_save_comment_in_place_keeps_thread_context() {
     let comment = |id: u64, who: &str, replies: Vec<Comment>| Comment {
         id, author: user(who), posted_at: "1 Jan 2026".into(),
         content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
-        replies, chapter_label: None, notice: None, more_replies: 0,
+        replies, chapter_label: None, chapter_id: None, notice: None, more_replies: 0,
     };
     // A fetched thread: root 10 by ann, reply 11 by bob, cached under
     // work 7 / chapter 70.
@@ -2795,6 +2795,7 @@ fn test_comment_extras_round_trip_through_cache() {
         content: vec![],
         replies: vec![],
         chapter_label: Some("on Chapter 2".into()),
+        chapter_id: None,
         notice: Some("(Previous comment deleted.)".into()),
         more_replies: 3,
     };
@@ -2803,4 +2804,75 @@ fn test_comment_extras_round_trip_through_cache() {
     assert_eq!(back.chapter_label.as_deref(), Some("on Chapter 2"));
     assert_eq!(back.notice.as_deref(), Some("(Previous comment deleted.)"));
     assert_eq!(back.more_replies, 3);
+}
+
+#[test]
+fn test_comment_fetch_stamps_live_on_chapters() {
+    let db = open_test_db();
+    db.save_work(&sample_work(1)).unwrap(); // 3 chapters posted
+    db.save_chapter(1, &sample_chapter(1)).unwrap();
+
+    // Nothing fetched yet.
+    assert_eq!(db.comments_fetched_at(1, 901).unwrap(), None);
+    assert_eq!(db.comments_fetched_at(1, 0).unwrap(), None);
+
+    // One chapter's list: only that chapter; the whole work isn't complete.
+    db.mark_comments_fetched(1, 901, 1).unwrap();
+    assert!(db.comments_fetched_at(1, 901).unwrap().is_some());
+    assert_eq!(db.comments_fetched_at(1, 0).unwrap(), None);
+
+    // The whole-work list stamps every posted chapter — stubs for the two
+    // never fetched — and the work counts as fetched.
+    db.mark_comments_fetched(1, 0, 0).unwrap();
+    let chapters = db.get_chapters(1).unwrap();
+    assert_eq!(chapters.len(), 3);
+    assert!(chapters[1].content.is_empty() && chapters[2].content.is_empty());
+    assert!(db.comments_fetched_at(1, 0).unwrap().is_some());
+
+    // Fetching a stub's text fills it in and keeps the stamp (and id).
+    db.save_chapter(1, &sample_chapter(2)).unwrap();
+    assert!(db.comments_fetched_at(1, 902).unwrap().is_some());
+    assert_eq!(db.get_chapter(1, 2).unwrap().unwrap().content.len(), 2);
+
+    // A chapter stamp for a chapter with no row places a stub at its number.
+    db.save_work(&WorkSummary { chapter_count: 4, ..sample_work(1) }).unwrap();
+    db.mark_comments_fetched(1, 904, 4).unwrap();
+    assert!(db.comments_fetched_at(1, 904).unwrap().is_some());
+
+    // Purging a work that's neither downloaded nor being read: stamped
+    // rows become stubs, unstamped rows go.
+    db.save_work(&sample_work(2)).unwrap();
+    db.save_chapter(2, &sample_chapter(1)).unwrap();
+    db.purge_non_retained_chapters().unwrap();
+    assert!(db.get_chapters(2).unwrap().is_empty());
+    let kept = db.get_chapters(1).unwrap();
+    assert_eq!(kept.len(), 4);
+    assert!(kept.iter().all(|c| c.content.is_empty()));
+    assert_eq!(kept[0].title.as_deref(), Some("Chapter 1"));
+    assert!(db.comments_fetched_at(1, 0).unwrap().is_some());
+}
+
+#[test]
+fn test_whole_work_comments_land_on_their_chapter() {
+    use crate::models::Comment;
+    let db = open_test_db();
+    let comment = |id: u64, chapter_id: Option<u64>, replies: Vec<Comment>| Comment {
+        id,
+        author: AO3User { id: "ann".into(), username: "ann".into(), profile_url: None, avatar_url: None },
+        posted_at: "1 Jan 2026".into(),
+        content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
+        replies, chapter_label: chapter_id.map(|_| "on Chapter 2".into()), chapter_id,
+        notice: None, more_replies: 0,
+    };
+    // From the whole-work list: the root names chapter 902; its reply
+    // doesn't, and sits on the thread's chapter.
+    db.save_comment(1, 0, &comment(10, Some(902), vec![comment(11, None, vec![])])).unwrap();
+    let in_chapter = db.get_comments(1, 902).unwrap();
+    assert_eq!(in_chapter.len(), 1);
+    assert_eq!(in_chapter[0].replies.len(), 1);
+    assert_eq!(db.get_comments(1, 0).unwrap().len(), 1);
+
+    // Re-saved by a page that doesn't name the chapter: the known id stays.
+    db.save_comment(1, 0, &comment(10, None, vec![])).unwrap();
+    assert_eq!(db.comment_context(10).unwrap(), Some((1, 902, 0)));
 }

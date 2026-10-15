@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 use crate::models::{BookmarkTarget, Chapter, ContentBlock, LocalSearchCriteria, Rating,
@@ -258,10 +258,11 @@ impl Storage {
     }
 
     /// Local autocomplete: substring match, alphabetical. Answered from the
-    /// in-memory tag cache — no SQL.
+    /// in-memory tag cache — no SQL. `limit` of 0 means no limit.
     pub fn search_tags(&self, tag_type: &str, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
+        let limit = if limit == 0 { usize::MAX } else { limit as usize };
         Ok(self.tag_cache
-            .search(Some(tag_type), term, limit as usize)
+            .search(Some(tag_type), term, limit)
             .into_iter()
             .map(|e| e.name.to_string())
             .collect())
@@ -589,15 +590,22 @@ impl Storage {
     // Chapters
     // -------------------------------------------------------------------
 
-    /// Insert or replace a chapter for the given work.
+    /// Save a chapter's text for the given work. An existing row (real or
+    /// stub) keeps its comment-fetch stamp.
     pub fn save_chapter(&self, work_id: u64, chapter: &Chapter) -> Result<(), AppError> {
         let content_json = serde_json::to_string(&chapter.content).map_err(map_json)?;
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO chapters
+                "INSERT INTO chapters
                     (work_id, number, chapter_id, title, content_json,
                      notes_before, notes_after)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (work_id, number) DO UPDATE SET
+                     chapter_id = excluded.chapter_id,
+                     title = excluded.title,
+                     content_json = excluded.content_json,
+                     notes_before = excluded.notes_before,
+                     notes_after = excluded.notes_after",
                 params![
                     work_id as i64,
                     chapter.number as i64,
@@ -610,6 +618,77 @@ impl Storage {
             )
             .map_err(map_sql)?;
         Ok(())
+    }
+
+    /// Make sure chapter `number` has a row — a stub (`content_json`
+    /// `'[]'`) when its text was never fetched — so it can carry a
+    /// comment-fetch stamp. Fills in a missing chapter id; never touches
+    /// fetched text.
+    pub fn ensure_chapter_stub(&self, work_id: u64, number: u32, chapter_id: Option<u64>) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT INTO chapters (work_id, number, chapter_id, content_json)
+             VALUES (?1, ?2, ?3, '[]')
+             ON CONFLICT (work_id, number) DO UPDATE SET
+                 chapter_id = COALESCE(chapters.chapter_id, excluded.chapter_id)",
+            params![work_id as i64, number as i64, chapter_id.map(|id| id as i64)],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// Stamp a complete fetch of a comment list. `chapter_id` > 0: that
+    /// chapter (a stub at `chapter_number` is made when it has no row).
+    /// 0: the whole-work list, which holds every chapter's comments — every
+    /// chapter is stamped, stubs filling in chapters 1…`chapter_count` that
+    /// have no row yet.
+    pub fn mark_comments_fetched(&self, work_id: u64, chapter_id: u64, chapter_number: u32) -> Result<(), AppError> {
+        let now = crate::timefmt::epoch_now() as i64;
+        if chapter_id > 0 {
+            let n = self.conn.execute(
+                "UPDATE chapters SET comments_fetched_at = ?3 WHERE work_id = ?1 AND chapter_id = ?2",
+                params![work_id as i64, chapter_id as i64, now],
+            ).map_err(map_sql)?;
+            if n == 0 && chapter_number > 0 {
+                self.ensure_chapter_stub(work_id, chapter_number, Some(chapter_id))?;
+                self.conn.execute(
+                    "UPDATE chapters SET comments_fetched_at = ?3 WHERE work_id = ?1 AND number = ?2",
+                    params![work_id as i64, chapter_number as i64, now],
+                ).map_err(map_sql)?;
+            }
+            return Ok(());
+        }
+        let posted = self.get_work(work_id)?.map(|w| w.chapter_count).unwrap_or(0);
+        for number in 1..=posted {
+            self.ensure_chapter_stub(work_id, number, None)?;
+        }
+        self.conn.execute(
+            "UPDATE chapters SET comments_fetched_at = ?2 WHERE work_id = ?1",
+            params![work_id as i64, now],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// When a comment list was last fetched completely (epoch seconds), or
+    /// None. A chapter (`chapter_id` > 0) answers with its own stamp; the
+    /// whole work (0) only when every posted chapter is stamped, with the
+    /// oldest stamp — the list is as fresh as its stalest chapter.
+    pub fn comments_fetched_at(&self, work_id: u64, chapter_id: u64) -> Result<Option<u64>, AppError> {
+        if chapter_id > 0 {
+            let at: Option<i64> = self.conn.query_row(
+                "SELECT comments_fetched_at FROM chapters WHERE work_id = ?1 AND chapter_id = ?2",
+                params![work_id as i64, chapter_id as i64],
+                |row| row.get(0),
+            ).optional().map_err(map_sql)?.flatten();
+            return Ok(at.map(|t| t as u64));
+        }
+        let (rows, stamped, oldest): (u32, u32, Option<i64>) = self.conn.query_row(
+            "SELECT COUNT(*), COUNT(comments_fetched_at), MIN(comments_fetched_at)
+             FROM chapters WHERE work_id = ?1",
+            params![work_id as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(map_sql)?;
+        let posted = self.get_work(work_id)?.map(|w| w.chapter_count).unwrap_or(rows);
+        let complete = rows > 0 && stamped == rows && stamped >= posted;
+        Ok(if complete { oldest.map(|t| t as u64) } else { None })
     }
 
     /// All chapters for a work, ordered by chapter number.
@@ -707,10 +786,19 @@ impl Storage {
     // Cleanup — purge chapters for works that aren't downloaded or currently reading
     // -------------------------------------------------------------------
 
+    /// Chapters of works neither downloaded nor being read lose their
+    /// text. Rows carrying a comment-fetch stamp become stubs (id, title
+    /// and stamp kept); the rest are deleted.
     pub fn purge_non_retained_chapters(&self) -> Result<(), AppError> {
+        const NOT_RETAINED: &str = "work_id NOT IN (SELECT work_id FROM downloads)
+                                    AND work_id NOT IN (SELECT id FROM works WHERE last_chapter_read > 0)";
         self.conn.execute(
-            "DELETE FROM chapters WHERE work_id NOT IN (SELECT work_id FROM downloads)
-                                    AND work_id NOT IN (SELECT id FROM works WHERE last_chapter_read > 0)",
+            &format!("DELETE FROM chapters WHERE comments_fetched_at IS NULL AND {NOT_RETAINED}"),
+            [],
+        ).map_err(map_sql)?;
+        self.conn.execute(
+            &format!("UPDATE chapters SET content_json = '[]', notes_before = NULL, notes_after = NULL
+                      WHERE content_json != '[]' AND {NOT_RETAINED}"),
             [],
         ).map_err(map_sql)?;
         Ok(())

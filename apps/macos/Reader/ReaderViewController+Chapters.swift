@@ -24,8 +24,9 @@ extension ReaderViewController {
         // to the network for the new chapter.
         if !force {
             // Already fetched this session?
+            // A stub chapter (text never fetched or purged) needs the network.
             if let fetched = appState.chaptersForWork(work.id), !fetched.isEmpty,
-               chapterIndex < fetched.count {
+               chapterIndex < fetched.count, !fetched[chapterIndex].isStub {
                 chapters = fetched
                 renderChapter()
                 return
@@ -33,7 +34,7 @@ extension ReaderViewController {
 
             // Local database cache (downloaded / recently read works).
             let cached = appState.bridge.getCachedChapters(workId)
-            if !cached.isEmpty, chapterIndex < cached.count {
+            if !cached.isEmpty, chapterIndex < cached.count, !cached[chapterIndex].isStub {
                 appState.fetchedChapters[work.id] = cached
                 chapters = cached
                 renderChapter()

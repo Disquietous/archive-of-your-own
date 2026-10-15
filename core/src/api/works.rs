@@ -647,7 +647,9 @@ impl AO3App {
         let s = self.storage.blocking_lock();
         let work = s.get_work(work_id).map_err(AO3Error::from)?
             .ok_or(AO3Error::Network { message: "This work isn’t in the local library.".to_string() })?;
-        let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+        // Stubs (no text fetched) aren't chapters to export.
+        let chapters: Vec<_> = s.get_chapters(work_id).map_err(AO3Error::from)?
+            .into_iter().filter(|c| !c.content.is_empty()).collect();
         if chapters.is_empty() {
             return Err(AO3Error::Network { message: "No downloaded chapters — download the work first.".to_string() });
         }

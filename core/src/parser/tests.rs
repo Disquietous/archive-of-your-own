@@ -992,7 +992,7 @@ mod comment_tests {
   <li class="comment group" id="comment_100" role="article">
     <div class="comment">
       <h4 class="heading byline"><a href="/users/reader1">reader1</a>
-        <span class="parent">on Chapter 3</span>
+        <span class="parent">on <a href="/works/5000001/chapters/5000103">Chapter 3</a></span>
         <span class="posted datetime"><span class="date">1</span></span></h4>
       <blockquote class="userstuff"><p>Lovely.</p></blockquote>
     </div>
@@ -1019,6 +1019,8 @@ mod comment_tests {
         assert_eq!(page.comments.len(), 2);
         let first = &page.comments[0];
         assert_eq!(first.chapter_label.as_deref(), Some("on Chapter 3"));
+        // AO3 links the label to the chapter (comments_helper#chapter_description_link).
+        assert_eq!(first.chapter_id, Some(5000103));
         assert_eq!(first.author.username, "reader1");
         assert!(first.notice.is_none());
         assert_eq!(first.replies.len(), 1);

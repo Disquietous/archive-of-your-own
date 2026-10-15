@@ -335,6 +335,13 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         .and_then(|h| h.select(&sel("span.parent")).next())
         .map(|s| text(&s).split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|s| !s.is_empty());
+    // …and its link names the chapter: /works/{w}/chapters/{c}.
+    let chapter_id = heading
+        .and_then(|h| h.select(&sel("span.parent a[href*='/chapters/']")).next())
+        .and_then(|a| a.value().attr("href"))
+        .and_then(|href| href.split(['?', '#']).next())
+        .and_then(|path| path.rsplit('/').next())
+        .and_then(|s| s.parse::<u64>().ok());
 
     // No body: AO3 shows a message paragraph instead (deleted, hidden,
     // awaiting moderation). Direct children only, so a nested reply's
@@ -377,7 +384,7 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
     };
 
     Some((Comment { id, author, posted_at, content, replies: Vec::new(),
-                    chapter_label, notice, more_replies: 0 }, parent_comment_id))
+                    chapter_label, chapter_id, notice, more_replies: 0 }, parent_comment_id))
 }
 
 fn parse_comment_pagination(doc: &Html, pagination_sel: &Selector) -> (u32, u32) {

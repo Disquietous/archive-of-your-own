@@ -132,3 +132,11 @@ enum Fandom {
         return Color(hex: "BF8350").opacity(opacity)
     }
 }
+
+extension UChapter {
+    /// A row whose text was never fetched (or was purged) — kept for its
+    /// comment-fetch stamp. Readers fetch the work instead of showing it.
+    /// A fetched chapter is never empty: one the parser can't read carries
+    /// a notice paragraph.
+    var isStub: Bool { contentJson == "[]" }
+}

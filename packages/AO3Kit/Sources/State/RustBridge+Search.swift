@@ -277,6 +277,20 @@ extension RustBridge {
         return (try? app.getCachedComments(workId: workId, chapterId: chapterId)) ?? "[]"
     }
 
+    /// When a comment list was last fetched completely; nil if never.
+    /// `chapterId` 0 = the whole work (complete only when every chapter is).
+    func commentsFetchedAt(workId: UInt64, chapterId: UInt64) -> Date? {
+        guard let at = (try? app?.commentsFetchedAt(workId: workId, chapterId: chapterId)) ?? nil else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(at))
+    }
+
+    /// Every page of a comment list is in: stamp it. `chapterId` 0 stamps
+    /// every chapter of the work; `chapterNumber` (1-based, 0 = unknown)
+    /// places a stub when the chapter has no row.
+    func markCommentsFetched(workId: UInt64, chapterId: UInt64, chapterNumber: UInt32) {
+        try? app?.markCommentsFetched(workId: workId, chapterId: chapterId, chapterNumber: chapterNumber)
+    }
+
     func fetchImage(url: String) async throws -> Data {
         guard let app else { throw BridgeError.notInitialized }
         return Data(try await app.fetchImage(url: url))

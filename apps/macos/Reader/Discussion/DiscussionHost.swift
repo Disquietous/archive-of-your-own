@@ -15,7 +15,7 @@ import SwiftUI
 /// keeps its scroll position and chapter).
 /// Width, composer height and expanded state persist as single prefs.
 @MainActor
-final class DiscussionHost: NSObject, NSSplitViewDelegate {
+final class DiscussionHost: NSObject, @preconcurrency NSSplitViewDelegate {
     let theme: AppTheme
     let appState: AppState
     let model: DiscussionModel

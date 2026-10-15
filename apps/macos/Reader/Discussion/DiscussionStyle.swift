@@ -7,7 +7,6 @@ struct DiscussionStyle {
     let nameFont, timeFont, badgeFont, smallFont, linkFont, bodyFont, noticeFont: NSFont
 
     // Geometry (points). A comment box: 8 pad, 28 avatar, 10 gap, text.
-    static let maxColumn: CGFloat = 720
     static let sideInset: CGFloat = 12
     static let indentStep: CGFloat = 36
     static let pad: CGFloat = 8
@@ -39,10 +38,10 @@ struct DiscussionStyle {
         noticeFont = ContentBlockRenderer.applyTraits(.italic, to: MacFont.ui(12))
     }
 
-    /// The readable column inside a table of `width`: its left edge and width.
+    /// The comment column inside a table of `width`: its left edge and width.
+    /// Spans the full width (expanded included), less the side insets.
     static func column(in width: CGFloat) -> (x: CGFloat, width: CGFloat) {
-        let measure = min(width, maxColumn)
-        return ((width - measure) / 2 + sideInset, max(0, measure - sideInset * 2))
+        (sideInset, max(0, width - sideInset * 2))
     }
 
     /// Center x of the thread line for indent level `level`.

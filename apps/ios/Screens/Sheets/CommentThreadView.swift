@@ -19,6 +19,11 @@ struct CommentThreadView: View {
     @State var isLoadingAll = false
     @State var loadAllProgress: UInt32 = 0
     @State var loadError: String?
+    /// When this list was last fetched completely. Set: the sheet opens
+    /// from the cache without asking AO3 until the user checks again.
+    @State var lastFetched: Date?
+    /// Page 1 was fetched, so reaching the last page means every page was.
+    @State var fetchedFromFirstPage = false
     @State var didCancel = false
     @State var commentTask = NetworkTask()
     @State var replyingTo: UInt64?
@@ -137,16 +142,37 @@ struct CommentThreadView: View {
                 .font(Typography.sheetTitle())
                 .foregroundStyle(theme.ink)
 
-            if !comments.isEmpty {
-                Text(currentPage < totalPages
-                     ? "\(loadedCommentCount) shown · more on AO3"
-                     : "\(loadedCommentCount) comment\(loadedCommentCount == 1 ? "" : "s")")
-                    .font(Typography.uiSmall())
-                    .foregroundStyle(theme.ink3)
-                    .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                if !comments.isEmpty {
+                    Text(currentPage < totalPages
+                         ? "\(loadedCommentCount) shown · more on AO3"
+                         : "\(loadedCommentCount) comment\(loadedCommentCount == 1 ? "" : "s")")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                        .lineLimit(1)
+                }
+                if let lastFetched {
+                    Text("Last fetched: \(lastFetched.formatted(date: .abbreviated, time: .shortened))")
+                        .font(Typography.uiSmall())
+                        .foregroundStyle(theme.ink3)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
+
+            Button {
+                Task { await checkForNewComments() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(theme.ink3)
+                    .frame(width: 32, height: 32)
+                    .background(theme.surface2)
+                    .clipShape(Circle())
+            }
+            .disabled(isLoading || isLoadingAll || UInt64(workID) == nil)
+            .accessibilityLabel("Check for new comments")
 
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
@@ -176,8 +202,28 @@ struct CommentThreadView: View {
         if !cached.isEmpty {
             comments = cached
         }
+        // Fetched completely before: the cache stands until the user checks.
+        if let wid = UInt64(workID), let at = state.bridge.commentsFetchedAt(workId: wid, chapterId: chapterID ?? 0) {
+            lastFetched = at
+            return
+        }
 
         await loadPage(1, replace: true)
+    }
+
+    /// "Check for new comments": fetch every page again — new replies can
+    /// land on any page.
+    func checkForNewComments() async {
+        guard !isLoading, !isLoadingAll else { return }
+        await loadPage(1, replace: true)
+        if loadError == nil { await loadAllPages() }
+    }
+
+    /// Stamp the list once its last page is in (pages load in order from 1).
+    func markFetchedIfComplete() {
+        guard fetchedFromFirstPage, currentPage >= totalPages, let wid = UInt64(workID) else { return }
+        state.bridge.markCommentsFetched(workId: wid, chapterId: chapterID ?? 0, chapterNumber: 0)
+        lastFetched = Date()
     }
 
     func fetchPage(_ page: UInt32) async throws -> UCommentsPage {
@@ -208,6 +254,8 @@ struct CommentThreadView: View {
             }
             currentPage = result.currentPage
             totalPages = result.totalPages
+            if page == 1 { fetchedFromFirstPage = true }
+            markFetchedIfComplete()
         } catch {
             if !commentTask.isCancelled && !error.isCancellation {
                 loadError = error.localizedDescription
@@ -250,6 +298,7 @@ struct CommentThreadView: View {
                 appendUnique(ParsedComment.fromJSON(result.commentsJson))
                 currentPage = result.currentPage
                 totalPages = result.totalPages
+                markFetchedIfComplete()
                 nextPage += 1
             } catch {
                 if !commentTask.isCancelled && !error.isCancellation {

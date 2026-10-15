@@ -265,7 +265,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 22;
+    pub(crate) const SCHEMA_VERSION: u32 = 23;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -329,6 +329,7 @@ impl Storage {
                 20 => self.add_works_finished(),
                 21 => self.migrate_v21_follows(),
                 22 => self.migrate_v22_comment_drafts(),
+                23 => self.migrate_v23_chapter_comment_stamps(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -540,6 +541,35 @@ impl Storage {
                 PRIMARY KEY (account_id, work_id, chapter_id)
             );",
         ).map_err(map_sql)
+    }
+
+    /// v23 — comment-fetch stamps live on chapters (2026-10):
+    /// * `chapters.comments_fetched_at`: epoch seconds of the last complete
+    ///   fetch of that chapter's comments — by its own list, or by the
+    ///   whole-work list, which is every chapter's comments. A stamped
+    ///   chapter isn't fetched again unless the user asks.
+    /// * A row whose `content_json` is `'[]'` is a stub: the chapter's text
+    ///   was never fetched (or was purged) but the row keeps its id, title
+    ///   and stamp. Readers fetch the text on open.
+    /// * `comments.work_id` filled in for rows cached by a chapter fetch
+    ///   (they were stored with 0), so the whole-work view sees them.
+    fn migrate_v23_chapter_comment_stamps(&self) -> Result<(), AppError> {
+        if !self.table_exists("chapters")? {
+            return Ok(()); // minimal legacy fixtures only — the baseline makes it
+        }
+        if !self.column_exists("chapters", "comments_fetched_at")? {
+            self.conn
+                .execute("ALTER TABLE chapters ADD COLUMN comments_fetched_at INTEGER", [])
+                .map_err(map_sql)?;
+        }
+        self.conn.execute(
+            "UPDATE comments SET work_id = (
+                 SELECT ch.work_id FROM chapters ch WHERE ch.chapter_id = comments.chapter_id LIMIT 1)
+             WHERE work_id = 0 AND chapter_id > 0
+               AND EXISTS (SELECT 1 FROM chapters ch WHERE ch.chapter_id = comments.chapter_id)",
+            [],
+        ).map_err(map_sql)?;
+        Ok(())
     }
 
     fn table_exists(&self, table: &str) -> Result<bool, AppError> {

@@ -583,11 +583,27 @@ impl Storage {
             split_author_byline(&comment.author.username).1.unwrap_or_default()
         };
 
+        // Whole-work pages name each comment's chapter; replies sit on
+        // their thread's chapter. A known id is never overwritten with 0.
+        let chapter_id = if chapter_id > 0 { chapter_id } else { comment.chapter_id.unwrap_or(0) };
         let content_json = serde_json::to_string(&comment.content).map_err(map_json)?;
         self.conn.execute(
-            "INSERT OR REPLACE INTO comments (id, work_id, chapter_id, parent_id, author_id, author_pseud, posted_at, content_json,
-                                              chapter_label, notice, more_replies)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO comments (id, work_id, chapter_id, parent_id, author_id, author_pseud, posted_at, content_json,
+                                   chapter_label, notice, more_replies)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT (id) DO UPDATE SET
+                 work_id = CASE WHEN excluded.work_id > 0 THEN excluded.work_id ELSE comments.work_id END,
+                 chapter_id = CASE WHEN excluded.chapter_id > 0 THEN excluded.chapter_id ELSE comments.chapter_id END,
+                 parent_id = excluded.parent_id,
+                 author_id = excluded.author_id,
+                 author_pseud = excluded.author_pseud,
+                 posted_at = excluded.posted_at,
+                 content_json = excluded.content_json,
+                 chapter_label = CASE WHEN excluded.chapter_label != '' THEN excluded.chapter_label
+                                      ELSE comments.chapter_label END,
+                 notice = excluded.notice,
+                 more_replies = excluded.more_replies,
+                 cached_at = datetime('now')",
             params![
                 comment.id as i64,
                 work_id as i64,
@@ -617,16 +633,16 @@ impl Storage {
         };
         let sql = format!(
             "SELECT id, posted_at, content_json, parent_id, author_id, author_pseud,
-                    chapter_label, notice, more_replies
+                    chapter_label, notice, more_replies, chapter_id
              FROM comments WHERE {} ORDER BY id",
             where_clause
         );
         let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-        type Row = (i64, String, String, i64, String, String, String, String, u32);
+        type Row = (i64, String, String, i64, String, String, String, String, u32, i64);
         let rows: Vec<Row> = stmt
             .query_map(params![param_val], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?))
+                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?))
             })
             .map_err(map_sql)?
             .filter_map(|r| r.ok())
@@ -635,7 +651,7 @@ impl Storage {
         // Authors come from the users cache: the account row plus the
         // pseud the comment was posted under.
         let mut all: Vec<(Comment, u64)> = rows.into_iter().map(|(id, posted_at, content_json, parent_id, author_id, author_pseud,
-                                                          chapter_label, notice, more_replies)| {
+                                                          chapter_label, notice, more_replies, chapter_id)| {
             let content: Vec<ContentBlock> = serde_json::from_str(&content_json).unwrap_or_default();
             let author = match self.users_cache.resolve(&author_id) {
                 Some(e) => {
@@ -659,6 +675,7 @@ impl Storage {
                 content,
                 replies: Vec::new(),
                 chapter_label: Some(chapter_label).filter(|s| !s.is_empty()),
+                chapter_id: Some(chapter_id as u64).filter(|&id| id > 0),
                 notice: Some(notice).filter(|s| !s.is_empty()),
                 more_replies,
             };

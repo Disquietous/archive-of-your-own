@@ -255,6 +255,18 @@ fn extract_work_page_stats(doc: &Html) -> (u64, u32, Option<u32>, u32, u64, u32,
 // Chapter body → ContentBlock tree
 // ---------------------------------------------------------------------------
 
+/// Stands in for a chapter body that parsed to nothing (embedded media,
+/// markup the content tree has no block for). An empty content list is
+/// reserved for chapter stubs — rows kept for their comment-fetch stamp
+/// whose text was never fetched or was purged — which readers fetch on
+/// open; a real chapter must never look like one or it would refetch on
+/// every open.
+pub(crate) fn unreadable_chapter_notice() -> ContentBlock {
+    ContentBlock::Paragraph { text: vec![InlineContent::Italic { content: vec![InlineContent::Text {
+        value: "This chapter has no content this app can display. Open it on AO3 to read it.".to_string(),
+    }] }] }
+}
+
 fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
     // Multi-chapter: each chapter is div.chapter[id^="chapter-"] directly under div#chapters
     // Use ID selector to avoid matching nested div.chapter.preface elements
@@ -305,7 +317,11 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
             blocks.extend(notes_before_blocks);
             blocks.push(ContentBlock::HorizontalRule);
         }
-        blocks.extend(body_blocks);
+        if body_blocks.is_empty() {
+            blocks.push(unreadable_chapter_notice());
+        } else {
+            blocks.extend(body_blocks);
+        }
         if !notes_after_blocks.is_empty() {
             blocks.push(ContentBlock::HorizontalRule);
             blocks.push(ContentBlock::Heading { level: 4, text: "End Notes:".to_string() });
@@ -337,17 +353,18 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
     // Single-chapter work — no div#chapter-N elements
     let content_sel = sel("div.userstuff.module[role='article']");
     if let Some(el) = doc.select(&content_sel).next() {
-        let blocks: Vec<ContentBlock> = parse_element_children(&el).into_iter().filter(|b| !is_landmark_heading(b)).collect();
-        if !blocks.is_empty() {
-            return vec![Chapter {
-                id: None,
-                title: None,
-                number: 1,
-                content: blocks,
-                notes_before: None,
-                notes_after: None,
-            }];
+        let mut blocks: Vec<ContentBlock> = parse_element_children(&el).into_iter().filter(|b| !is_landmark_heading(b)).collect();
+        if blocks.is_empty() {
+            blocks.push(unreadable_chapter_notice());
         }
+        return vec![Chapter {
+            id: None,
+            title: None,
+            number: 1,
+            content: blocks,
+            notes_before: None,
+            notes_after: None,
+        }];
     }
 
     // Final fallback: any div.userstuff with paragraphs

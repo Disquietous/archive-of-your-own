@@ -25,7 +25,7 @@ final class DiscussionCommentCell: DiscussionGuideCell, NSTextViewDelegate {
         didSet { if hovering != oldValue { applyHover() } }
     }
 
-    required override init(frame: NSRect) {
+    required init(frame: NSRect) {
         super.init(frame: frame)
         avatarView.wantsLayer = true
         avatarView.layer?.cornerRadius = DiscussionStyle.avatar / 2

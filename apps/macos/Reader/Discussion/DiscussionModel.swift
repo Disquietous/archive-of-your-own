@@ -48,6 +48,13 @@ final class DiscussionModel {
     private(set) var isLoadingAll = false
     private(set) var loadAllProgress: UInt32 = 0
     private(set) var loadError: String?
+    /// When this list was last fetched completely (every page). Set: the
+    /// panel opens from the cache without asking AO3 — only the user's
+    /// "Check for new comments" fetches again.
+    private(set) var lastFetched: Date?
+    /// Page 1 was fetched this scope, so reaching the last page means every
+    /// page has been (pages load in order).
+    private var fetchedFromFirstPage = false
     private(set) var expandingReplies: Set<UInt64> = []
     let commentTask = NetworkTask()
     private var loadGeneration = 0
@@ -126,6 +133,9 @@ final class DiscussionModel {
     }
 
     var hasMorePages: Bool { currentPage < totalPages }
+
+    /// Sample works have no AO3 comments to check.
+    var canCheckForNew: Bool { numericWorkID != nil }
 
     var replyTarget: ParsedComment? {
         replyTargetID.flatMap { find($0, in: comments) }
@@ -248,6 +258,8 @@ final class DiscussionModel {
         currentPage = 1
         totalPages = 1
         loadError = nil
+        lastFetched = nil
+        fetchedFromFirstPage = false
         isLoading = false
         isLoadingAll = false
         collapsed = []
@@ -278,11 +290,19 @@ final class DiscussionModel {
         // The DB read and JSON decode run off the main thread: the storage
         // lock can be held by in-flight requests.
         if let app = appState.bridge.coreApp {
-            let cached = await Task.detached(priority: .userInitiated) {
-                ParsedComment.fromJSON((try? app.getCachedComments(workId: cid > 0 ? 0 : wid, chapterId: cid)) ?? "[]")
+            let (cached, stamp) = await Task.detached(priority: .userInitiated) {
+                (ParsedComment.fromJSON((try? app.getCachedComments(workId: wid, chapterId: cid)) ?? "[]"),
+                 (try? app.commentsFetchedAt(workId: wid, chapterId: cid)) ?? nil)
             }.value
             guard generation == loadGeneration else { return }
             if !cached.isEmpty && comments.isEmpty { comments = cached }
+            // Fetched completely before: comments aren't posted in bulk, so
+            // the cache stands until the user checks again.
+            if let stamp {
+                lastFetched = Date(timeIntervalSince1970: TimeInterval(stamp))
+                isLoading = false
+                return
+            }
         }
         await loadPage(1, replace: true)
     }
@@ -313,6 +333,8 @@ final class DiscussionModel {
             merge(fresh, replacingOrder: replace)
             currentPage = max(result.currentPage, page)
             totalPages = result.totalPages
+            if page == 1 { fetchedFromFirstPage = true }
+            if fetchedFromFirstPage, currentPage >= totalPages { markFetched(workID: wid, chapterID: cid) }
         } catch {
             guard generation == loadGeneration else { return }
             if !commentTask.isCancelled && !error.isCancellation {
@@ -325,27 +347,6 @@ final class DiscussionModel {
     func loadNextPage() {
         guard hasMorePages, !isLoading else { return }
         Task { await loadPage(currentPage + 1, replace: false) }
-    }
-
-    func loadAllPages() {
-        guard hasMorePages, !isLoadingAll else { return }
-        let generation = loadGeneration
-        isLoadingAll = true
-        loadAllTask = Task {
-            while generation == loadGeneration, currentPage < totalPages, !Task.isCancelled {
-                loadAllProgress = currentPage + 1
-                await loadPage(currentPage + 1, replace: false)
-                if loadError != nil { break }
-            }
-            if generation == loadGeneration { isLoadingAll = false }
-        }
-    }
-
-    func cancelLoadAll() {
-        loadAllTask?.cancel()
-        commentTask.cancel()
-        isLoadingAll = false
-        isLoading = false
     }
 
     /// Fold fetched threads in: a thread already shown is replaced (it may
@@ -565,5 +566,58 @@ extension DiscussionModel {
             }
             return copy
         }
+    }
+}
+
+// MARK: - Paging actions
+
+extension DiscussionModel {
+    func loadAllPages() {
+        guard hasMorePages, !isLoadingAll else { return }
+        let generation = loadGeneration
+        isLoadingAll = true
+        loadAllTask = Task {
+            while generation == loadGeneration, currentPage < totalPages, !Task.isCancelled {
+                loadAllProgress = currentPage + 1
+                await loadPage(currentPage + 1, replace: false)
+                if loadError != nil { break }
+            }
+            if generation == loadGeneration { isLoadingAll = false }
+        }
+    }
+
+    /// "Check for new comments": fetch every page of this list again. New
+    /// replies can land on any page, not just the last.
+    func checkForNewComments() {
+        guard numericWorkID != nil, !isLoading, !isLoadingAll else { return }
+        let generation = loadGeneration
+        isLoadingAll = true
+        loadAllProgress = 1
+        loadAllTask = Task {
+            await loadPage(1, replace: true)
+            while generation == loadGeneration, loadError == nil, currentPage < totalPages, !Task.isCancelled {
+                loadAllProgress = currentPage + 1
+                await loadPage(currentPage + 1, replace: false)
+            }
+            if generation == loadGeneration { isLoadingAll = false }
+        }
+    }
+
+    /// Every page is in: stamp the list (the whole work stamps each of its
+    /// chapters) so it isn't fetched again on open.
+    private func markFetched(workID wid: UInt64, chapterID cid: UInt64) {
+        lastFetched = Date()
+        guard let app = appState.bridge.coreApp else { return }
+        let number = UInt32(chapterIndex + 1)
+        Task.detached(priority: .utility) {
+            try? app.markCommentsFetched(workId: wid, chapterId: cid, chapterNumber: number)
+        }
+    }
+
+    func cancelLoadAll() {
+        loadAllTask?.cancel()
+        commentTask.cancel()
+        isLoadingAll = false
+        isLoading = false
     }
 }

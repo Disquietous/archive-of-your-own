@@ -98,7 +98,7 @@ impl AO3App {
                 }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
-                log_db("save_comment", s.save_comment(0, chapter_id, comment));
+                log_db("save_comment", s.save_comment(work_id, chapter_id, comment));
             }
             let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
             Ok(UCommentsPage {
@@ -117,6 +117,12 @@ impl AO3App {
                 }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
+                // Each comment lands on its chapter (the "on Chapter N"
+                // link); a chapter with no row yet gets a stub so it can
+                // carry the comment-fetch stamp later.
+                if let (Some(cid), Some(n)) = (comment.chapter_id, chapter_number(comment)) {
+                    log_db("ensure_chapter_stub", s.ensure_chapter_stub(work_id, n, Some(cid)));
+                }
                 log_db("save_comment", s.save_comment(work_id, 0, comment));
             }
             let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
@@ -126,6 +132,23 @@ impl AO3App {
                 total_pages: cp.total_pages,
             })
         }).await
+    }
+
+    /// Every page of a comment list has been fetched: stamp it so it isn't
+    /// fetched again on open. `chapter_id` 0 = the whole-work list, which
+    /// stamps every chapter; `chapter_number` (1-based) places a stub when
+    /// the chapter has no row.
+    pub fn mark_comments_fetched(&self, work_id: u64, chapter_id: u64, chapter_number: u32) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.mark_comments_fetched(work_id, chapter_id, chapter_number).map_err(AO3Error::from)
+    }
+
+    /// When a comment list was last fetched completely (epoch seconds); None
+    /// if it never has been. `chapter_id` 0 = the whole work, complete only
+    /// when every chapter is.
+    pub fn comments_fetched_at(&self, work_id: u64, chapter_id: u64) -> Result<Option<u64>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        s.comments_fetched_at(work_id, chapter_id).map_err(AO3Error::from)
     }
 
     pub fn get_cached_comments(&self, work_id: u64, chapter_id: u64) -> Result<String, AO3Error> {
@@ -649,4 +672,12 @@ fn thread_json(root: Option<&Comment>, target_comment_id: u64) -> String {
         "target_comment_id": target_comment_id,
     });
     serde_json::to_string(&result).unwrap_or("{}".to_string())
+}
+
+/// The chapter number in a whole-work comment's "on Chapter N" label.
+fn chapter_number(comment: &Comment) -> Option<u32> {
+    comment.chapter_label.as_deref()?
+        .split_whitespace()
+        .filter_map(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok())
+        .next()
 }
