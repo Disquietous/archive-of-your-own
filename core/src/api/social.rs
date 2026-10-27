@@ -566,52 +566,42 @@ impl AO3App {
         }).await
     }
 
-    /// An author's avatar: served from the DB cache when present. On a miss,
-    /// a known avatar URL — the caller's hint (inbox/comment data carries
-    /// one) or one recorded in ao3_users — means a single image request;
-    /// only a never-seen user costs the profile-page fetch as well. The
-    /// bytes are cached forever either way.
+    /// An author's avatar. The bytes live in the URL-keyed image cache, so
+    /// an icon many users share (AO3's default) is fetched once in total.
+    /// The URL is the caller's hint (inbox/comment data carries one) or the
+    /// one recorded in ao3_users; only a never-seen user without a hint
+    /// costs the profile-page fetch, which records the URL for next time.
     pub async fn fetch_author_avatar(&self, username: String, url_hint: Option<String>) -> Result<Vec<u8>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let key = format!("avatar:{username}");
             let known_url = {
                 let s = storage.lock().await;
-                if let Some(data) = s.get_cached_image(&key).map_err(AO3Error::from)? {
+                if let Some(data) = s.get_cached_image(&format!("avatar:{username}")).map_err(AO3Error::from)? {
                     return Ok(data);
                 }
                 url_hint.filter(|u| !u.is_empty())
                     .or_else(|| s.get_known_avatar_url(&username).unwrap_or(None))
             };
-            let (bytes, fetched_icon_url) = if let Some(url) = known_url {
-                let bytes = with_recovery(client.clone(), storage.clone(), OpKind::Image, RetrySafety::Idempotent,
-                    move |client| {
-                        let url = url.clone();
-                        async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
-                    }).await?;
-                (bytes, None)
-            } else {
-                let username_for_fetch = username.clone();
-                let (bytes, icon_url) = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
-                    move |client| {
-                        let username = username_for_fetch.clone();
-                        async move { client.read().await.fetch_user_icon(&username).await.map_err(AO3Error::from) }
-                    }).await?;
-                (bytes, Some(icon_url))
+            let url = match known_url {
+                Some(url) => url,
+                None => {
+                    let username_for_fetch = username.clone();
+                    let profile = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
+                        move |client| {
+                            let username = username_for_fetch.clone();
+                            async move { client.read().await.fetch_user_profile(&username).await.map_err(AO3Error::from) }
+                        }).await?;
+                    let Some(url) = profile.avatar_url.clone() else {
+                        return Err(AO3Error::from(AppError::ElementNotFound(format!("profile icon for {username}"))));
+                    };
+                    // A profile-page fetch is the authoritative source for
+                    // this user's avatar URL — record it so future lookups
+                    // skip the profile request.
+                    let s = storage.lock().await;
+                    log_db("upsert_ao3_user", s.upsert_ao3_user(&profile));
+                    url
+                }
             };
-            let s = storage.lock().await;
-            // A profile-page fetch is the authoritative source for this
-            // user's avatar URL — record it so future lookups skip the
-            // profile request.
-            if let Some(icon_url) = fetched_icon_url {
-                log_db("upsert_ao3_user", s.upsert_ao3_user(&AO3User {
-                    id: username.clone(),
-                    username: username.clone(),
-                    profile_url: Some(format!("{}/users/{}", crate::client::BASE_URL, username)),
-                    avatar_url: Some(icon_url),
-                }));
-            }
-            log_db("save_cached_image", s.save_cached_image(&key, &bytes));
-            Ok(bytes)
+            super::works::fetch_image_cached(client, storage, &url, 0).await.map(|(bytes, _)| bytes)
         }).await
     }
 }

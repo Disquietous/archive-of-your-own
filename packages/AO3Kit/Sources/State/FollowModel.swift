@@ -131,9 +131,15 @@ final class FollowModel {
         target.kind.isSubscribable && appState.ao3Username != nil
     }
 
-    /// When this follow's own What's New check last succeeded.
+    /// When this follow's own What's New check last ran.
     func lastChecked(_ target: Target) -> String? {
         appState.followLastChecked[target.key]
+    }
+
+    /// This follow's last What's New fetch was a 404 (or it's excluded
+    /// from checks after too many in a row).
+    func isNotFound(_ target: Target) -> Bool {
+        appState.followNotFound.contains(target.key)
     }
 
     /// An AO3 change for this target is in flight.

@@ -33,6 +33,7 @@ extension CloudLibrarySync {
             result.outcome = .failed(error.localizedDescription)
             return result
         }
+        result.checked = true
 
         switch verdict {
         case .noCloudCopy:
@@ -45,7 +46,9 @@ extension CloudLibrarySync {
             }
             result.resolutionDone = true
 
-        case .foreign(let name, let writtenAt, let generation, let dismissed):
+        // The core's "dismissed" mark is ignored: every check asks
+        // (CloudLibrarySync.promptConflict).
+        case .foreign(let name, let writtenAt, let generation, _):
             let conflict = Conflict(deviceName: name, writtenAt: Date(timeIntervalSince1970: Double(writtenAt) / 1000), generation: generation)
             if let (choice, forGeneration) = resolution {
                 guard forGeneration == generation else {
@@ -55,8 +58,6 @@ extension CloudLibrarySync {
                     return result
                 }
                 carryOut(choice, conflict: conflict, into: &result, app: app, deviceName: deviceName, folder: folder, key: key)
-            } else if dismissed {
-                result.outcome = .dismissedConflict(name)
             } else {
                 result.outcome = .conflict(conflict)
             }
@@ -90,7 +91,7 @@ extension CloudLibrarySync {
 
     nonisolated private static func pushIfDue(_ result: inout CycleResult, app: Ao3App, deviceName: String,
                                               folder: URL, key: String, force: Bool, lastPush: Date?) {
-        if !force, let lastPush, Date().timeIntervalSince(lastPush) < pushInterval { return }
+        if !force, let lastPush, Date().timeIntervalSince(lastPush) < pushInterval - intervalSlack { return }
         do {
             _ = try push(app: app, deviceName: deviceName, folder: folder, key: key)
             result.pushedAt = Date()

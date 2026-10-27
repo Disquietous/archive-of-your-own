@@ -86,23 +86,18 @@ impl Storage {
             .ok_or_else(|| AppError::StorageError("in-memory store has no file to operate on".into()))
     }
 
-    /// Unix ms of the newest write to the database file or its WAL, as
-    /// the filesystem saw it. Cheap "changed since" probe for sync.
-    pub fn last_modified_ms(&self) -> Option<i64> {
-        let path = self.path.as_deref()?;
-        let path = Path::new(path);
-        let mut newest: Option<i64> = None;
-        for p in std::iter::once(path.to_path_buf()).chain(sidecars(path)) {
-            if let Ok(meta) = std::fs::metadata(&p) {
-                if let Ok(m) = meta.modified() {
-                    if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                        let ms = d.as_millis() as i64;
-                        newest = Some(newest.map_or(ms, |n| n.max(ms)));
-                    }
-                }
-            }
-        }
-        newest
+    /// Rows written on this connection since the last `set_sync_mark` —
+    /// the sync engine's "changed since" probe. Counts real
+    /// INSERT/UPDATE/DELETEs only; file modification times also moved on
+    /// reads (the -shm index) and checkpoints, so a library nobody edited
+    /// still looked changed.
+    pub fn changed_since_sync_mark(&self) -> bool {
+        self.conn.total_changes() > self.sync_mark
+    }
+
+    /// Every write so far is accounted for by the sync engine.
+    pub fn set_sync_mark(&mut self) {
+        self.sync_mark = self.conn.total_changes();
     }
 
     /// Write a complete, consistent copy of the library to `dest`,
@@ -224,7 +219,10 @@ impl Storage {
         self.collections_cache = Default::default();
         self.users_cache = Default::default();
         self.series_cache = Default::default();
-        self.migrate_and_load()
+        self.migrate_and_load()?;
+        // A new connection counts from zero.
+        self.set_sync_mark();
+        Ok(())
     }
 }
 

@@ -31,6 +31,9 @@ struct CloudSyncSettingsPane: View {
                     SettingsInfoRow(theme: theme, label: "Last sent to iCloud",
                                     value: sync.lastPushedAt.map(Self.relative) ?? "Never")
                     Divider().foregroundStyle(theme.line)
+                    SettingsInfoRow(theme: theme, label: "Last checked",
+                                    value: sync.lastCheckedAt.map(Self.relative) ?? "Not yet")
+                    Divider().foregroundStyle(theme.line)
                     SettingsInfoRow(theme: theme, label: "This device", value: sync.deviceName)
                 }
                 if let conflict = sync.pendingConflict {

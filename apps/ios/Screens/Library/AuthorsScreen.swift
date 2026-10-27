@@ -183,7 +183,9 @@ struct AuthorsScreen: View {
                             .lineLimit(1)
                         HStack(spacing: 6) {
                             if subscribed { Text("Subscribed on AO3 ·") }
-                            if let lastChecked, let rel = DBTimestamp.relative(lastChecked) {
+                            if follows.isNotFound(target) {
+                                Text("Not Found")
+                            } else if let lastChecked, let rel = DBTimestamp.relative(lastChecked) {
                                 Text("Checked \(rel)")
                             } else {
                                 Text("Not checked yet")

@@ -302,7 +302,8 @@ struct ChapterImageView: View {
         }
         .onAppear {
             // Off means nothing shows until tapped, even if cached.
-            guard theme.imageAutoLoad else { return }
+            // A failed fetch waits for a tap — don't refetch on re-appear.
+            guard theme.imageAutoLoad, error == nil else { return }
             if let data = state.bridge.cachedChapterImage(url: src) {
                 image = UIImage(data: data)
             } else {

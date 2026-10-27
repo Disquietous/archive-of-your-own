@@ -274,9 +274,12 @@ extension ReaderViewController {
 
     /// With auto-load on: adopt already-cached images synchronously and
     /// fetch the rest. With it off, every image stays a tap-to-load
-    /// placeholder — cached or not.
+    /// placeholder — cached or not. A src with a status (loading or failed)
+    /// is skipped: every render re-primes, so a failed fetch would otherwise
+    /// retry forever. Retrying a failure is the user's tap.
     func primeAndLoadImages(in blocks: [ParsedContentBlock]) {
-        for src in Self.imageSrcs(in: blocks) where loadedChapterImages[src] == nil {
+        for src in Self.imageSrcs(in: blocks)
+        where loadedChapterImages[src] == nil && chapterImageStatus[src] == nil {
             guard theme.imageAutoLoad else { continue }
             if let data = appState.bridge.cachedChapterImage(url: src),
                let image = NSImage(data: data) {

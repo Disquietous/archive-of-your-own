@@ -132,10 +132,18 @@ impl AO3App {
     }
 
     /// Cached avatar bytes for an author, if previously fetched. Sync,
-    /// DB-only — never touches the network.
+    /// DB-only — never touches the network. A per-user row (cached before
+    /// images were keyed by URL) wins; otherwise the user's recorded avatar
+    /// URL is looked up in the URL-keyed cache.
     pub fn get_cached_author_avatar(&self, username: String) -> Result<Option<Vec<u8>>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.get_cached_image(&format!("avatar:{username}")).map_err(AO3Error::from)
+        if let Some(data) = s.get_cached_image(&format!("avatar:{username}")).map_err(AO3Error::from)? {
+            return Ok(Some(data));
+        }
+        match s.get_known_avatar_url(&username).map_err(AO3Error::from)? {
+            Some(url) if !url.is_empty() => super::works::cached_image(&s, &url),
+            _ => Ok(None),
+        }
     }
 }
 

@@ -85,6 +85,9 @@ final class CloudLibrarySync {
     private(set) var status: Status = .off
     private(set) var enabled = false
     private(set) var lastPushedAt: Date?
+    /// When this device last read iCloud's manifest and decided whether
+    /// to send — whatever it decided. This session only.
+    private(set) var lastCheckedAt: Date?
     private(set) var pendingConflict: Conflict?
     private(set) var backups: [Backup] = []
     private(set) var deviceId: String = ""
@@ -103,6 +106,9 @@ final class CloudLibrarySync {
     /// How often an owned cloud copy is refreshed while the library keeps
     /// changing. Foreground use also pushes on background/quit.
     nonisolated static let pushInterval: TimeInterval = 5 * 60
+    /// Timer ticks land a little short of a full interval after the last
+    /// push; without slack every other tick was skipped (≈10 min pushes).
+    nonisolated static let intervalSlack: TimeInterval = 30
 
     private weak var appState: AppState?
     private var containerURL: URL?
@@ -115,6 +121,9 @@ final class CloudLibrarySync {
     /// A choice made while the iCloud copy was still downloading; carried
     /// out on the next cycle once the file is local.
     private var pendingResolution: (Resolution, Int64)?
+    /// "Not Now" for this copy: don't ask again before `until` (the next
+    /// scheduled check) unless forced.
+    private var notNowQuiet: (generation: Int64, until: Date)?
 
     // MARK: Lifecycle
 
@@ -123,6 +132,7 @@ final class CloudLibrarySync {
         appState = state
         if deviceName.isEmpty { deviceName = Self.defaultDeviceName() }
         let bridge = state.bridge
+        NSLog("[sync] attach: initialized=%d", bridge.isInitialized ? 1 : 0)
         guard bridge.isInitialized else { return }
         if let s = bridge.cloudSyncStatus() {
             deviceId = s.deviceId
@@ -136,7 +146,11 @@ final class CloudLibrarySync {
     /// Turn sync on or off for this device. Enabling on a device that finds
     /// no key in iCloud Keychain and no cloud copy mints the shared key.
     func setEnabled(_ on: Bool) {
-        guard let bridge = appState?.bridge, bridge.isInitialized else { return }
+        guard let bridge = appState?.bridge, bridge.isInitialized else {
+            NSLog("[sync] setEnabled(%d) skipped: appState=%d", on ? 1 : 0, appState != nil ? 1 : 0)
+            return
+        }
+        NSLog("[sync] setEnabled(%d)", on ? 1 : 0)
         bridge.setCloudSyncEnabled(on)
         enabled = on
         if on {
@@ -151,6 +165,7 @@ final class CloudLibrarySync {
 
     /// Check iCloud now, and push if this device owns the copy.
     func syncNow() {
+        NSLog("[sync] syncNow: enabled=%d", enabled ? 1 : 0)
         guard enabled else { return }
         forceNext = true
         requestCycle()
@@ -166,6 +181,7 @@ final class CloudLibrarySync {
         let manifest = Self.readManifest(in: dir, startDownload: false)
         guard case .available(let json) = manifest else { return }
         guard let verdict = try? app.cloudSyncEvaluate(manifestJson: json) else { return }
+        lastCheckedAt = Date()
         switch verdict {
         case .noCloudCopy, .owned(needsPush: true): break
         default: return
@@ -208,7 +224,8 @@ final class CloudLibrarySync {
         pendingConflict = nil
         switch resolution {
         case .notNow:
-            appState?.bridge.cloudSyncDismiss(generation: conflict.generation)
+            // Only this prompt: the next scheduled check asks again.
+            notNowQuiet = (conflict.generation, Date().addingTimeInterval(Self.pushInterval - Self.intervalSlack))
             status = .attention("Not syncing: iCloud holds \(conflict.deviceName)'s library.")
         case .useCloudCopy, .overwriteCloudCopy:
             pendingResolution = (resolution, conflict.generation)
@@ -278,8 +295,10 @@ final class CloudLibrarySync {
     // MARK: Engine
 
     private func start(mintKeyIfFirst: Bool = false) {
+        NSLog("[sync] start: timer=%d", timer != nil ? 1 : 0)
         guard timer == nil else { requestCycle(); return }
         guard FileManager.default.ubiquityIdentityToken != nil else {
+            NSLog("[sync] start: no ubiquity identity token")
             status = .unavailable("Sign in to iCloud in System Settings to sync.")
             return
         }
@@ -289,7 +308,8 @@ final class CloudLibrarySync {
             let url = await Task.detached(priority: .utility) {
                 FileManager.default.url(forUbiquityContainerIdentifier: nil)
             }.value
-            guard let self, self.enabled else { return }
+            guard let self, self.enabled else { NSLog("[sync] start: dropped after container lookup"); return }
+            NSLog("[sync] start: container=%@", url?.path ?? "nil")
             guard let url else {
                 status = .unavailable("iCloud Drive isn't available for this app.")
                 return
@@ -347,15 +367,25 @@ final class CloudLibrarySync {
         // lands mid-cycle can't pull the library out from under the work,
         // and a nil handle can never be mistaken for a successful swap.
         guard enabled, let bridge = appState?.bridge, bridge.isInitialized, let app = bridge.coreApp,
-              let dir = syncFolder() else { return }
-        if cycleRunning || busy { cycleQueued = true; return }
+              let dir = syncFolder() else {
+            NSLog("[sync] requestCycle skipped: enabled=%d appState=%d initialized=%d coreApp=%d container=%d",
+                  enabled ? 1 : 0, appState != nil ? 1 : 0, appState?.bridge.isInitialized == true ? 1 : 0,
+                  appState?.bridge.coreApp != nil ? 1 : 0, containerURL != nil ? 1 : 0)
+            return
+        }
+        if cycleRunning || busy {
+            NSLog("[sync] requestCycle queued: cycleRunning=%d busy=%d", cycleRunning ? 1 : 0, busy ? 1 : 0)
+            cycleQueued = true
+            return
+        }
+        NSLog("[sync] cycle start: force=%d resolution=%d lastPush=%@", forceNext ? 1 : 0,
+              pendingResolution != nil ? 1 : 0, lastPushedAt.map { "\($0)" } ?? "never")
         cycleRunning = true
         let deviceName = self.deviceName
         let force = forceNext
         forceNext = false
         let resolution = pendingResolution
         let lastPush = lastPushedAt
-        let dismissedConflict = pendingConflict
         if status == .off || status == .idle { status = .checking }
         // This cycle may swap the library file underneath the UI (off the
         // main thread, before we hear about it): hold progress writes for
@@ -370,13 +400,15 @@ final class CloudLibrarySync {
                               resolution: resolution, lastPush: lastPush)
             }.value
             guard let self else { return }
-            applyCycleResult(result, mayReplaceLibrary: mayReplaceLibrary, dismissedConflict: dismissedConflict)
+            applyCycleResult(result, mayReplaceLibrary: mayReplaceLibrary, forced: force)
         }
     }
 
     /// Fold a finished cycle's result back into the observable state.
-    private func applyCycleResult(_ result: CycleResult, mayReplaceLibrary: Bool, dismissedConflict: Conflict?) {
+    private func applyCycleResult(_ result: CycleResult, mayReplaceLibrary: Bool, forced: Bool) {
         cycleRunning = false
+        NSLog("[sync] cycle done: outcome=%@ pushedAt=%@ queued=%d", "\(result.outcome)",
+              result.pushedAt.map { "\($0)" } ?? "none", cycleQueued ? 1 : 0)
         if result.libraryReplaced {
             appState?.libraryWasReplaced()
             refreshBackups()
@@ -384,19 +416,15 @@ final class CloudLibrarySync {
             appState?.endLibraryReplacement()
         }
         if result.backupsChanged { refreshBackups() }
+        if result.checked { lastCheckedAt = Date() }
         if let at = result.pushedAt { lastPushedAt = at }
         if result.resolutionDone { pendingResolution = nil }
         switch result.outcome {
         case .idle:
             status = .idle
         case .conflict(let conflict):
-            status = .attention("iCloud holds \(conflict.deviceName)'s library.")
-            if dismissedConflict != conflict {
-                pendingConflict = conflict
-                presentConflict?(conflict)
-            }
-        case .dismissedConflict(let name):
-            status = .attention("Not syncing: iCloud holds \(name)'s library.")
+            status = .attention("Not syncing: iCloud holds \(conflict.deviceName)'s library.")
+            promptConflict(conflict, forced: forced)
         case .waitingForDownload:
             status = .downloading
         case .waitingForKey:
@@ -410,12 +438,24 @@ final class CloudLibrarySync {
         }
     }
 
+    /// Ask about another device's copy. Every check that finds one asks,
+    /// except that "Not Now" quiets the same copy until the next scheduled
+    /// check; Sync Now and a newer copy always ask. The platform hook
+    /// re-presents only when its prompt isn't already on screen.
+    private func promptConflict(_ conflict: Conflict, forced: Bool) {
+        if !forced, let quiet = notNowQuiet, quiet.generation == conflict.generation, Date() < quiet.until {
+            return
+        }
+        notNowQuiet = nil
+        pendingConflict = conflict
+        presentConflict?(conflict)
+    }
+
     // MARK: Off-main work
 
     enum CycleOutcome {
         case idle
         case conflict(Conflict)
-        case dismissedConflict(String)
         case waitingForDownload
         case waitingForKey
         case failed(String)
@@ -423,6 +463,8 @@ final class CloudLibrarySync {
 
     struct CycleResult {
         var outcome: CycleOutcome
+        /// The cycle read iCloud's manifest and judged it.
+        var checked = false
         var pushedAt: Date?
         var libraryReplaced = false
         var backupsChanged = false

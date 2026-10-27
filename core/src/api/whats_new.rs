@@ -195,341 +195,371 @@ impl AO3App {
     pub async fn check_next_follow(&self) -> Result<Option<UFollowCheckResult>, AO3Error> {
         let census_cycle_used = self.census_cycle_used.clone();
         self.run_on_runtime(move |client, storage| async move {
-            let s = storage.lock().await;
-            // Pop the first item from the queue
-            let queue_json = s.get_check_queue().map_err(AO3Error::from)?
-                .unwrap_or_else(|| "[]".to_string());
-            let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json)
-                .unwrap_or_default();
-            if queue.is_empty() {
-                return Ok(None);
-            }
-            // Items whose follow was removed since they were queued are
-            // dropped — an unfollowed target is never fetched.
-            let mut item = queue.remove(0);
-            while !s.is_followed(item["kind"].as_str().unwrap_or(""),
-                                 item["target_id"].as_str().unwrap_or("")).unwrap_or(false) {
+            // The follow this call popped. Its `last_checked_at` is stamped
+            // after the check whatever the outcome — success, 404, other
+            // failure — so a target that keeps failing doesn't hold the
+            // overdue warning up forever.
+            let mut checked: Option<(String, String)> = None;
+            let result: Result<Option<UFollowCheckResult>, AO3Error> = async {
+                let s = storage.lock().await;
+                // Pop the first item from the queue
+                let queue_json = s.get_check_queue().map_err(AO3Error::from)?
+                    .unwrap_or_else(|| "[]".to_string());
+                let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json)
+                    .unwrap_or_default();
                 if queue.is_empty() {
-                    log_db("set_check_queue", s.set_check_queue("[]"));
                     return Ok(None);
                 }
-                item = queue.remove(0);
-            }
-            let sub_type = item["kind"].as_str().unwrap_or("").to_string();
-            let sub_id = item["target_id"].as_str().unwrap_or("").to_string();
-            let sub_name = item["name"].as_str().unwrap_or("").to_string();
-            let is_census = item["census"].as_bool().unwrap_or(false);
-
-            // Persist updated queue before the fetch (so a crash mid-fetch
-            // skips this item rather than retrying it forever).
-            let mut remaining = queue.len() as u32;
-            let updated_json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
-            log_db("set_check_queue", s.set_check_queue(&updated_json));
-
-            // Census continuations read their page cursor from the persisted
-            // state, not the queue marker — cancel/crash resumes cleanly.
-            let census_state: Option<CensusState> = if is_census {
-                s.get_follow_census_meta(&sub_type, &sub_id)
-                    .ok()
-                    .and_then(|(_, _, state)| state)
-                    .and_then(|json| serde_json::from_str(&json).ok())
-            } else {
-                None
-            };
-            drop(s);
-
-            if is_census && census_state.is_none() {
-                // Orphaned marker — its state was cleared elsewhere.
-                return Ok(Some(UFollowCheckResult {
-                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining, error: None,
-                }));
-            }
-
-            // Build URL
-            let base = crate::client::BASE_URL;
-            let census_page = census_state.as_ref().map(|c| c.next_page);
-            let url = match (sub_type.as_str(), census_page) {
-                ("author", None) => format!("{base}/users/{sub_id}/works"),
-                ("author", Some(p)) => format!("{base}/users/{sub_id}/works?page={p}"),
-                ("series", None) => format!("{base}/series/{sub_id}"),
-                ("series", Some(p)) => format!("{base}/series/{sub_id}?page={p}"),
-                ("work", _) => format!("{base}/works/{sub_id}?view_adult=true"),
-                _ => return Ok(Some(UFollowCheckResult {
-                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
-                    error: Some("Unknown subscription type".to_string()),
-                })),
-            };
-
-            // Fetch through the recovery engine (Idempotent — a plain GET):
-            // a transient failure already gets rotated-and-retried in Rust
-            // before ever reaching this match. What's left after that is
-            // classified (never string-matched) to decide whether it's
-            // still worth requeuing for the next census cycle.
-            let url_for_fetch = url.clone();
-            let fetch_result = with_recovery(
-                client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
-                move |client| {
-                    let url = url_for_fetch.clone();
-                    async move {
-                        // Inside the attempt closure so retries pace too —
-                        // not just the first request for each item.
-                        tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
-                        let c = client.read().await;
-                        let timeout = c.timeout_for_url(&url);
-                        c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
+                // Items whose follow was removed since they were queued are
+                // dropped — an unfollowed target is never fetched.
+                let mut item = queue.remove(0);
+                while !s.is_followed(item["kind"].as_str().unwrap_or(""),
+                                     item["target_id"].as_str().unwrap_or("")).unwrap_or(false) {
+                    if queue.is_empty() {
+                        log_db("set_check_queue", s.set_check_queue("[]"));
+                        return Ok(None);
                     }
-                }).await;
-            let html = match fetch_result {
-                Ok(h) => h,
-                Err(e) => {
-                    let msg = format!("{e}");
-                    log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
+                    item = queue.remove(0);
+                }
+                let sub_type = item["kind"].as_str().unwrap_or("").to_string();
+                let sub_id = item["target_id"].as_str().unwrap_or("").to_string();
+                let sub_name = item["name"].as_str().unwrap_or("").to_string();
+                let is_census = item["census"].as_bool().unwrap_or(false);
+                checked = Some((sub_type.clone(), sub_id.clone()));
 
-                    let retryable = matches!(classify(&e), Some(
-                        crate::client::FailureKind::ConnectFailure
-                        | crate::client::FailureKind::EdgeTlsFailure
-                        | crate::client::FailureKind::RateLimited { .. }
-                        | crate::client::FailureKind::Challenged
-                        | crate::client::FailureKind::OriginUnavailable
-                        | crate::client::FailureKind::ResponseTimeout
-                    ));
-                    if retryable {
-                        let s = storage.lock().await;
-                        if let Ok(Some(json)) = s.get_check_queue() {
-                            if let Ok(mut q) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                                // Re-insert the item wholesale so census
-                                // markers survive the retry.
-                                q.insert(0, item);
-                                log_db("set_check_queue", s.set_check_queue(&serde_json::to_string(&q).unwrap_or_default()));
-                            }
-                        }
-                    }
+                // Persist updated queue before the fetch (so a crash mid-fetch
+                // skips this item rather than retrying it forever).
+                let mut remaining = queue.len() as u32;
+                let updated_json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
+                log_db("set_check_queue", s.set_check_queue(&updated_json));
+
+                // Census continuations read their page cursor from the persisted
+                // state, not the queue marker — cancel/crash resumes cleanly.
+                let census_state: Option<CensusState> = if is_census {
+                    s.get_follow_census_meta(&sub_type, &sub_id)
+                        .ok()
+                        .and_then(|(_, _, state)| state)
+                        .and_then(|json| serde_json::from_str(&json).ok())
+                } else {
+                    None
+                };
+                drop(s);
+
+                if is_census && census_state.is_none() {
+                    // Orphaned marker — its state was cleared elsewhere.
                     return Ok(Some(UFollowCheckResult {
-                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
-                        remaining: if retryable { remaining + 1 } else { remaining },
-                        error: Some(msg),
+                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining, error: None,
                     }));
                 }
-            };
 
-            // Parse works and extract the newest date
-            let (newest_date, parsed_works) = match sub_type.as_str() {
-                "author" | "series" => {
-                    // Both author pages and series pages use li.work.blurb.
-                    // A parse error (schema canary) must abort the check:
-                    // treating it as "0 works" would make the census flag
-                    // every known work as gone. An interrupted census
-                    // resumes on this subscription's next regular check.
-                    let works = match crate::parser::parse_work_listings(&html) {
-                        Ok(w) => w,
-                        Err(e) => {
-                            log_error!("sub_check", "Parse failed for {sub_type} '{sub_name}' ({url}): {e}");
-                            return Ok(Some(UFollowCheckResult {
-                                kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
-                                remaining, error: Some(format!("{e}")),
-                            }));
+                // Build URL
+                let base = crate::client::BASE_URL;
+                let census_page = census_state.as_ref().map(|c| c.next_page);
+                let url = match (sub_type.as_str(), census_page) {
+                    ("author", None) => format!("{base}/users/{sub_id}/works"),
+                    ("author", Some(p)) => format!("{base}/users/{sub_id}/works?page={p}"),
+                    ("series", None) => format!("{base}/series/{sub_id}"),
+                    ("series", Some(p)) => format!("{base}/series/{sub_id}?page={p}"),
+                    ("work", _) => format!("{base}/works/{sub_id}?view_adult=true"),
+                    _ => return Ok(Some(UFollowCheckResult {
+                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
+                        error: Some("Unknown subscription type".to_string()),
+                    })),
+                };
+
+                // Fetch through the recovery engine (Idempotent — a plain GET):
+                // a transient failure already gets rotated-and-retried in Rust
+                // before ever reaching this match. What's left after that is
+                // classified (never string-matched) to decide whether it's
+                // still worth requeuing for the next census cycle.
+                let url_for_fetch = url.clone();
+                let fetch_result = with_recovery(
+                    client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
+                    move |client| {
+                        let url = url_for_fetch.clone();
+                        async move {
+                            // Inside the attempt closure so retries pace too —
+                            // not just the first request for each item.
+                            tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
+                            let c = client.read().await;
+                            let timeout = c.timeout_for_url(&url);
+                            c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
                         }
-                    };
-                    let date = works.iter()
-                        .map(|w| w.date_updated.as_str())
-                        .max()
-                        .unwrap_or("")
-                        .to_string();
-                    (date, works)
-                }
-                "work" => {
-                    if let Ok((w, _)) = crate::parser::parse_work_page(&html) {
-                        let date = w.date_updated.clone();
-                        (date, vec![w])
-                    } else {
-                        (String::new(), vec![])
+                    }).await;
+                let html = match fetch_result {
+                    Ok(h) => {
+                        // A successful fetch ends any not-found streak.
+                        let s = storage.lock().await;
+                        log_db("reset_follow_status", s.reset_follow_status(&sub_type, &sub_id));
+                        h
                     }
-                }
-                _ => (String::new(), vec![]),
-            };
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
 
-            let s = storage.lock().await;
-
-            // ---- Census continuation: one deeper listing page per call ----
-            if let Some(mut state) = census_state {
-                let (flagged, _) = diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, state.seed);
-                // One transaction per census page: works + associations +
-                // flags land together or not at all.
-                let tx = s.begin_tx().map_err(AO3Error::from)?;
-                for w in &parsed_works {
-                    log_db("save_work", s.save_work(w));
-                }
-                let page_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
-                for id in page_ids {
-                    if !state.seen_ids.contains(&id) {
-                        state.seen_ids.push(id);
-                    }
-                }
-                let changed = !flagged.is_empty();
-                if changed {
-                    log_db("add_new_work_ids", s.add_new_work_ids(&flagged));
-                }
-                log_db("commit census page", tx.commit());
-
-                let done = !crate::parser::has_next_page(&html)
-                    || state.next_page >= CENSUS_MAX_PAGES
-                    || parsed_works.is_empty();
-                if done && state.next_page >= CENSUS_MAX_PAGES && crate::parser::has_next_page(&html) {
-                    log_error!("whats_new",
-                        "Census for {sub_type} '{sub_name}' hit the {CENSUS_MAX_PAGES}-page cap with pages left — listing walk truncated");
-                }
-                if done {
-                    finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
-                } else {
-                    state.next_page += 1;
-                    log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
-                        &sub_id, serde_json::to_string(&state).ok().as_deref()));
-                    remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
-                }
-                if remaining == 0 {
-                    log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
-                }
-                return Ok(Some(UFollowCheckResult {
-                    kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining, error: None,
-                }));
-            }
-
-            // ---- Level 0: page 1 (or the single work) ----
-            // The snapshot's job here: distinguish a first run (seed
-            // silently) from a repeat check. An empty date also counts as
-            // first run — census bookkeeping may create the row early.
-            let first_run = s.get_follow_baseline(&sub_type, &sub_id)
-                .unwrap_or(None)
-                .is_none();
-
-            let (updated_ids, unseen) = if first_run {
-                log_info!("whats_new",
-                    "First check for {} subscription '{}' — seeded {} works silently (rule: no baseline yet, nothing can qualify)",
-                    sub_type, sub_name, parsed_works.len());
-                (Vec::new(), 0)
-            } else {
-                diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, false)
-            };
-            let changed = !updated_ids.is_empty();
-
-            // Cache works and mark new/updated ones for the What's New feed —
-            // one transaction, so a crash can't leave a half-saved page.
-            let tx = s.begin_tx().map_err(AO3Error::from)?;
-            for w in &parsed_works {
-                log_db("save_work", s.save_work(w));
-            }
-            // Membership (author byline / series part) rides on the saved
-            // works themselves — nothing to record per subscription.
-            let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
-            if changed {
-                log_db("add_new_work_ids", s.add_new_work_ids(&updated_ids));
-            }
-
-            // Save snapshot (always, even on first run)
-            if !newest_date.is_empty() {
-                log_db("set_follow_baseline", s.set_follow_baseline(&sub_type, &sub_id, &newest_date));
-            }
-            // This subscription's check completed — stamp its own freshness.
-            // Error paths above return before this line, so a failed check
-            // stays stale and re-qualifies for the next round.
-            log_db("set_follow_last_checked", s.set_follow_last_checked(&sub_type, &sub_id, &now_utc()));
-            log_db("commit check page", tx.commit());
-
-            // ---- Census escalation (listings only) ----
-            // Page 1 sorted by update date is blind to backdated posts and
-            // removals; the listing's total works count is not. When the
-            // count doesn't reconcile with what page 1 shows, walk the whole
-            // listing. A periodic census also runs to catch the one case the
-            // count can't see (an addition paired with a removal between
-            // checks) and to reconcile the gone-from-AO3 flags.
-            if sub_type == "author" || sub_type == "series" {
-                let header_total = crate::parser::parse_listing_works_total(&html);
-                let (prev_total, last_census_at, existing_state) =
-                    s.get_follow_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
-
-                let mut census_reason: Option<String> = None;
-                if existing_state.is_some() {
-                    census_reason = Some("resuming interrupted census".to_string());
-                } else if !first_run {
-                    if let (Some(t), Some(p)) = (header_total, prev_total) {
-                        let delta = t as i64 - p as i64;
-                        if delta < 0 {
-                            census_reason = Some(format!(
-                                "listing count fell {p} → {t} (rule: something was removed; confirm what)"));
-                        } else if delta > unseen as i64 {
-                            census_reason = Some(format!(
-                                "listing count rose {p} → {t} but page 1 shows only {unseen} unknown work(s) (rule: a new work missing from the top of the date sort is a backdated post)"));
-                        } else if delta == 0 && unseen > 0 {
-                            census_reason = Some(format!(
-                                "unknown work on page 1 with unchanged count {t} (rule: an addition paired with a removal keeps the count flat)"));
+                        // A 404 counts toward the not-found limit; reaching it
+                        // excludes the follow from every future check.
+                        if matches!(classify(&e), Some(crate::client::FailureKind::Http { code: 404 })) {
+                            let s = storage.lock().await;
+                            let limit = not_found_limit(&s);
+                            match s.record_follow_not_found(&sub_type, &sub_id, limit) {
+                                Ok(-1) => { log_info!("whats_new",
+                                    "{sub_type} '{sub_name}' not found on {limit} consecutive checks — excluded from What's New checks"); }
+                                Ok(n) => { log_info!("whats_new",
+                                    "{sub_type} '{sub_name}' not found ({n} consecutive, limit {limit})"); }
+                                Err(e) => log_db("record_follow_not_found", Err::<(), _>(e)),
+                            }
                         }
-                    }
-                }
-                // Age-based census — capped at one per check cycle so
-                // baselines build gradually instead of all at once.
-                let seed = last_census_at.is_none();
-                if census_reason.is_none() {
-                    let due = match &last_census_at {
-                        None => true,
-                        Some(at) => {
-                            let then = crate::timefmt::datetime_to_epoch(at).unwrap_or(0);
-                            let now = crate::timefmt::epoch_now();
-                            now.saturating_sub(then) > CENSUS_INTERVAL_SECS
+
+                        let retryable = matches!(classify(&e), Some(
+                            crate::client::FailureKind::ConnectFailure
+                            | crate::client::FailureKind::EdgeTlsFailure
+                            | crate::client::FailureKind::RateLimited { .. }
+                            | crate::client::FailureKind::Challenged
+                            | crate::client::FailureKind::OriginUnavailable
+                            | crate::client::FailureKind::ResponseTimeout
+                        ));
+                        if retryable {
+                            let s = storage.lock().await;
+                            if let Ok(Some(json)) = s.get_check_queue() {
+                                if let Ok(mut q) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                                    // Re-insert the item wholesale so census
+                                    // markers survive the retry.
+                                    q.insert(0, item);
+                                    log_db("set_check_queue", s.set_check_queue(&serde_json::to_string(&q).unwrap_or_default()));
+                                }
+                            }
                         }
-                    };
-                    if due && !census_cycle_used.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        census_reason = Some(if seed {
-                            "baseline census (first full listing pass)".to_string()
+                        return Ok(Some(UFollowCheckResult {
+                            kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
+                            remaining: if retryable { remaining + 1 } else { remaining },
+                            error: Some(msg),
+                        }));
+                    }
+                };
+
+                // Parse works and extract the newest date
+                let (newest_date, parsed_works) = match sub_type.as_str() {
+                    "author" | "series" => {
+                        // Both author pages and series pages use li.work.blurb.
+                        // A parse error (schema canary) must abort the check:
+                        // treating it as "0 works" would make the census flag
+                        // every known work as gone. An interrupted census
+                        // resumes on this subscription's next regular check.
+                        let works = match crate::parser::parse_work_listings(&html) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                log_error!("sub_check", "Parse failed for {sub_type} '{sub_name}' ({url}): {e}");
+                                return Ok(Some(UFollowCheckResult {
+                                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
+                                    remaining, error: Some(format!("{e}")),
+                                }));
+                            }
+                        };
+                        let date = works.iter()
+                            .map(|w| w.date_updated.as_str())
+                            .max()
+                            .unwrap_or("")
+                            .to_string();
+                        (date, works)
+                    }
+                    "work" => {
+                        let parsed = sub_id.parse::<u64>().ok()
+                            .and_then(|id| crate::parser::parse_work_page(&html, id).ok());
+                        if let Some((w, _)) = parsed {
+                            let date = w.date_updated.clone();
+                            (date, vec![w])
                         } else {
-                            "periodic census".to_string()
-                        });
-                    }
-                }
-
-                if let Some(reason) = census_reason {
-                    let resumed = existing_state
-                        .and_then(|json| serde_json::from_str::<CensusState>(&json).ok());
-                    let fresh = resumed.is_none();
-                    let mut state = resumed.unwrap_or_else(|| CensusState {
-                        next_page: 2,
-                        total_pages: crate::parser::total_pages(&html),
-                        seen_ids: Vec::new(),
-                        started_at: now_utc(),
-                        reason: reason.clone(),
-                        seed,
-                    });
-                    for id in &all_ids {
-                        if !state.seen_ids.contains(id) {
-                            state.seen_ids.push(*id);
+                            (String::new(), vec![])
                         }
                     }
-                    log_info!("whats_new",
-                        "Census for {} subscription '{}': {} (from page {}, ~{} pages)",
-                        sub_type, sub_name, reason, state.next_page, state.total_pages);
-                    if fresh && !crate::parser::has_next_page(&html) {
-                        // Single-page listing: page 1 was the whole census.
+                    _ => (String::new(), vec![]),
+                };
+
+                let s = storage.lock().await;
+
+                // ---- Census continuation: one deeper listing page per call ----
+                if let Some(mut state) = census_state {
+                    let (flagged, _) = diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, state.seed);
+                    // One transaction per census page: works + associations +
+                    // flags land together or not at all.
+                    let tx = s.begin_tx().map_err(AO3Error::from)?;
+                    for w in &parsed_works {
+                        log_db("save_work", s.save_work(w));
+                    }
+                    let page_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+                    for id in page_ids {
+                        if !state.seen_ids.contains(&id) {
+                            state.seen_ids.push(id);
+                        }
+                    }
+                    let changed = !flagged.is_empty();
+                    if changed {
+                        log_db("add_new_work_ids", s.add_new_work_ids(&flagged));
+                    }
+                    log_db("commit census page", tx.commit());
+
+                    let done = !crate::parser::has_next_page(&html)
+                        || state.next_page >= CENSUS_MAX_PAGES
+                        || parsed_works.is_empty();
+                    if done && state.next_page >= CENSUS_MAX_PAGES && crate::parser::has_next_page(&html) {
+                        log_error!("whats_new",
+                            "Census for {sub_type} '{sub_name}' hit the {CENSUS_MAX_PAGES}-page cap with pages left — listing walk truncated");
+                    }
+                    if done {
                         finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
                     } else {
+                        state.next_page += 1;
                         log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
                             &sub_id, serde_json::to_string(&state).ok().as_deref()));
                         remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
                     }
-                } else if let Some(t) = header_total {
-                    // Counts reconcile — adopt the fresh total as the next
-                    // check's baseline.
-                    log_db("set_follow_total_works", s.set_follow_total_works(&sub_type, &sub_id, t));
+                    if remaining == 0 {
+                        log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
+                    }
+                    return Ok(Some(UFollowCheckResult {
+                        kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining, error: None,
+                    }));
                 }
-            }
 
-            // If queue is now empty, mark the check as complete
-            if remaining == 0 {
-                log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
-            }
+                // ---- Level 0: page 1 (or the single work) ----
+                // The snapshot's job here: distinguish a first run (seed
+                // silently) from a repeat check. An empty date also counts as
+                // first run — census bookkeeping may create the row early.
+                let first_run = s.get_follow_baseline(&sub_type, &sub_id)
+                    .unwrap_or(None)
+                    .is_none();
 
-            Ok(Some(UFollowCheckResult {
-                kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining,
-                error: None,
-            }))
+                let (updated_ids, unseen) = if first_run {
+                    log_info!("whats_new",
+                        "First check for {} subscription '{}' — seeded {} works silently (rule: no baseline yet, nothing can qualify)",
+                        sub_type, sub_name, parsed_works.len());
+                    (Vec::new(), 0)
+                } else {
+                    diff_and_flag_works(&s, &parsed_works, &sub_type, &sub_name, false)
+                };
+                let changed = !updated_ids.is_empty();
+
+                // Cache works and mark new/updated ones for the What's New feed —
+                // one transaction, so a crash can't leave a half-saved page.
+                let tx = s.begin_tx().map_err(AO3Error::from)?;
+                for w in &parsed_works {
+                    log_db("save_work", s.save_work(w));
+                }
+                // Membership (author byline / series part) rides on the saved
+                // works themselves — nothing to record per subscription.
+                let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+                if changed {
+                    log_db("add_new_work_ids", s.add_new_work_ids(&updated_ids));
+                }
+
+                // Save snapshot (always, even on first run)
+                if !newest_date.is_empty() {
+                    log_db("set_follow_baseline", s.set_follow_baseline(&sub_type, &sub_id, &newest_date));
+                }
+                log_db("commit check page", tx.commit());
+
+                // ---- Census escalation (listings only) ----
+                // Page 1 sorted by update date is blind to backdated posts and
+                // removals; the listing's total works count is not. When the
+                // count doesn't reconcile with what page 1 shows, walk the whole
+                // listing. A periodic census also runs to catch the one case the
+                // count can't see (an addition paired with a removal between
+                // checks) and to reconcile the gone-from-AO3 flags.
+                if sub_type == "author" || sub_type == "series" {
+                    let header_total = crate::parser::parse_listing_works_total(&html);
+                    let (prev_total, last_census_at, existing_state) =
+                        s.get_follow_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
+
+                    let mut census_reason: Option<String> = None;
+                    if existing_state.is_some() {
+                        census_reason = Some("resuming interrupted census".to_string());
+                    } else if !first_run {
+                        if let (Some(t), Some(p)) = (header_total, prev_total) {
+                            let delta = t as i64 - p as i64;
+                            if delta < 0 {
+                                census_reason = Some(format!(
+                                    "listing count fell {p} → {t} (rule: something was removed; confirm what)"));
+                            } else if delta > unseen as i64 {
+                                census_reason = Some(format!(
+                                    "listing count rose {p} → {t} but page 1 shows only {unseen} unknown work(s) (rule: a new work missing from the top of the date sort is a backdated post)"));
+                            } else if delta == 0 && unseen > 0 {
+                                census_reason = Some(format!(
+                                    "unknown work on page 1 with unchanged count {t} (rule: an addition paired with a removal keeps the count flat)"));
+                            }
+                        }
+                    }
+                    // Age-based census — capped at one per check cycle so
+                    // baselines build gradually instead of all at once.
+                    let seed = last_census_at.is_none();
+                    if census_reason.is_none() {
+                        let due = match &last_census_at {
+                            None => true,
+                            Some(at) => {
+                                let then = crate::timefmt::datetime_to_epoch(at).unwrap_or(0);
+                                let now = crate::timefmt::epoch_now();
+                                now.saturating_sub(then) > CENSUS_INTERVAL_SECS
+                            }
+                        };
+                        if due && !census_cycle_used.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            census_reason = Some(if seed {
+                                "baseline census (first full listing pass)".to_string()
+                            } else {
+                                "periodic census".to_string()
+                            });
+                        }
+                    }
+
+                    if let Some(reason) = census_reason {
+                        let resumed = existing_state
+                            .and_then(|json| serde_json::from_str::<CensusState>(&json).ok());
+                        let fresh = resumed.is_none();
+                        let mut state = resumed.unwrap_or_else(|| CensusState {
+                            next_page: 2,
+                            total_pages: crate::parser::total_pages(&html),
+                            seen_ids: Vec::new(),
+                            started_at: now_utc(),
+                            reason: reason.clone(),
+                            seed,
+                        });
+                        for id in &all_ids {
+                            if !state.seen_ids.contains(id) {
+                                state.seen_ids.push(*id);
+                            }
+                        }
+                        log_info!("whats_new",
+                            "Census for {} subscription '{}': {} (from page {}, ~{} pages)",
+                            sub_type, sub_name, reason, state.next_page, state.total_pages);
+                        if fresh && !crate::parser::has_next_page(&html) {
+                            // Single-page listing: page 1 was the whole census.
+                            finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
+                        } else {
+                            log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
+                                &sub_id, serde_json::to_string(&state).ok().as_deref()));
+                            remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
+                        }
+                    } else if let Some(t) = header_total {
+                        // Counts reconcile — adopt the fresh total as the next
+                        // check's baseline.
+                        log_db("set_follow_total_works", s.set_follow_total_works(&sub_type, &sub_id, t));
+                    }
+                }
+
+                // If queue is now empty, mark the check as complete
+                if remaining == 0 {
+                    log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
+                }
+
+                Ok(Some(UFollowCheckResult {
+                    kind: sub_type, target_id: sub_id, name: sub_name, changed, remaining,
+                    error: None,
+                }))
+            }.await;
+            if let Some((kind, id)) = checked {
+                let s = storage.lock().await;
+                log_db("set_follow_last_checked", s.set_follow_last_checked(&kind, &id, &now_utc()));
+            }
+            result
         }).await
     }
 

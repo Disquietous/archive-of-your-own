@@ -147,6 +147,8 @@ final class AppState {
     @ObservationIgnored var backgroundedAt: Date?
 
     func lockNow() {
+        // Locking closes the library; send unsent changes to iCloud first.
+        cloudSync.flush()
         bridge.lock()
     }
 
@@ -238,6 +240,15 @@ final class AppState {
     /// Per-follow last-completed-check stamps ("kind:target_id" lowercased
     /// → DB datetime), mirrored from the follows table for row labels.
     var followLastChecked: [String: String] = [:]
+    /// Follows whose last What's New fetch was a 404 (status ≠ 0), same
+    /// keys — their rows say "Not Found" instead of the checked time.
+    var followNotFound: Set<String> = []
+    /// Consecutive 404s after which a follow is excluded from What's New
+    /// checks (it stays followed). 0 = never exclude. Persisted in the
+    /// Rust prefs store, which reads it during the check.
+    var whatsNewNotFoundLimit: Int = 5 {
+        didSet { bridge.setPref(key: "whats_new_not_found_limit", value: String(whatsNewNotFoundLimit)) }
+    }
     /// Subscriptions with no follow, found by a user-initiated reload —
     /// each platform shows one "Follow All / Not Now" prompt for them.
     var pendingFollowAll: [USubscription]?
@@ -457,6 +468,8 @@ final class AppState {
         requestLogMaxAgeValue = Int(bridge.getPref(key: "request_log_max_age_value") ?? "") ?? 0
         requestLogMaxAgeUnit = LogTrimUnit(rawValue: bridge.getPref(key: "request_log_max_age_unit") ?? "") ?? .days
         requestLogMaxRows = UInt64(bridge.getPref(key: "request_log_max_rows") ?? "") ?? 2000
+
+        whatsNewNotFoundLimit = Int(bridge.getPref(key: "whats_new_not_found_limit") ?? "") ?? 5
 
         // Stale-chapter cleanup runs only when the user has opted in.
         autoPurgeChapters = bridge.getPref(key: "auto_purge_chapters") == "1"

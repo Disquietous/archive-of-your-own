@@ -32,6 +32,30 @@ extension SettingsView {
 
             divider
 
+            HStack(spacing: 12) {
+                settingsLabel(icon: "questionmark.folder", title: "Stop checking after")
+                Spacer()
+                TextField("0", value: Binding(
+                    get: { state.whatsNewNotFoundLimit },
+                    set: { state.whatsNewNotFoundLimit = min(9999, max(0, $0)) }
+                ), format: .number)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .font(.custom("HankenGrotesk", size: 15).weight(.semibold))
+                .foregroundStyle(theme.ink)
+                .frame(width: 40)
+                Text(state.whatsNewNotFoundLimit == 0 ? "off" : "not found")
+                    .font(Typography.uiSmall())
+                    .foregroundStyle(theme.ink3)
+            }
+            .padding(.vertical, 4)
+            settingsCaption("""
+                A followed author, work or series that AO3 reports missing this many What's New checks in a row \
+                is left out of future checks. It stays followed. 0 never stops checking.
+                """)
+
+            divider
+
             navRow(icon: "paintpalette", title: "Appearance & Theme", detail: theme.activeTheme.name) {
                 nav.presentedSheet = .themeEditor
             }

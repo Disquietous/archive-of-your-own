@@ -25,6 +25,66 @@ async fn note_work_presence<T>(storage: &Arc<Mutex<Storage>>, work_id: u64, resu
     result
 }
 
+/// Cached bytes for an image URL. A cached body that isn't a real image
+/// (poison from before the sniff guard existed) is purged and reported as
+/// absent.
+pub(super) fn cached_image(s: &Storage, url: &str) -> Result<Option<Vec<u8>>, AO3Error> {
+    let key = image_url_key(url);
+    match s.get_cached_image(&key).map_err(AO3Error::from)? {
+        Some(data) if crate::client::sniff_image_kind(&data) == "not-an-image" => {
+            log_info!("image", "Purging non-image cache entry ({} bytes) for {url}", data.len());
+            log_db("delete_cached_image", s.delete_cached_image(&key));
+            Ok(None)
+        }
+        other => Ok(other),
+    }
+}
+
+/// The one way any image reaches the app: the URL's cached bytes when
+/// present, else one fetch over the private connection, cached in the
+/// (encrypted) library under the URL so no screen ever fetches the same
+/// image twice. `max_bytes` 0 = unlimited; an over-cap or non-image body
+/// errors and is not cached. The flag is true when the network was used.
+pub(super) async fn fetch_image_cached(
+    client: Arc<tokio::sync::RwLock<AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    url: &str,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, bool), AO3Error> {
+    {
+        let s = storage.lock().await;
+        if let Some(data) = cached_image(&s, url)? {
+            log_info!("image", "Cache hit ({} bytes, {}): {url}",
+                      data.len(), crate::client::sniff_image_kind(&data));
+            return Ok((data, false));
+        }
+    }
+    let url_for_fetch = url.to_string();
+    let bytes = with_recovery(client, storage.clone(), OpKind::Image, RetrySafety::Idempotent, move |client| {
+        let url = url_for_fetch.clone();
+        async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
+    }).await?;
+    if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+        log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
+        return Err(AO3Error::Network {
+            message: format!("Image is {:.1} MB — over the size limit",
+                             bytes.len() as f64 / 1_048_576.0),
+        });
+    }
+    // Never cache non-image bodies, and tell the user what actually
+    // happened instead of a downstream decode failure.
+    if crate::client::sniff_image_kind(&bytes) == "not-an-image" {
+        return Err(AO3Error::Network {
+            message: "The host sent a web page instead of the image — it may be blocking private connections".to_string(),
+        });
+    }
+    let s = storage.lock().await;
+    log_db("save_cached_image", s.save_cached_image(&image_url_key(url), &bytes));
+    log_info!("image", "Cached {} bytes ({}) for {url}",
+              bytes.len(), crate::client::sniff_image_kind(&bytes));
+    Ok((bytes, true))
+}
+
 #[uniffi::export]
 
 impl AO3App {
@@ -491,12 +551,11 @@ impl AO3App {
         }).await
     }
 
+    /// Any image by URL, cache-first: served from the encrypted DB when this
+    /// URL was ever fetched before, else fetched once and cached.
     pub async fn fetch_image(&self, url: String) -> Result<Vec<u8>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            with_recovery(client, storage, OpKind::Image, RetrySafety::Idempotent, move |client| {
-                let url = url.clone();
-                async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
-            }).await
+            fetch_image_cached(client, storage, &url, 0).await.map(|(bytes, _)| bytes)
         }).await
     }
 
@@ -507,15 +566,7 @@ impl AO3App {
     /// guard existed) is purged and reported as absent.
     pub fn get_cached_chapter_image(&self, url: String) -> Result<Option<Vec<u8>>, AO3Error> {
         let s = self.storage.blocking_lock();
-        let key = chapter_image_key(&url);
-        match s.get_cached_image(&key).map_err(AO3Error::from)? {
-            Some(data) if crate::client::sniff_image_kind(&data) == "not-an-image" => {
-                log_info!("image", "Purging non-image cache entry ({} bytes) for {url}", data.len());
-                log_db("delete_cached_image", s.delete_cached_image(&key));
-                Ok(None)
-            }
-            other => Ok(other),
-        }
+        cached_image(&s, &url)
     }
 
     /// Fetch one embedded image (cache-first, over the private connection).
@@ -523,45 +574,7 @@ impl AO3App {
     pub async fn fetch_chapter_image(&self, url: String, max_bytes: u64) -> Result<Vec<u8>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             log_info!("image", "Chapter image requested (cap {} bytes): {url}", max_bytes);
-            {
-                let s = storage.lock().await;
-                if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&url)) {
-                    let kind = crate::client::sniff_image_kind(&data);
-                    if kind == "not-an-image" {
-                        // Poisoned entry from before the sniff guard — purge
-                        // and fall through to a fresh fetch.
-                        log_info!("image", "Purging non-image cache entry ({} bytes), refetching {url}", data.len());
-                        log_db("delete_cached_image", s.delete_cached_image(&chapter_image_key(&url)));
-                    } else {
-                        log_info!("image", "Cache hit ({} bytes, {kind}): {url}", data.len());
-                        return Ok(data);
-                    }
-                }
-            }
-            let url_for_fetch = url.clone();
-            let bytes = with_recovery(client, storage.clone(), OpKind::Image, RetrySafety::Idempotent, move |client| {
-                let url = url_for_fetch.clone();
-                async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
-            }).await?;
-            if max_bytes > 0 && bytes.len() as u64 > max_bytes {
-                log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
-                return Err(AO3Error::Network {
-                    message: format!("Image is {:.1} MB — over the size limit",
-                                     bytes.len() as f64 / 1_048_576.0),
-                });
-            }
-            // Never cache non-image bodies, and tell the user what actually
-            // happened instead of a downstream decode failure.
-            if crate::client::sniff_image_kind(&bytes) == "not-an-image" {
-                return Err(AO3Error::Network {
-                    message: "The host sent a web page instead of the image — it may be blocking private connections".to_string(),
-                });
-            }
-            let s = storage.lock().await;
-            log_db("save_cached_image", s.save_cached_image(&chapter_image_key(&url), &bytes));
-            log_info!("image", "Cached {} bytes ({}) for {url}",
-                      bytes.len(), crate::client::sniff_image_kind(&bytes));
-            Ok(bytes)
+            fetch_image_cached(client, storage, &url, max_bytes).await.map(|(bytes, _)| bytes)
         }).await
     }
 
@@ -583,35 +596,10 @@ impl AO3App {
                       srcs.len());
             let mut fetched = 0u32;
             for src in srcs {
-                {
-                    let s = storage.lock().await;
-                    if let Ok(Some(data)) = s.get_cached_image(&chapter_image_key(&src)) {
-                        if crate::client::sniff_image_kind(&data) != "not-an-image" {
-                            continue;
-                        }
-                        // Poisoned entry — purge and refetch below.
-                        log_db("delete_cached_image", s.delete_cached_image(&chapter_image_key(&src)));
-                    }
-                }
-                let src_for_fetch = src.clone();
-                let result = with_recovery(client.clone(), storage.clone(), OpKind::Image, RetrySafety::Idempotent,
-                    move |client| {
-                        let src = src_for_fetch.clone();
-                        async move { client.read().await.fetch_image(&src).await.map_err(AO3Error::from) }
-                    }).await;
-                match result {
-                    Ok(bytes) => {
-                        if max_bytes > 0 && bytes.len() as u64 > max_bytes {
-                            log_info!("image", "Offline prefetch skipping {src}: {} bytes over cap", bytes.len());
-                            continue;
-                        }
-                        let s = storage.lock().await;
-                        log_db("save_cached_image", s.save_cached_image(&chapter_image_key(&src), &bytes));
-                        fetched += 1;
-                    }
-                    Err(e) => {
-                        log_info!("image", "Offline prefetch failed for {src}: {e}");
-                    }
+                match fetch_image_cached(client.clone(), storage.clone(), &src, max_bytes).await {
+                    Ok((_, true)) => fetched += 1,
+                    Ok((_, false)) => {}
+                    Err(e) => { log_info!("image", "Offline prefetch skipped {src}: {e}"); }
                 }
             }
             Ok(fetched)

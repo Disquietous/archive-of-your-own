@@ -172,7 +172,8 @@ struct AuthorsList: View {
         // Same selection treatment as the work lists: accent-soft fill
         // with a 3pt accent bar on the leading edge.
         let selected = kind == .author && model.author.username == follow.targetId
-        let lastChecked = follow.lastCheckedAt
+        let checkedLabel = model.follows.isNotFound(target)
+            ? "Not Found" : follow.lastCheckedAt.map { "Checked \(Fmt.relativeTime($0))" }
         return Button {
             open(follow)
         } label: {
@@ -204,10 +205,11 @@ struct AuthorsList: View {
             if selected { theme.accent.frame(width: 3) }
         }
         // "Checked 2h ago" in the top-right corner — the same treatment as
-        // the work rows' published/updated dates.
+        // the work rows' published/updated dates. "Not Found" instead when
+        // the last check 404'd.
         .overlay(alignment: .topTrailing) {
-            if let lastChecked {
-                Text("Checked \(Fmt.relativeTime(lastChecked))")
+            if let checkedLabel {
+                Text(checkedLabel)
                     .font(Font(MacFont.ui(10, weight: .medium)))
                     .foregroundStyle(theme.ink3)
                     .padding(.top, 6)

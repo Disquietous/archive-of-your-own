@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 use crate::models::{split_author_byline, WorkSummary};
@@ -22,6 +22,9 @@ pub struct FollowRow {
     pub name: String,
     pub added_at: String,
     pub last_checked_at: Option<String>,
+    /// What's New not-found counter: 0 = fetched fine, n > 0 = n
+    /// consecutive 404s, -1 = excluded from checks.
+    pub status: i32,
 }
 
 impl Storage {
@@ -32,7 +35,7 @@ impl Storage {
     /// Follows of `kind` (all kinds when None), in the order they were added.
     pub fn get_follows(&self, kind: Option<&str>) -> Result<Vec<FollowRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT kind, target_id, name, added_at, last_checked_at FROM follows
+            "SELECT kind, target_id, name, added_at, last_checked_at, status FROM follows
              WHERE ?1 IS NULL OR kind = ?1 ORDER BY rowid"
         ).map_err(map_sql)?;
         let rows = stmt.query_map(params![kind], |r| Ok(FollowRow {
@@ -41,6 +44,7 @@ impl Storage {
             name: r.get(2)?,
             added_at: r.get(3)?,
             last_checked_at: r.get(4)?,
+            status: r.get(5)?,
         })).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
@@ -77,7 +81,7 @@ impl Storage {
     pub fn get_check_targets(&self) -> Result<Vec<(String, String, String)>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT kind, target_id, name FROM follows
-             WHERE kind IN ('author', 'work', 'series')
+             WHERE kind IN ('author', 'work', 'series') AND status >= 0
              ORDER BY name COLLATE NOCASE"
         ).map_err(map_sql)?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -275,6 +279,30 @@ impl Storage {
             Some(Err(e)) => Err(map_sql(e)),
             None => Ok(None),
         }
+    }
+
+    /// Count one more consecutive 404 for this follow. Reaching `limit`
+    /// (0 = no limit) sets the status to -1, which drops the follow from
+    /// every future check. Returns the new status.
+    pub fn record_follow_not_found(&self, kind: &str, target_id: &str, limit: u32) -> Result<i32, AppError> {
+        self.conn.execute(
+            "UPDATE follows SET status = CASE WHEN ?3 > 0 AND status + 1 >= ?3 THEN -1 ELSE status + 1 END
+             WHERE kind = ?1 AND target_id = ?2 AND status >= 0",
+            params![kind, target_id, limit],
+        ).map_err(map_sql)?;
+        self.get_follow_status(kind, target_id)
+    }
+
+    /// A successful fetch — the not-found streak is over.
+    pub fn reset_follow_status(&self, kind: &str, target_id: &str) -> Result<(), AppError> {
+        self.update_follow_column(kind, target_id, "status", &0)
+    }
+
+    pub fn get_follow_status(&self, kind: &str, target_id: &str) -> Result<i32, AppError> {
+        self.conn.query_row(
+            "SELECT status FROM follows WHERE kind = ?1 AND target_id = ?2",
+            params![kind, target_id], |r| r.get(0),
+        ).optional().map_err(map_sql).map(|v| v.unwrap_or(0))
     }
 
     fn update_follow_column(&self, kind: &str, target_id: &str, column: &str,

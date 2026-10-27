@@ -30,6 +30,36 @@ struct GeneralSettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            SettingsGroup(theme: theme, label: "What’s New") {
+                HStack(spacing: 8) {
+                    Text("Stop checking after")
+                        .font(Font(MacFont.ui(13, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                    TextField("", text: Binding(
+                        get: { appState.whatsNewNotFoundLimit == 0 ? "" : String(appState.whatsNewNotFoundLimit) },
+                        set: { appState.whatsNewNotFoundLimit = Int($0.filter(\.isNumber).prefix(4)) ?? 0 }))
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .font(Font(MacFont.ui(13, weight: .semibold)))
+                        .foregroundStyle(theme.ink)
+                        .frame(width: 50, height: 28)
+                        .background(theme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.line, lineWidth: 1))
+                    Text("“Not Found” results in a row")
+                        .font(Font(MacFont.ui(13, weight: .medium)))
+                        .foregroundStyle(theme.ink)
+                    Spacer()
+                }
+                Text("""
+                    A followed author, work or series that AO3 reports missing this many checks in a row is left \
+                    out of future checks. It stays followed. Empty never stops checking.
+                    """)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             AccountSection(theme: theme, appState: appState)
 
         }

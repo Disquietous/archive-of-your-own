@@ -115,6 +115,17 @@ struct SyncState {
     /// Foreign generation the user declined to act on.
     #[serde(default)]
     dismissed_generation: i64,
+    /// The library has writes the iCloud copy doesn't: set when a check
+    /// or export finds rows written since the last one, cleared by a
+    /// push or an adoption. Persisted so edits survive a quit that
+    /// couldn't push. State written before this field existed reads as
+    /// true — one push to be sure.
+    #[serde(default = "unsynced_default")]
+    unsynced_changes: bool,
+}
+
+fn unsynced_default() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -271,6 +282,20 @@ impl AO3App {
         write_sync_state_to(self.state_path(), state)
     }
 
+    /// Fold rows written since the sync mark into the persisted
+    /// `unsynced_changes` flag and move the mark past them.
+    fn note_unsynced_changes(&self, s: &mut Storage, state: &mut SyncState) -> Result<(), AO3Error> {
+        if !s.changed_since_sync_mark() {
+            return Ok(());
+        }
+        s.set_sync_mark();
+        if !state.unsynced_changes {
+            state.unsynced_changes = true;
+            self.write_sync_state(state)?;
+        }
+        Ok(())
+    }
+
     fn new_backup_slot(&self, reason: &str, source_device: &str) -> Result<(String, PathBuf), AO3Error> {
         let dir = self.backups_dir();
         std::fs::create_dir_all(&dir).map_err(|e| io_err("create backups dir", e))?;
@@ -363,6 +388,7 @@ pub fn library_bootstrap_from_cloud(
     state.known_cloud_generation = state.known_cloud_generation.max(expected_generation);
     state.last_push_at = now_ms();
     state.dismissed_generation = 0;
+    state.unsynced_changes = false;
     write_sync_state_to(&state_dir, &state)?;
     log_info!("sync", "bootstrapped library from iCloud copy gen {} from {}", expected_generation, writer);
     Ok(())
@@ -396,6 +422,7 @@ pub fn library_bootstrap_from_backup(db_path: String, id: String, passphrase: St
     if sidecar_path(&state_dir).exists() {
         state.last_pushed_generation = 0;
         state.last_push_at = 0;
+        state.unsynced_changes = true;
         write_sync_state_to(&state_dir, &state)?;
     }
     log_info!("backup", "bootstrapped library from backup {}", id);
@@ -429,7 +456,7 @@ impl AO3App {
     /// Judge the cloud copy from its manifest (`None` when iCloud holds
     /// nothing). Records the generation seen so a later push outranks it.
     pub fn cloud_sync_evaluate(&self, manifest_json: Option<String>) -> Result<UCloudVerdict, AO3Error> {
-        let s = self.storage.blocking_lock();
+        let mut s = self.storage.blocking_lock();
         let mut state = self.sync_state(&s)?;
         let Some(json) = manifest_json else {
             return Ok(UCloudVerdict::NoCloudCopy);
@@ -443,8 +470,8 @@ impl AO3App {
             self.write_sync_state(&state)?;
         }
         if manifest.generation == state.last_pushed_generation {
-            let modified = s.last_modified_ms().unwrap_or(0);
-            return Ok(UCloudVerdict::Owned { needs_push: modified > state.last_push_at });
+            self.note_unsynced_changes(&mut s, &mut state)?;
+            return Ok(UCloudVerdict::Owned { needs_push: state.unsynced_changes });
         }
         if manifest.schema_version > Storage::SCHEMA_VERSION {
             return Ok(UCloudVerdict::NeedsAppUpdate { schema_version: manifest.schema_version });
@@ -462,8 +489,11 @@ impl AO3App {
     /// pushed until `cloud_sync_mark_pushed` — a failed upload must not
     /// claim ownership.
     pub fn cloud_sync_export(&self, staging_path: String, cloud_key: String, device_name: String) -> Result<UCloudExport, AO3Error> {
-        let s = self.storage.blocking_lock();
-        let state = self.sync_state(&s)?;
+        let mut s = self.storage.blocking_lock();
+        let mut state = self.sync_state(&s)?;
+        // Writes up to here are in this copy; any after it count again.
+        // The storage lock is held throughout, so nothing lands between.
+        self.note_unsynced_changes(&mut s, &mut state)?;
         let generation = state.known_cloud_generation.max(state.last_pushed_generation) + 1;
         let written_at = now_ms();
         let gen_s = generation.to_string();
@@ -478,6 +508,7 @@ impl AO3App {
         let db_size = s
             .export_copy(Path::new(&staging_path), &cloud_key, &embed_refs)
             .map_err(AO3Error::from)?;
+        s.set_sync_mark();
         let manifest = UCloudManifest {
             format: MANIFEST_FORMAT,
             device_id: state.device_id,
@@ -499,6 +530,7 @@ impl AO3App {
         state.last_pushed_generation = generation;
         state.known_cloud_generation = state.known_cloud_generation.max(generation);
         state.last_push_at = now_ms();
+        state.unsynced_changes = false;
         self.write_sync_state(&state)
     }
 
@@ -530,6 +562,7 @@ impl AO3App {
         state.known_cloud_generation = state.known_cloud_generation.max(expected_generation);
         state.last_push_at = now_ms();
         state.dismissed_generation = 0;
+        state.unsynced_changes = false;
         self.write_sync_state(&state)?;
         log_info!("sync", "adopted iCloud copy gen {} from {}", expected_generation, writer);
         self.backup_info(&id).ok_or_else(|| storage_err("backup written but unreadable"))
@@ -588,6 +621,7 @@ impl AO3App {
         let mut state = self.sync_state(&s)?;
         state.last_pushed_generation = 0;
         state.last_push_at = 0;
+        state.unsynced_changes = true;
         self.write_sync_state(&state)?;
         log_info!("backup", "restored backup {} ({})", info.id, info.reason);
         self.backup_info(&new_id).ok_or_else(|| storage_err("backup written but unreadable"))
@@ -709,7 +743,7 @@ mod bootstrap_tests {
             store.set_state("who", "backup").unwrap();
         }
         std::fs::write(backups.join("1700000000000.json"), br#"{"created_at":1700000000000,"reason":"Before using the iCloud copy","source_device":""}"#).unwrap();
-        write_sync_state_to(&dir, &SyncState { device_id: "dev".into(), enabled: true, last_push_at: 5, last_pushed_generation: 9, known_cloud_generation: 9, dismissed_generation: 0 }).unwrap();
+        write_sync_state_to(&dir, &SyncState { device_id: "dev".into(), enabled: true, last_push_at: 5, last_pushed_generation: 9, known_cloud_generation: 9, dismissed_generation: 0, unsynced_changes: false }).unwrap();
 
         let listed = library_bootstrap_backups(db_path.to_string_lossy().to_string());
         assert_eq!(listed.len(), 1);

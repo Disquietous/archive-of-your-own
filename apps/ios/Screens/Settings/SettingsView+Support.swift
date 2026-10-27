@@ -61,6 +61,9 @@ extension SettingsView {
             if let at = sync.lastPushedAt {
                 settingsCaption("Last sent to iCloud \(RelativeDateTimeFormatter().localizedString(for: at, relativeTo: Date())).")
             }
+            if let at = sync.lastCheckedAt {
+                settingsCaption("Last checked \(RelativeDateTimeFormatter().localizedString(for: at, relativeTo: Date())).")
+            }
 
             if let conflict = sync.pendingConflict {
                 divider

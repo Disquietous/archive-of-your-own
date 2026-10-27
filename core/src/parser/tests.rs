@@ -147,11 +147,11 @@ fn test_parse_search_results_stats() {
 fn test_parse_work_page() {
     let html = fs::read_to_string("tests/fixtures/work_page.html")
         .expect("Failed to read work page fixture");
-    let result = parse_work_page(&html);
+    let result = parse_work_page(&html, 2000001);
     assert!(result.is_ok(), "Should parse work page: {:?}", result.err());
     let (summary, chapters) = result.unwrap();
 
-    assert!(summary.id > 0, "Should have valid work ID");
+    assert_eq!(summary.id, 2000001, "Should carry the requested work ID");
     assert!(!summary.title.is_empty(), "Should have title");
     assert!(!chapters.is_empty(), "Should have at least one chapter");
     assert!(!chapters[0].content.is_empty(), "Chapter should have content blocks");
@@ -161,7 +161,7 @@ fn test_parse_work_page() {
 fn test_parse_work_page_series() {
     let html = fs::read_to_string("tests/fixtures/work_series.html")
         .expect("Failed to read series work page fixture");
-    let (summary, _) = parse_work_page(&html).expect("Should parse series work page");
+    let (summary, _) = parse_work_page(&html, 2000011).expect("Should parse series work page");
 
     assert_eq!(summary.series.len(), 2, "Should find both memberships");
 
@@ -184,7 +184,7 @@ fn test_parse_work_page_series() {
 fn test_parse_work_page_no_series() {
     let html = fs::read_to_string("tests/fixtures/work_page.html")
         .expect("Failed to read work page fixture");
-    let (summary, _) = parse_work_page(&html).expect("Should parse work page");
+    let (summary, _) = parse_work_page(&html, 2000001).expect("Should parse work page");
     assert!(summary.series.is_empty(), "Work not in a series should have none");
 }
 
@@ -582,7 +582,7 @@ mod live_work_tests {
     fn test_parse_live_work() {
         let html = std::fs::read_to_string("tests/fixtures/work_multi_chapter.html")
             .expect("read fixture");
-        let (summary, chapters) = parse_work_page(&html).expect("parse work");
+        let (summary, chapters) = parse_work_page(&html, 3000001).expect("parse work");
         println!("Title: {}", summary.title);
         println!("Chapters found: {}", chapters.len());
         for (i, ch) in chapters.iter().enumerate() {
@@ -969,14 +969,14 @@ mod comment_tests {
             mock_admin_banner());
 
         // Even without stripping, the parser must skip the banner.
-        let (_, chapters) = parse_work_page(&html).unwrap();
+        let (_, chapters) = parse_work_page(&html, 1).unwrap();
         assert_eq!(chapters.len(), 1);
         let text = format!("{:?}", chapters[0].content);
         assert!(text.contains("First line of the story."), "chapter text parsed: {text}");
         assert!(!text.contains("down for maintenance"), "banner text excluded: {text}");
 
         // And the fetch path strips the banner before parsing anyway.
-        let (_, chapters) = parse_work_page(&strip_admin_banner(html)).unwrap();
+        let (_, chapters) = parse_work_page(&strip_admin_banner(html), 1).unwrap();
         assert_eq!(chapters.len(), 1);
         let text = format!("{:?}", chapters[0].content);
         assert!(text.contains("First line of the story."));

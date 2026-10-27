@@ -5,12 +5,17 @@ import SwiftUI
 extension AppState {
     /// Refresh the per-follow last-checked stamps (keyed "kind:target_id",
     /// lowercased) from the follows table.
+    /// Also refreshes which follows are currently not found.
     func loadFollowLastChecked() {
         var map: [String: String] = [:]
+        var notFound: Set<String> = []
         for f in bridge.getFollows() {
-            if let at = f.lastCheckedAt { map["\(f.kind):\(f.targetId.lowercased())"] = at }
+            let key = "\(f.kind):\(f.targetId.lowercased())"
+            if let at = f.lastCheckedAt { map[key] = at }
+            if f.status != 0 { notFound.insert(key) }
         }
         followLastChecked = map
+        followNotFound = notFound
     }
 
     /// Run the What's New check over the follows. `force` checks every

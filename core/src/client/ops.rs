@@ -245,8 +245,7 @@ impl AO3Client {
     pub async fn get_work(&self, work_id: u64) -> Result<(WorkSummary, Vec<Chapter>, Vec<String>), AppError> {
         let url = format!("{BASE_URL}/works/{work_id}?view_full_work=true&view_adult=true");
         let html = self.fetch(&url).await?;
-        let (mut summary, chapters) = parser::parse_work_page(&html)?;
-        summary.id = work_id;
+        let (summary, chapters) = parser::parse_work_page(&html, work_id)?;
         let kudos_names = parser::parse_kudos_usernames(&html);
         Ok((summary, chapters, kudos_names))
     }

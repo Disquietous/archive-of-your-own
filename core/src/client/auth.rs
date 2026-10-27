@@ -311,18 +311,6 @@ impl AO3Client {
         })
     }
 
-    /// A user's profile icon: profile page → icon URL → image. Returns the
-    /// bytes plus the resolved icon URL so callers can record it.
-    /// Two requests; callers cache the result so this runs once per user.
-    pub async fn fetch_user_icon(&self, username: &str) -> Result<(Vec<u8>, String), AppError> {
-        let profile = self.fetch_user_profile(username).await?;
-        let Some(url) = profile.avatar_url else {
-            return Err(AppError::ElementNotFound(format!("profile icon for {username}")));
-        };
-        let bytes = self.fetch_image(&url).await?;
-        Ok((bytes, url))
-    }
-
     /// AO3's JSON autocomplete for canonical tag names — fired ONLY on an
     /// explicit user action, never on keystrokes (local cache handles those).
     /// tag_type: fandom | character | relationship | freeform | creator.

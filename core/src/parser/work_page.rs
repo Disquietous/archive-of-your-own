@@ -19,10 +19,12 @@ fn is_landmark_heading(block: &ContentBlock) -> bool {
 // Work page parser (single work with metadata + chapter content)
 // ---------------------------------------------------------------------------
 
-pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
+/// `id` is the work the caller requested — never read off the page, which
+/// can be a chapter page whose IDs (the comment form's among them) are the
+/// chapter's, not the work's.
+pub fn parse_work_page(html: &str, id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
     let doc = Html::parse_document(html);
 
-    let id = extract_work_page_id(&doc);
     let title = extract_work_page_title(&doc);
     let authors = extract_work_page_authors(&doc);
     let (rating, warnings, categories, fandoms, relationships, characters, tags) =
@@ -69,45 +71,6 @@ pub fn parse_work_page(html: &str) -> Result<(WorkSummary, Vec<Chapter>), AppErr
     };
 
     Ok((summary_obj, chapters))
-}
-
-fn extract_work_page_id(doc: &Html) -> u64 {
-    // Try from the comment textarea id: comment_content_for_NNNNN
-    let textarea_sel = sel("textarea[id^='comment_content_for_']");
-    if let Some(el) = doc.select(&textarea_sel).next() {
-        if let Some(id_attr) = el.value().attr("id") {
-            let id_str = id_attr.trim_start_matches("comment_content_for_");
-            if let Ok(id) = id_str.parse() {
-                return id;
-            }
-        }
-    }
-    // Try from the kudos link href: /works/NNNNN#kudos
-    let kudos_sel = sel("dd.kudos a");
-    if let Some(link) = doc.select(&kudos_sel).next() {
-        if let Some(href) = link.value().attr("href") {
-            let id_str = href
-                .trim_start_matches("/works/")
-                .split('#')
-                .next()
-                .unwrap_or("");
-            if let Ok(id) = id_str.parse() {
-                return id;
-            }
-        }
-    }
-    // Try from bookmarks link: /works/NNNNN/bookmarks
-    let bm_sel = sel("dd.bookmarks a");
-    if let Some(link) = doc.select(&bm_sel).next() {
-        if let Some(href) = link.value().attr("href") {
-            for part in href.split('/') {
-                if let Ok(id) = part.parse::<u64>() {
-                    return id;
-                }
-            }
-        }
-    }
-    0
 }
 
 fn extract_work_page_title(doc: &Html) -> String {

@@ -43,6 +43,17 @@ pub(super) fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crat
 /// next check round.
 pub(super) const CHECK_INTERVAL_SECS: u64 = 3600;
 
+/// Consecutive 404s after which a follow is excluded from What's New
+/// checks, until the user sets the pref. 0 = never exclude.
+pub(super) const DEFAULT_NOT_FOUND_LIMIT: u32 = 5;
+
+/// The user's not-found limit (pref `whats_new_not_found_limit`).
+pub(super) fn not_found_limit(s: &Storage) -> u32 {
+    s.get_state("pref:whats_new_not_found_limit").ok().flatten()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_NOT_FOUND_LIMIT)
+}
+
 /// Is this follow's own check stale? A missing follow, NULL, or
 /// unparseable stamp all count as never-checked.
 pub(super) fn follow_check_due(s: &Storage, kind: &str, target_id: &str) -> bool {
@@ -200,10 +211,15 @@ pub(super) fn requeue_census_marker(s: &Storage, sub_type: &str, sub_id: &str, n
     queue.len() as u32
 }
 
-/// Chapter-image cache key — the full URL keeps it unique, the prefix
-/// groups the rows apart from avatars.
-pub(super) fn chapter_image_key(url: &str) -> String {
-    format!("chimg:{url}")
+/// Image cache key: one row per image URL, whoever asked for it — a
+/// chapter, a comment avatar, the inbox. Site-relative URLs resolve
+/// against AO3 first so both spellings of one image share the row.
+pub(super) fn image_url_key(url: &str) -> String {
+    if url.starts_with('/') {
+        format!("img:{}{url}", crate::client::BASE_URL)
+    } else {
+        format!("img:{url}")
+    }
 }
 
 /// Every image URL in a ContentBlock tree, depth-first (blockquotes, lists).

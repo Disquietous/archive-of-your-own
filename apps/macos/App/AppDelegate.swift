@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activityMonitor: Any?
     private var idleCheckTimer: Timer?
     private var lastActivity = Date()
+    /// The iCloud conflict alert while it's up (sheet or modal).
+    private var cloudConflictAlert: NSAlert?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MacFont.scale = CGFloat(theme.uiFontScale)
@@ -33,6 +35,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Alert-only: the dock badge is drawn manually from newWorkIDs below,
         // so the UN badge would be a second, competing badge mechanism.
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
+        // A notification click macOS routed to another copy of the app (same
+        // bundle ID, different path) lands here: that duplicate quits and
+        // forwards the click.
+        DistributedNotificationCenter.default().addObserver(
+            forName: SingleInstance.showWhatsNewNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showWhatsNewFromNotification() }
+        }
         appState.onNewWorksFound = { [weak self] count in
             self?.notifyNewWorks(count)
         }
@@ -242,9 +252,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Called on every sync check that finds another device's copy: an
+    /// alert already on screen stays (and comes forward); one that was
+    /// lost (its window gone) is replaced.
     private func presentCloudConflict(_ conflict: CloudLibrarySync.Conflict) {
+        if let shown = cloudConflictAlert, shown.window.isVisible {
+            shown.window.orderFront(nil)
+            return
+        }
         let sync = appState.cloudSync
         let alert = NSAlert()
+        cloudConflictAlert = alert
         alert.messageText = "iCloud has \(conflict.deviceName)'s library"
         let when = RelativeDateTimeFormatter().localizedString(for: conflict.writtenAt, relativeTo: Date())
         alert.informativeText = """
@@ -254,7 +272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Use iCloud Copy")
         alert.addButton(withTitle: "Replace iCloud Copy")
         alert.addButton(withTitle: "Not Now")
-        let handle: (NSApplication.ModalResponse) -> Void = { response in
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if self?.cloudConflictAlert === alert { self?.cloudConflictAlert = nil }
             switch response {
             case .alertFirstButtonReturn: sync.resolve(.useCloudCopy)
             case .alertSecondButtonReturn: sync.resolve(.overwriteCloudCopy)
@@ -491,12 +510,13 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            model.goSection(.whatsNew)
-        }
+        Task { @MainActor [weak self] in self?.showWhatsNewFromNotification() }
         completionHandler()
+    }
+
+    func showWhatsNewFromNotification() {
+        NSApp.activate(ignoringOtherApps: true)
+        model.goSection(.whatsNew)
     }
 }
 

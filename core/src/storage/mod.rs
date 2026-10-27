@@ -73,6 +73,10 @@ pub struct Storage {
     users_cache: UsersCache,
     /// The series mirror — same contract (see series_cache.rs).
     series_cache: SeriesCache,
+    /// `total_changes()` when the sync engine last accounted for the
+    /// library's writes (see `changed_since_sync_mark`). Per connection:
+    /// reset whenever the connection is (re)opened.
+    sync_mark: u64,
 }
 
 /// A live write transaction from `Storage::begin_tx`. Commit consumes it;
@@ -171,7 +175,7 @@ impl Storage {
 
     fn configure(conn: Connection, path: Option<String>, passphrase: &str) -> Result<Self, AppError> {
         let conn = Self::prepare_connection(conn, passphrase)?;
-        let storage = Self {
+        let mut storage = Self {
             conn,
             path,
             passphrase: passphrase.to_string(),
@@ -182,8 +186,11 @@ impl Storage {
             collections_cache: CollectionsCache::default(),
             users_cache: UsersCache::default(),
             series_cache: SeriesCache::default(),
+            sync_mark: 0,
         };
         storage.migrate_and_load()?;
+        // Migrations aren't library edits.
+        storage.set_sync_mark();
         Ok(storage)
     }
 
@@ -265,7 +272,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 23;
+    pub(crate) const SCHEMA_VERSION: u32 = 25;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -330,6 +337,8 @@ impl Storage {
                 21 => self.migrate_v21_follows(),
                 22 => self.migrate_v22_comment_drafts(),
                 23 => self.migrate_v23_chapter_comment_stamps(),
+                24 => self.migrate_v24_follow_status(),
+                25 => self.migrate_v25_image_url_keys(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -569,6 +578,44 @@ impl Storage {
                AND EXISTS (SELECT 1 FROM chapters ch WHERE ch.chapter_id = comments.chapter_id)",
             [],
         ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// v24 — `follows.status`: the What's New check's not-found counter.
+    /// 0 = the last fetch succeeded; n > 0 = that many consecutive 404s;
+    /// -1 = excluded from checks after reaching the user's limit. The
+    /// follow itself stays.
+    fn migrate_v24_follow_status(&self) -> Result<(), AppError> {
+        if !self.column_exists("follows", "status")? {
+            self.conn
+                .execute("ALTER TABLE follows ADD COLUMN status INTEGER NOT NULL DEFAULT 0", [])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// v25 — `image_cache` is keyed by image URL alone (`img:<absolute
+    /// url>`) so any screen showing an image already fetched for another
+    /// reuses it. Chapter images move off their `chimg:` prefix (a
+    /// site-relative src resolves against AO3, matching `image_url_key`);
+    /// a URL already present under the new key wins.
+    fn migrate_v25_image_url_keys(&self) -> Result<(), AppError> {
+        if !self.table_exists("image_cache")? {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "UPDATE OR IGNORE image_cache SET key = CASE
+                     WHEN substr(key, 7, 1) = '/' THEN 'img:' || ?1 || substr(key, 7)
+                     ELSE 'img:' || substr(key, 7)
+                 END
+                 WHERE key LIKE 'chimg:%'",
+                [crate::client::BASE_URL],
+            )
+            .map_err(map_sql)?;
+        self.conn
+            .execute("DELETE FROM image_cache WHERE key LIKE 'chimg:%'", [])
+            .map_err(map_sql)?;
         Ok(())
     }
 

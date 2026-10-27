@@ -591,6 +591,36 @@ fn test_follow_check_state() {
 }
 
 #[test]
+fn test_follow_not_found_status() {
+    let db = open_test_db();
+    assert!(db.add_follow("author", "Gone", "Gone").unwrap());
+    assert!(db.add_follow("work", "7", "Kept").unwrap());
+    assert_eq!(db.get_follow_status("author", "gone").unwrap(), 0);
+
+    // Consecutive 404s count up; a successful fetch resets the streak.
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), 1);
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), 2);
+    db.reset_follow_status("author", "gone").unwrap();
+    assert_eq!(db.get_follow_status("author", "gone").unwrap(), 0);
+
+    // Reaching the limit excludes it from checks; the follow stays.
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), 1);
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), 2);
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), -1);
+    assert_eq!(db.record_follow_not_found("author", "gone", 3).unwrap(), -1, "excluded stays excluded");
+    assert!(db.is_followed("author", "gone").unwrap());
+    let targets: Vec<String> = db.get_check_targets().unwrap().into_iter().map(|t| t.1).collect();
+    assert_eq!(targets, vec!["7".to_string()]);
+    let gone = db.get_follows(Some("author")).unwrap();
+    assert_eq!(gone[0].status, -1);
+
+    // Limit 0 = never exclude.
+    for n in 1..=10 {
+        assert_eq!(db.record_follow_not_found("work", "7", 0).unwrap(), n);
+    }
+}
+
+#[test]
 fn test_check_targets_and_crawl_stamps() {
     let db = open_test_db();
     db.add_follow("fandom", "Some Fandom", "Some Fandom").unwrap();
@@ -2720,6 +2750,34 @@ fn abandoned_sync_bookkeeping_is_dropped_on_migrate() {
 }
 
 #[test]
+fn chapter_image_rows_rekey_by_url_on_migrate() {
+    let path = temp_db_path("image_keys");
+    {
+        let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+        db.save_cached_image("chimg:https://host/a.png", b"abs").unwrap();
+        db.save_cached_image("chimg:/images/b.png", b"rel").unwrap();
+        // Already under the URL key: that copy wins over the chimg duplicate.
+        db.save_cached_image("img:https://host/c.png", b"new").unwrap();
+        db.save_cached_image("chimg:https://host/c.png", b"old").unwrap();
+        db.save_cached_image("avatar:someone", b"av").unwrap();
+        db.conn.execute_batch("PRAGMA user_version = 24;").unwrap();
+    }
+    let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+    assert_eq!(db.get_cached_image("img:https://host/a.png").unwrap(), Some(b"abs".to_vec()));
+    assert_eq!(db.get_cached_image("img:https://archiveofourown.org/images/b.png").unwrap(),
+               Some(b"rel".to_vec()));
+    assert_eq!(db.get_cached_image("img:https://host/c.png").unwrap(), Some(b"new".to_vec()));
+    assert_eq!(db.get_cached_image("avatar:someone").unwrap(), Some(b"av".to_vec()));
+    let leftovers: i64 = db.conn
+        .query_row("SELECT count(*) FROM image_cache WHERE key LIKE 'chimg:%'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(leftovers, 0);
+    drop(db);
+    library_file::remove_file_set(&path);
+}
+
+#[test]
 fn rejected_key_is_wrong_passphrase_not_storage_error() {
     let path = temp_db_path("wrong_key");
     let path_str = path.to_string_lossy().to_string();
@@ -2875,4 +2933,17 @@ fn test_whole_work_comments_land_on_their_chapter() {
     // Re-saved by a page that doesn't name the chapter: the known id stays.
     db.save_comment(1, 0, &comment(10, None, vec![])).unwrap();
     assert_eq!(db.comment_context(10).unwrap(), Some((1, 902, 0)));
+}
+
+#[test]
+fn test_sync_mark_counts_writes_not_reads() {
+    let mut db = open_test_db();
+    assert!(!db.changed_since_sync_mark(), "opening and migrating isn't an edit");
+    db.get_chapters(1).unwrap();
+    db.get_state("anything").unwrap();
+    assert!(!db.changed_since_sync_mark(), "reads don't count");
+    db.set_state("k", "v").unwrap();
+    assert!(db.changed_since_sync_mark());
+    db.set_sync_mark();
+    assert!(!db.changed_since_sync_mark());
 }

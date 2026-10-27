@@ -740,8 +740,12 @@ pub struct UFollow {
     pub target_id: String,
     pub name: String,
     pub added_at: String,
-    /// When this follow's own What's New check last succeeded. None = never.
+    /// When this follow's own What's New check last ran, whatever its
+    /// outcome. None = never.
     pub last_checked_at: Option<String>,
+    /// Not-found counter: 0 = last fetch succeeded, n > 0 = n consecutive
+    /// 404s, -1 = excluded from What's New checks.
+    pub status: i32,
 }
 
 impl From<crate::storage::FollowRow> for UFollow {
@@ -752,6 +756,7 @@ impl From<crate::storage::FollowRow> for UFollow {
             name: r.name,
             added_at: r.added_at,
             last_checked_at: r.last_checked_at,
+            status: r.status,
         }
     }
 }
