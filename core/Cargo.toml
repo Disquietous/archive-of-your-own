@@ -17,31 +17,34 @@ tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr"
 bindgen-cli = ["uniffi/cli"]
 
 [dependencies]
-uniffi = { version = "0.31" }
+uniffi = { version = "0.32" }
 async-trait = "0.1"
-scraper = "0.22"
-ego-tree = "0.10"
+scraper = "0.29"
+ego-tree = "0.11"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "cookies", "http2", "gzip", "brotli", "zstd", "deflate"] }
-rusqlite = { version = "0.36", features = ["bundled-sqlcipher", "functions", "trace"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "cookies", "form", "http2", "gzip", "brotli", "zstd", "deflate"] }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher", "functions", "trace"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 # renamex_np(RENAME_SWAP): the atomic two-path exchange behind library
 # file replacement — the live database is never absent from disk.
-libc = "0.2"
+# Held below 0.2.190: that release made `proc_pidinfo` macOS-only, and
+# sysinfo 0.38 (required by arti's tor-memquota) calls it on iOS too, so
+# every iOS build fails. Lift once sysinfo or tor-memquota fixes it.
+libc = ">=0.2.189, <0.2.190"
 
 # Tor (optional — heavy deps, only for release builds)
-arti-client = { version = "0.42", optional = true, default-features = false, features = ["tokio", "rustls", "geoip", "experimental-api"] }
-tor-geoip = { version = "0.42", optional = true }
-tor-rtcompat = { version = "0.42", optional = true, features = ["tokio"] }
-tor-linkspec = { version = "0.42", optional = true }
-tor-netdir = { version = "0.42", optional = true, features = ["geoip"] }
-tor-dirmgr = { version = "0.42", optional = true }
+arti-client = { version = "0.47", optional = true, default-features = false, features = ["tokio", "rustls", "geoip", "experimental-api"] }
+tor-geoip = { version = "0.47", optional = true }
+tor-rtcompat = { version = "0.47", optional = true, features = ["tokio"] }
+tor-linkspec = { version = "0.47", optional = true }
+tor-netdir = { version = "0.47", optional = true, features = ["geoip"] }
+tor-dirmgr = { version = "0.47", optional = true }
 # stream-ctrl exposes DataStream::client_stream_ctrl() -> tunnel -> real path
-tor-proto = { version = "0.42", optional = true, features = ["stream-ctrl"] }
+tor-proto = { version = "0.47", optional = true, features = ["stream-ctrl"] }
 # arti reports guard/circuit/bootstrap trouble only through `tracing`; the
 # bridge in src/arti_trace.rs routes those events into the debug log. Both
 # crates are already in the graph via arti — this adds no new code.

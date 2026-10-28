@@ -56,6 +56,11 @@ struct SettingsRootView: View {
                 .padding(.vertical, 6)
             }
         }
+        .onChange(of: model.settingsTabRequest, initial: true) {
+            guard let request = model.settingsTabRequest else { return }
+            if let requested = Tab(rawValue: request) { tab = requested }
+            model.settingsTabRequest = nil
+        }
     }
 
     private var tabStrip: some View {

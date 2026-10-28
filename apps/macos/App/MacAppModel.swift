@@ -25,6 +25,9 @@ final class MacAppModel {
 
     /// The app opens on Currently Reading — the primary use case.
     var section: Section = .reading
+    /// A Settings tab (its title, e.g. "Privacy") someone asked to open;
+    /// the Settings view selects it and clears the request.
+    var settingsTabRequest: String?
     var selectedWorkID: String?
 
     /// The reading pane's reader state. Work windows own their own

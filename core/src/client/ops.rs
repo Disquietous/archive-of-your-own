@@ -287,7 +287,7 @@ impl AO3Client {
         let audit = AuditCtx::new("GET (image)", url, None);
 
         self.enforce_rate_limit().await;
-        let client = self.http();
+        let client = self.http()?;
         let timeout = self.request_timeout();
 
         // Resolve the full URL for relative paths

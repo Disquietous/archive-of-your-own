@@ -408,7 +408,7 @@ impl WorksCache {
             .prepare_cached("UPDATE works SET gone_from_ao3 = ?2 WHERE id = ?1")
             .map_err(map_sql)?;
         for id in work_ids {
-            stmt.execute(params![id, gone as i64]).map_err(map_sql)?;
+            stmt.execute(params![*id as i64, gone as i64]).map_err(map_sql)?;
             self.update_entity(*id, |e| e.gone_from_ao3 = gone);
         }
         Ok(())
@@ -422,7 +422,7 @@ impl WorksCache {
             .prepare_cached("UPDATE works SET finished = ?2 WHERE id = ?1")
             .map_err(map_sql)?;
         for id in work_ids {
-            stmt.execute(params![id, finished as i64]).map_err(map_sql)?;
+            stmt.execute(params![*id as i64, finished as i64]).map_err(map_sql)?;
             self.update_entity(*id, |e| e.finished = finished);
         }
         Ok(())

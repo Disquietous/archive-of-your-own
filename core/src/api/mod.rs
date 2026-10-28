@@ -180,7 +180,14 @@ impl AO3App {
     /// than once — see `with_recovery`. `op_id`: a caller-obtained
     /// `new_operation_id` ties the fetch to the requesting view per the
     /// request-tracking standard; None = untracked (internal id).
-    async fn run_listing_fetch<F, Fut>(&self, key: &str, op_id: Option<u64>, fetch: F) -> Result<UPagedWorks, AO3Error>
+    ///
+    /// `follow_target` (kind, id) names the author or series a listing
+    /// belongs to. When that target is followed and has a What's New
+    /// baseline, the page goes through the check's own rules before it is
+    /// cached (`diff_and_flag_works`): any listing fetch — Refresh Works,
+    /// paging a drill-in — finds new and updated works the same way the
+    /// What's New check does.
+    async fn run_listing_fetch<F, Fut>(&self, key: &str, op_id: Option<u64>, follow_target: Option<(String, String)>, fetch: F) -> Result<UPagedWorks, AO3Error>
     where
         F: Fn(Arc<tokio::sync::RwLock<AO3Client>>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AO3Error>> + Send + 'static,
@@ -194,8 +201,17 @@ impl AO3App {
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 kind, RetrySafety::Idempotent, fetch).await?;
             let s = storage.lock().await;
+            let flagged = match &follow_target {
+                Some((kind, id)) if s.is_followed(kind, id).unwrap_or(false)
+                    && s.get_follow_baseline(kind, id).ok().flatten().is_some() =>
+                    diff_and_flag_works(&s, &works, kind, id, false).0,
+                _ => Vec::new(),
+            };
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             for w in &works { log_db("save_work", s.save_work(w)); }
+            if !flagged.is_empty() {
+                log_db("add_new_work_ids", s.add_new_work_ids(&flagged));
+            }
             log_db("commit listing save", tx.commit());
             Ok(UPagedWorks {
                 works: works.into_iter().map(UWorkSummary::from).collect(),
@@ -251,7 +267,18 @@ impl AO3App {
 
         let outcome = match result {
             Ok(r) => r,
-            Err(e) if e.is_cancelled() => Err(AO3Error::Cancelled),
+            Err(e) if e.is_cancelled() => {
+                // An abort drops the recovery loop wherever it was, so it
+                // never reached its own terminal emit — close the operation
+                // out here or the UI keeps showing it in flight.
+                if let Some(id) = op_id {
+                    crate::events::emit(crate::events::CoreEvent::OperationFinished {
+                        id, outcome: crate::events::OpOutcome::Cancelled,
+                    });
+                    crate::events::untrack_operation(id);
+                }
+                Err(AO3Error::Cancelled)
+            }
             Err(e) => Err(AO3Error::Network { message: e.to_string() }),
         };
 

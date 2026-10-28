@@ -841,6 +841,17 @@ impl From<crate::models::UserProfile> for UUserProfile {
     }
 }
 
+/// Follows the What's New check has let go stale, for the overdue warning.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UWhatsNewOverdue {
+    /// Checked follows last checked longer ago than the threshold, or never.
+    pub overdue: u32,
+    /// Of `overdue`, the ones never checked at all (e.g. just followed).
+    pub never_checked: u32,
+    /// Every follow the check covers.
+    pub total: u32,
+}
+
 /// One pending item of the What's New check queue, for the monitor UI.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UCheckQueueItem {

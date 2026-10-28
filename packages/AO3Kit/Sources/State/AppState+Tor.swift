@@ -142,31 +142,61 @@ extension AppState {
         }
     }
 
+    /// The connect overlay's Cancel: stop building the connection and stay
+    /// disconnected. Requests waiting on it fail and nothing retries until
+    /// the user connects again.
     func cancelTorConnect() {
         torConnectCancelled = true
         isTestingCircuit = false
         isResolvingCloudflare = false
+        torReconnecting = false
+        bridge.cancelConnection()
     }
 
     func proceedWithCurrentCircuit() async {
-        cancelTorConnect()
+        // Stop the circuit search but keep the connection — unlike Cancel,
+        // which disconnects.
+        torConnectCancelled = true
+        isTestingCircuit = false
+        isResolvingCloudflare = false
         torConnectFailed = false
         bridge.writeLog(level: "WARN", tag: "health", message: "User chose to proceed with untested circuit")
         await resolveCloudflare()
     }
 
+    /// Whether a user action may go online now. Tor not required, or
+    /// connected: yes. A connection being built: wait for it. Otherwise
+    /// (never connected, failed, or cancelled) the app stays offline — it
+    /// never connects on its own; the user is told why the action can't
+    /// run, and chooses whether to connect.
     func ensureTorConnected() async -> Bool {
         guard bridge.torRequired else { return true }
-        if bridge.torStatus.isConnected { return true }
-
-        showTorConnectOverlay = true
-        await connectTor()
-
-        if bridge.torStatus.isConnected {
-            showTorConnectOverlay = false
-            return true
+        while isConnectingTor || torReconnecting {
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
+        if bridge.torStatus.isConnected { return true }
+        reportNetworkDisabled()
         return false
+    }
+
+    /// Tell the user an action needed the network while Tor is required and
+    /// not connected. One notice at a time, and none while the connect
+    /// overlay already says what is happening.
+    func reportNetworkDisabled() {
+        guard !showTorConnectOverlay, !networkDisabledNotice else { return }
+        networkDisabledNotice = true
+    }
+
+    /// The network-disabled notice's "Connect to Tor": the full connect
+    /// sequence behind the blocking overlay.
+    func connectFromNotice() {
+        showTorConnectOverlay = true
+        Task {
+            await connectTor()
+            if torStatus.isConnected && !torConnectFailed {
+                showTorConnectOverlay = false
+            }
+        }
     }
 
     /// Load AO3 in a hidden WKWebView routed through our Tor SOCKS proxy to

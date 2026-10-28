@@ -136,47 +136,89 @@ impl AO3App {
 
     // -- Tor connection --
 
+    /// Build a new Tor connection and swap it in. Cancellable
+    /// (`cancel_connection`); a cancel or a failure leaves the app
+    /// disconnected rather than on whatever connection it had before —
+    /// the user asked for a new one.
     pub async fn connect_tor(&self) -> Result<(), AO3Error> {
         #[cfg(feature = "tor")]
         {
             let state_dir = self.state_dir.clone();
             let runtime = self._runtime.clone();
             let client_ref = self.client.clone();
-
-            // Spawn onto our tokio runtime so arti has a live reactor
-            let mut new_client = runtime.spawn(async move {
-                AO3Client::new_tor_with_dir(&state_dir).await
-            })
-            .await
-            .map_err(|e| AO3Error::Network { message: format!("Tor task panicked: {e}") })?
-            .map_err(AO3Error::from)?;
-            new_client.share_route_timeouts(self.route_timeouts.clone());
-
             let timeout = self.timeout_secs.clone();
-            let client_ref2 = client_ref.clone();
+            let route_timeouts = self.route_timeouts.clone();
             let tor_connected = self.tor_connected.clone();
             let socks_port = self.socks_port.clone();
+
+            // On our tokio runtime so arti has a live reactor.
             runtime.spawn(async move {
-                let mut client = client_ref2.write().await;
-                let secs = timeout.load(std::sync::atomic::Ordering::Relaxed);
-                new_client.set_timeout(secs);
+                crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+                    state: crate::events::ConnectionState::Connecting,
+                });
+                let mut new_client = match super::recovery::bootstrap_tor(&state_dir).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        super::recovery::go_offline(&client_ref).await;
+                        tor_connected.store(false, std::sync::atomic::Ordering::Relaxed);
+                        socks_port.store(0, std::sync::atomic::Ordering::Relaxed);
+                        crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+                            state: super::recovery::connection_lost_state(&e),
+                        });
+                        return Err(e);
+                    }
+                };
+                new_client.share_route_timeouts(route_timeouts);
+                new_client.set_timeout(timeout.load(std::sync::atomic::Ordering::Relaxed));
+                let mut client = client_ref.write().await;
                 tor_connected.store(new_client.is_tor(), std::sync::atomic::Ordering::Relaxed);
-                socks_port.store(new_client.socks_port().unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
+                let port = new_client.socks_port().unwrap_or(0);
+                socks_port.store(port as u32, std::sync::atomic::Ordering::Relaxed);
                 // Stop the outgoing client's SOCKS accept loop before it's
                 // dropped — otherwise the replaced client orphans a listener
                 // port and a background task on every (re)connect.
                 client.stop_socks_proxy();
                 *client = new_client;
+                drop(client);
+                crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+                    state: crate::events::ConnectionState::Connected { via_tor: true, socks_port: port },
+                });
+                Ok(())
             })
             .await
-            .map_err(|e| AO3Error::Network { message: format!("Failed to update client: {e}") })?;
-
-            Ok(())
+            .map_err(|e| AO3Error::Network { message: format!("Tor task panicked: {e}") })?
         }
         #[cfg(not(feature = "tor"))]
         {
             Err(AO3Error::Network { message: "Tor support not compiled in".to_string() })
         }
+    }
+
+    /// Cancel connection-building: any bootstrap in progress (user connect
+    /// or the engine's reconnect) stops, and the app is left disconnected
+    /// even if a connection had just come up. Operations waiting on the
+    /// connection fail; nothing retries on its own.
+    pub fn cancel_connection(&self) {
+        log_info!("tor", "Connection cancelled by user — disconnecting");
+        super::recovery::cancel_connection();
+        let client_ref = self.client.clone();
+        let tor_connected = self.tor_connected.clone();
+        let socks_port = self.socks_port.clone();
+        self._runtime.spawn(async move {
+            super::recovery::go_offline(&client_ref).await;
+            tor_connected.store(false, std::sync::atomic::Ordering::Relaxed);
+            socks_port.store(0, std::sync::atomic::Ordering::Relaxed);
+            crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+                state: crate::events::ConnectionState::Disconnected,
+            });
+        });
+    }
+
+    /// Whether Tor is required. While it is, nothing is sent without a
+    /// Tor connection — requests fail with `NetworkDisabled` instead.
+    /// Process-wide; starts required until the app says otherwise.
+    pub fn set_tor_required(&self, required: bool) {
+        crate::client::set_tor_required(required);
     }
 
     pub async fn new_circuit(&self) -> Result<(), AO3Error> {
@@ -219,6 +261,9 @@ impl AO3App {
         .await
         .map_err(|e| AO3Error::Network { message: format!("Disconnect failed: {e}") })?
         .map_err(AO3Error::from)?;
+        crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+            state: crate::events::ConnectionState::Disconnected,
+        });
         Ok(())
     }
 
@@ -299,6 +344,12 @@ impl AO3App {
     /// mount instead of replaying events it may have missed.
     pub fn active_operations(&self) -> Vec<crate::events::OperationStatus> {
         crate::events::operations_snapshot()
+    }
+
+    /// One operation's live status (attempt, remedy, recovery step), or
+    /// None once it has finished — what a progress banner polls.
+    pub fn operation_status(&self, op_id: u64) -> Option<crate::events::OperationStatus> {
+        crate::events::operation_status(op_id)
     }
 
     pub fn is_request_active(&self) -> bool {

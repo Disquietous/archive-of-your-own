@@ -26,7 +26,7 @@ impl AO3Client {
         // Step 2: POST login form
         self.enforce_rate_limit().await;
 
-        let client = self.http();
+        let client = self.http()?;
 
         let timeout = self.request_timeout();
 
@@ -168,7 +168,7 @@ impl AO3Client {
     pub(super) async fn post_form_raw(&self, url: &str, form_params: Vec<(String, String)>) -> Result<String, AppError> {
         self.enforce_rate_limit().await;
 
-        let client = self.http();
+        let client = self.http()?;
 
         let timeout = self.request_timeout();
 
@@ -252,7 +252,7 @@ impl AO3Client {
         let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"), self.request_timeout().as_secs());
         self.enforce_rate_limit().await;
 
-        let client = self.http();
+        let client = self.http()?;
         let timeout = self.request_timeout();
 
         let id_string = work_id.to_string();
@@ -358,7 +358,7 @@ impl AO3Client {
 
         self.enforce_rate_limit().await;
 
-        let client = self.http();
+        let client = self.http()?;
 
         let timeout = self.request_timeout();
 

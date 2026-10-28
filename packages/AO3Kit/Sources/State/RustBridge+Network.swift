@@ -13,6 +13,12 @@ extension RustBridge {
         app?.cancelOperation(opId: opID)
     }
 
+    /// One tracked operation's live status — attempt, remedy, recovery
+    /// step — or nil once it has finished.
+    func operationStatus(_ opID: UInt64) -> OperationStatus? {
+        app?.operationStatus(opId: opID)
+    }
+
     /// Every operation the recovery engine currently has in flight or is
     /// actively recovering — the authoritative snapshot a view asks for on
     /// mount instead of replaying events it may have missed.

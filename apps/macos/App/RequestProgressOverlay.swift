@@ -18,7 +18,14 @@ final class RequestProgressOverlay {
             host = nil
             return
         }
-        guard host == nil else { return }
+        if let host {
+            // A newer operation took the pane over: follow it, or the
+            // banner filters out every request the new one makes.
+            if host.rootView.opID != opID {
+                host.rootView = RequestProgressView(theme: theme, appState: appState, opID: opID)
+            }
+            return
+        }
         let banner = NSHostingView(rootView: RequestProgressView(theme: theme, appState: appState, opID: opID))
         banner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(banner)

@@ -281,6 +281,14 @@ final class AppState {
     var torConnectCancelled = false
     var torConnectFailed = false
     var showTorConnectOverlay = false
+    /// The recovery engine (not the user) is building the connection now
+    /// shown in the connect overlay — it rebuilt a connection that stopped
+    /// working. Cleared when that connection resolves.
+    var torReconnecting = false
+    /// Something needed the network while Tor is required and not
+    /// connected. The platform UI explains why it didn't happen, then
+    /// clears this.
+    var networkDisabledNotice = false
     var needsReauth = false
 
     // Connection-recovery projection (AppState+Recovery.swift) — Swift never
@@ -379,6 +387,9 @@ final class AppState {
     /// `whatsNewOverdueSecs`. Each platform shows a warning offering to
     /// check now; the check never starts on its own.
     var whatsNewCheckOverdue = false
+    /// The warning's numbers: how many follows are overdue, and how many of
+    /// those were never checked.
+    var whatsNewOverdueCounts: UWhatsNewOverdue?
     static let whatsNewOverdueSecs: UInt64 = 24 * 3600
     /// The overdue warning as the platforms present it: held until the
     /// network is usable. With Tor on, nothing shows before the circuit and
@@ -505,8 +516,9 @@ final class AppState {
         // overdue. Rust decides per row: any checked follow whose
         // own last-checked stamp is missing or older than the threshold.
         if ao3Username != nil, !whatsNewOverdueWarned {
-            if bridge.isWhatsNewCheckOverdue(maxAgeSecs: Self.whatsNewOverdueSecs) {
+            if let counts = bridge.whatsNewOverdue(maxAgeSecs: Self.whatsNewOverdueSecs), counts.overdue > 0 {
                 whatsNewOverdueWarned = true
+                whatsNewOverdueCounts = counts
                 whatsNewCheckOverdue = true
             }
         }
@@ -571,6 +583,8 @@ final class AppState {
                 return "Session expired. Please re-enter your password."
             case .WrongPassword:
                 return "Wrong password."
+            case .NetworkDisabled:
+                return "Tor isn’t connected, so nothing was sent."
             }
         }
         return error.localizedDescription

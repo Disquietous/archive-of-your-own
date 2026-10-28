@@ -140,9 +140,11 @@ extension RustBridge {
         _ = try? await app?.downloadWorkImages(workId: workId, maxBytes: maxBytes)
     }
 
-    /// Stamp "a full works crawl for this author/series completed now".
-    func setWorksCrawledNow(kind: String, targetId: String) {
-        try? app?.setWorksCrawledNow(kind: kind, targetId: targetId)
+    /// A full works crawl for this author/series finished, listing
+    /// `workIds`. Stamps the crawl; for a followed target it also counts as
+    /// a complete What's New check of it.
+    func completeWorksCrawl(kind: String, targetId: String, workIds: [UInt64]) {
+        try? app?.completeWorksCrawl(kind: kind, targetId: targetId, workIds: workIds)
     }
 
     /// UTC datetime of the last completed works crawl, or nil.

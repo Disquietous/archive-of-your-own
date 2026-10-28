@@ -109,7 +109,8 @@ final class SubscriptionWorksModel {
                     works = all
                     // Membership is derived from the crawled works
                     // themselves (byline / series part) — nothing to save.
-                    appState.bridge.setWorksCrawledNow(kind: subType, targetId: subId)
+                    appState.bridge.completeWorksCrawl(kind: subType, targetId: subId,
+                                                       workIds: all.compactMap { UInt64($0.id) })
                     crawledAt = appState.bridge.getWorksCrawledAt(kind: subType, targetId: subId)
                     // The crawl rewrote works in the DB (author renames,
                     // updated stats) — merge them into the snapshot too.

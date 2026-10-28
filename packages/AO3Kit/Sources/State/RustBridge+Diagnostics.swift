@@ -128,9 +128,11 @@ extension RustBridge {
 
     // MARK: - What's New check (follows only)
 
-    func startWhatsNewCheck(onlyStale: Bool) throws -> UInt32 {
+    /// `olderThanSecs` limits the round to follows last checked longer ago
+    /// than that, or never; nil leaves `onlyStale` in charge.
+    func startWhatsNewCheck(onlyStale: Bool, olderThanSecs: UInt64? = nil) throws -> UInt32 {
         guard let app else { throw BridgeError.notInitialized }
-        return try app.startWhatsNewCheck(onlyStale: onlyStale)
+        return try app.startWhatsNewCheck(onlyStale: onlyStale, olderThanSecs: olderThanSecs)
     }
 
     /// The persisted What's New queue, front item first.
@@ -144,8 +146,9 @@ extension RustBridge {
         (try? app?.isWhatsNewCheckDue()) ?? false
     }
 
-    /// True when any checked follow was last checked over `maxAgeSecs` ago.
-    func isWhatsNewCheckOverdue(maxAgeSecs: UInt64) -> Bool {
-        (try? app?.isWhatsNewCheckOverdue(maxAgeSecs: maxAgeSecs)) ?? false
+    /// How many checked follows were last checked over `maxAgeSecs` ago,
+    /// or never; nil when the library isn't readable.
+    func whatsNewOverdue(maxAgeSecs: UInt64) -> UWhatsNewOverdue? {
+        try? app?.whatsNewOverdue(maxAgeSecs: maxAgeSecs)
     }
 }

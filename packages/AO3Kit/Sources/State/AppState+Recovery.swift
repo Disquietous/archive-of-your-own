@@ -109,8 +109,56 @@ extension AppState {
                 bridge.refreshCircuitHops()
             }
 
-        case .operationTick, .connectionChanged, .dataInvalidated:
+        case .connectionChanged(let state):
+            handleConnectionChanged(state)
+
+        case .networkRefused(let id):
+            // Passive image loads (avatars, auto-loaded pictures) fail
+            // quietly into their own placeholders; anything else the user
+            // asked for gets the explanation.
+            if let id, case .image = operationKinds[id] { break }
+            reportNetworkDisabled()
+
+        case .operationTick, .dataInvalidated:
             break
+        }
+    }
+
+    /// The core is the authority on the connection: mirror its state into
+    /// the bridge, and put a connection the engine is rebuilding behind the
+    /// same blocking overlay a user connect gets.
+    private func handleConnectionChanged(_ state: ConnectionState) {
+        switch state {
+        case .connecting:
+            bridge.torStatus = .connecting
+            if !isConnectingTor {
+                torReconnecting = true
+                torConnectFailed = false
+                showTorConnectOverlay = true
+            }
+        case .connected:
+            bridge.torStatus = .connected
+            bridge.torHasConnectedOnce = true
+            bridge.refreshCircuitHops()
+            if torReconnecting {
+                torReconnecting = false
+                showTorConnectOverlay = false
+            }
+        case .failed(let message):
+            bridge.torStatus = .error(message)
+            bridge.circuitHops = []
+            if torReconnecting {
+                // The overlay stays up in its failed state: Retry or Cancel.
+                torReconnecting = false
+                torConnectFailed = true
+            }
+        case .disconnected:
+            bridge.torStatus = .disconnected
+            bridge.circuitHops = []
+            if torReconnecting {
+                torReconnecting = false
+                showTorConnectOverlay = false
+            }
         }
     }
 }

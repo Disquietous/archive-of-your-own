@@ -22,7 +22,9 @@ extension AppState {
     /// follow regardless of per-row freshness (the user asked explicitly);
     /// the default lets each row's own last-checked stamp decide, so a
     /// resumed round re-checks only what actually needs it.
-    func runWhatsNewCheck(force: Bool = false) async {
+    /// `olderThanSecs` limits the round to follows last checked longer ago
+    /// than that, or never (the overdue warning's "check just these").
+    func runWhatsNewCheck(force: Bool = false, olderThanSecs: UInt64? = nil) async {
         guard ao3Username != nil else { return }
         guard !isCheckingWhatsNew else { return }
         // Claim the check BEFORE the first await. Waiting for Tor can take
@@ -49,7 +51,7 @@ extension AppState {
         do {
             // The queue is built from the follows in the shared Rust store,
             // so follows added on any platform are checked here.
-            let total = try bridge.startWhatsNewCheck(onlyStale: !force)
+            let total = try bridge.startWhatsNewCheck(onlyStale: !force, olderThanSecs: olderThanSecs)
             whatsNewCheckTotal = Int(total)
             whatsNewCheckRemaining = Int(total)
             checkMonitor.queued(bridge.getWhatsNewCheckQueue())
@@ -164,6 +166,37 @@ extension AppState {
         guard !isCheckingWhatsNew else { return }
         if all { bridge.resetWhatsNewCheck() }
         Task { await runWhatsNewCheck(force: all) }
+    }
+
+    /// The overdue warning's "check just these": a round over only the
+    /// follows last checked over `whatsNewOverdueSecs` ago, or never.
+    func startOverdueWhatsNewCheck() {
+        guard !isCheckingWhatsNew else { return }
+        Task { await runWhatsNewCheck(olderThanSecs: Self.whatsNewOverdueSecs) }
+    }
+
+    /// The overdue warning's text, with its counts.
+    var whatsNewOverdueMessage: String {
+        guard let counts = whatsNewOverdueCounts, counts.overdue > 0 else {
+            return "Some followed authors, works or series haven’t been checked in over 24 hours."
+        }
+        let n = Int(counts.overdue)
+        var text = n == 1
+            ? "1 followed author, work or series hasn’t been checked in over 24 hours"
+            : "\(n) followed authors, works or series haven’t been checked in over 24 hours"
+        let never = Int(counts.neverChecked)
+        if never > 0 {
+            text += never == n
+                ? (n == 1 ? " — it has never been checked" : " — none of them has ever been checked")
+                : " (\(never) never checked)"
+        }
+        return text + "."
+    }
+
+    /// The "check just these" button title, e.g. "Check These 12".
+    var whatsNewOverdueCheckTitle: String {
+        let n = Int(whatsNewOverdueCounts?.overdue ?? 0)
+        return n == 1 ? "Check This One" : "Check These \(n)"
     }
 
     /// Hold the run at the next item boundary. The in-flight request

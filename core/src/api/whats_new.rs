@@ -14,7 +14,10 @@ impl AO3App {
     /// `last_checked_at` is missing or older than CHECK_INTERVAL_SECS —
     /// per-row freshness, so a resumed round re-checks exactly the rows
     /// that need it and nothing that was already checked recently.
-    pub fn start_whats_new_check(&self, only_stale: bool) -> Result<u32, AO3Error> {
+    /// `older_than_secs` narrows the round further: only follows last
+    /// checked longer ago than that (or never) join — the overdue warning's
+    /// "check just these". None leaves `only_stale` in charge.
+    pub fn start_whats_new_check(&self, only_stale: bool, older_than_secs: Option<u64>) -> Result<u32, AO3Error> {
         self.census_cycle_used.store(false, std::sync::atomic::Ordering::Relaxed);
         let s = self.storage.blocking_lock();
         let mut queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
@@ -25,7 +28,11 @@ impl AO3App {
             let queued = queue.iter().any(|q|
                 q["kind"].as_str() == Some(kind.as_str())
                     && q["target_id"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(&id)));
-            if queued || (only_stale && !follow_check_due(&s, &kind, &id)) {
+            let wanted = match older_than_secs {
+                Some(age) => follow_older_than(&s, &kind, &id, age),
+                None => !only_stale || follow_check_due(&s, &kind, &id),
+            };
+            if queued || !wanted {
                 continue;
             }
             queue.push(serde_json::json!({"kind": kind, "target_id": id, "name": name}));
@@ -53,16 +60,25 @@ impl AO3App {
             .any(|(kind, id, _)| follow_check_due(&s, kind, id)))
     }
 
-    /// Has a full check gone unrun for longer than `max_age_secs`? True
-    /// when any checked follow was last checked longer ago than that (or
-    /// never). Per-row, like `is_whats_new_check_due`: a round counts as
-    /// full once every row has its own recent stamp, however many
-    /// interrupted runs it took to get there.
-    pub fn is_whats_new_check_overdue(&self, max_age_secs: u64) -> Result<bool, AO3Error> {
+    /// How many checked follows were last checked longer ago than
+    /// `max_age_secs`, or never — the overdue warning's numbers. Per-row,
+    /// like `is_whats_new_check_due`: a round counts as full once every row
+    /// has its own recent stamp, however many interrupted runs it took.
+    pub fn whats_new_overdue(&self, max_age_secs: u64) -> Result<UWhatsNewOverdue, AO3Error> {
         let s = self.storage.blocking_lock();
-        Ok(s.get_check_targets().map_err(AO3Error::from)?
-            .iter()
-            .any(|(kind, id, _)| follow_older_than(&s, kind, id, max_age_secs)))
+        let targets = s.get_check_targets().map_err(AO3Error::from)?;
+        let mut overdue = 0u32;
+        let mut never_checked = 0u32;
+        for (kind, id, _) in &targets {
+            if !follow_older_than(&s, kind, id, max_age_secs) {
+                continue;
+            }
+            overdue += 1;
+            if !matches!(s.get_follow_last_checked(kind, id), Ok(Some(at)) if !at.is_empty()) {
+                never_checked += 1;
+            }
+        }
+        Ok(UWhatsNewOverdue { overdue, never_checked, total: targets.len() as u32 })
     }
 
     /// The persisted check queue as it stands — front item first. Read by
@@ -170,10 +186,41 @@ impl AO3App {
         s.get_detail_viewed_work_ids().map_err(AO3Error::from)
     }
 
-    /// Stamp "a full works crawl for this author/series completed now".
-    pub fn set_works_crawled_now(&self, kind: String, target_id: String) -> Result<(), AO3Error> {
+    /// A full works crawl (Refresh Works) for this author/series finished;
+    /// `work_ids` is every work it listed. Stamps the crawl. When the target
+    /// is followed, the crawl was a complete What's New census as well, so
+    /// it is recorded as one — gone-from-AO3 flags reconciled, total and
+    /// census time adopted — and the follow is marked checked with a fresh
+    /// baseline. (Each page was already compared and new or
+    /// updated works flagged as it arrived; see `run_listing_fetch`.)
+    pub fn complete_works_crawl(&self, kind: String, target_id: String, work_ids: Vec<u64>) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
-        s.set_works_crawled_at(&kind, &target_id, &now_utc()).map_err(AO3Error::from)
+        let now = now_utc();
+        s.set_works_crawled_at(&kind, &target_id, &now).map_err(AO3Error::from)?;
+        if !s.is_followed(&kind, &target_id).map_err(AO3Error::from)? {
+            return Ok(());
+        }
+        let state = CensusState {
+            next_page: 0,
+            total_pages: 0,
+            seen_ids: work_ids.clone(),
+            started_at: now.clone(),
+            reason: "full works crawl (Refresh Works)".to_string(),
+            seed: s.get_follow_census_meta(&kind, &target_id).map(|(_, last, _)| last.is_none()).unwrap_or(true),
+        };
+        finalize_census(&s, &kind, &target_id, &target_id, &state);
+        // The newest update date the crawl saw — what a check's page 1
+        // would have recorded.
+        let newest = work_ids.iter()
+            .filter_map(|id| s.get_work(*id).ok().flatten())
+            .map(|w| w.date_updated)
+            .max()
+            .unwrap_or_default();
+        if !newest.is_empty() {
+            log_db("set_follow_baseline", s.set_follow_baseline(&kind, &target_id, &newest));
+        }
+        log_db("set_follow_last_checked", s.set_follow_last_checked(&kind, &target_id, &now));
+        Ok(())
     }
 
     /// UTC "YYYY-MM-DD HH:MM:SS" of the last completed works crawl, or None.

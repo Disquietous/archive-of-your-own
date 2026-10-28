@@ -78,6 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.presentWhatsNewOverdue()
             }
         }
+        // Something needed the network while Tor is required and not
+        // connected: say why it didn't happen, and offer to connect.
+        ObservationRelay.track { [weak self] in
+            guard let self, appState.networkDisabledNotice else { return }
+            DispatchQueue.main.async { self.presentNetworkDisabled() }
+        }
         ObservationRelay.track { [weak self] in
             guard let self else { return }
             let count = appState.newUnviewedWorkCount
@@ -309,15 +315,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentWhatsNewOverdue() {
         let alert = NSAlert()
         alert.messageText = "What’s New is out of date"
-        alert.informativeText = "Some followed authors, works or series haven’t been checked in over 24 hours."
-        alert.addButton(withTitle: "Check Now")
+        alert.informativeText = appState.whatsNewOverdueMessage
+        alert.addButton(withTitle: appState.whatsNewOverdueCheckTitle)
+        alert.addButton(withTitle: "Check All")
         alert.addButton(withTitle: "Later")
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            if response == .alertFirstButtonReturn {
-                self?.appState.startWhatsNewCheck(all: false)
+            switch response {
+            case .alertFirstButtonReturn: self?.appState.startOverdueWhatsNewCheck()
+            case .alertSecondButtonReturn: self?.appState.startWhatsNewCheck(all: true)
+            default: break
             }
         }
         if let window = mainWindowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
+    private func presentNetworkDisabled() {
+        guard appState.networkDisabledNotice else { return }
+        let alert = NSAlert()
+        alert.messageText = "Tor isn’t connected"
+        alert.informativeText = """
+            This needs the internet, and the app only goes online through Tor, which isn’t \
+            connected — so nothing was sent. Connect to Tor, or turn off “Connect via Tor \
+            on launch” in Settings › Privacy to use a direct connection.
+            """
+        alert.addButton(withTitle: "Connect to Tor")
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "OK")
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            appState.networkDisabledNotice = false
+            switch response {
+            case .alertFirstButtonReturn:
+                appState.connectFromNotice()
+            case .alertSecondButtonReturn:
+                model.settingsTabRequest = "Privacy"
+                model.goSection(.settings)
+                mainWindowController?.window?.makeKeyAndOrderFront(nil)
+            default:
+                break
+            }
+        }
+        let window = NSApp.keyWindow ?? mainWindowController?.window
+        if let window, window.isVisible, window.attachedSheet == nil {
             alert.beginSheetModal(for: window, completionHandler: handle)
         } else {
             handle(alert.runModal())

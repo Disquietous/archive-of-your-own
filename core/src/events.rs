@@ -90,11 +90,17 @@ pub enum OpOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ConnectionState {
+    /// No Tor connection — left there by a cancel or a disconnect. While
+    /// Tor is required, nothing is sent until the user reconnects.
     Disconnected,
+    /// A new Tor connection is being bootstrapped (user connect or the
+    /// recovery engine's full reconnect). Requests needing it wait.
     Connecting,
     Connected { via_tor: bool, socks_port: u16 },
+    /// Building the connection failed; the app is now disconnected.
+    Failed { message: String },
 }
 
 /// Scope of cached data a screen should treat as stale. Deliberately coarse
@@ -114,6 +120,9 @@ pub enum CoreEvent {
     OperationFinished { id: OpId, outcome: OpOutcome },
     ConnectionChanged { state: ConnectionState },
     DataInvalidated { scope: InvalidationScope },
+    /// A request was refused because Tor is required and not connected.
+    /// `id` is the operation it belonged to, when it ran inside one.
+    NetworkRefused { id: Option<OpId> },
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +173,9 @@ pub struct OperationStatus {
     /// `Some` only while a remedy (rotate/backoff/etc.) is actively being
     /// applied between attempts; `None` while a request is in flight.
     pub remedy: Option<Remedy>,
+    /// The remedy's current sub-step (new route, waiting on a reconnect,
+    /// backing off) — what a progress banner shows between requests.
+    pub step: Option<RecoveryStep>,
     pub started_at_ms: u64,
 }
 
@@ -184,6 +196,19 @@ pub(crate) fn track_operation(status: OperationStatus) {
 /// snapshot once this runs.
 pub(crate) fn untrack_operation(id: OpId) {
     operations().lock().unwrap().remove(&id);
+}
+
+/// Record and announce an operation's current recovery sub-step.
+pub(crate) fn set_operation_step(id: OpId, step: RecoveryStep) {
+    if let Some(status) = operations().lock().unwrap().get_mut(&id) {
+        status.step = Some(step);
+    }
+    emit(CoreEvent::RecoveryStep { id, step });
+}
+
+/// One operation's live status, if it is in flight or being recovered.
+pub fn operation_status(id: OpId) -> Option<OperationStatus> {
+    operations().lock().unwrap().get(&id).cloned()
 }
 
 /// Every operation currently in flight or being recovered.

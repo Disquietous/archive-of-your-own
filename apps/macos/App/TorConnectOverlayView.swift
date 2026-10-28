@@ -47,7 +47,7 @@ struct TorConnectOverlayView: View {
                     ProgressView()
                         .controlSize(.large)
 
-                    Text("Connecting to Tor")
+                    Text(appState.torReconnecting ? "Reconnecting to Tor" : "Connecting to Tor")
                         .font(Font(MacFont.serif(22, weight: .semibold)))
                         .foregroundStyle(theme.ink)
 
@@ -78,6 +78,9 @@ struct TorConnectOverlayView: View {
     }
 
     private var progressDetail: String {
+        if appState.torReconnecting {
+            return "The Tor connection stopped working, so a new one is being built. Requests resume once it’s ready."
+        }
         if appState.isResolvingCloudflare { return "Resolving archive challenge…" }
         if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
         switch appState.torStatus {

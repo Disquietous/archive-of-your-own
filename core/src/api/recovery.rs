@@ -183,7 +183,7 @@ where
     loop {
         events::emit(CoreEvent::OperationStarted { id, kind: kind.clone() });
         events::track_operation(OperationStatus {
-            id, kind: kind.clone(), attempt, max_attempts: DEFAULT_CAP, remedy: None, started_at_ms,
+            id, kind: kind.clone(), attempt, max_attempts: DEFAULT_CAP, remedy: None, step: None, started_at_ms,
         });
 
         let err = match op(client.clone()).await {
@@ -204,7 +204,7 @@ where
         // arrived, so the only question is whether re-running `op` is safe.
         if failure == FailureKind::ResponseTimeout {
             if safety == RetrySafety::Idempotent && attempt < 2 {
-                events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::Retrying });
+                events::set_operation_step(id, RecoveryStep::Retrying);
                 attempt += 1;
                 continue;
             }
@@ -228,10 +228,15 @@ where
             id, failure, remedy: policy.remedy, attempt, max_attempts: policy.cap,
         });
         events::track_operation(OperationStatus {
-            id, kind: kind.clone(), attempt, max_attempts: policy.cap, remedy: Some(policy.remedy), started_at_ms,
+            id, kind: kind.clone(), attempt, max_attempts: policy.cap, remedy: Some(policy.remedy), step: None, started_at_ms,
         });
 
-        perform_remedy(&client, &storage, policy.remedy, failure, id).await;
+        if !perform_remedy(&client, &storage, policy.remedy, failure, id).await {
+            // The connection rebuild failed or was cancelled: the app is
+            // disconnected now, and a retry could only be refused.
+            finish_failed(id, Some(failure));
+            return Err(AO3Error::NetworkDisabled);
+        }
 
         attempt += 1;
     }
@@ -242,13 +247,15 @@ fn finish_failed(id: OpId, kind: Option<FailureKind>) {
     events::untrack_operation(id);
 }
 
+/// Apply one remedy. False when the connection is gone afterwards (a
+/// full reconnect that failed or was cancelled) — retrying is pointless.
 async fn perform_remedy(
     client: &Arc<RwLock<AO3Client>>,
     storage: &Arc<Mutex<Storage>>,
     remedy: Remedy,
     failure: FailureKind,
     id: OpId,
-) {
+) -> bool {
     match remedy {
         Remedy::Rotate => {
             // 429's budget is scoped to the exit IP; with no circuit to
@@ -256,23 +263,23 @@ async fn perform_remedy(
             if let FailureKind::RateLimited { retry_after_secs } = failure {
                 if !client.read().await.is_tor() {
                     let secs = retry_after_secs.unwrap_or(5).min(60);
-                    events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::BackingOff { seconds: secs } });
+                    events::set_operation_step(id, RecoveryStep::BackingOff { seconds: secs });
                     tokio::time::sleep(Duration::from_secs(secs as u64)).await;
-                    return;
+                    return true;
                 }
             }
-            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::RotatingCircuit });
+            events::set_operation_step(id, RecoveryStep::RotatingCircuit);
             rotate(client).await;
         }
         Remedy::RotateAndReclear => {
-            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::RotatingCircuit });
+            events::set_operation_step(id, RecoveryStep::RotatingCircuit);
             rotate(client).await;
-            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::EarningClearance });
+            events::set_operation_step(id, RecoveryStep::EarningClearance);
             earn_clearance(client, storage).await;
         }
         Remedy::Backoff => {
             let secs = 2u32;
-            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::BackingOff { seconds: secs } });
+            events::set_operation_step(id, RecoveryStep::BackingOff { seconds: secs });
             tokio::time::sleep(Duration::from_secs(secs as u64)).await;
         }
         Remedy::Reconnect => {
@@ -280,12 +287,14 @@ async fn perform_remedy(
             // covers a genuine outage on a direct connection.
             if !client.read().await.is_tor() {
                 let secs = 2u32;
-                events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::BackingOff { seconds: secs } });
+                events::set_operation_step(id, RecoveryStep::BackingOff { seconds: secs });
                 tokio::time::sleep(Duration::from_secs(secs as u64)).await;
-                return;
+                return true;
             }
-            events::emit(CoreEvent::RecoveryStep { id, step: RecoveryStep::Reconnecting });
-            full_reconnect(client).await;
+            events::set_operation_step(id, RecoveryStep::Reconnecting);
+            if !full_reconnect(client).await {
+                return false;
+            }
             // The fresh client starts with an empty cookie jar — put the
             // persisted session back so the retry stays signed in.
             restore_persisted_cookies(client, storage).await;
@@ -295,23 +304,101 @@ async fn perform_remedy(
         // of this loop (`SessionExpired` never reaches `policy_for`).
         Remedy::Purge => {}
     }
+    true
 }
 
-/// The privacy hub's "New circuit" treatment: replace the whole TorClient
-/// with a freshly bootstrapped one (new guards and all), not just an
-/// isolated sub-client on the old bootstrap. Mirrors `AO3App::connect_tor`,
-/// driven by the context the app constructor registers. Falls back to
-/// plain rotation when the context is missing or the bootstrap fails, so
-/// the retry never runs on the very circuit that just failed.
-async fn full_reconnect(client: &Arc<RwLock<AO3Client>>) {
+// ---------------------------------------------------------------------------
+// New connections — one at a time, cancellable, never silently replaced
+// ---------------------------------------------------------------------------
+
+/// Woken by `cancel_connection`: every bootstrap in progress stops.
+static CONNECT_CANCEL: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// The engine's reconnect in progress, if any. Operations that need a
+/// reconnect while one runs wait on it instead of starting another; `None`
+/// in the channel means still running, `Some(connected)` the outcome.
+static RECONNECT: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bool>>>> =
+    std::sync::Mutex::new(None);
+
+/// Bootstrap a fresh Tor client, abandoned the moment the user cancels.
+#[cfg(feature = "tor")]
+pub(crate) async fn bootstrap_tor(state_dir: &str) -> Result<AO3Client, AO3Error> {
+    let cancelled = CONNECT_CANCEL.notified();
+    tokio::pin!(cancelled);
+    cancelled.as_mut().enable();
+    tokio::select! {
+        result = AO3Client::new_tor_with_dir(state_dir) => result.map_err(AO3Error::from),
+        _ = &mut cancelled => Err(AO3Error::Cancelled),
+    }
+}
+
+/// Stop every connection bootstrap in progress. The connection paths
+/// themselves then drop to disconnected and announce it.
+pub(crate) fn cancel_connection() {
+    CONNECT_CANCEL.notify_waiters();
+}
+
+/// Drop the Tor transport: the client goes direct, which the Tor
+/// requirement then refuses to use — disconnected, not degraded. Callers
+/// own the app's tor_connected/socks_port mirrors.
+pub(crate) async fn go_offline(client: &Arc<RwLock<AO3Client>>) {
+    let mut c = client.write().await;
+    if let Err(e) = c.disconnect_tor() {
+        log_error!("recovery", "disconnect failed: {e}");
+    }
+}
+
+/// The announcement for a connection attempt that didn't end connected.
+pub(crate) fn connection_lost_state(err: &AO3Error) -> events::ConnectionState {
+    match err {
+        AO3Error::Cancelled => events::ConnectionState::Disconnected,
+        other => events::ConnectionState::Failed { message: other.to_string() },
+    }
+}
+
+/// Replace the whole TorClient with a freshly bootstrapped one (new guards
+/// and all) — the privacy hub's "New connection" treatment. Runs on its own
+/// task so cancelling the operation that asked for it can't abandon the
+/// connection half-built, and joins any reconnect already in progress.
+/// True when connected afterwards; on failure or cancel the app is left
+/// disconnected (announced via `ConnectionChanged`).
+async fn full_reconnect(client: &Arc<RwLock<AO3Client>>) -> bool {
+    let mut rx = {
+        let mut slot = RECONNECT.lock().unwrap();
+        match slot.as_ref() {
+            Some(rx) if rx.borrow().is_none() => rx.clone(),
+            _ => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                *slot = Some(rx.clone());
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let connected = reconnect_task(&client).await;
+                    let _ = tx.send(Some(connected));
+                });
+                rx
+            }
+        }
+    };
+    loop {
+        if let Some(connected) = *rx.borrow() {
+            return connected;
+        }
+        if rx.changed().await.is_err() {
+            return false;
+        }
+    }
+}
+
+async fn reconnect_task(client: &Arc<RwLock<AO3Client>>) -> bool {
     #[cfg(feature = "tor")]
     {
         let Some(ctx) = reconnect_context() else {
             log_info!("recovery", "no reconnect context registered — falling back to circuit rotation");
             rotate(client).await;
-            return;
+            return client.read().await.is_tor();
         };
-        match AO3Client::new_tor_with_dir(&ctx.state_dir).await {
+        events::emit(CoreEvent::ConnectionChanged { state: events::ConnectionState::Connecting });
+        match bootstrap_tor(&ctx.state_dir).await {
             Ok(mut new_client) => {
                 new_client.share_route_timeouts(ctx.route_timeouts.clone());
                 new_client.set_timeout(ctx.timeout_secs.load(std::sync::atomic::Ordering::Relaxed));
@@ -320,17 +407,27 @@ async fn full_reconnect(client: &Arc<RwLock<AO3Client>>) {
                 // swap — same leak-avoidance as connect_tor.
                 c.stop_socks_proxy();
                 *c = new_client;
+                let port = c.socks_port().unwrap_or(0);
                 ctx.tor_connected.store(c.is_tor(), std::sync::atomic::Ordering::Relaxed);
-                ctx.socks_port.store(c.socks_port().unwrap_or(0) as u32, std::sync::atomic::Ordering::Relaxed);
+                ctx.socks_port.store(port as u32, std::sync::atomic::Ordering::Relaxed);
+                drop(c);
+                events::emit(CoreEvent::ConnectionChanged {
+                    state: events::ConnectionState::Connected { via_tor: true, socks_port: port },
+                });
+                true
             }
             Err(e) => {
-                log_error!("recovery", "full reconnect failed: {e} — falling back to circuit rotation");
-                rotate(client).await;
+                log_error!("recovery", "full reconnect did not complete: {e} — disconnected");
+                go_offline(client).await;
+                ctx.tor_connected.store(false, std::sync::atomic::Ordering::Relaxed);
+                ctx.socks_port.store(0, std::sync::atomic::Ordering::Relaxed);
+                events::emit(CoreEvent::ConnectionChanged { state: connection_lost_state(&e) });
+                false
             }
         }
     }
     #[cfg(not(feature = "tor"))]
-    { let _ = client; }
+    { let _ = client; false }
 }
 
 async fn rotate(client: &Arc<RwLock<AO3Client>>) {
@@ -402,6 +499,22 @@ mod tests {
 
     fn http_err(kind: FailureKind) -> AO3Error {
         AO3Error::Http { kind, message: "test".to_string() }
+    }
+
+    #[tokio::test]
+    async fn tor_required_refuses_a_direct_request_without_retrying() {
+        // Fail closed: with Tor required (the default), a client that isn't
+        // on Tor sends nothing, and the engine doesn't retry the refusal.
+        crate::client::set_tor_required(true);
+        let (client, storage) = test_app().await;
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = attempts.clone();
+        let result = with_recovery(client, storage, OpKind::Image, RetrySafety::Idempotent, move |c| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async move { c.read().await.fetch_image("https://example.invalid/a.png").await.map_err(AO3Error::from) }
+        }).await;
+        assert!(matches!(result, Err(AO3Error::NetworkDisabled)), "got {result:?}");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ impl AO3App {
 
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn leave_kudos(&self, work_id: u64, op_id: Option<u64>) -> Result<bool, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime_for(op_id, move |client, storage| async move {
             {
                 let c = client.read().await;
                 let s = storage.lock().await;
@@ -384,7 +384,7 @@ impl AO3App {
     /// `op_id`: request-tracking standard (see `fetch_work_full`); a crawl
     /// passes the same id for every page so the whole operation reads as one.
     pub async fn fetch_user_bookmarks_page(&self, username: String, page: u32, op_id: Option<u64>) -> Result<UPagedBookmarks, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
+        self.run_on_runtime_for(op_id, move |client, storage| async move {
             let (username, _) = split_author_byline(&username);
             let fetch_user = username.clone();
             let (listings, has_next, total, found) = recovery::with_recovery_as(

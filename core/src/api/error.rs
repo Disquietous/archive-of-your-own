@@ -31,6 +31,11 @@ pub enum AO3Error {
     /// be counted as a bad-password attempt.
     #[error("wrong_password")]
     WrongPassword,
+    /// Tor is required and not connected, so the request was never sent.
+    /// Only the user can change that (connect, or turn Tor off) — the UI
+    /// says so instead of reporting a network failure.
+    #[error("network_disabled")]
+    NetworkDisabled,
 }
 
 impl From<AppError> for AO3Error {
@@ -45,6 +50,7 @@ impl From<AppError> for AO3Error {
             AppError::InvalidWorkId(m) => AO3Error::Parse { message: m },
             AppError::SessionExpired => AO3Error::SessionExpired,
             AppError::WrongPassphrase => AO3Error::WrongPassword,
+            AppError::NetworkDisabled => AO3Error::NetworkDisabled,
         }
     }
 }

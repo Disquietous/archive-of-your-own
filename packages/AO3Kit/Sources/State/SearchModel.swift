@@ -455,6 +455,7 @@ final class SearchModel {
     func scrapeForm(_ appState: AppState) async {
         guard appState.bridge.isInitialized, !appState.bridge.networkBlocked else {
             formError = "Connect first to load the search fields from AO3."
+            if appState.bridge.isInitialized { appState.reportNetworkDisabled() }
             return
         }
         guard !isLoadingForm else { return }

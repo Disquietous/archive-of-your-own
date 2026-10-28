@@ -30,6 +30,10 @@ pub enum AppError {
     #[error("session_expired")]
     SessionExpired,
 
+    /// Tor is required and not connected: the request was never sent.
+    #[error("network_disabled")]
+    NetworkDisabled,
+
     /// SQLCipher rejected the key: the first page read after `PRAGMA key`
     /// came back "not a database". Distinct from every other open failure
     /// (schema too new, file damaged) so the unlock UI can say which.

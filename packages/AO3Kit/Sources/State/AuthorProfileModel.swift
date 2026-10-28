@@ -129,7 +129,8 @@ final class AuthorProfileModel {
                         pageDone: { lastPage = ($0, $1) })
                 }
                 if self.username == username && !task.isCancelled {
-                    appState.bridge.setWorksCrawledNow(kind: "author", targetId: username)
+                    appState.bridge.completeWorksCrawl(kind: "author", targetId: username,
+                                                       workIds: all.compactMap { UInt64($0.id) })
                     worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
                     appState.mergeCachedWorks(all)
                     // Show the cache union, not just the crawl result: works

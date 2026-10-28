@@ -36,10 +36,11 @@ struct ContentView: View {
         }
         .alert("What’s New is out of date",
                isPresented: Binding(get: { state.showWhatsNewOverdue }, set: { if !$0 { state.whatsNewCheckOverdue = false } })) {
-            Button("Check Now") { state.startWhatsNewCheck(all: false) }
+            Button(state.whatsNewOverdueCheckTitle) { state.startOverdueWhatsNewCheck() }
+            Button("Check All") { state.startWhatsNewCheck(all: true) }
             Button("Later", role: .cancel) {}
         } message: {
-            Text("Some followed authors, works or series haven’t been checked in over 24 hours.")
+            Text(state.whatsNewOverdueMessage)
         }
         // One prompt for every subscription a user-initiated reload found
         // without a follow — mounted here so it shows on any screen.

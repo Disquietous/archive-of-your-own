@@ -76,14 +76,37 @@ pub struct AO3Client {
     socks_proxy_task: Option<tokio::task::AbortHandle>,
 }
 
+/// Whether the user requires Tor. While set, a client without a Tor
+/// transport sends nothing: every request fails with `NetworkDisabled`
+/// instead of falling through to a direct connection. Process-wide (not
+/// per client) so no client swap — connect, rotation, reconnect, lock
+/// hand-off — can ever carry a stale copy. Starts set: until the app says
+/// otherwise, fail closed.
+static TOR_REQUIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_tor_required(required: bool) {
+    TOR_REQUIRED.store(required, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn tor_required() -> bool {
+    TOR_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl AO3Client {
-    /// The underlying reqwest client of the active transport.
-    fn http(&self) -> &reqwest::Client {
-        match &self.transport {
+    /// The underlying reqwest client of the active transport — the single
+    /// choke point every request passes, and so where the Tor requirement
+    /// is enforced.
+    fn http(&self) -> Result<&reqwest::Client, AppError> {
+        if tor_required() && !self.is_tor() {
+            log_info!("network", "Refused request: Tor is required and not connected");
+            crate::events::emit(crate::events::CoreEvent::NetworkRefused { id: crate::events::current_op() });
+            return Err(AppError::NetworkDisabled);
+        }
+        Ok(match &self.transport {
             Transport::Direct(c) => c,
             #[cfg(feature = "tor")]
             Transport::Tor { client, .. } => client,
-        }
+        })
     }
 
     /// The configured per-request timeout.
@@ -195,7 +218,6 @@ impl AO3Client {
         ))?
         .map_err(|e| AppError::TorError(format!("Tor bootstrap failed: {}", socks::error_chain(&e))))?;
 
-        let tor = Arc::new(tor);
 
         // Bind a local TCP listener on an ephemeral port to act as a SOCKS5
         // proxy. For every inbound connection we perform a minimal SOCKS5
@@ -281,7 +303,7 @@ impl AO3Client {
             let has_auth = cookies.contains("user_credentials");
             log_debug!("http"," cookies: has_auth={} len={} for {}", has_auth, cookies.len(), url);
 
-            let client = self.http();
+            let client = self.http()?;
 
             // Phase 1: Connect + TLS + headers (short timeout — dead connections fail fast)
             let send_start = std::time::Instant::now();
@@ -456,7 +478,7 @@ impl AO3Client {
 
     pub async fn fetch_health_check(&self) -> Result<u16, AppError> {
         self.enforce_rate_limit().await;
-        let client = self.http();
+        let client = self.http()?;
         let response = client.head(BASE_URL)
             .send()
             .await
@@ -565,7 +587,6 @@ impl AO3Client {
         };
 
         let isolated = tor.isolated_client();
-        let isolated = Arc::new(isolated);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -632,6 +653,17 @@ impl AO3Client {
 /// Build a `reqwest::Client` with our standard headers and an optional SOCKS
 /// proxy.
 fn build_reqwest_client(proxy_url: Option<&str>) -> Result<(reqwest::Client, Arc<reqwest::cookie::Jar>), AppError> {
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let builder = client_builder(proxy_url)?.cookie_provider(jar.clone());
+    let client = builder
+        .build()
+        .map_err(|e| AppError::NetworkError(format!("Failed to build HTTP client: {e}")))?;
+    Ok((client, jar))
+}
+
+/// The browser-like client configuration every AO3 client shares — headers,
+/// timeouts, proxy — without a cookie store.
+fn client_builder(proxy_url: Option<&str>) -> Result<reqwest::ClientBuilder, AppError> {
     use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, ACCEPT_ENCODING};
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static(APP_USER_AGENT));
@@ -646,10 +678,8 @@ fn build_reqwest_client(proxy_url: Option<&str>) -> Result<(reqwest::Client, Arc
     headers.insert("Sec-Fetch-Site", HeaderValue::from_static("none"));
     headers.insert("Priority", HeaderValue::from_static("u=0, i"));
 
-    let jar = Arc::new(reqwest::cookie::Jar::default());
     let mut builder = reqwest::Client::builder()
         .default_headers(headers)
-        .cookie_provider(jar.clone())
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(0))
         .pool_max_idle_per_host(0)
@@ -661,11 +691,7 @@ fn build_reqwest_client(proxy_url: Option<&str>) -> Result<(reqwest::Client, Arc
             .map_err(|e| AppError::NetworkError(format!("Invalid proxy URL: {e}")))?;
         builder = builder.proxy(proxy);
     }
-
-    let client = builder
-        .build()
-        .map_err(|e| AppError::NetworkError(format!("Failed to build HTTP client: {e}")))?;
-    Ok((client, jar))
+    Ok(builder)
 }
 
 // ---------------------------------------------------------------------------

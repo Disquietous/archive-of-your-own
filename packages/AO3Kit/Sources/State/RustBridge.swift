@@ -56,6 +56,26 @@ final class RustBridge {
         app?.setPlatformCapabilities(capabilities: recoveryCapabilities)
         torOnlyApp?.setObserver(observer: recoveryObserver)
         torOnlyApp?.setPlatformCapabilities(capabilities: recoveryCapabilities)
+        applyTorRequirement()
+        if torRequirementObserver == nil {
+            // The setting is written from several screens straight into
+            // UserDefaults; follow the store itself so the core never
+            // enforces a stale requirement.
+            torRequirementObserver = NotificationCenter.default.addObserver(
+                forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyTorRequirement() }
+            }
+        }
+    }
+
+    @ObservationIgnored private var torRequirementObserver: NSObjectProtocol?
+
+    /// Push the Tor setting into the core, which enforces it: while Tor is
+    /// required and not connected, nothing is sent.
+    private func applyTorRequirement() {
+        let required = torRequired
+        (app ?? torOnlyApp)?.setTorRequired(required: required)
     }
 
     var torRequired: Bool {
@@ -371,6 +391,10 @@ final class RustBridge {
             circuitHops = runtime.getCircuitHops()
         } catch let error as Ao3Error {
             switch error {
+            case .Cancelled:
+                // The user cancelled: the core left the app disconnected.
+                torStatus = .disconnected
+                circuitHops = []
             case .Network(let msg):
                 if msg.contains("timed out") {
                     torStatus = .error("Timed out — check your network")
@@ -383,6 +407,12 @@ final class RustBridge {
         } catch {
             torStatus = .error(error.localizedDescription)
         }
+    }
+
+    /// Stop building a Tor connection (user connect or the engine's
+    /// reconnect) and stay disconnected until the user reconnects.
+    func cancelConnection() {
+        (app ?? torOnlyApp)?.cancelConnection()
     }
 
     func disconnectTor() async {
