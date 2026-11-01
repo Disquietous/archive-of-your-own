@@ -185,6 +185,9 @@ pub struct LocalSearchCriteria {
     /// "" any · "T" crossovers only · "F" no crossovers
     pub crossover: String,
     pub single_chapter: bool,
+    /// Library-only: keep works whose stored chapter rows number exactly
+    /// the explicit total chapter count. A "?" total never matches.
+    pub fully_downloaded: bool,
     pub word_count: String,
     /// Language option label, e.g. "English".
     pub language: String,

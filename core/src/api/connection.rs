@@ -214,6 +214,62 @@ impl AO3App {
         });
     }
 
+    /// New Identity, teardown half. In order:
+    /// 1. Offline: the transport goes direct, which the Tor requirement
+    ///    refuses to use — nothing more is sent, and the recovery engine has
+    ///    no Tor connection to rebuild.
+    /// 2. Every in-flight operation and every open SOCKS stream is cancelled.
+    /// 3. Once every stream has ended, arti's on-disk state (guards,
+    ///    consensus, everything) is deleted.
+    /// 4. Cloudflare cookies go — their clearance belonged to the old exit.
+    ///    The AO3 session is kept.
+    /// The caller then connects as usual (`connect_tor`), which builds the
+    /// new Tor client from nothing. Not cancellable: once started, the old
+    /// state is always wiped; a cancel only stops the new connection.
+    pub async fn reset_tor_identity(&self) -> Result<(), AO3Error> {
+        let client_ref = self.client.clone();
+        let storage = self.storage.clone();
+        let state_dir = self.state_dir.clone();
+        let tor_connected = self.tor_connected.clone();
+        let socks_port = self.socks_port.clone();
+        let active_tasks = self.active_tasks.clone();
+        self._runtime.spawn(async move {
+            super::recovery::go_offline(&client_ref).await;
+            tor_connected.store(false, std::sync::atomic::Ordering::Relaxed);
+            socks_port.store(0, std::sync::atomic::Ordering::Relaxed);
+            crate::events::emit(crate::events::CoreEvent::ConnectionChanged {
+                state: crate::events::ConnectionState::Disconnected,
+            });
+
+            if let Ok(mut tasks) = active_tasks.lock() {
+                for (_, handle) in tasks.drain() {
+                    handle.abort();
+                }
+            }
+            crate::client::kill_socks_streams();
+
+            loop {
+                let open = crate::client::live_socks_streams();
+                if open == 0 { break; }
+                log_info!("tor", "New identity: waiting for {open} stream(s) to close");
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+
+            crate::client::wipe_tor_state(&state_dir).map_err(AO3Error::from)?;
+            log_info!("tor", "New identity: Tor state wiped");
+
+            client_ref.read().await.clear_cloudflare_cookies();
+            let s = storage.lock().await;
+            if let Ok(Some((id, _, cookies))) = s.get_active_account() {
+                log_db("update_account_cookies",
+                    s.update_account_cookies(&id, &crate::client::strip_cloudflare_cookies(&cookies)));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| AO3Error::Network { message: format!("New identity task failed: {e}") })?
+    }
+
     /// Whether Tor is required. While it is, nothing is sent without a
     /// Tor connection — requests fail with `NetworkDisabled` instead.
     /// Process-wide; starts required until the app says otherwise.

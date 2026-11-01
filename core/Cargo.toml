@@ -63,11 +63,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # readable backtraces and breakpoints, but drop the type/variable DWARF
 # that made target/debug balloon to tens of GB. Release profiles (what the
 # app ships) are unaffected.
+# No debug info for dev/test builds: on macOS it lives in per-codegen-unit
+# .rcgu.o files that every incremental rebuild leaves behind (22 GB of them
+# by 2026-10-31). Panic messages keep their file and line regardless.
 [profile.dev]
-debug = "line-tables-only"
+debug = false
 
 [profile.dev.package."*"]
-debug = "line-tables-only"
+debug = false
 
 # Cargo defaults release to incremental = false, so every one-line change
 # recompiled the whole ao3_core crate per target (~2min each, measured).

@@ -37,7 +37,7 @@ struct CommentThreadView: View {
     var overrideLoggedIn: Bool = false
 
     var isLoggedIn: Bool {
-        overrideLoggedIn || state.bridge.getCredentials() != nil
+        overrideLoggedIn || state.ao3Username != nil
     }
 
     var body: some View {

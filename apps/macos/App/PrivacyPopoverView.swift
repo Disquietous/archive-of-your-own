@@ -9,10 +9,10 @@ struct PrivacyPopoverView: View {
     @Bindable var appState: AppState
     @Bindable var model: MacAppModel
 
+    @Environment(\.dismiss) private var dismiss
+
     @State private var username = ""
     @State private var password = ""
-    @State private var isSigningIn = false
-    @State private var loginError: String?
 
     private struct Hop: Identifiable {
         let label: String, icon: String, tint: KeyPath<AppTheme, Color>
@@ -100,12 +100,17 @@ struct PrivacyPopoverView: View {
             }
 
             Button {
-                Task { await appState.connectTorNow() }
+                if connected {
+                    dismiss()
+                    appState.newTorIdentity()
+                } else {
+                    Task { await appState.connectTorNow() }
+                }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12, weight: .semibold))
-                    Text(connected ? "New circuit" : "Connect")
+                    Text(connected ? "New Identity" : "Connect")
                         .font(Font(MacFont.ui(13, weight: .bold)))
                 }
                 .foregroundStyle(theme.ink)
@@ -129,7 +134,7 @@ struct PrivacyPopoverView: View {
 
     @ViewBuilder
     private var accountSection: some View {
-        if appState.needsReauth {
+        if appState.needsReauth || (appState.ao3Username == nil && appState.ao3ActiveAccount != nil) {
             reauthForm
         } else if let account = appState.ao3Username {
             signedInRow(account)
@@ -185,7 +190,7 @@ struct PrivacyPopoverView: View {
                 SecureField("Password", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { signIn() }
-                if let loginError {
+                if let loginError = appState.ao3LoginError {
                     Text(loginError)
                         .font(Font(MacFont.ui(11.5, weight: .medium)))
                         .foregroundStyle(Color(hex: "CE514D"))
@@ -205,7 +210,7 @@ struct PrivacyPopoverView: View {
                 Image(systemName: "person.badge.clock")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(theme.accent2)
-                Text("Session expired — \(appState.ao3Username ?? "account")")
+                Text("\(appState.needsReauth ? "Session expired" : "Logged out") — \(appState.ao3ActiveAccount ?? "account")")
                     .font(Font(MacFont.ui(12.5, weight: .bold)))
                     .foregroundStyle(theme.ink)
             }
@@ -219,7 +224,7 @@ struct PrivacyPopoverView: View {
                 SecureField("Password", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { reauth() }
-                if let loginError {
+                if let loginError = appState.ao3LoginError {
                     Text(loginError)
                         .font(Font(MacFont.ui(11.5, weight: .medium)))
                         .foregroundStyle(Color(hex: "CE514D"))
@@ -232,7 +237,7 @@ struct PrivacyPopoverView: View {
     private func signInButton(label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Group {
-                if isSigningIn {
+                if appState.ao3LoginInFlight {
                     ProgressView().controlSize(.small)
                 } else {
                     Text(label)
@@ -245,7 +250,7 @@ struct PrivacyPopoverView: View {
             .clipShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
-        .disabled(isSigningIn || password.isEmpty)
+        .disabled(appState.ao3LoginInFlight || password.isEmpty)
     }
 
     // MARK: - Toggles
@@ -275,49 +280,21 @@ struct PrivacyPopoverView: View {
     // MARK: - Actions
 
     private func signIn() {
-        // Belt-and-braces alongside the UI gate: with Tor required,
-        // credentials never leave except over a circuit.
-        guard !isSigningIn, !username.isEmpty, !password.isEmpty, !appState.bridge.networkBlocked else { return }
-        isSigningIn = true
-        loginError = nil
+        guard !username.isEmpty, !password.isEmpty else { return }
         Task { @MainActor in
-            do {
-                let success = try await appState.bridge.login(username: username, password: password)
-                if success {
-                    try? appState.bridge.saveAccount(username: username)
-                    appState.bridge.saveSessionCookies()
-                    appState.refreshAO3Username()
-                    username = ""
-                    password = ""
-                    await appState.loadSubscriptions(force: true)
-                } else {
-                    loginError = "Login failed. Check your credentials."
-                }
-            } catch {
-                loginError = "\(error)".contains("timeout")
-                    ? "Timed out. Try a new circuit above." : error.localizedDescription
+            if await appState.signInAO3(username: username, password: password) {
+                username = ""
+                password = ""
             }
-            isSigningIn = false
         }
     }
 
     private func reauth() {
-        guard !isSigningIn, !password.isEmpty, !appState.bridge.networkBlocked else { return }
-        isSigningIn = true
-        loginError = nil
+        guard !password.isEmpty else { return }
         Task { @MainActor in
-            do {
-                let success = try await appState.bridge.reauthenticate(password: password)
-                if success {
-                    appState.needsReauth = false
-                    password = ""
-                } else {
-                    loginError = "Login failed. Check your password."
-                }
-            } catch {
-                loginError = error.localizedDescription
+            if await appState.logInActiveAccount(password: password) {
+                password = ""
             }
-            isSigningIn = false
         }
     }
 

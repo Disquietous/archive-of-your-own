@@ -286,7 +286,7 @@ struct PrivacySheetView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("New circuit")
+                        Text("New Identity")
                             .font(Typography.smallButtonLabel())
                     }
                     .foregroundStyle(theme.ink)

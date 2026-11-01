@@ -27,8 +27,59 @@ use audit::AuditCtx;
 use helpers::scan_attr_near;
 #[cfg(feature = "tor")]
 use socks::run_socks_proxy;
+#[cfg(feature = "tor")]
+pub use socks::{kill_socks_streams, live_socks_streams};
+/// Without Tor there is no SOCKS proxy, so never any streams.
+#[cfg(not(feature = "tor"))]
+pub fn kill_socks_streams() {}
+#[cfg(not(feature = "tor"))]
+pub fn live_socks_streams() -> usize { 0 }
 
 pub const BASE_URL: &str = "https://archiveofourown.org";
+
+/// Cookies that prove an AO3 login: `remember_user_token` (what AO3 sets
+/// now) and the older `user_credentials`. `_otwarchive_session` is issued to
+/// anonymous visitors too, so it never proves a login on its own.
+const LOGIN_COOKIE_NAMES: [&str; 2] = ["remember_user_token", "user_credentials"];
+
+/// Arti's on-disk state (guards, consensus, everything) under the app's
+/// state directory.
+pub fn tor_state_dir(state_dir: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(state_dir).join("tor")
+}
+
+/// Delete all of arti's on-disk state. Only safe with no Tor client alive.
+pub fn wipe_tor_state(state_dir: &str) -> Result<(), AppError> {
+    let dir = tor_state_dir(state_dir);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::TorError(format!("Cannot delete Tor state {}: {e}", dir.display()))),
+    }
+}
+
+/// Cloudflare's cookies (`cf_clearance`, `__cf_bm`, `_cfuvid`, ...): bound
+/// to the exit that earned them, unrelated to the AO3 session.
+fn is_cloudflare_cookie(name: &str) -> bool {
+    name.starts_with("cf_") || name.starts_with("__cf") || name == "_cfuvid"
+}
+
+/// A jar string without its Cloudflare cookies.
+pub fn strip_cloudflare_cookies(cookies: &str) -> String {
+    cookies.split("; ")
+        .filter(|c| !c.is_empty() && !is_cloudflare_cookie(c.split('=').next().unwrap_or("")))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Whether a cookie string (a jar's `name=value; ...` header, or a single
+/// Set-Cookie value) carries an AO3 login. The one test of logged-in state.
+pub fn has_login_cookie(cookies: &str) -> bool {
+    cookies.split(';').any(|part| {
+        let (name, value) = part.trim().split_once('=').unwrap_or((part.trim(), ""));
+        LOGIN_COOKIE_NAMES.contains(&name) && !value.is_empty()
+    })
+}
 
 const APP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; rv:140.0) Gecko/20100101 Firefox/140.0";
 const RATE_LIMIT_DELAY: Duration = Duration::from_millis(500);
@@ -196,7 +247,7 @@ impl AO3Client {
         use arti_client::TorClient;
         use arti_client::config::TorClientConfigBuilder;
 
-        let tor_dir = std::path::PathBuf::from(state_dir).join("tor");
+        let tor_dir = tor_state_dir(state_dir);
         let cache_dir = tor_dir.join("cache");
         let data_dir = tor_dir.join("data");
         for dir in [&tor_dir, &cache_dir, &data_dir] {
@@ -300,7 +351,7 @@ impl AO3Client {
 
             // Check cookies before sending
             let cookies = self.get_session_cookies();
-            let has_auth = cookies.contains("user_credentials");
+            let has_auth = has_login_cookie(&cookies);
             log_debug!("http"," cookies: has_auth={} len={} for {}", has_auth, cookies.len(), url);
 
             let client = self.http()?;
@@ -556,13 +607,26 @@ impl AO3Client {
         }
     }
 
-    /// Expire ONLY the AO3 auth cookies (`user_credentials`,
+    /// Expire the Cloudflare cookies, keeping everything else.
+    pub fn clear_cloudflare_cookies(&self) {
+        use reqwest::cookie::CookieStore;
+        let url = BASE_URL.parse::<url::Url>().unwrap();
+        let Some(header) = self.cookie_jar.cookies(&url) else { return };
+        for part in header.to_str().unwrap_or("").split("; ") {
+            let name = part.split('=').next().unwrap_or("");
+            if is_cloudflare_cookie(name) {
+                self.cookie_jar.add_cookie_str(&format!("{name}=; Max-Age=0"), &url);
+            }
+        }
+    }
+
+    /// Expire ONLY the AO3 auth cookies (the login cookies plus
     /// `_otwarchive_session`) — used when AO3 rejects the session. Leaves
     /// every other cookie (notably Cloudflare's cf_clearance) intact, since
     /// those are expensive to re-earn over Tor.
     pub fn clear_auth_cookies(&self) {
         let url = BASE_URL.parse::<url::Url>().unwrap();
-        for name in ["user_credentials", "_otwarchive_session"] {
+        for name in LOGIN_COOKIE_NAMES.iter().copied().chain(["_otwarchive_session"]) {
             self.cookie_jar.add_cookie_str(&format!("{name}=; Max-Age=0"), &url);
         }
     }
@@ -702,6 +766,25 @@ fn client_builder(proxy_url: Option<&str>) -> Result<reqwest::ClientBuilder, App
 mod tests {
     use super::*;
     use super::helpers::{comment_post_succeeded, scan_attr_near, urlencoded};
+
+    #[test]
+    fn test_strip_cloudflare_cookies() {
+        assert_eq!(
+            strip_cloudflare_cookies("_otwarchive_session=a; cf_clearance=b; remember_user_token=c; __cf_bm=d; _cfuvid=e"),
+            "_otwarchive_session=a; remember_user_token=c");
+        assert_eq!(strip_cloudflare_cookies(""), "");
+    }
+
+    #[test]
+    fn test_has_login_cookie() {
+        assert!(has_login_cookie("_otwarchive_session=abc; remember_user_token=xyz"));
+        assert!(has_login_cookie("user_credentials=1; cf_clearance=q"));
+        assert!(has_login_cookie("remember_user_token=xyz; path=/; secure; HttpOnly"));
+        assert!(!has_login_cookie("_otwarchive_session=abc; cf_clearance=q"));
+        assert!(!has_login_cookie("remember_user_token=; Max-Age=0"));
+        assert!(!has_login_cookie("x_remember_user_token=xyz"));
+        assert!(!has_login_cookie(""));
+    }
 
     #[test]
     fn test_comment_post_succeeded() {

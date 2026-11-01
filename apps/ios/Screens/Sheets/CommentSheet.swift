@@ -19,7 +19,7 @@ struct CommentSheet: View {
     @State private var draftLoaded = false
 
     private var isLoggedIn: Bool {
-        state.bridge.getCredentials() != nil
+        state.ao3Username != nil
     }
 
     var body: some View {

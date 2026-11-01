@@ -1,11 +1,19 @@
 import Foundation
 
 extension SearchModel {
+    /// Library-only filters live in the form state beside AO3's fields
+    /// (so saved searches and Clear cover them) under this prefix, which
+    /// AO3 requests never send.
+    static let libraryFieldPrefix = "library["
+    /// "1" keeps only works with every chapter stored locally.
+    static let fullyDownloadedField = "library[fully_downloaded]"
+
     /// An all-blank criteria record (blank matches everything in the core).
     static func emptyLibraryCriteria() -> ULibrarySearchCriteria {
         ULibrarySearchCriteria(
             query: "", title: "", creators: "", revisedAt: "", complete: "",
-            crossover: "", singleChapter: false, wordCount: "", language: "",
+            crossover: "", singleChapter: false, fullyDownloaded: false,
+            wordCount: "", language: "",
             fandomNames: "", characterNames: "", relationshipNames: "",
             freeformNames: "", ratings: [], warnings: [], categories: [],
             hits: "", kudosCount: "", commentsCount: "", bookmarksCount: "",
@@ -45,6 +53,7 @@ extension SearchModel {
             case _ where name.hasSuffix("[complete]"): c.complete = value
             case _ where name.hasSuffix("[crossover]"): c.crossover = value
             case _ where name.hasSuffix("[single_chapter]"): c.singleChapter = checked.contains("1") || value == "1"
+            case Self.fullyDownloadedField: c.fullyDownloaded = value == "1"
             case _ where name.hasSuffix("[word_count]"): c.wordCount = value
             case _ where name.hasSuffix("[language_id]"): c.language = labels(name, value, checked).first ?? ""
             case _ where name.hasSuffix("[fandom_names]"): c.fandomNames = value

@@ -613,6 +613,9 @@ pub struct ULibrarySearchCriteria {
     pub complete: String,
     pub crossover: String,
     pub single_chapter: bool,
+    /// Library-only: every chapter of a work with an explicit total is
+    /// stored locally.
+    pub fully_downloaded: bool,
     pub word_count: String,
     pub language: String,
     pub fandom_names: String,
@@ -640,6 +643,7 @@ impl From<ULibrarySearchCriteria> for LocalSearchCriteria {
             complete: c.complete,
             crossover: c.crossover,
             single_chapter: c.single_chapter,
+            fully_downloaded: c.fully_downloaded,
             word_count: c.word_count,
             language: c.language,
             fandom_names: c.fandom_names,

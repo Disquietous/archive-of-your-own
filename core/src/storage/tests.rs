@@ -1902,6 +1902,37 @@ fn assert_search_parity(db: &Storage, c: &LocalSearchCriteria) {
 }
 
 #[test]
+fn test_search_fully_downloaded() {
+    let db = open_test_db();
+    // (id, total_chapters, chapter rows stored)
+    for (id, total, stored) in [
+        (1, Some(3), 3), // complete download
+        (2, Some(3), 2), // missing a chapter
+        (3, None, 2),    // "?" total never qualifies
+        (4, Some(1), 1), // one-shot, downloaded
+        (5, Some(2), 0), // metadata only
+    ] {
+        let mut w = sample_work(id);
+        w.total_chapters = total;
+        db.save_work(&w).unwrap();
+        for n in 1..=stored {
+            db.save_chapter(id, &sample_chapter(n)).unwrap();
+        }
+    }
+    // The fixtures share sort keys, so compare as sets: the oracle's order
+    // among ties is arbitrary.
+    let sorted = |mut v: Vec<u64>| { v.sort(); v };
+    let oracle = |c: &LocalSearchCriteria| sorted(
+        db.search_local_works_filtered(c, 0).unwrap().iter().map(|w| w.id).collect());
+    let c = LocalSearchCriteria { fully_downloaded: true, ..Default::default() };
+    assert_eq!(sorted(db.search_library_work_ids(&c).unwrap()), vec![1, 4]);
+    assert_eq!(oracle(&c), vec![1, 4]);
+    let c = LocalSearchCriteria { fully_downloaded: true, title: "Work 4".into(), ..Default::default() };
+    assert_eq!(db.search_library_work_ids(&c).unwrap(), vec![4]);
+    assert_eq!(oracle(&c), vec![4]);
+}
+
+#[test]
 fn test_sql_search_parity_matrix() {
     let db = open_test_db();
     for w in parity_library() {

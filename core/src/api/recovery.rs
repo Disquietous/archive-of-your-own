@@ -62,8 +62,10 @@ struct Policy {
 fn policy_for(failure: FailureKind, attempt: u32) -> Option<Policy> {
     match failure {
         // Provably never reached AO3 — safe to retry for any operation.
+        // Edge↔origin TLS, not a challenge: new nodes only. If the new exit
+        // does need clearance, the retry comes back Challenged and earns it.
         FailureKind::EdgeTlsFailure =>
-            Some(Policy { remedy: Remedy::RotateAndReclear, cap: 3, retry_at_most_once: true }),
+            Some(Policy { remedy: Remedy::Rotate, cap: 3, retry_at_most_once: true }),
         // 429's budget is scoped to the exit IP. Escalation ladder: three
         // retries each from a new set of nodes (isolated client on the
         // same bootstrap), then one full reconnect (fresh TorClient — the
@@ -478,7 +480,7 @@ async fn restore_persisted_cookies(client: &Arc<RwLock<AO3Client>>, storage: &Ar
     let s = storage.lock().await;
     let cookies = match s.get_active_account() {
         Ok(Some((_, _, cookies))) if !cookies.is_empty() => Some(cookies),
-        _ => s.get_state("ao3_session_cookies").ok().flatten().filter(|c| !c.is_empty()),
+        _ => None,
     };
     drop(s);
     if let Some(cookies) = cookies {

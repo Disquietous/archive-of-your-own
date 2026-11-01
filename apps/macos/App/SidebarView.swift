@@ -265,7 +265,9 @@ struct SidebarView: View {
                 }
             }
         } else {
-            Text("Direct connection")
+            // With Tor required the core sends nothing until Tor connects,
+            // so there is no connection at all — not a direct one.
+            Text(theme.useTorByDefault ? "Not connected" : "Direct connection")
                 .font(Font(MacFont.ui(11)))
                 .foregroundStyle(theme.ink3)
         }
@@ -428,6 +430,7 @@ struct SidebarView: View {
     private var identityLine: String {
         if appState.needsReauth { return "session expired" }
         if let account = appState.ao3Username { return account }
+        if let account = appState.ao3ActiveAccount { return "\(account) · logged out" }
         return "not signed in"
     }
 

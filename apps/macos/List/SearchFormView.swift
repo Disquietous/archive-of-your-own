@@ -68,6 +68,9 @@ struct SearchFormView: View {
                         ForEach(scalarFields, id: \.name) { field in
                             fieldControl(field)
                         }
+                        if search.searchLibraryOnly {
+                            fullyDownloadedControl
+                        }
                     }
 
                     if !chipGroups.isEmpty {
@@ -245,6 +248,33 @@ struct SearchFormView: View {
                     .buttonStyle(.plain)
                 }
             }
+        }
+    }
+
+    /// Library-only filter (not an AO3 field): works whose every chapter is
+    /// stored locally, judged against an explicit total chapter count.
+    private var fullyDownloadedControl: some View {
+        @Bindable var search = model.search
+        let key = SearchModel.fullyDownloadedField
+        let on = search.fieldValues[key] == "1"
+        return VStack(alignment: .leading, spacing: 5) {
+            Text("DOWNLOADS")
+                .font(Font(MacFont.ui(10.5, weight: .bold)))
+                .kerning(0.6)
+                .foregroundStyle(theme.ink3)
+            Button {
+                search.fieldValues[key] = on ? nil : "1"
+            } label: {
+                Text("Fully downloaded only")
+                    .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                    .foregroundStyle(on ? theme.onAccent : theme.ink2)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(on ? theme.accent : theme.surface2)
+                    .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Only works with every chapter saved locally. Works with an unknown chapter total (?) are excluded.")
         }
     }
 

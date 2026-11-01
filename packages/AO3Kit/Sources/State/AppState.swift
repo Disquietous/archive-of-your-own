@@ -281,6 +281,9 @@ final class AppState {
     var torConnectCancelled = false
     var torConnectFailed = false
     var showTorConnectOverlay = false
+    /// New Identity is tearing down the old connection (streams closing,
+    /// Tor state being wiped) before the new one is built.
+    var isResettingTorIdentity = false
     /// The recovery engine (not the user) is building the connection now
     /// shown in the connect overlay — it rebuilt a connection that stopped
     /// working. Cleared when that connection resolves.
@@ -361,8 +364,17 @@ final class AppState {
 
     var pendingBookmarkRemoval: String?
 
+    /// The active account's username, only while it is logged in to AO3.
     var ao3Username: String?
+    /// The active account's username, logged in or not.
+    var ao3ActiveAccount: String?
     var ao3AccountCount = 0
+    /// An AO3 login request is in flight. Owned here, not by a view, so every
+    /// login surface (including ones reopened mid-attempt) shows the attempt
+    /// until it resolves.
+    var ao3LoginInFlight = false
+    /// Why the last login attempt failed; cleared when a new one starts.
+    var ao3LoginError: String?
 
     var downloadingWorkIDs: Set<String> = []
     /// A running "Download all": works finished so far of the batch.

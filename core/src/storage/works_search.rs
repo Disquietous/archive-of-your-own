@@ -110,6 +110,8 @@ enum Predicate {
     Complete(bool),
     Crossover(bool),
     SingleChapter,
+    /// Stored chapter rows equal the explicit total chapter count.
+    FullyDownloaded,
     /// ASCII-ci equality, pre-lowered.
     LanguageEquals(String),
     Number { column: &'static str, range: NumRange },
@@ -175,6 +177,9 @@ fn parse_criteria(c: &LocalSearchCriteria) -> Vec<Predicate> {
     }
     if c.single_chapter {
         preds.push(Predicate::SingleChapter);
+    }
+    if c.fully_downloaded {
+        preds.push(Predicate::FullyDownloaded);
     }
     let language = c.language.trim();
     if !language.is_empty() {
@@ -261,6 +266,13 @@ fn parse_revised(expr: &str) -> Option<DateCmp> {
 // ---------------------------------------------------------------------------
 // Compiler
 // ---------------------------------------------------------------------------
+
+/// A work is fully downloaded when its stored chapter rows number exactly
+/// its explicit total chapter count. An unknown total ("?", NULL) never
+/// matches. Shared with the oracle so both apply the same rule.
+pub(super) const FULLY_DOWNLOADED_SQL: &str =
+    "works.total_chapters IS NOT NULL AND works.total_chapters > 0
+     AND works.total_chapters = (SELECT COUNT(*) FROM chapters ch WHERE ch.work_id = works.id)";
 
 /// Range bounds land in i64 columns; a garbage bound past i64::MAX clamps
 /// (nothing stored is ever that large, so comparisons keep their meaning).
@@ -403,6 +415,9 @@ impl Storage {
             }
             Predicate::SingleChapter => {
                 fragments.push("works.chapter_count = 1".into());
+            }
+            Predicate::FullyDownloaded => {
+                fragments.push(FULLY_DOWNLOADED_SQL.into());
             }
             Predicate::LanguageEquals(lowered) => {
                 fragments.push("lower(works.language) = ?".into());

@@ -51,10 +51,10 @@ impl AO3Client {
 
             let status = resp.status().as_u16();
 
-            // Check for user_credentials cookie in response headers
+            // Check for a login cookie in response headers
             let has_cred_cookie = resp.headers().get_all("set-cookie")
                 .iter()
-                .any(|v| v.to_str().unwrap_or("").contains("user_credentials"));
+                .any(|v| super::has_login_cookie(v.to_str().unwrap_or("")));
 
             let final_url = resp.url().to_string();
             let body = resp.text().await
@@ -332,57 +332,5 @@ impl AO3Client {
             }
         }
         Ok(names)
-    }
-
-    /// Log out of AO3 by sending a DELETE request to the session endpoint.
-    pub async fn logout(&self) -> Result<(), AppError> {
-        let html = self.fetch(&format!("{BASE_URL}/")).await?;
-        let token = {
-            let doc = scraper::Html::parse_document(&html);
-            let sel = scraper::Selector::parse("a[href='/users/logout']").unwrap();
-            if doc.select(&sel).next().is_none() {
-                return Ok(());
-            }
-            let meta_sel = scraper::Selector::parse("meta[name='csrf-token']").unwrap();
-            doc.select(&meta_sel)
-                .next()
-                .and_then(|el| el.value().attr("content"))
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-
-        if token.is_empty() {
-            self.clear_cookies();
-            return Ok(());
-        }
-
-        self.enforce_rate_limit().await;
-
-        let client = self.http()?;
-
-        let timeout = self.request_timeout();
-
-        let params = [
-            ("authenticity_token", token.as_str()),
-            ("_method", "delete"),
-        ];
-
-        let result = tokio::time::timeout(timeout, async {
-            client.post(format!("{BASE_URL}/users/logout"))
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| AppError::NetworkError(format!("{e}")))?;
-            Ok::<(), AppError>(())
-        }).await;
-
-        match result {
-            Err(_) => {},
-            Ok(Err(_)) => {},
-            Ok(Ok(())) => {},
-        }
-
-        self.clear_cookies();
-        Ok(())
     }
 }

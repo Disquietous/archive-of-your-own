@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::has_login_cookie;
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
@@ -22,22 +23,19 @@ impl AO3App {
 
     pub async fn login(&self, username: String, password: String) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let result = with_recovery(client.clone(), storage.clone(), OpKind::Login, RetrySafety::Idempotent,
+            with_recovery(client, storage, OpKind::Login, RetrySafety::Idempotent,
                 move |client| {
                     let (username, password) = (username.clone(), password.clone());
                     async move {
                         client.read().await.login(&username, &password).await.map_err(AO3Error::from)
                     }
-                }).await?;
-            if result {
-                let cookies = client.read().await.get_session_cookies();
-                let s = storage.lock().await;
-                log_db("set_state", s.set_state("ao3_session_cookies", &cookies));
-            }
-            Ok(result)
+                }).await
         }).await
     }
 
+    /// Persist the live jar to the active account row — the only place a
+    /// session is stored. Without an active account there is nowhere to
+    /// keep it (first login saves via `save_account`).
     pub fn save_session_cookies(&self) -> Result<(), AO3Error> {
         let client = self.client.blocking_read();
         let cookies = client.get_session_cookies();
@@ -45,47 +43,26 @@ impl AO3App {
 
         // Save to active account if one exists
         if let Ok(Some((id, _, _))) = storage.get_active_account() {
-            if !cookies.contains("user_credentials") {
+            if !has_login_cookie(&cookies) {
                 if let Ok(Some((_, _, existing))) = storage.get_active_account() {
-                    if existing.contains("user_credentials") {
+                    if has_login_cookie(&existing) {
                         log_info!("cookies", " Refusing to overwrite authenticated cookies with unauthenticated jar");
                         return Ok(());
                     }
                 }
             }
             storage.update_account_cookies(&id, &cookies).map_err(AO3Error::from)?;
-            return Ok(());
         }
-
-        // Fallback to legacy app_state
-        if !cookies.contains("user_credentials") {
-            if let Ok(Some(existing)) = storage.get_state("ao3_session_cookies") {
-                if existing.contains("user_credentials") {
-                    log_info!("cookies", " Refusing to overwrite authenticated cookies with unauthenticated jar");
-                    return Ok(());
-                }
-            }
-        }
-        storage.set_state("ao3_session_cookies", &cookies).map_err(AO3Error::from)
+        Ok(())
     }
 
     pub fn restore_session_cookies(&self) -> Result<bool, AO3Error> {
         let storage = self.storage.blocking_lock();
+        log_db("migrate_legacy_credentials", storage.migrate_legacy_credentials());
 
-        // Try active account first
         if let Ok(Some((_, _, cookies))) = storage.get_active_account() {
             if !cookies.is_empty() {
-                log_info!("cookies"," Restoring from account: {} chars, has user_credentials={}", cookies.len(), cookies.contains("user_credentials"));
-                let client = self.client.blocking_read();
-                client.set_session_cookies(&cookies);
-                return Ok(true);
-            }
-        }
-
-        // Fallback to legacy
-        if let Some(cookies) = storage.get_state("ao3_session_cookies").map_err(AO3Error::from)? {
-            if !cookies.is_empty() {
-                log_info!("cookies"," Restoring from legacy: {} chars, has user_credentials={}", cookies.len(), cookies.contains("user_credentials"));
+                log_info!("cookies"," Restoring from account: {} chars, logged in={}", cookies.len(), has_login_cookie(&cookies));
                 let client = self.client.blocking_read();
                 client.set_session_cookies(&cookies);
                 return Ok(true);
@@ -96,11 +73,11 @@ impl AO3App {
 
     pub fn save_account(&self, username: String) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        if let Ok(Some((id, _, _))) = storage.get_active_account() {
-            storage.create_account(&id, &username, "").map_err(AO3Error::from)?;
-            return Ok(());
-        }
-        let id = crate::storage::account_id_for(&username);
+        // Logging in as a username already on file reuses that row.
+        let id = storage.get_all_accounts().ok()
+            .and_then(|all| all.into_iter().find(|(_, u, _, _)| u.eq_ignore_ascii_case(&username)))
+            .map(|(id, _, _, _)| id)
+            .unwrap_or_else(|| crate::storage::account_id_for(&username));
         let client = self.client.blocking_read();
         let cookies = client.get_session_cookies();
         storage.create_account(&id, &username, &cookies).map_err(AO3Error::from)?;
@@ -179,41 +156,24 @@ impl AO3App {
         Ok(result)
     }
 
+    /// Log the active account out on this device. See `logout_specific_account`.
     pub async fn logout_account(&self) -> Result<(), AO3Error> {
         self.run_on_runtime(|client, storage| async move {
-            let c = client.read().await;
-            let _ = c.logout().await;
-            drop(c);
-
-            let s = storage.lock().await;
-            if let Ok(Some((id, _, _))) = s.get_active_account() {
-                s.clear_account_cookies(&id).map_err(AO3Error::from)?;
+            let active = storage.lock().await.get_active_account().map_err(AO3Error::from)?;
+            match active {
+                Some((id, _, _)) => sign_out_locally(&client, &storage, &id).await,
+                None => Ok(()),
             }
-            Ok(())
         }).await
     }
 
+    /// Log an account out on this device: its session is dropped from
+    /// storage (and from the live jar when it is the active account). The
+    /// account itself stays. Never sends a request — the orphaned AO3
+    /// session expires server-side on its own.
     pub async fn logout_specific_account(&self, account_id: String) -> Result<(), AO3Error> {
-        let aid = account_id.clone();
         self.run_on_runtime(move |client, storage| async move {
-            // Storage must not stay locked across the network logout — every
-            // sync getter blocks on this mutex.
-            let is_active = {
-                let s = storage.lock().await;
-                s.get_active_account()
-                    .map(|a| a.map(|(id, _, _)| id == aid).unwrap_or(false))
-                    .unwrap_or(false)
-            };
-
-            if is_active {
-                let c = client.read().await;
-                let _ = c.logout().await;
-                drop(c);
-            }
-
-            let s = storage.lock().await;
-            s.clear_account_cookies(&aid).map_err(AO3Error::from)?;
-            Ok(())
+            sign_out_locally(&client, &storage, &account_id).await
         }).await
     }
 
@@ -226,7 +186,7 @@ impl AO3App {
         if was_active {
             // Activate the first remaining account, if any
             if let Ok(accounts) = storage.get_all_accounts() {
-                if let Some((first_id, _, _)) = accounts.first() {
+                if let Some((first_id, _, _, _)) = accounts.first() {
                     log_db("set_active_account", storage.set_active_account(first_id));
                 }
             }
@@ -238,8 +198,9 @@ impl AO3App {
         let storage = self.storage.blocking_lock();
         log_db("migrate_legacy_credentials", storage.migrate_legacy_credentials());
         let accounts = storage.get_all_accounts().map_err(AO3Error::from)?;
-        Ok(accounts.into_iter().map(|(id, username, active)| {
-            vec![id, username, if active { "1".to_string() } else { "0".to_string() }]
+        let flag = |b: bool| if b { "1".to_string() } else { "0".to_string() };
+        Ok(accounts.into_iter().map(|(id, username, active, logged_in)| {
+            vec![id, username, flag(active), flag(logged_in)]
         }).collect())
     }
 
@@ -249,7 +210,7 @@ impl AO3App {
         let client = self.client.blocking_read();
         let current_cookies = client.get_session_cookies();
         if let Ok(Some((current_id, _, _))) = storage.get_active_account() {
-            if current_cookies.contains("user_credentials") || !current_cookies.is_empty() {
+            if !current_cookies.is_empty() {
                 log_db("update_account_cookies", storage.update_account_cookies(&current_id, &current_cookies));
             }
         }
@@ -260,7 +221,7 @@ impl AO3App {
         if let Ok(Some((_, username, cookies))) = storage.get_active_account() {
             let client = self.client.blocking_read();
             client.clear_cookies();
-            let has_session = !cookies.is_empty() && cookies.contains("user_credentials");
+            let has_session = has_login_cookie(&cookies);
             if !cookies.is_empty() {
                 client.set_session_cookies(&cookies);
             }
@@ -291,4 +252,19 @@ impl AO3App {
                 }).await
         }).await
     }
+}
+
+/// Drop an account's AO3 session on this device.
+async fn sign_out_locally(
+    client: &Arc<tokio::sync::RwLock<AO3Client>>,
+    storage: &Arc<Mutex<Storage>>,
+    account_id: &str,
+) -> Result<(), AO3Error> {
+    let is_active = storage.lock().await.get_active_account()
+        .map(|a| a.is_some_and(|(id, _, _)| id == account_id))
+        .unwrap_or(false);
+    if is_active {
+        client.read().await.clear_auth_cookies();
+    }
+    storage.lock().await.clear_account_cookies(account_id).map_err(AO3Error::from)
 }

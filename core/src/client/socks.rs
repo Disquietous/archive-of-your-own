@@ -1,4 +1,42 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// SOCKS streams currently open, across every proxy (current and replaced).
+static LIVE_STREAMS: AtomicUsize = AtomicUsize::new(0);
+
+/// Bumped to end every open SOCKS stream (New Identity).
+static KILL_STREAMS: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> = std::sync::OnceLock::new();
+
+fn kill_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    KILL_STREAMS.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+/// End every open SOCKS stream, on any proxy. Streams accepted afterwards
+/// are unaffected.
+pub fn kill_socks_streams() {
+    kill_sender().send_modify(|g| *g += 1);
+}
+
+/// How many SOCKS streams are still open.
+pub fn live_socks_streams() -> usize {
+    LIVE_STREAMS.load(Ordering::SeqCst)
+}
+
+/// Counts a stream as live from accept until its task ends, however it ends.
+struct LiveStream;
+
+impl LiveStream {
+    fn new() -> Self {
+        LIVE_STREAMS.fetch_add(1, Ordering::SeqCst);
+        LiveStream
+    }
+}
+
+impl Drop for LiveStream {
+    fn drop(&mut self) {
+        LIVE_STREAMS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Embedded SOCKS5 proxy (Tor transport)
@@ -19,10 +57,16 @@ pub(super) async fn run_socks_proxy(
             Err(_) => continue,
         };
         let tor = Arc::clone(&tor);
+        let live = LiveStream::new();
+        // Subscribed at accept: a kill from here on ends this stream.
+        let mut kill = kill_sender().subscribe();
         tokio::spawn(async move {
-            if let Err(_e) = handle_socks_connection(stream, &tor).await {
+            let _live = live;
+            tokio::select! {
                 // Connection-level errors are silently dropped; the caller
                 // (reqwest) will surface a network error.
+                _ = handle_socks_connection(stream, &tor) => {}
+                _ = kill.changed() => {}
             }
         });
     }

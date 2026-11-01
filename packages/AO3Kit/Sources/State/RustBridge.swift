@@ -409,6 +409,22 @@ final class RustBridge {
         }
     }
 
+    /// New Identity's teardown: offline, every stream ended, Tor state wiped,
+    /// Cloudflare cookies dropped. False if it failed; either way the app is
+    /// left disconnected.
+    func resetTorIdentity() async -> Bool {
+        guard let runtime = app ?? torOnlyApp else { return false }
+        do {
+            try await runtime.resetTorIdentity()
+            circuitHops = []
+            return true
+        } catch {
+            torStatus = .error(error.localizedDescription)
+        }
+        circuitHops = []
+        return false
+    }
+
     /// Stop building a Tor connection (user connect or the engine's
     /// reconnect) and stay disconnected until the user reconnects.
     func cancelConnection() {

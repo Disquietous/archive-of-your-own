@@ -59,6 +59,8 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
     /// Returns the resolved cookies, or throws on failure.
     func resolve(socksPort: UInt16) async throws -> ResolvedCookies {
         guard socksPort > 0 else { throw ResolveError.noSocksPort }
+        // Fail closed: without the leak rule, no page loads at all.
+        let leakRules = try await Self.leakRules()
 
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
@@ -77,6 +79,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
 
             let config = WKWebViewConfiguration()
             config.websiteDataStore = dataStore
+            config.userContentController.add(leakRules)
 
             let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: config)
             wv.navigationDelegate = self
@@ -94,6 +97,30 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
             let url = URL(string: "https://archiveofourown.org/")!
             wv.load(URLRequest(url: url))
         }
+    }
+
+    // MARK: - Leak rules
+
+    /// WebKit resolves `<link rel="dns-prefetch">` hosts through the system
+    /// DNS even when the web view has a SOCKS proxy — a lookup outside Tor
+    /// (reported by Mysk, Aug 2026; Onion Browser 3.4.1's fix). Blocking
+    /// the `ping` resource type stops those prefetches.
+    private static let leakRulesJSON = """
+        [{"trigger": {"url-filter": ".*", "resource-type": ["ping"]},
+          "action": {"type": "block"}}]
+        """
+
+    private static var compiledLeakRules: WKContentRuleList?
+
+    private static func leakRules() async throws -> WKContentRuleList {
+        if let compiledLeakRules { return compiledLeakRules }
+        guard let rules = try await WKContentRuleListStore.default()
+            .compileContentRuleList(forIdentifier: "tor-leak-rules", encodedContentRuleList: leakRulesJSON)
+        else {
+            throw ResolveError.loadFailed("leak rules failed to compile")
+        }
+        compiledLeakRules = rules
+        return rules
     }
 
     // MARK: - WKNavigationDelegate

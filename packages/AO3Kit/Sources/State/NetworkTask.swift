@@ -52,7 +52,10 @@ extension AppState {
             // has already purged the cached token; surface the manual
             // sign-in prompt and stop.
             if error.isSessionExpired || error.isPasswordNeeded {
-                await MainActor.run { needsReauth = true }
+                await MainActor.run {
+                    needsReauth = true
+                    refreshAO3Username()
+                }
                 throw Ao3Error.Network(message: "Session expired. Please sign in again.")
             }
             throw error

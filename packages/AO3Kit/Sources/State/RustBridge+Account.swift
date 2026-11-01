@@ -1,5 +1,12 @@
 import Foundation
 
+struct AO3Account: Identifiable, Equatable {
+    let id: String
+    let username: String
+    let isActive: Bool
+    let isLoggedIn: Bool
+}
+
 extension RustBridge {
     // MARK: - First-launch bootstrap (no library yet)
 
@@ -180,12 +187,14 @@ extension RustBridge {
         try? app?.removeAccount(accountId: accountId)
     }
 
-    func getAccounts() -> [(id: String, username: String, isActive: Bool)] {
+    /// `isLoggedIn` is per account: whether its stored session holds an
+    /// AO3 login, independent of which account is active.
+    func getAccounts() -> [AO3Account] {
         guard let app else { return [] }
         let raw = (try? app.getAccounts()) ?? []
         return raw.compactMap { arr in
-            guard arr.count >= 3 else { return nil }
-            return (id: arr[0], username: arr[1], isActive: arr[2] == "1")
+            guard arr.count >= 4 else { return nil }
+            return AO3Account(id: arr[0], username: arr[1], isActive: arr[2] == "1", isLoggedIn: arr[3] == "1")
         }
     }
 

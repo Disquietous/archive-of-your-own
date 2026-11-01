@@ -47,7 +47,8 @@ struct TorConnectOverlayView: View {
                     ProgressView()
                         .controlSize(.large)
 
-                    Text(appState.torReconnecting ? "Reconnecting to Tor" : "Connecting to Tor")
+                    Text(appState.isResettingTorIdentity ? "New Identity"
+                         : appState.torReconnecting ? "Reconnecting to Tor" : "Connecting to Tor")
                         .font(Font(MacFont.serif(22, weight: .semibold)))
                         .foregroundStyle(theme.ink)
 
@@ -78,6 +79,9 @@ struct TorConnectOverlayView: View {
     }
 
     private var progressDetail: String {
+        if appState.isResettingTorIdentity {
+            return "Closing open connections and clearing Tor state…"
+        }
         if appState.torReconnecting {
             return "The Tor connection stopped working, so a new one is being built. Requests resume once it’s ready."
         }

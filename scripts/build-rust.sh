@@ -5,16 +5,19 @@ set -euo pipefail
 # Usage: ./scripts/build-rust.sh [--release] [--mac-only | --ios-only | --sim-only]
 #
 # Slice selection — pick the one matching the OS you are working on:
-#   (none)      all three slices (iOS device, iOS simulator, macOS)
+#   (none)      iOS device + macOS
 #   --mac-only  macOS slice only         (everyday loop for the Mac app)
-#   --ios-only  iOS device + simulator   (everyday loop for the iOS app)
-#   --sim-only  iOS simulator only       (fastest iOS loop; no device runs)
-#   --device-only  iOS device only       (testing on a real iPhone/iPad)
-# Slices that are not rebuilt are reused from the previous build and go
-# stale until the next run that includes them — run the matching flag (or a
-# full build) before switching to the other OS. Bindings are regenerated
-# either way, from whichever library was just built (the API surface is
-# identical across targets).
+#   --ios-only  iOS device only          (everyday loop for the iOS app)
+#   --device-only  same as --ios-only
+#   --sim-only  iOS simulator only       (on request only — testing is on
+#                                         real hardware)
+# The simulator slice is never built unless asked for, and the XCFramework
+# carries it only on the run that built it. Other slices that are not
+# rebuilt are reused from the previous build and go stale until the next
+# run that includes them — run the matching flag (or a full build) before
+# switching to the other OS. Bindings are regenerated either way, from
+# whichever library was just built (the API surface is identical across
+# targets).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -28,7 +31,7 @@ PROFILE="debug"
 PROFILE_FLAG=""
 # Which slices to build (1 = build, 0 = reuse the existing lib).
 BUILD_DEVICE=1
-BUILD_SIM=1
+BUILD_SIM=0
 BUILD_MAC=1
 SLICE_LABEL=""
 for arg in "$@"; do
@@ -41,7 +44,7 @@ for arg in "$@"; do
             BUILD_DEVICE=0; BUILD_SIM=0; BUILD_MAC=1; SLICE_LABEL="macOS only"
             ;;
         --ios-only)
-            BUILD_DEVICE=1; BUILD_SIM=1; BUILD_MAC=0; SLICE_LABEL="iOS only"
+            BUILD_DEVICE=1; BUILD_SIM=0; BUILD_MAC=0; SLICE_LABEL="iOS device only"
             ;;
         --sim-only)
             BUILD_DEVICE=0; BUILD_SIM=1; BUILD_MAC=0; SLICE_LABEL="iOS simulator only"
@@ -113,7 +116,6 @@ fi
 # repackaged; they are stale until a run that includes them.
 REUSED=()
 [[ $BUILD_DEVICE == 0 ]] && REUSED+=("$DEVICE_LIB")
-[[ $BUILD_SIM == 0 ]] && REUSED+=("$SIM_LIB")
 [[ $BUILD_MAC == 0 ]] && REUSED+=("$MACOS_LIB")
 # `${arr[@]+"${arr[@]}"}`: an empty array trips `set -u` on bash < 4.4
 # (the full build reuses nothing), so expand it only when it has entries.
@@ -138,6 +140,7 @@ echo "==> Sweeping unused build trees..."
 for triple in aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin; do
     rm -rf "target/$triple/debug"
 done
+"$SCRIPT_DIR/prune-rust-target.sh"
 
 # Generate Swift bindings — from whichever library was just built (the API
 # surface is identical across targets, so any fresh slice will do).
@@ -162,6 +165,11 @@ echo "==> Creating XCFramework..."
 FRAMEWORK_DIR="$ROOT_DIR/AO3Core.xcframework"
 rm -rf "$FRAMEWORK_DIR"
 
+# Device and macOS always; the simulator only when this run built it, so a
+# stale simulator slice never ships against fresh bindings.
+SLICE_LIBS=("$DEVICE_LIB" "$MACOS_LIB")
+[[ $BUILD_SIM == 1 ]] && SLICE_LIBS+=("$SIM_LIB")
+
 # Find the generated header (uniffi generates a modulemap + header)
 HEADER_FILE="$GENERATED_DIR/ao3_coreFFI.h"
 MODULE_FILE="$GENERATED_DIR/ao3_coreFFI.modulemap"
@@ -173,19 +181,19 @@ if [[ -f "$HEADER_FILE" ]]; then
     cp "$HEADER_FILE" "$HEADERS_DIR/"
     cp "$MODULE_FILE" "$HEADERS_DIR/module.modulemap" 2>/dev/null || true
 
-    xcodebuild -create-xcframework \
-        -library "$DEVICE_LIB" -headers "$HEADERS_DIR" \
-        -library "$SIM_LIB" -headers "$HEADERS_DIR" \
-        -library "$MACOS_LIB" -headers "$HEADERS_DIR" \
-        -output "$FRAMEWORK_DIR"
+    SLICE_ARGS=()
+    for lib in "${SLICE_LIBS[@]}"; do
+        SLICE_ARGS+=(-library "$lib" -headers "$HEADERS_DIR")
+    done
+    xcodebuild -create-xcframework "${SLICE_ARGS[@]}" -output "$FRAMEWORK_DIR"
 
     rm -rf "$HEADERS_DIR"
 else
-    xcodebuild -create-xcframework \
-        -library "$DEVICE_LIB" \
-        -library "$SIM_LIB" \
-        -library "$MACOS_LIB" \
-        -output "$FRAMEWORK_DIR"
+    SLICE_ARGS=()
+    for lib in "${SLICE_LIBS[@]}"; do
+        SLICE_ARGS+=(-library "$lib")
+    done
+    xcodebuild -create-xcframework "${SLICE_ARGS[@]}" -output "$FRAMEWORK_DIR"
 fi
 
 phase "xcframework done"

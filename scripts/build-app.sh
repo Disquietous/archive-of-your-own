@@ -7,8 +7,8 @@ set -euo pipefail
 # Usage: ./scripts/build-app.sh <mac|ios|both> [--rust] [--clean]
 #
 #   mac      build ArchiveOfYourOwnMac only
-#   ios      build ArchiveOfYourOwn (iOS) only, against a generic arm64
-#            simulator (the XCFramework carries no x86_64 slice)
+#   ios      build ArchiveOfYourOwn (iOS) only, for generic iOS devices
+#            (the XCFramework carries no simulator slice unless asked for)
 #   both     build each in turn — use when porting a finished feature to
 #            the other OS, not after every change
 #   --rust   first rebuild the matching Rust slice(s) via build-rust.sh
@@ -79,10 +79,10 @@ build_one() {
 
 case "$WHICH" in
     mac)  build_one ArchiveOfYourOwnMac "platform=macOS,arch=arm64" ;;
-    ios)  build_one ArchiveOfYourOwn "generic/platform=iOS Simulator" ;;
+    ios)  build_one ArchiveOfYourOwn "generic/platform=iOS" ;;
     both)
         build_one ArchiveOfYourOwnMac "platform=macOS,arch=arm64"
-        build_one ArchiveOfYourOwn "generic/platform=iOS Simulator"
+        build_one ArchiveOfYourOwn "generic/platform=iOS"
         ;;
 esac
 echo "==> Done."

@@ -22,6 +22,7 @@ extension AppState {
         // gated on wasConnected, which lost sessions established while
         // disconnected — surfacing as bogus "session expired" moments later.)
         bridge.saveSessionCookies()
+        refreshAO3Username()
 
         torConnectCancelled = false
         torConnectFailed = false
@@ -80,6 +81,36 @@ extension AppState {
         await connectTor()
     }
 
+    /// Tor Browser's New Identity: behind the blocking connect overlay, take
+    /// the app offline, end every stream, wipe all Tor state, then build a
+    /// connection from nothing. The AO3 session carries over; Cloudflare
+    /// clearance is earned again on the new connection.
+    func newTorIdentity() {
+        guard !isResettingTorIdentity, !isConnectingTor else { return }
+        torConnectCancelled = false
+        torConnectFailed = false
+        isResettingTorIdentity = true
+        showTorConnectOverlay = true
+        Task {
+            // Persist the session first; the core then strips only the
+            // Cloudflare cookies from it.
+            bridge.saveSessionCookies()
+            // Runs to completion even if the user cancels — the old state is
+            // always wiped; a cancel only skips building the new connection.
+            let reset = await bridge.resetTorIdentity()
+            isResettingTorIdentity = false
+            guard !torConnectCancelled else { return }
+            guard reset else {
+                torConnectFailed = true
+                return
+            }
+            await connectTor()
+            if torStatus.isConnected && !torConnectFailed {
+                showTorConnectOverlay = false
+            }
+        }
+    }
+
     func rotateCircuit() async {
         // Coalesce: if a rotation is already running (another request hit the
         // same dead circuit), wait for it instead of rotating again — the
@@ -104,6 +135,7 @@ extension AppState {
         }
 
         bridge.saveSessionCookies()
+        refreshAO3Username()
 
         torConnectCancelled = false
         torConnectFailed = false
@@ -171,7 +203,7 @@ extension AppState {
     /// run, and chooses whether to connect.
     func ensureTorConnected() async -> Bool {
         guard bridge.torRequired else { return true }
-        while isConnectingTor || torReconnecting {
+        while isConnectingTor || torReconnecting || isResettingTorIdentity {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
         if bridge.torStatus.isConnected { return true }

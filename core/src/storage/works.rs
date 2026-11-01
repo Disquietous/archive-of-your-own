@@ -324,8 +324,23 @@ impl Storage {
     pub fn search_local_works_filtered(&self, c: &LocalSearchCriteria, limit: u32)
         -> Result<Vec<WorkSummary>, AppError>
     {
+        // Chapter rows aren't on WorkSummary, so the download check is a
+        // set lookup built with the same SQL rule as the compiled search.
+        let downloaded: Option<std::collections::HashSet<u64>> = if c.fully_downloaded {
+            let sql = format!(
+                "SELECT works.id FROM works WHERE {}",
+                super::works_search::FULLY_DOWNLOADED_SQL
+            );
+            let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
+            let ids = stmt.query_map([], |r| r.get::<_, i64>(0)).map_err(map_sql)?
+                .collect::<Result<Vec<_>, _>>().map_err(map_sql)?;
+            Some(ids.into_iter().map(|id| id as u64).collect())
+        } else {
+            None
+        };
         let mut works: Vec<WorkSummary> = self.get_all_works()?
             .into_iter()
+            .filter(|w| downloaded.as_ref().is_none_or(|set| set.contains(&w.id)))
             .filter(|w| Self::work_matches(c, w))
             .collect();
         Self::sort_filtered(&mut works, &c.sort_column, &c.sort_direction);

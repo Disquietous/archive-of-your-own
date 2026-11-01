@@ -204,6 +204,7 @@ struct DetailView: View {
                 .font(Font(MacFont.reading(named: theme.readingFont.fontName, size: size)))
                 .lineSpacing(size * (theme.readLeading - 1) * 0.45)
                 .foregroundStyle(theme.ink)
+                .textSelection(.enabled)
         }
         .padding(.init(top: 18, leading: 20, bottom: 18, trailing: 20))
         .frame(maxWidth: .infinity, alignment: .leading)

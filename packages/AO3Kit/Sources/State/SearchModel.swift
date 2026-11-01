@@ -396,6 +396,8 @@ final class SearchModel {
     var activeFilterCount: Int {
         let fields = fieldValues.filter { key, value in
             guard key != primaryField?.name, !value.isEmpty else { return false }
+            // Library-only filters don't apply to (and aren't shown for) AO3.
+            if key.hasPrefix(Self.libraryFieldPrefix), !searchLibraryOnly { return false }
             if let defaultLanguage, key == defaultLanguage.field, value == defaultLanguage.value {
                 return false
             }

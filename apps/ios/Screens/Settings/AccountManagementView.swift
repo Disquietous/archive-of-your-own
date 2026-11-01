@@ -18,8 +18,11 @@ struct AccountManagementView: View {
     @State private var showLogoutConfirm = false
     @State private var loggingOutAccountId: String?
 
-    private var accounts: [(id: String, username: String, isActive: Bool)] {
-        state.bridge.getAccounts()
+    private var accounts: [AO3Account] {
+        // Observable reads so the list refreshes when login state changes.
+        _ = state.ao3Username
+        _ = state.ao3AccountCount
+        return state.bridge.getAccounts()
     }
 
     var body: some View {
@@ -106,7 +109,7 @@ struct AccountManagementView: View {
             }
             Button("Cancel", role: .cancel) { logoutConfirmId = nil }
         } message: {
-            Text("The session will be ended on AO3. You'll need to sign in again to use this account.")
+            Text("Forgets this account's AO3 session on this device. The account stays here so you can log back in.")
         }
     }
 
@@ -143,7 +146,7 @@ struct AccountManagementView: View {
 
     // MARK: - Account Row
 
-    private func accountRow(_ account: (id: String, username: String, isActive: Bool)) -> some View {
+    private func accountRow(_ account: AO3Account) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -151,11 +154,11 @@ struct AccountManagementView: View {
                         .font(.custom("HankenGrotesk", size: 15).weight(.semibold))
                         .foregroundStyle(theme.ink)
 
-                    if account.isActive {
-                        Text("Active")
-                            .font(Typography.uiCaption())
-                            .foregroundStyle(theme.sage)
-                    }
+                    Text(account.isActive
+                         ? "Active · \(account.isLoggedIn ? "Logged in" : "Logged out")"
+                         : (account.isLoggedIn ? "Logged in" : "Logged out"))
+                        .font(Typography.uiCaption())
+                        .foregroundStyle(account.isActive && account.isLoggedIn ? theme.sage : theme.ink3)
                 }
 
                 Spacer()
@@ -163,7 +166,17 @@ struct AccountManagementView: View {
                 if loggingOutAccountId == account.id {
                     ProgressView()
                         .frame(width: 32, height: 32)
-                } else {
+                } else if account.isActive && !account.isLoggedIn {
+                    Button {
+                        nav.presentedSheet = .reauth
+                    } label: {
+                        Text("Log in")
+                            .font(Typography.uiSmall())
+                            .foregroundStyle(theme.accent)
+                            .frame(height: 32)
+                    }
+                    .buttonStyle(IconButtonPressStyle())
+                } else if account.isLoggedIn {
                     Button {
                         logoutConfirmId = account.id
                         showLogoutConfirm = true
@@ -248,8 +261,7 @@ struct AccountManagementView: View {
     private func performLogout(accountId: String) {
         loggingOutAccountId = accountId
         Task {
-            await state.bridge.logoutSpecificAccount(accountId: accountId)
-            state.refreshAO3Username()
+            await state.logOut(accountId: accountId)
             loggingOutAccountId = nil
         }
     }

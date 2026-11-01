@@ -13,13 +13,19 @@ pub fn parse_work_listings(html: &str) -> Result<Vec<WorkSummary>, AppError> {
     let doc = Html::parse_document(html);
     let blurb_sel = sel("li.work.blurb");
     let mut works = Vec::new();
+    let mut blurbs = 0;
 
     for blurb in doc.select(&blurb_sel) {
+        blurbs += 1;
         match parse_single_blurb(&blurb) {
             Ok(w) => works.push(w),
-            Err(_) => continue,
+            Err(e) => {
+                log_error!("parser", "work blurb {:?} dropped: {e}", blurb.value().attr("id"));
+                continue;
+            }
         }
     }
+    log_info!("parser", "work listing: {blurbs} blurbs, {} parsed", works.len());
 
     if works.is_empty() {
         verify_empty_listing(&doc, "work listing")?;

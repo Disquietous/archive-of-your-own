@@ -16,7 +16,8 @@ extension SearchModel {
         }
         var keys: [String] = []
         var values: [String] = []
-        for (name, value) in request.fieldValues where !value.isEmpty {
+        for (name, value) in request.fieldValues
+        where !value.isEmpty && !name.hasPrefix(Self.libraryFieldPrefix) {
             keys.append(name)
             values.append(value)
         }

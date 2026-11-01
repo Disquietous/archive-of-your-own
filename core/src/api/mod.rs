@@ -292,17 +292,15 @@ impl AO3App {
         outcome
     }
 
-    /// Clear the dead auth cookies from the live jar and every persisted
-    /// copy (active account row + legacy app_state key). Never sends a
-    /// network request — expiry is only ever detected from a normal
-    /// request's rejection.
+    /// Clear the dead auth cookies from the live jar and the active account
+    /// row. Never sends a network request — expiry is only ever detected
+    /// from a normal request's rejection.
     async fn purge_expired_session(&self) {
         self.client.read().await.clear_auth_cookies();
         let s = self.storage.lock().await;
         if let Ok(Some((id, _, _))) = s.get_active_account() {
             log_db("clear_account_cookies", s.clear_account_cookies(&id));
         }
-        log_db("set_state", s.set_state("ao3_session_cookies", ""));
         log_info!("auth", "Session expired — cleared cached token; user must sign in again");
     }
 

@@ -6,11 +6,9 @@ struct ReauthSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var password = ""
-    @State private var isLoading = false
-    @State private var error: String?
 
     private var username: String {
-        state.ao3Username ?? ""
+        state.ao3ActiveAccount ?? ""
     }
 
     var body: some View {
@@ -26,7 +24,7 @@ struct ReauthSheet: View {
                 .foregroundStyle(theme.accent)
                 .padding(.bottom, 12)
 
-            Text("Session Expired")
+            Text(state.needsReauth ? "Session Expired" : "Log In")
                 .font(Typography.sheetTitle())
                 .foregroundStyle(theme.ink)
                 .padding(.bottom, 6)
@@ -47,7 +45,7 @@ struct ReauthSheet: View {
                     .background(theme.surface2)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                if let error {
+                if let error = state.ao3LoginError {
                     Text(error)
                         .font(Typography.uiSmall())
                         .foregroundStyle(Color(hex: "CE514D"))
@@ -63,7 +61,7 @@ struct ReauthSheet: View {
                     Task { await reauthenticate() }
                 } label: {
                     Group {
-                        if isLoading {
+                        if state.ao3LoginInFlight {
                             HStack(spacing: 10) {
                                 ProgressView()
                                     .tint(theme.onAccent)
@@ -85,7 +83,7 @@ struct ReauthSheet: View {
                     )
                 }
                 .buttonStyle(ButtonPressStyle())
-                .disabled(isLoading || password.isEmpty)
+                .disabled(state.ao3LoginInFlight || password.isEmpty)
                 .opacity(password.isEmpty ? 0.5 : 1)
 
                 Button { dismiss() } label: {
@@ -106,22 +104,9 @@ struct ReauthSheet: View {
     }
 
     private func reauthenticate() async {
-        isLoading = true
-        error = nil
-
-        do {
-            let success = try await state.bridge.reauthenticate(password: password)
-            if success {
-                state.needsReauth = false
-                password = ""
-                dismiss()
-            } else {
-                error = "Login failed. Check your password."
-            }
-        } catch {
-            self.error = error.localizedDescription
+        if await state.logInActiveAccount(password: password) {
+            password = ""
+            dismiss()
         }
-
-        isLoading = false
     }
 }

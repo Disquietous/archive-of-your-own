@@ -340,12 +340,15 @@ impl Storage {
         Ok(self.get_active_account()?.is_some_and(|(active, _, _)| active == id))
     }
 
-    pub fn get_all_accounts(&self) -> Result<Vec<(String, String, bool)>, AppError> {
+    /// (id, username, is_active, logged_in). Logged in = the stored session
+    /// carries AO3's auth cookie; independent of which account is active.
+    pub fn get_all_accounts(&self) -> Result<Vec<(String, String, bool, bool)>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, username, is_active FROM accounts ORDER BY created_at"
+            "SELECT id, username, is_active, cookies FROM accounts ORDER BY created_at"
         ).map_err(map_sql)?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)? != 0))
+            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)? != 0,
+                crate::client::has_login_cookie(&row.get::<_,String>(3)?)))
         }).map_err(map_sql)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -396,6 +399,19 @@ impl Storage {
                 self.set_state("ao3_session_cookies", "")?;
                 return Ok(Some(id));
             }
+        }
+
+        // The account row is the only home for a session. Older builds also
+        // kept a copy in app_state (and saved there when no account was
+        // active); hand a live one to the active account if its row has
+        // none, then retire the key either way.
+        if let Some(c) = cookies.filter(|c| !c.is_empty()) {
+            if let Some((id, _, row)) = self.get_active_account()? {
+                if !crate::client::has_login_cookie(&row) && crate::client::has_login_cookie(&c) {
+                    self.update_account_cookies(&id, &c)?;
+                }
+            }
+            self.set_state("ao3_session_cookies", "")?;
         }
         Ok(None)
     }
