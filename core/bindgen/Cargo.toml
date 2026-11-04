@@ -1,0 +1,23 @@
+[package]
+name = "ao3-bindgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The Swift-bindings generator, in its own crate so building it never
+# touches ao3_core or its dependency graph. When it lived as a [[bin]]
+# inside core/, every `cargo run` built the whole library (static archive
+# included) in the debug profile under a feature set nothing else used —
+# a second multi-GB tree in core/target/debug on every release build.
+#
+# The version must match core/Cargo.toml's uniffi exactly: generated
+# bindings and the compiled library share an ABI contract.
+[dependencies]
+uniffi = { version = "=0.32.2", features = ["cli"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[profile.release]
+debug = false

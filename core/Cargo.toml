@@ -10,11 +10,9 @@ crate-type = ["lib", "staticlib"]
 [features]
 default = []
 tor = ["arti-client", "tor-rtcompat", "tor-linkspec", "tor-netdir", "tor-dirmgr", "tor-geoip", "tor-proto", "tracing", "tracing-subscriber"]
-# The uniffi-bindgen helper binary only. Keeping uniffi/cli behind a
-# feature keeps the 70s+ code-generator (uniffi_bindgen, goblin, askama,
-# clap, …) out of the library's dependency graph — measured as the bulk
-# of every cross-target release build before this was gated.
-bindgen-cli = ["uniffi/cli"]
+# The Swift-bindings generator lives in core/bindgen (its own crate) so
+# the code generator's dependencies never enter this graph and building
+# it never builds this library.
 
 [dependencies]
 uniffi = { version = "0.32" }
@@ -50,11 +48,6 @@ tor-proto = { version = "0.47", optional = true, features = ["stream-ctrl"] }
 # crates are already in the graph via arti — this adds no new code.
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry", "std"] }
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "src/uniffi_bindgen.rs"
-required-features = ["bindgen-cli"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

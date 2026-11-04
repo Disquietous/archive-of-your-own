@@ -17,4 +17,15 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 
 "$SCRIPT_DIR/prune-rust-target.sh"
 cd "$(dirname "$SCRIPT_DIR")/core"
+
+# Build first, capturing the artifact manifest, and GC target/debug down
+# to exactly that set — so anything a stray `cargo test`/`cargo build`
+# with other flags left behind is gone by the next run. The test run
+# after is fully fresh (no recompile).
+GC_JSON="$(mktemp)"
+trap 'rm -f "$GC_JSON"' EXIT
+cargo test --lib --no-default-features --features tor --no-run \
+    --message-format=json-render-diagnostics > "$GC_JSON"
+"$SCRIPT_DIR/gc-rust-target.sh" target "$GC_JSON"
+
 cargo test --lib --no-default-features --features tor "$@"

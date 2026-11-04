@@ -154,6 +154,7 @@ releases/
 
 # Rust
 core/target/
+core/bindgen/target/
 
 # Xcode
 *.xcodeproj/

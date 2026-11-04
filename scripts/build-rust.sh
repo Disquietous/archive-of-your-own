@@ -68,6 +68,9 @@ phase() {
 echo "==> Building Rust core ($PROFILE${SLICE_LABEL:+, $SLICE_LABEL})..."
 
 cd "$CORE_DIR"
+# Per-slice artifact manifests for the GC pass at the end.
+GC_DIR="$(mktemp -d)"
+trap 'rm -rf "$GC_DIR"' EXIT
 
 # Ensure targets are available
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin 2>/dev/null || true
@@ -91,7 +94,8 @@ BINDGEN_LIB=""
 if [[ $BUILD_DEVICE == 1 ]]; then
     echo "  Building for iOS device (aarch64-apple-ios)..."
     PHASE_T0=$SECONDS
-    cargo build --lib --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor
+    cargo build --lib --target aarch64-apple-ios $PROFILE_FLAG --no-default-features --features tor \
+        --message-format=json-render-diagnostics > "$GC_DIR/aarch64-apple-ios.json"
     phase "iOS device compile done"
     BINDGEN_LIB="$DEVICE_LIB"
 fi
@@ -99,7 +103,8 @@ fi
 if [[ $BUILD_SIM == 1 ]]; then
     echo "  Building for iOS simulator (aarch64-apple-ios-sim)..."
     PHASE_T0=$SECONDS
-    cargo build --lib --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor
+    cargo build --lib --target aarch64-apple-ios-sim $PROFILE_FLAG --no-default-features --features tor \
+        --message-format=json-render-diagnostics > "$GC_DIR/aarch64-apple-ios-sim.json"
     phase "iOS simulator compile done"
     BINDGEN_LIB="$SIM_LIB"
 fi
@@ -107,7 +112,8 @@ fi
 if [[ $BUILD_MAC == 1 ]]; then
     echo "  Building for macOS (aarch64-apple-darwin)..."
     PHASE_T0=$SECONDS
-    cargo build --lib --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor
+    cargo build --lib --target aarch64-apple-darwin $PROFILE_FLAG --no-default-features --features tor \
+        --message-format=json-render-diagnostics > "$GC_DIR/aarch64-apple-darwin.json"
     phase "macOS compile done"
     BINDGEN_LIB="$MACOS_LIB"
 fi
@@ -141,23 +147,22 @@ for triple in aarch64-apple-ios aarch64-apple-ios-sim aarch64-apple-darwin; do
     rm -rf "target/$triple/debug"
 done
 "$SCRIPT_DIR/prune-rust-target.sh"
+# Exact GC: every slice build above reported the artifacts it used (target
+# tree and the shared host tree in target/release alike); everything else
+# in those trees is an orphan from an earlier configuration.
+"$SCRIPT_DIR/gc-rust-target.sh" "$CORE_DIR/target" "$GC_DIR"/*.json
 
 # Generate Swift bindings — from whichever library was just built (the API
 # surface is identical across targets, so any fresh slice will do).
 echo "==> Generating Swift bindings (from $BINDGEN_LIB)..."
 mkdir -p "$GENERATED_DIR"
 
-cargo run --bin uniffi-bindgen --features bindgen-cli generate \
+# core/bindgen is its own crate with its own target dir: building the
+# generator never touches ao3_core or core/target.
+cargo run --quiet --release --manifest-path "$CORE_DIR/bindgen/Cargo.toml" -- generate \
     --library "$BINDGEN_LIB" \
     --language swift \
-    --out-dir "$GENERATED_DIR" 2>/dev/null || {
-    # If the bindgen binary doesn't exist, use cargo-uniffi
-    cargo install uniffi-bindgen-cli 2>/dev/null || true
-    uniffi-bindgen generate \
-        --library "$BINDGEN_LIB" \
-        --language swift \
-        --out-dir "$GENERATED_DIR"
-}
+    --out-dir "$GENERATED_DIR"
 phase "bindgen done"
 
 # Create XCFramework
