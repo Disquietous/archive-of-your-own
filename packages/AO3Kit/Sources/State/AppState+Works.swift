@@ -3,6 +3,20 @@ import SwiftUI
 // MARK: - Works, chapters, downloads & reading progress
 
 extension AppState {
+    /// The library id (as the string every screen keys by) for an AO3 work
+    /// number — from a link, a series prev/next, or a subscription. nil
+    /// when the text isn't an AO3 number or the library is unavailable.
+    func rowID(forAO3Work number: String) -> String? {
+        guard let n = UInt64(number), let id = bridge.resolveAO3Work(n) else { return nil }
+        return String(id)
+    }
+
+    /// The library id for an AO3 series number (see `rowID(forAO3Work:)`).
+    func rowID(forAO3Series number: String, name: String? = nil) -> String? {
+        guard let n = UInt64(number), let id = bridge.resolveAO3Series(n, name: name) else { return nil }
+        return String(id)
+    }
+
     /// Force-fetch a work's current details from AO3 and replace the local
     /// copy (fetchWorkMetadata only fills gaps — this updates).
     func refreshWorkMetadata(_ id: String) async {

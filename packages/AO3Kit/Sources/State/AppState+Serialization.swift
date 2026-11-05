@@ -14,14 +14,14 @@ extension AppState {
             warnings: s.warnings.first ?? "No Archive Warnings Apply",
             category: s.categories.first ?? "",
             tags: s.tags,
-            words: Int(s.wordCount),
+            words: Int(s.wordCount ?? 0),
             chapterCount: Int(s.chapterCount),
             totalChapters: s.totalChapters > 0 ? Int(s.totalChapters) : Int(s.chapterCount),
             complete: s.complete,
-            kudos: Int(s.kudos),
-            hits: Int(s.hits),
-            bookmarks: Int(s.bookmarksCount),
-            comments: Int(s.comments),
+            kudos: Int(s.kudos ?? 0),
+            hits: Int(s.hits ?? 0),
+            bookmarks: Int(s.bookmarksCount ?? 0),
+            comments: Int(s.comments ?? 0),
             published: s.datePublished,
             updated: s.dateUpdated,
             summary: s.summary,
@@ -35,11 +35,12 @@ extension AppState {
                     seriesID: String($0.seriesId),
                     name: $0.name,
                     part: Int($0.part),
-                    prevWorkID: $0.prevWorkId.map(String.init),
-                    nextWorkID: $0.nextWorkId.map(String.init)
+                    prevWorkExternalID: $0.prevWorkExternalId,
+                    nextWorkExternalID: $0.nextWorkExternalId
                 )
             },
-            fetchedAt: s.fetchedAt
+            fetchedAt: s.fetchedAt,
+            url: s.url
         )
     }
 

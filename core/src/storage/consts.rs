@@ -58,7 +58,8 @@ pub(super) const SQL_ROLLBACK_TO: &str = "ROLLBACK TO";
 // ---------------------------------------------------------------------------
 
 pub(super) const SQL_UPSERT_SUBSCRIPTION: &str =
-    "INSERT OR REPLACE INTO subscriptions (account, sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4, ?5)";
+    "INSERT INTO subscriptions (account_id, sub_type, sub_id, name, ao3_id) VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(account_id, sub_type, sub_id) DO UPDATE SET name = excluded.name, ao3_id = excluded.ao3_id";
 
 // ---------------------------------------------------------------------------
 // Tag vocabulary (work_tags.tag_type / tags.tag_type values)
@@ -75,7 +76,6 @@ pub(super) const TAG_TYPE_CREATOR: &str = "creator";
 // ---------------------------------------------------------------------------
 
 pub(super) const SUB_TYPE_AUTHOR: &str = "author";
-pub(super) const SUB_TYPE_SERIES: &str = "series";
 
 // ---------------------------------------------------------------------------
 // Rating names as stored in works.rating

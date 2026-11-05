@@ -44,7 +44,10 @@ pub fn parse_work_page(html: &str, id: u64) -> Result<(WorkSummary, Vec<Chapter>
     let chapters = parse_chapters_content(&doc);
 
     let summary_obj = WorkSummary {
-        id,
+        id: 0,
+        source: SOURCE_AO3.to_string(),
+        external_id: id.to_string(),
+        url: super::ao3_work_url(id),
         title,
         authors,
         fandoms,
@@ -55,13 +58,13 @@ pub fn parse_work_page(html: &str, id: u64) -> Result<(WorkSummary, Vec<Chapter>
         characters,
         tags,
         summary,
-        word_count,
+        word_count: Some(word_count),
         chapter_count,
         total_chapters,
-        kudos,
-        hits,
-        bookmarks,
-        comments,
+        kudos: Some(kudos),
+        hits: Some(hits),
+        bookmarks: Some(bookmarks),
+        comments: Some(comments),
         date_published,
         date_updated,
         language,
@@ -159,11 +162,12 @@ pub(super) fn extract_work_page_series(doc: &Html) -> Vec<SeriesMembership> {
         let next_work_id = span.select(&next_sel).next().and_then(work_id_from_href);
 
         memberships.push(SeriesMembership {
-            series_id,
+            series_id: 0,
+            series_external_id: series_id.to_string(),
             name,
             part,
-            prev_work_id,
-            next_work_id,
+            prev_work_external_id: prev_work_id.map(|id| id.to_string()),
+            next_work_external_id: next_work_id.map(|id| id.to_string()),
         });
     }
     memberships

@@ -141,11 +141,19 @@ struct SubscriptionsScreen: View {
         }
     }
 
+    /// The bell target for a subscription row. A subscription names its
+    /// target by AO3 id; follows key works and series by library id, so
+    /// those resolve first (a never-seen target gets its stub row).
     private func target(_ sub: USubscription) -> FollowModel.Target {
         let type = sub.subType.lowercased()
-        let kind: FollowModel.Kind = type.contains("work") ? .work
-            : type.contains("series") ? .series : .author
-        return FollowModel.Target(kind: kind, id: sub.id, name: sub.name)
+        if type.contains("work") {
+            return FollowModel.Target(kind: .work, id: state.rowID(forAO3Work: sub.id) ?? sub.id, name: sub.name)
+        }
+        if type.contains("series") {
+            return FollowModel.Target(kind: .series, id: state.rowID(forAO3Series: sub.id, name: sub.name) ?? sub.id,
+                                      name: sub.name)
+        }
+        return FollowModel.Target(kind: .author, id: sub.id, name: sub.name)
     }
 
     private func row(_ sub: USubscription) -> some View {
@@ -175,13 +183,18 @@ struct SubscriptionsScreen: View {
         .padding(.vertical, 12)
     }
 
+    /// A subscription names its target by AO3 id; the screens key by the
+    /// library id, so works and series resolve first.
     private func open(_ sub: USubscription) {
         let type = sub.subType.lowercased()
         if type.contains("work") {
-            if UInt64(sub.id) != nil { nav.openWork(sub.id) }
+            if let id = state.rowID(forAO3Work: sub.id) { nav.openWork(id) }
+        } else if type.contains("series") {
+            if let id = state.rowID(forAO3Series: sub.id, name: sub.name) {
+                nav.openSubscriptionWorks(id: id, name: sub.name, subType: "series")
+            }
         } else {
-            nav.openSubscriptionWorks(id: sub.id, name: sub.name,
-                                      subType: type.contains("series") ? "series" : "author")
+            nav.openSubscriptionWorks(id: sub.id, name: sub.name, subType: "author")
         }
     }
 }

@@ -74,8 +74,9 @@ extension ReaderView {
                             .foregroundStyle(theme.ink3)
                     }
                 }
-                if let next = work?.nextInSeries?.nextWorkID {
-                    nextWorkInSeriesButton(next)
+                if let next = work?.nextInSeries?.nextWorkExternalID,
+                   let nextID = state.rowID(forAO3Work: next) {
+                    nextWorkInSeriesButton(nextID)
                 }
             } else {
                 Button {

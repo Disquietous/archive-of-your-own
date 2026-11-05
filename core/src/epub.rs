@@ -92,10 +92,10 @@ fn package_opf(work: &WorkSummary, chapters: &[Chapter]) -> String {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="uid">urn:ao3:work:{id}</dc:identifier>
+    <dc:identifier id="uid">urn:{source}:work:{id}</dc:identifier>
     <dc:title>{title}</dc:title>
 {creators}    <dc:language>{lang}</dc:language>
-    <dc:source>https://archiveofourown.org/works/{id}</dc:source>
+    <dc:source>{url}</dc:source>
     <meta property="dcterms:modified">{modified}</meta>
   </metadata>
   <manifest>
@@ -104,7 +104,9 @@ fn package_opf(work: &WorkSummary, chapters: &[Chapter]) -> String {
 {spine}  </spine>
 </package>
 "#,
-        id = work.id,
+        source = xml_escape(&work.source),
+        id = xml_escape(&work.external_id),
+        url = xml_escape(&work.url),
         title = xml_escape(&work.title),
         creators = creators,
         lang = language_code(&work.language),
@@ -167,7 +169,7 @@ fn title_page_xhtml(work: &WorkSummary) -> String {
   <p>by {authors}</p>
   <p class="tags">{fandoms}</p>
 {summary}  <p class="tags">{tags}</p>
-  <p class="tags">Exported from the Archive of Our Own: https://archiveofourown.org/works/{id}</p>
+  <p class="tags">Exported from the Archive of Our Own: {url}</p>
 </body>
 </html>
 "#,
@@ -176,7 +178,7 @@ fn title_page_xhtml(work: &WorkSummary) -> String {
         fandoms = fandoms,
         summary = summary,
         tags = tags,
-        id = work.id,
+        url = xml_escape(&work.url),
     )
 }
 
@@ -388,7 +390,10 @@ mod tests {
 
     fn sample_work() -> WorkSummary {
         WorkSummary {
-            id: 12345,
+            id: 7,
+            source: "ao3".to_string(),
+            external_id: "12345".to_string(),
+            url: "https://archiveofourown.org/works/12345".to_string(),
             title: "A Test & Trial".to_string(),
             authors: vec!["someauthor".to_string()],
             fandoms: vec!["Testing".to_string()],
@@ -399,13 +404,13 @@ mod tests {
             characters: vec![],
             tags: vec!["Fluff".to_string()],
             summary: "A summary with <brackets>.".to_string(),
-            word_count: 100,
+            word_count: Some(100),
             chapter_count: 1,
             total_chapters: Some(1),
-            kudos: 1,
-            hits: 2,
-            bookmarks: 0,
-            comments: 0,
+            kudos: Some(1),
+            hits: Some(2),
+            bookmarks: Some(0),
+            comments: Some(0),
             date_published: "2024-01-01".to_string(),
             date_updated: "2024-01-02".to_string(),
             language: "English".to_string(),

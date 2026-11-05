@@ -46,8 +46,11 @@ struct WorkDetailView: View {
         isReal && work?.content == nil
     }
 
+    /// The work's page at its source — from the record, never built from
+    /// an id.
     var ao3URL: URL? {
-        isReal ? ExternalLinkOpener.ao3WorkURL(workID) : nil
+        guard let url = work?.url, !url.isEmpty else { return nil }
+        return URL(string: url)
     }
 
     /// The detail screen's tracked operations — refresh and kudos both post

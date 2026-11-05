@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection};
 
 use crate::error::AppError;
-use crate::models::{SeriesMembership, WorkSummary};
+use crate::models::{ExternalRef, SeriesMembership, WorkSummary};
 
 use super::consts::*;
 use super::tag_cache::TagCache;
@@ -38,6 +38,20 @@ pub(super) struct WorkEntity {
     /// User-set "I'm done reading this" flag. Never inferred from
     /// progress — only the header toggle and "mark all as read" write it.
     pub finished: bool,
+    /// A row that exists only so the library has an id for a target it has
+    /// never fetched (a followed or linked work). Invisible to every
+    /// listing; cleared by the first save.
+    pub stub: bool,
+}
+
+impl WorkEntity {
+    pub(super) fn external_ref(&self) -> ExternalRef {
+        ExternalRef {
+            source: self.summary.source.clone(),
+            external_id: self.summary.external_id.clone(),
+            url: self.summary.url.clone(),
+        }
+    }
 }
 
 /// The works table's in-memory mirror and single write authority (the
@@ -51,6 +65,9 @@ pub(super) struct WorkEntity {
 /// remain fair game for set-selection queries (the compiled library search);
 /// write-through is what keeps their results consistent with the map.
 ///
+/// Keyed by row id, with a (source, external_id) index alongside — the
+/// one place an external id turns into a row id.
+///
 /// Exceptions to the invariant, both safe by ordering:
 /// - schema migrations (version-frozen inline SQL) run before `load`
 /// - `Storage::with_savepoint` / `TxGuard` reload after a rollback, since a
@@ -58,6 +75,7 @@ pub(super) struct WorkEntity {
 #[derive(Default)]
 pub(super) struct WorksCache {
     map: RefCell<HashMap<u64, Arc<WorkEntity>>>,
+    by_external: RefCell<HashMap<(String, String), u64>>,
 }
 
 impl WorksCache {
@@ -70,19 +88,21 @@ impl WorksCache {
         {
             let sql = format!(
                 "SELECT {}, detail_viewed_at, last_read_dt, last_chapter_read,
-                        last_chapter_read_pos, gone_from_ao3, finished FROM works",
+                        last_chapter_read_pos, gone_from_ao3, finished, stub FROM works",
                 Storage::work_select("")
             );
             let mut stmt = conn.prepare(&sql).map_err(map_sql)?;
+            let n = Storage::WORK_COLS.len();
             let rows = stmt
                 .query_map([], |row| {
                     let summary = Storage::work_from_row(row)?;
-                    let detail_viewed_at: String = row.get(20)?;
-                    let last_read_dt: String = row.get(21)?;
-                    let last_chapter_read: i64 = row.get(22)?;
-                    let last_chapter_read_pos: i64 = row.get(23)?;
-                    let gone_from_ao3: i64 = row.get(24)?;
-                    let finished: i64 = row.get(25)?;
+                    let detail_viewed_at: String = row.get(n)?;
+                    let last_read_dt: String = row.get(n + 1)?;
+                    let last_chapter_read: i64 = row.get(n + 2)?;
+                    let last_chapter_read_pos: i64 = row.get(n + 3)?;
+                    let gone_from_ao3: i64 = row.get(n + 4)?;
+                    let finished: i64 = row.get(n + 5)?;
+                    let stub: i64 = row.get(n + 6)?;
                     Ok(WorkEntity {
                         summary,
                         tags: Vec::new(),
@@ -92,6 +112,7 @@ impl WorksCache {
                         last_chapter_read_pos: last_chapter_read_pos as u32,
                         gone_from_ao3: gone_from_ao3 != 0,
                         finished: finished != 0,
+                        stub: stub != 0,
                     })
                 })
                 .map_err(map_sql)?;
@@ -118,20 +139,34 @@ impl WorksCache {
             }
         }
         let mut map = self.map.borrow_mut();
+        let mut by_external = self.by_external.borrow_mut();
         map.clear();
+        by_external.clear();
         for (id, entity) in entities {
+            by_external.insert(Self::key(&entity.summary.source, &entity.summary.external_id), id);
             map.insert(id, Arc::new(entity));
         }
         Ok(())
     }
 
+    fn key(source: &str, external_id: &str) -> (String, String) {
+        (source.to_string(), external_id.to_string())
+    }
+
+    /// The entity for a row id — stubs included (callers that list or
+    /// display filter on `stub`).
     pub(super) fn get(&self, id: u64) -> Option<Arc<WorkEntity>> {
         self.map.borrow().get(&id).cloned()
     }
 
-    /// A snapshot of every entity (unordered).
+    /// Row id for a (source, external_id), stubs included.
+    pub(super) fn resolve(&self, source: &str, external_id: &str) -> Option<u64> {
+        self.by_external.borrow().get(&Self::key(source, external_id)).copied()
+    }
+
+    /// A snapshot of every real (non-stub) entity (unordered).
     pub(super) fn all(&self) -> Vec<Arc<WorkEntity>> {
-        self.map.borrow().values().cloned().collect()
+        self.map.borrow().values().filter(|e| !e.stub).cloned().collect()
     }
 
     /// The entity as a `WorkSummary` with its tag-name vectors filled from
@@ -163,55 +198,69 @@ impl WorksCache {
         }
     }
 
+    fn insert_entity(&self, entity: WorkEntity) {
+        self.by_external.borrow_mut()
+            .insert(Self::key(&entity.summary.source, &entity.summary.external_id), entity.summary.id);
+        self.map.borrow_mut().insert(entity.summary.id, Arc::new(entity));
+    }
+
     // -------------------------------------------------------------------
     // Write-through mutations
     // -------------------------------------------------------------------
 
-    /// Upsert a work summary plus its author- and tag-index rows.
-    /// `fetched_at` is stamped by the caller so entity and row agree.
-    /// Library state survives from the existing entity/row (upsert, NOT
-    /// INSERT OR REPLACE — replace would re-create the row and wipe it);
-    /// series merges with the stored memberships (see below).
+    /// Upsert a work summary plus its author- and tag-index rows, keyed by
+    /// (source, external_id): an existing row updates in place and keeps
+    /// its id, a new one allocates. The input's `id` is ignored. Returns
+    /// the row id. `fetched_at` is stamped by the caller so entity and row
+    /// agree. Library state survives from the existing entity/row (upsert,
+    /// NOT INSERT OR REPLACE — replace would re-create the row and wipe
+    /// it); `series` is the caller's already-resolved membership list (see
+    /// `Storage::save_work` for the merge rule), written when it differs
+    /// from what is stored.
     pub(super) fn save_work(&self, conn: &Connection, tags: &TagCache,
-                            work: &WorkSummary, fetched_at: &str)
-        -> Result<(), AppError>
+                            work: &WorkSummary, series: &[SeriesMembership], fetched_at: &str)
+        -> Result<u64, AppError>
     {
+        let existing_id = self.resolve(&work.source, &work.external_id);
+        let old = existing_id.and_then(|id| self.get(id));
         conn.execute(
                 "INSERT INTO works (
-                    id, title, authors_json, rating,
+                    source, external_id, url, stub, title, authors_json, rating,
                     warnings_json, categories_json, summary, word_count,
                     chapter_count, total_chapters, kudos, hits,
                     bookmarks, comments, date_published, date_updated, language, complete,
                     fetched_at, warnings_mask, categories_mask, fandom_count
                 ) VALUES (
-                    ?1, ?2, ?3, ?4,
-                    ?5, ?6, ?7, ?8,
-                    ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18,
-                    ?19, ?20, ?21, ?22
+                    ?1, ?2, ?3, 0, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14,
+                    ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24
                 )
-                ON CONFLICT(id) DO UPDATE SET
-                    title = ?2, authors_json = ?3, rating = ?4,
-                    warnings_json = ?5, categories_json = ?6, summary = ?7, word_count = ?8,
-                    chapter_count = ?9, total_chapters = ?10, kudos = ?11, hits = ?12,
-                    bookmarks = ?13, comments = ?14, date_published = ?15, date_updated = ?16,
-                    language = ?17, complete = ?18, fetched_at = ?19,
-                    warnings_mask = ?20, categories_mask = ?21, fandom_count = ?22",
+                ON CONFLICT(source, external_id) DO UPDATE SET
+                    url = ?3, stub = 0, title = ?4, authors_json = ?5, rating = ?6,
+                    warnings_json = ?7, categories_json = ?8, summary = ?9, word_count = ?10,
+                    chapter_count = ?11, total_chapters = ?12, kudos = ?13, hits = ?14,
+                    bookmarks = ?15, comments = ?16, date_published = ?17, date_updated = ?18,
+                    language = ?19, complete = ?20, fetched_at = ?21,
+                    warnings_mask = ?22, categories_mask = ?23, fandom_count = ?24",
                 params![
-                    work.id as i64,
+                    work.source,
+                    work.external_id,
+                    work.url,
                     work.title,
                     serde_json::to_string(&work.authors).map_err(map_json)?,
                     rating_to_str(&work.rating),
                     serde_json::to_string(&work.warnings).map_err(map_json)?,
                     serde_json::to_string(&work.categories).map_err(map_json)?,
                     work.summary,
-                    work.word_count as i64,
+                    work.word_count.map(|c| c as i64),
                     work.chapter_count as i64,
                     work.total_chapters.map(|c| c as i64),
-                    work.kudos as i64,
-                    work.hits as i64,
-                    work.bookmarks as i64,
-                    work.comments as i64,
+                    work.kudos.map(|c| c as i64),
+                    work.hits.map(|c| c as i64),
+                    work.bookmarks.map(|c| c as i64),
+                    work.comments.map(|c| c as i64),
                     work.date_published,
                     work.date_updated,
                     work.language,
@@ -223,38 +272,26 @@ impl WorksCache {
                 ],
             )
             .map_err(map_sql)?;
-        self.replace_work_authors(conn, work.id, &work.authors)?;
-        let tag_refs = self.replace_work_tag_rows(conn, tags, work)?;
+        let id = match existing_id {
+            Some(id) => id,
+            None => conn.last_insert_rowid() as u64,
+        };
+        self.replace_work_authors(conn, id, &work.authors)?;
+        let tag_refs = self.replace_work_tag_rows(conn, tags, id, work)?;
 
         let mut summary = work.clone();
+        summary.id = id;
         summary.fandoms.clear();
         summary.characters.clear();
         summary.relationships.clear();
         summary.tags.clear();
         summary.fetched_at = fetched_at.to_string();
-        let mut map = self.map.borrow_mut();
-        let old = map.get(&work.id).cloned();
+        summary.series = series.to_vec();
         let old_series = old.as_ref().map(|o| o.summary.series.clone()).unwrap_or_default();
-        // Blurbs carry series id/name/part but not the prev/next links;
-        // keep those from the stored (work-page) entry for the same
-        // series. An empty incoming list is "unknown", not "none" — only
-        // set_series (work page) clears.
-        summary.series = if work.series.is_empty() {
-            old_series.clone()
-        } else {
-            work.series.iter().map(|m| {
-                let mut m = m.clone();
-                if let Some(o) = old_series.iter().find(|o| o.series_id == m.series_id) {
-                    if m.prev_work_id.is_none() { m.prev_work_id = o.prev_work_id; }
-                    if m.next_work_id.is_none() { m.next_work_id = o.next_work_id; }
-                }
-                m
-            }).collect()
-        };
         if summary.series != old_series {
             conn.execute(
                     "UPDATE works SET series_json = ?2 WHERE id = ?1",
-                    params![work.id as i64, serde_json::to_string(&summary.series).map_err(map_json)?],
+                    params![id as i64, serde_json::to_string(&summary.series).map_err(map_json)?],
                 )
                 .map_err(map_sql)?;
         }
@@ -267,19 +304,62 @@ impl WorksCache {
             last_chapter_read_pos: old.as_ref().map(|o| o.last_chapter_read_pos).unwrap_or(0),
             gone_from_ao3: old.as_ref().map(|o| o.gone_from_ao3).unwrap_or(false),
             finished: old.as_ref().map(|o| o.finished).unwrap_or(false),
+            stub: false,
         };
-        map.insert(work.id, Arc::new(entity));
-        Ok(())
+        self.insert_entity(entity);
+        Ok(id)
+    }
+
+    /// A row for a target the library has never fetched, so it has an id
+    /// to navigate and follow by. No-op (returning the existing id) when
+    /// the target is already known, stub or not.
+    pub(super) fn ensure_stub(&self, conn: &Connection, external: &ExternalRef, title: &str)
+        -> Result<u64, AppError>
+    {
+        if let Some(id) = self.resolve(&external.source, &external.external_id) {
+            return Ok(id);
+        }
+        conn.execute(
+                "INSERT INTO works (source, external_id, url, stub, title, authors_json, rating,
+                                    warnings_json, categories_json, summary, chapter_count,
+                                    date_updated, language, complete)
+                 VALUES (?1, ?2, ?3, 1, ?4, '[]', ?5, '[]', '[]', '', 0, '', '', 0)",
+                params![external.source, external.external_id, external.url, title,
+                        rating_to_str(&crate::models::Rating::NotRated)],
+            )
+            .map_err(map_sql)?;
+        let id = conn.last_insert_rowid() as u64;
+        let mut summary = WorkSummary {
+            id,
+            source: external.source.clone(),
+            external_id: external.external_id.clone(),
+            url: external.url.clone(),
+            title: title.to_string(),
+            ..stub_summary()
+        };
+        summary.title = title.to_string();
+        self.insert_entity(WorkEntity {
+            summary,
+            tags: Vec::new(),
+            detail_viewed_at: String::new(),
+            last_read_dt: String::new(),
+            last_chapter_read: 0,
+            last_chapter_read_pos: 0,
+            gone_from_ao3: false,
+            finished: false,
+            stub: true,
+        });
+        Ok(id)
     }
 
     /// Rewrite a work's tag join rows. `tag_type` records which blurb list
     /// each tag came from; `position` runs across the four lists in AO3's
     /// blurb order. Returns the refs for the entity — first sighting wins
     /// on a duplicate name, like the table's INSERT OR IGNORE.
-    fn replace_work_tag_rows(&self, conn: &Connection, tags: &TagCache, work: &WorkSummary)
+    fn replace_work_tag_rows(&self, conn: &Connection, tags: &TagCache, id: u64, work: &WorkSummary)
         -> Result<Vec<WorkTagRef>, AppError>
     {
-        conn.execute("DELETE FROM work_tags WHERE work_id = ?1", params![work.id as i64])
+        conn.execute("DELETE FROM work_tags WHERE work_id = ?1", params![id as i64])
             .map_err(map_sql)?;
         let mut stmt = conn
             .prepare_cached("INSERT OR IGNORE INTO work_tags (work_id, tag_id, tag_type, position)
@@ -296,7 +376,7 @@ impl WorksCache {
         ] {
             for name in list {
                 let tag_id = tags.resolve(conn, name, tag_type)?.id;
-                stmt.execute(params![work.id as i64, tag_id, tag_type, position])
+                stmt.execute(params![id as i64, tag_id, tag_type, position])
                     .map_err(map_sql)?;
                 position += 1;
                 if seen.insert(tag_id) {
@@ -322,8 +402,8 @@ impl WorksCache {
         Ok(())
     }
 
-    /// Persist series memberships. The work page is authoritative, so an
-    /// empty slice clears.
+    /// Persist series memberships (already resolved to series row ids).
+    /// The work page is authoritative, so an empty slice clears.
     pub(super) fn set_series(&self, conn: &Connection, work_id: u64,
                              series: &[SeriesMembership])
         -> Result<(), AppError>
@@ -428,12 +508,48 @@ impl WorksCache {
         Ok(())
     }
 
-    /// Delete the works row (work_tags and collection rows cascade via
-    /// their foreign keys; the entity's tag refs go with it).
+    /// Delete the works row (every dependent table cascades via its
+    /// foreign key or trigger; the entity's tag refs go with it).
     pub(super) fn delete(&self, conn: &Connection, work_id: u64) -> Result<(), AppError> {
         conn.execute("DELETE FROM works WHERE id = ?1", params![work_id as i64])
             .map_err(map_sql)?;
-        self.map.borrow_mut().remove(&work_id);
+        if let Some(e) = self.map.borrow_mut().remove(&work_id) {
+            self.by_external.borrow_mut()
+                .remove(&Self::key(&e.summary.source, &e.summary.external_id));
+        }
         Ok(())
+    }
+}
+
+/// The empty summary a stub row carries (everything absent).
+fn stub_summary() -> WorkSummary {
+    WorkSummary {
+        id: 0,
+        source: String::new(),
+        external_id: String::new(),
+        url: String::new(),
+        title: String::new(),
+        authors: Vec::new(),
+        fandoms: Vec::new(),
+        rating: crate::models::Rating::NotRated,
+        warnings: Vec::new(),
+        categories: Vec::new(),
+        relationships: Vec::new(),
+        characters: Vec::new(),
+        tags: Vec::new(),
+        summary: String::new(),
+        word_count: None,
+        chapter_count: 0,
+        total_chapters: None,
+        kudos: None,
+        hits: None,
+        bookmarks: None,
+        comments: None,
+        date_published: String::new(),
+        date_updated: String::new(),
+        language: String::new(),
+        complete: false,
+        series: Vec::new(),
+        fetched_at: String::new(),
     }
 }

@@ -82,11 +82,17 @@ pub fn parse_subscriptions_page(html: &str) -> Result<Vec<Subscription>, AppErro
                     .and_then(|a| a.rsplit('/').next())
                     .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
                     .map(str::to_string);
+                let url = match sub_type {
+                    "work" => id.parse().map(super::ao3_work_url).unwrap_or_default(),
+                    "series" => id.parse().map(super::ao3_series_url).unwrap_or_default(),
+                    _ => super::ao3_user_url(&id),
+                };
                 subs.push(Subscription {
                     sub_type: sub_type.to_string(),
                     id,
                     name,
                     ao3_id,
+                    url,
                 });
             }
         }

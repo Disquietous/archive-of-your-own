@@ -265,24 +265,30 @@ impl AO3App {
                     // cache, so a local bookmark row would render blank.
                     // Skip; the pull picks the work up after the reveal.
                     if listing.mystery { continue; }
-                    match listing.target {
-                        BookmarkTarget::Work(_) => {
+                    let target = match listing.kind {
+                        BookmarkKind::Work => {
                             let Some(ws) = listing.work_summary.as_ref() else { continue };
-                            log_db("save_work", s.save_work(ws));
+                            match s.save_work(ws) {
+                                Ok(id) => BookmarkTarget::Work(id),
+                                Err(e) => { log_error!("db", "save_work failed: {e}"); continue; }
+                            }
                         }
-                        BookmarkTarget::Series(_) => {
+                        BookmarkKind::Series => {
                             let Some(sr) = listing.series_summary.as_ref() else { continue };
-                            log_db("save_series", s.save_series(sr));
+                            match s.save_series(sr) {
+                                Ok(id) => BookmarkTarget::Series(id),
+                                Err(e) => { log_error!("db", "save_series failed: {e}"); continue; }
+                            }
                         }
-                    }
+                    };
                     // Upsert bookmark with sync_to_ao3=true
-                    let id = match s.add_bookmark_for(listing.target, Some(&listing.note), true) {
+                    let id = match s.add_bookmark_for(target, Some(&listing.note), true) {
                         Ok(id) => id,
                         Err(e) => { log_error!("db", "add_bookmark failed: {e}"); continue; }
                     };
                     log_db("set_ao3_bookmark_id",
-                           s.set_ao3_bookmark_id_for(listing.target, listing.ao3_bookmark_id));
-                    all_bookmarks.push(Self::ubookmark(listing.target, listing.note.clone(), true,
+                           s.set_ao3_bookmark_id_for(target, listing.ao3_bookmark_id));
+                    all_bookmarks.push(Self::ubookmark(target, listing.note.clone(), true,
                                                        Some(listing.ao3_bookmark_id), id));
                 }
                 log_db("commit bookmark page", tx.commit());
@@ -455,13 +461,21 @@ impl AO3App {
                 return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
             };
 
+            // The client speaks AO3 numbers; the target is a row id.
+            let (kind, number) = {
+                let s = storage.lock().await;
+                match target {
+                    BookmarkTarget::Work(id) => (BookmarkKind::Work, ao3_work_number(&s, id)?),
+                    BookmarkTarget::Series(id) => (BookmarkKind::Series, ao3_series_number(&s, id)?),
+                }
+            };
             // Creating a bookmark that already exists updates it in place
             // (AO3-side upsert), so a full retry after rotation is safe.
             let ao3_id = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "bookmark_push".to_string() }, RetrySafety::Idempotent,
                 move |client| {
                     let (note, tags, collections) = (note.clone(), tags.clone(), collections.clone());
                     async move {
-                        client.read().await.create_ao3_bookmark(target, &note, &tags, &collections, private, rec)
+                        client.read().await.create_ao3_bookmark(kind, number, &note, &tags, &collections, private, rec)
                             .await.map_err(AO3Error::from)
                     }
                 }).await?;

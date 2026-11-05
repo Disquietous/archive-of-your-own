@@ -208,7 +208,7 @@ extension ReadPaneViewController {
             splitWorksOpID = search.searchFetchOp.opID
             splitBookmarksOpID = search.bookmarksFetchOp.opID
             toolbar.setLeading([])
-            toolbar.setTrailing([ao3Button(url: ExternalLinkOpener.ao3CollectionURL(collectionName),
+            toolbar.setTrailing([ao3Button(url: search.splitCollectionURL,
                                            tooltip: "Open this collection on AO3 in your browser"),
                                  searchSourceButton()])
             show(mode: .collectionSplit)
@@ -322,7 +322,7 @@ extension ReadPaneViewController {
         } else {
             refreshDetailActionButtons(for: work, bookmarked: bookmarked)
             toolbar.setAfterTitle([startReadingButton])
-            var trailing: [NSView] = [ao3Button(url: ExternalLinkOpener.ao3WorkURL(work.id),
+            var trailing: [NSView] = [ao3Button(url: work.url.isEmpty ? nil : URL(string: work.url),
                                                 tooltip: "Open this work on AO3 in your browser"),
                                       detachButton, settingsButton, detailRefreshButton(),
                                       downloadButton, readingListButton, subscribeButton,

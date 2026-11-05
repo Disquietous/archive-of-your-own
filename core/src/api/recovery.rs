@@ -479,7 +479,7 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
 async fn restore_persisted_cookies(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Storage>>) {
     let s = storage.lock().await;
     let cookies = match s.get_active_account() {
-        Ok(Some((_, _, cookies))) if !cookies.is_empty() => Some(cookies),
+        Ok(Some(account)) if !account.cookies.is_empty() => Some(account.cookies),
         _ => None,
     };
     drop(s);

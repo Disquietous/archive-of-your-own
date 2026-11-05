@@ -9,22 +9,20 @@ impl AO3App {
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn leave_kudos(&self, work_id: u64, op_id: Option<u64>) -> Result<bool, AO3Error> {
         self.run_on_runtime_for(op_id, move |client, storage| async move {
-            {
+            let number = {
                 let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
-            }
+                ao3_work_number(&s, work_id)?
+            };
             // AO3 answers a duplicate kudos with "already left kudos"
             // rather than erroring, so a full retry after rotation can
             // never double-apply — safe to retry for every failure kind.
             let accepted = with_recovery_as(client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Kudos, RetrySafety::Idempotent,
-                move |client| {
-                    let work_id = work_id;
-                    async move {
-                        client.read().await.leave_kudos(work_id).await.map_err(AO3Error::from)
-                    }
+                move |client| async move {
+                    client.read().await.leave_kudos(number).await.map_err(AO3Error::from)
                 }).await?;
             let c = client.read().await;
             let s = storage.lock().await;
@@ -50,18 +48,19 @@ impl AO3App {
     /// like a fetch of the same scope.
     pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<UPostResult, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            {
+            let number = {
                 let c = client.read().await;
                 let s = storage.lock().await;
                 seed_posting_credentials(&c, &s);
-            }
+                ao3_work_number(&s, work_id)?
+            };
             let base = crate::client::BASE_URL;
             let (endpoint, controller, form_page) = if chapter_id == 0 {
-                (format!("{base}/works/{work_id}/comments"), "works",
-                 format!("{base}/works/{work_id}?show_comments=true&view_adult=true"))
+                (format!("{base}/works/{number}/comments"), "works",
+                 format!("{base}/works/{number}?show_comments=true&view_adult=true"))
             } else {
                 (format!("{base}/chapters/{chapter_id}/comments"), "chapters",
-                 format!("{base}/works/{work_id}/chapters/{chapter_id}?show_comments=true&view_adult=true"))
+                 format!("{base}/works/{number}/chapters/{chapter_id}?show_comments=true&view_adult=true"))
             };
             // A comment creates a new record with no natural dedup, so this
             // only retries failures that are provably pre-origin (525) —
@@ -80,21 +79,21 @@ impl AO3App {
             persist_posting_credentials(&c, &s);
             let Some(body) = posted else { return Ok(UPostResult { posted: false, comment_json: String::new() }) };
             let page = crate::parser::parse_comments(&body).comments;
-            let (cache_work, cache_chapter) = if chapter_id == 0 { (work_id, 0) } else { (0, chapter_id) };
             for comment in &page {
-                log_db("save_comment", s.save_comment(cache_work, cache_chapter, comment));
+                log_db("save_comment", s.save_comment(work_id, chapter_id, comment));
             }
             log_db("clear_comment_draft", s.clear_comment_draft(work_id, chapter_id));
-            let account = s.subscription_account();
+            let account = s.subscription_account().map(|a| a.username);
             Ok(posted_result(&page, account.as_deref()))
         }).await
     }
 
     pub async fn fetch_chapter_comments(&self, work_id: u64, chapter_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
+            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
-                    client.read().await.fetch_comments_for_chapter(work_id, chapter_id, page).await.map_err(AO3Error::from)
+                    client.read().await.fetch_comments_for_chapter(number, chapter_id, page).await.map_err(AO3Error::from)
                 }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
@@ -111,9 +110,10 @@ impl AO3App {
 
     pub async fn fetch_work_comments(&self, work_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
+            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
-                    client.read().await.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)
+                    client.read().await.fetch_comments_for_work(number, page).await.map_err(AO3Error::from)
                 }).await?;
             let s = storage.lock().await;
             for comment in &cp.comments {
@@ -199,7 +199,7 @@ impl AO3App {
                     }).await?;
                 parent = find_comment(&subtree, parent_comment_id);
             }
-            let account = storage.lock().await.subscription_account();
+            let account = storage.lock().await.subscription_account().map(|a| a.username);
             let result = match parent.as_ref() {
                 Some(p) => posted_result(std::slice::from_ref(p), account.as_deref()),
                 None => UPostResult { posted: true, comment_json: String::new() },
@@ -272,9 +272,10 @@ impl AO3App {
     /// discarded (the switch already emptied subscriptions).
     pub async fn sync_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let Some(username) = storage.lock().await.subscription_account() else {
+            let Some(account) = storage.lock().await.subscription_account() else {
                 return Err(AO3Error::Network { message: "Sign in to AO3 in Settings first".to_string() });
             };
+            let username = account.username.clone();
             let mut all_subs = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
@@ -325,13 +326,13 @@ impl AO3App {
             }
 
             let s = storage.lock().await;
-            if s.subscription_account().as_deref() != Some(username.as_str()) {
+            if s.subscription_account().map(|a| a.id) != Some(account.id) {
                 return Err(AO3Error::Cancelled);
             }
             let tuples: Vec<(String, String, String, Option<String>)> = all_subs.iter()
                 .map(|u| (u.sub_type.clone(), u.id.clone(), u.name.clone(), u.ao3_id.clone()))
                 .collect();
-            s.save_subscriptions(&username, &tuples).map_err(AO3Error::from)?;
+            s.save_subscriptions(account.id, &tuples).map_err(AO3Error::from)?;
             Ok(all_subs)
         }).await
     }
@@ -365,10 +366,10 @@ impl AO3App {
             // Subscription data only — never follows.
             if let (true, Some(account)) = (profile.viewer_signed_in, s.subscription_account()) {
                 if profile.subscribed {
-                    log_db("add_subscription", s.add_subscription(&account, "author", &profile.username,
+                    log_db("add_subscription", s.add_subscription(account.id, "author", &profile.username,
                         &profile.username, profile.subscription_ao3_id.as_deref()));
                 } else {
-                    log_db("remove_subscription", s.remove_subscription(&account, "author", &profile.username));
+                    log_db("remove_subscription", s.remove_subscription(account.id, "author", &profile.username));
                 }
             }
             Ok(UUserProfile::from(profile))
@@ -401,8 +402,8 @@ impl AO3App {
             let tx = s.begin_tx().map_err(AO3Error::from)?;
             let mut hits = Vec::new();
             for l in listings {
-                let id = cache_bookmark_listing(&s, &l);
-                hits.push(hit_from_listing(l, id));
+                let (target, id) = cache_bookmark_listing(&s, &l);
+                hits.push(hit_from_listing(l, target, id));
             }
             log_db("commit listing save", tx.commit());
             Ok(UPagedBookmarks {
@@ -465,10 +466,8 @@ impl AO3App {
     pub fn get_persisted_subscriptions(&self) -> Result<Vec<USubscription>, AO3Error> {
         let s = self.storage.blocking_lock();
         let Some(account) = s.subscription_account() else { return Ok(Vec::new()) };
-        let rows = s.get_subscriptions(&account).map_err(AO3Error::from)?;
-        Ok(rows.into_iter()
-            .map(|(t, id, name, ao3_id)| USubscription { sub_type: t, id, name, ao3_id })
-            .collect())
+        let rows = s.get_subscriptions(account.id).map_err(AO3Error::from)?;
+        Ok(rows.into_iter().map(usubscription).collect())
     }
 
     /// Every cached bookmark attributed to a user, newest first — the
@@ -479,11 +478,13 @@ impl AO3App {
             .into_iter().map(UBookmarkHit::from).collect())
     }
 
-    /// A subscription's cached works, derived from the works table
-    /// (author bylines / series memberships).
+    /// An author's or series' cached works, derived from the works table
+    /// (author bylines / series memberships). `sub_id`: the author's
+    /// username or the series row id.
     pub fn get_subscription_works(&self, sub_type: String, sub_id: String) -> Result<Vec<UWorkSummary>, AO3Error> {
         let s = self.storage.blocking_lock();
-        let works = s.get_subscription_works(&sub_type, &sub_id).map_err(AO3Error::from)?;
+        let Some(target) = s.follow_target(&sub_type, &sub_id) else { return Ok(Vec::new()) };
+        let works = s.get_subscription_works(target).map_err(AO3Error::from)?;
         Ok(works.into_iter().map(UWorkSummary::from).collect())
     }
 
@@ -509,14 +510,21 @@ impl AO3App {
     /// thread on the pages read along the way.
     pub async fn fetch_comment_thread(&self, work_url: String, comment_id: u64) -> Result<String, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let work_id: u64 = work_url.split('/')
+            let number: u64 = work_url.split('/')
                 .find(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty())
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
-            if work_id == 0 {
+            if number == 0 {
                 return Err(AO3Error::Network { message: "Invalid work URL".to_string() });
             }
+            // The inbox names the work by URL; its comments cache under the
+            // work's row (a stub until the work itself is fetched).
+            let work_id = {
+                let s = storage.lock().await;
+                let external = ExternalRef::ao3(number.to_string(), crate::parser::ao3_work_url(number));
+                s.ensure_work_stub(&external, "").map_err(AO3Error::from)?
+            };
 
             fn find_root_thread(comments: &[Comment], target_id: u64) -> Option<Comment> {
                 comments.iter().find(|c| find_comment(std::slice::from_ref(*c), target_id).is_some()).cloned()
@@ -530,7 +538,7 @@ impl AO3App {
             while page <= total_pages {
                 let comments_page = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
                     move |client| async move {
-                        client.read().await.fetch_comments_for_work(work_id, page).await.map_err(AO3Error::from)
+                        client.read().await.fetch_comments_for_work(number, page).await.map_err(AO3Error::from)
                     }).await?;
 
                 total_pages = comments_page.total_pages.max(1);
@@ -662,6 +670,17 @@ fn thread_json(root: Option<&Comment>, target_comment_id: u64) -> String {
         "target_comment_id": target_comment_id,
     });
     serde_json::to_string(&result).unwrap_or("{}".to_string())
+}
+
+/// A stored subscription row as the bridge record (URL rebuilt from the
+/// AO3 vocabulary it carries).
+pub(super) fn usubscription((sub_type, id, name, ao3_id): (String, String, String, Option<String>)) -> USubscription {
+    let url = match sub_type.as_str() {
+        "work" => id.parse().map(crate::parser::ao3_work_url).unwrap_or_default(),
+        "series" => id.parse().map(crate::parser::ao3_series_url).unwrap_or_default(),
+        _ => crate::parser::ao3_user_url(&id),
+    };
+    USubscription { sub_type, id, name, ao3_id, url }
 }
 
 /// The chapter number in a whole-work comment's "on Chapter N" label.

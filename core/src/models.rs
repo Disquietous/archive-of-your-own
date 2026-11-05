@@ -85,22 +85,98 @@ impl Warning {
     }
 }
 
+/// The source every record carried before the library learned a second
+/// one. Adapters name their own; the core compares, never interprets.
+pub const SOURCE_AO3: &str = "ao3";
+
+/// Where a stored entity came from: its source and the id that source
+/// knows it by, plus the canonical page URL ("" for sources without
+/// one). This is the only shape in which an external identifier leaves
+/// the core — row ids identify everything else.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExternalRef {
+    pub source: String,
+    pub external_id: String,
+    pub url: String,
+}
+
+impl ExternalRef {
+    pub fn ao3(external_id: impl Into<String>, url: impl Into<String>) -> Self {
+        ExternalRef { source: SOURCE_AO3.to_string(), external_id: external_id.into(), url: url.into() }
+    }
+}
+
+/// A follow's target, by row id. Works and series are what the What's New
+/// check fetches; authors are users rows; fandoms are tag rows (followed,
+/// never checked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FollowTarget {
+    Work(u64),
+    Series(u64),
+    Author(i64),
+    Fandom(i64),
+}
+
+impl FollowTarget {
+    /// The `follows.kind` column value.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            FollowTarget::Work(_) => "work",
+            FollowTarget::Series(_) => "series",
+            FollowTarget::Author(_) => "author",
+            FollowTarget::Fandom(_) => "fandom",
+        }
+    }
+
+    /// The `follows.target_id` column value.
+    pub fn id(&self) -> i64 {
+        match self {
+            FollowTarget::Work(id) | FollowTarget::Series(id) => *id as i64,
+            FollowTarget::Author(id) | FollowTarget::Fandom(id) => *id,
+        }
+    }
+
+    pub fn from_parts(kind: &str, id: i64) -> Option<Self> {
+        match kind {
+            "work" => Some(FollowTarget::Work(id as u64)),
+            "series" => Some(FollowTarget::Series(id as u64)),
+            "author" => Some(FollowTarget::Author(id)),
+            "fandom" => Some(FollowTarget::Fandom(id)),
+            _ => None,
+        }
+    }
+}
+
 /// One "Part N of <series>" membership from a work page, including the
-/// adjacent works in that series when AO3 provides the links.
+/// adjacent works in that series when AO3 provides the links. The series
+/// itself resolves to a row id when the work is saved (`series_id` is 0
+/// on a freshly parsed membership); the adjacent works stay external
+/// ids — they are usually not in the library, and a stub is only made
+/// when the user opens one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SeriesMembership {
+    /// Series row id; 0 until the owning work is saved.
+    #[serde(default)]
     pub series_id: u64,
+    /// The series' id at its source (AO3 series number).
+    pub series_external_id: String,
     pub name: String,
     /// 1-based position within the series; 0 when the position text
     /// couldn't be parsed.
     pub part: u32,
-    pub prev_work_id: Option<u64>,
-    pub next_work_id: Option<u64>,
+    pub prev_work_external_id: Option<String>,
+    pub next_work_external_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkSummary {
+    /// Row id; 0 for a freshly parsed summary that has not been saved.
     pub id: u64,
+    pub source: String,
+    /// The work's id at its source (AO3 work number).
+    pub external_id: String,
+    /// Canonical page URL at the source; "" when the source has none.
+    pub url: String,
     pub title: String,
     pub authors: Vec<String>,
     pub fandoms: Vec<String>,
@@ -111,13 +187,15 @@ pub struct WorkSummary {
     pub characters: Vec<String>,
     pub tags: Vec<String>,
     pub summary: String,
-    pub word_count: u64,
+    /// Stats are absent (None), never zero, when the source does not
+    /// report them. AO3 always does.
+    pub word_count: Option<u64>,
     pub chapter_count: u32,
     pub total_chapters: Option<u32>,
-    pub kudos: u32,
-    pub hits: u64,
-    pub bookmarks: u32,
-    pub comments: u32,
+    pub kudos: Option<u32>,
+    pub hits: Option<u64>,
+    pub bookmarks: Option<u32>,
+    pub comments: Option<u32>,
     pub date_published: String,
     pub date_updated: String,
     pub language: String,
@@ -206,7 +284,7 @@ pub struct LocalSearchCriteria {
     pub sort_direction: String,
 }
 
-/// What an AO3 bookmark points at. AO3 also allows external-work
+/// What a bookmark points at, by row id. AO3 also allows external-work
 /// bookmarks; those are not modelled (the parser skips them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BookmarkTarget {
@@ -214,7 +292,31 @@ pub enum BookmarkTarget {
     Series(u64),
 }
 
+/// The kind of a bookmark's target, before the target has a row id (a
+/// parsed listing names its work or series by external id only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BookmarkKind {
+    Work,
+    Series,
+}
+
+impl BookmarkKind {
+    pub fn with_id(self, id: u64) -> BookmarkTarget {
+        match self {
+            BookmarkKind::Work => BookmarkTarget::Work(id),
+            BookmarkKind::Series => BookmarkTarget::Series(id),
+        }
+    }
+}
+
 impl BookmarkTarget {
+    pub fn kind_of(&self) -> BookmarkKind {
+        match self {
+            BookmarkTarget::Work(_) => BookmarkKind::Work,
+            BookmarkTarget::Series(_) => BookmarkKind::Series,
+        }
+    }
+
     /// The `bookmarks.bookmark_type` column value.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -251,7 +353,12 @@ impl BookmarkTarget {
 /// series page header). Rows in the `series` table.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SeriesSummary {
+    /// Row id; 0 for a freshly parsed summary that has not been saved.
     pub id: u64,
+    pub source: String,
+    /// The series' id at its source (AO3 series number).
+    pub external_id: String,
+    pub url: String,
     pub name: String,
     pub authors: Vec<String>,
     pub summary: String,
@@ -267,7 +374,10 @@ pub struct SeriesSummary {
 
 #[derive(Debug, Clone)]
 pub struct BookmarkListing {
-    pub target: BookmarkTarget,
+    /// Work or series — the blurb names the target by external id only
+    /// (inside `work_summary` / `series_summary`); the row id exists once
+    /// the target is saved.
+    pub kind: BookmarkKind,
     pub ao3_bookmark_id: u64,
     pub note: String,
     /// AO3 username the blurb's "Bookmarked by" byline attributes the
@@ -304,6 +414,8 @@ pub struct BookmarkListing {
 pub struct BookmarkHit {
     /// Local row id (0 for remote hits that were not cached).
     pub id: i64,
+    /// Target by row id; id 0 for a remote hit whose target was not
+    /// cached (a mystery blurb).
     pub target: BookmarkTarget,
     pub bookmarker: String,
     pub note: String,
@@ -370,8 +482,11 @@ pub struct BookmarkSearchCriteria {
 /// One collection blurb from the /collections index (li.collection.blurb).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectionSummary {
-    /// URL slug — the path segment in /collections/{name}.
+    pub source: String,
+    /// The collection's external id: its URL slug, the path segment in
+    /// /collections/{name}. The row id never leaves storage.
     pub name: String,
+    pub url: String,
     /// Display title from the blurb heading link.
     pub title: String,
     /// Plain-text summary (blockquote.userstuff.summary), "" when absent.
@@ -430,11 +545,13 @@ impl CollectionSearchCriteria {
 #[derive(Debug, Clone)]
 pub struct Subscription {
     pub sub_type: String,  // "author", "work", "series"
-    pub id: String,        // username, work_id, or series_id
+    pub id: String,        // AO3 username, work number, or series number
     pub name: String,      // display name
     /// AO3's subscription record id (from the unsubscribe form action) —
     /// lets unsubscribe POST directly without a page fetch.
     pub ao3_id: Option<String>,
+    /// The subscribed target's page on AO3.
+    pub url: String,
 }
 
 #[derive(Debug, Clone)]

@@ -29,6 +29,28 @@ fn parse_number(s: &str) -> u64 {
     s.replace(',', "").trim().parse().unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// AO3 canonical URLs. The parser is the one place the core turns an AO3
+// id into a page address for a record (`url` fields); every other URL
+// the app sends lives in the client's routes.
+// ---------------------------------------------------------------------------
+
+pub fn ao3_work_url(work_number: u64) -> String {
+    format!("{}/works/{work_number}", crate::client::BASE_URL)
+}
+
+pub fn ao3_series_url(series_number: u64) -> String {
+    format!("{}/series/{series_number}", crate::client::BASE_URL)
+}
+
+pub fn ao3_collection_url(slug: &str) -> String {
+    format!("{}/collections/{slug}", crate::client::BASE_URL)
+}
+
+pub fn ao3_user_url(username: &str) -> String {
+    format!("{}/users/{username}", crate::client::BASE_URL)
+}
+
 /// AO3 sometimes injects a dismissible site-wide announcement between the
 /// page header and the content (`<div class="alert announcement group"
 /// id="admin-banner">…</div>`). Its body is a `<div class="userstuff">`,

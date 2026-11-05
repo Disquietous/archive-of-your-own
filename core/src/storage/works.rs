@@ -1,7 +1,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
-use crate::models::{BookmarkTarget, Chapter, ContentBlock, LocalSearchCriteria, Rating,
+use crate::models::{BookmarkTarget, Chapter, ContentBlock, ExternalRef, LocalSearchCriteria, Rating,
                     SeriesMembership, SeriesSummary, Warning, WorkSummary};
 
 use super::consts::*;
@@ -15,8 +15,8 @@ impl Storage {
     /// The works table's scalar columns, in `work_from_row` order. The tag
     /// vectors (fandoms, characters, relationships, freeforms) are not
     /// columns — they hydrate from the work_tags join via attach_work_tags.
-    pub(super) const WORK_COLS: [&'static str; 20] = [
-        "id", "title", "authors_json", "rating", "warnings_json",
+    pub(super) const WORK_COLS: [&'static str; 23] = [
+        "id", "source", "external_id", "url", "title", "authors_json", "rating", "warnings_json",
         "categories_json", "summary", COL_WORD_COUNT, "chapter_count",
         "total_chapters", COL_KUDOS, COL_HITS, COL_BOOKMARKS, COL_COMMENTS,
         "date_published", "date_updated", "language", "complete",
@@ -35,12 +35,41 @@ impl Storage {
 
     /// Upsert a work summary plus its author- and tag-index rows, atomically
     /// (a savepoint, so it also composes inside callers' batch transactions).
-    /// The write itself lives on the works cache — the single write
-    /// authority for the works tables.
-    pub fn save_work(&self, work: &WorkSummary) -> Result<(), AppError> {
+    /// Keyed by (source, external_id): the input's `id` is ignored and the
+    /// row id — existing or newly allocated — is returned. The write itself
+    /// lives on the works cache — the single write authority for the works
+    /// tables.
+    ///
+    /// Series memberships resolve to series rows here (a name-only stub
+    /// when the series was never cached). Blurbs carry series id/name/part
+    /// but not the prev/next links, so those merge in from the stored
+    /// (work-page) entry for the same series; an empty incoming list is
+    /// "unknown", not "none" — only `set_work_series` (work page) clears.
+    pub fn save_work(&self, work: &WorkSummary) -> Result<u64, AppError> {
         self.with_savepoint(Savepoint::SaveWork, || {
-            self.works_cache.save_work(
-                &self.conn, &self.tag_cache, work,
+            let old_series = self.works_cache
+                .resolve(&work.source, &work.external_id)
+                .and_then(|id| self.works_cache.get(id))
+                .map(|e| e.summary.series.clone())
+                .unwrap_or_default();
+            let series = if work.series.is_empty() {
+                old_series
+            } else {
+                let mut resolved = self.resolve_memberships(&work.series)?;
+                for m in &mut resolved {
+                    if let Some(o) = old_series.iter().find(|o| o.series_id == m.series_id) {
+                        if m.prev_work_external_id.is_none() {
+                            m.prev_work_external_id = o.prev_work_external_id.clone();
+                        }
+                        if m.next_work_external_id.is_none() {
+                            m.next_work_external_id = o.next_work_external_id.clone();
+                        }
+                    }
+                }
+                resolved
+            };
+            let id = self.works_cache.save_work(
+                &self.conn, &self.tag_cache, work, &series,
                 &crate::timefmt::now_utc_datetime(),
             )?;
             // Seeing a work's details anywhere feeds the autocomplete tag cache.
@@ -48,8 +77,48 @@ impl Storage {
             // Author bylines are user sightings: "Pseud (account)" teaches
             // the account row a pseud it hadn't recorded.
             self.record_author_bylines(&work.authors)?;
-            Ok(())
+            Ok(id)
         })
+    }
+
+    /// Memberships with their series row ids filled in, creating a
+    /// name-only series stub for any series the library never cached.
+    fn resolve_memberships(&self, series: &[SeriesMembership]) -> Result<Vec<SeriesMembership>, AppError> {
+        series.iter().map(|m| {
+            let external = ExternalRef {
+                source: crate::models::SOURCE_AO3.to_string(),
+                external_id: m.series_external_id.clone(),
+                url: m.series_external_id.parse().map(crate::parser::ao3_series_url).unwrap_or_default(),
+            };
+            let series_id = self.series_cache.ensure(&self.conn, &external, &m.name)?;
+            Ok(SeriesMembership { series_id, ..m.clone() })
+        }).collect()
+    }
+
+    /// Row id for a work the library knows by its external identity —
+    /// stubs included. None when never seen.
+    pub fn resolve_work(&self, source: &str, external_id: &str) -> Option<u64> {
+        self.works_cache.resolve(source, external_id)
+    }
+
+    /// Where a work row came from (its source, external id, and page URL)
+    /// — stubs included, since this is what a fetch needs. None for an
+    /// unknown row id.
+    pub fn work_ref(&self, work_id: u64) -> Option<ExternalRef> {
+        self.works_cache.get(work_id).map(|e| e.external_ref())
+    }
+
+    /// Whether a row id names a stub (known by id only, never fetched).
+    pub fn is_work_stub(&self, work_id: u64) -> bool {
+        self.works_cache.get(work_id).is_some_and(|e| e.stub)
+    }
+
+    /// The row id for an external identity, creating a stub row when the
+    /// library has never seen it. The one way a target enters the library
+    /// without being fetched: link opens, follows, and subscriptions name
+    /// targets by external id, and this gives them an id to work with.
+    pub fn ensure_work_stub(&self, external: &ExternalRef, title: &str) -> Result<u64, AppError> {
+        self.works_cache.ensure_stub(&self.conn, external, title)
     }
 
     /// Seed work_tags join rows from the pre-v8 JSON list columns, adding
@@ -129,36 +198,46 @@ impl Storage {
     /// because listing blurbs never carry series data and their upserts
     /// must not clobber it; only full work-page fetches call this. Always
     /// writes — the work page is authoritative, so an empty slice clears.
+    /// Memberships resolve to series rows (stubs created as needed).
     pub fn set_work_series(&self, work_id: u64, series: &[SeriesMembership]) -> Result<(), AppError> {
-        self.works_cache.set_series(&self.conn, work_id, series)
+        let resolved = self.resolve_memberships(series)?;
+        self.works_cache.set_series(&self.conn, work_id, &resolved)
     }
 
     // -------------------------------------------------------------------
     // Series
     // -------------------------------------------------------------------
 
-    /// Upsert a series summary (a series bookmark blurb or series page).
-    pub fn save_series(&self, series: &SeriesSummary) -> Result<(), AppError> {
+    /// Upsert a series summary (a series bookmark blurb or series page) by
+    /// (source, external_id); returns the row id.
+    pub fn save_series(&self, series: &SeriesSummary) -> Result<u64, AppError> {
         self.with_savepoint(Savepoint::SaveSeries, || {
             self.series_cache.save(&self.conn, series, &crate::timefmt::now_utc_datetime())
         })
     }
 
     /// Ensure a `series` row exists (a name-only stub when nothing better
-    /// is cached) so a bookmark may target it. Returns true if created.
-    pub fn ensure_series(&self, id: u64, name: &str) -> Result<bool, AppError> {
-        self.series_cache.ensure(&self.conn, id, name, &crate::timefmt::now_utc_datetime())
+    /// is cached) so a bookmark, follow, or membership may target it.
+    /// Returns the row id.
+    pub fn ensure_series(&self, external: &ExternalRef, name: &str) -> Result<u64, AppError> {
+        self.series_cache.ensure(&self.conn, external, name)
+    }
+
+    pub fn resolve_series(&self, source: &str, external_id: &str) -> Option<u64> {
+        self.series_cache.resolve(source, external_id)
     }
 
     pub fn get_series(&self, id: u64) -> Result<Option<SeriesSummary>, AppError> {
         Ok(self.series_cache.get(id).map(|s| (*s).clone()))
     }
 
-    /// Delete a series row; its bookmarks cascade (trigger) and their
-    /// collection links with them (FK) — mirrored in the caches.
+    /// Delete a series row; its bookmarks and follows cascade (trigger)
+    /// and the bookmarks' collection links with them (FK) — mirrored in
+    /// the caches.
     pub fn delete_series(&self, id: u64) -> Result<(), AppError> {
         self.series_cache.delete(&self.conn, id)?;
-        let gone = self.bookmarks_cache.purge_target(BookmarkTarget::Series(id));
+        self.app_bookmarks.purge_target(BookmarkTarget::Series(id));
+        let gone = self.ao3_bookmarks.purge_target(BookmarkTarget::Series(id));
         self.collections_cache.purge_bookmarks(&gone);
         Ok(())
     }
@@ -328,7 +407,7 @@ impl Storage {
         // set lookup built with the same SQL rule as the compiled search.
         let downloaded: Option<std::collections::HashSet<u64>> = if c.fully_downloaded {
             let sql = format!(
-                "SELECT works.id FROM works WHERE {}",
+                "SELECT works.id FROM works WHERE works.stub = 0 AND {}",
                 super::works_search::FULLY_DOWNLOADED_SQL
             );
             let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
@@ -399,12 +478,22 @@ impl Storage {
         let language = c.language.trim();
         if !language.is_empty() && !w.language.eq_ignore_ascii_case(language) { return false; }
 
-        Self::range_matches(&c.word_count, w.word_count)
-            && Self::range_matches(&c.hits, w.hits)
-            && Self::range_matches(&c.kudos_count, w.kudos as u64)
-            && Self::range_matches(&c.comments_count, w.comments as u64)
-            && Self::range_matches(&c.bookmarks_count, w.bookmarks as u64)
+        Self::range_matches_opt(&c.word_count, w.word_count)
+            && Self::range_matches_opt(&c.hits, w.hits)
+            && Self::range_matches_opt(&c.kudos_count, w.kudos.map(u64::from))
+            && Self::range_matches_opt(&c.comments_count, w.comments.map(u64::from))
+            && Self::range_matches_opt(&c.bookmarks_count, w.bookmarks.map(u64::from))
             && Self::revised_matches(&c.revised_at, &w.date_updated)
+    }
+
+    /// `range_matches` over an absent-able stat: an absent value matches
+    /// only when the expression doesn't filter (blank or unparseable) —
+    /// the same outcome SQL gives a NULL column.
+    pub(super) fn range_matches_opt(expr: &str, value: Option<u64>) -> bool {
+        match value {
+            Some(v) => Self::range_matches(expr, v),
+            None => super::works_search::parse_range(expr).is_none(),
+        }
     }
 
     pub(super) fn contains_ci(hay: &str, needle: &str) -> bool {
@@ -535,11 +624,13 @@ impl Storage {
         self.set_state(STATE_KNOWN_TAGS_BACKFILLED, "1")
     }
 
-    /// Retrieve a single work by its AO3 id, or `None` if not stored.
+    /// Retrieve a single work by row id, or `None` if not stored (a stub
+    /// row counts as not stored — nothing was ever fetched for it).
     /// Answered from the works cache — no SQL.
     pub fn get_work(&self, work_id: u64) -> Result<Option<WorkSummary>, AppError> {
         Ok(self.works_cache
             .get(work_id)
+            .filter(|e| !e.stub)
             .map(|e| self.works_cache.hydrate(&e, &self.tag_cache)))
     }
 
@@ -580,23 +671,16 @@ impl Storage {
         Ok(works)
     }
 
-    /// Delete a work (and its chapters, progress, bookmark, and history;
-    /// work_tags and collection_works rows cascade via their foreign keys).
+    /// Delete a work. Every dependent row — chapters, progress, history,
+    /// downloads, kudos, reading-list items, comments, drafts, tags,
+    /// collection links — cascades via its foreign key; bookmarks and
+    /// follows via the cascade triggers. The caches mirror the cascades
+    /// they hold.
     pub fn delete_work(&self, work_id: u64) -> Result<(), AppError> {
-        let id = work_id as i64;
-        self.conn
-            .execute("DELETE FROM chapters WHERE work_id = ?1", params![id])
-            .map_err(map_sql)?;
-        self.conn
-            .execute("DELETE FROM history WHERE work_id = ?1", params![id])
-            .map_err(map_sql)?;
         self.works_cache.delete(&self.conn, work_id)?;
-        // The works DELETE cascades: collection_works via its foreign key,
-        // bookmarks via the bookmarks_cascade_work trigger, and those
-        // bookmarks' collection_bookmarks links via their foreign key —
-        // mirror all three in the caches.
         self.collections_cache.purge_work(work_id);
-        let gone = self.bookmarks_cache.purge_target(BookmarkTarget::Work(work_id));
+        self.app_bookmarks.purge_target(BookmarkTarget::Work(work_id));
+        let gone = self.ao3_bookmarks.purge_target(BookmarkTarget::Work(work_id));
         self.collections_cache.purge_bookmarks(&gone);
         Ok(())
     }
@@ -823,25 +907,28 @@ impl Storage {
     /// vectors come back empty — callers hydrate them with attach_work_tags.
     pub(super) fn work_from_row(row: &rusqlite::Row<'_>) -> Result<WorkSummary, rusqlite::Error> {
         let id: i64 = row.get(0)?;
-        let title: String = row.get(1)?;
-        let authors_json: String = row.get(2)?;
-        let rating_str: String = row.get(3)?;
-        let warnings_json: String = row.get(4)?;
-        let categories_json: String = row.get(5)?;
-        let summary: String = row.get(6)?;
-        let word_count: i64 = row.get(7)?;
-        let chapter_count: i64 = row.get(8)?;
-        let total_chapters: Option<i64> = row.get(9)?;
-        let kudos: i64 = row.get(10)?;
-        let hits: i64 = row.get(11)?;
-        let bookmarks: i64 = row.get(12)?;
-        let comments: i64 = row.get(13)?;
-        let date_published: String = row.get(14)?;
-        let date_updated: String = row.get(15)?;
-        let language: String = row.get(16)?;
-        let complete: i32 = row.get(17)?;
-        let series_json: String = row.get(18)?;
-        let fetched_at: String = row.get(19)?;
+        let source: String = row.get(1)?;
+        let external_id: String = row.get(2)?;
+        let url: String = row.get(3)?;
+        let title: String = row.get(4)?;
+        let authors_json: String = row.get(5)?;
+        let rating_str: String = row.get(6)?;
+        let warnings_json: String = row.get(7)?;
+        let categories_json: String = row.get(8)?;
+        let summary: String = row.get(9)?;
+        let word_count: Option<i64> = row.get(10)?;
+        let chapter_count: i64 = row.get(11)?;
+        let total_chapters: Option<i64> = row.get(12)?;
+        let kudos: Option<i64> = row.get(13)?;
+        let hits: Option<i64> = row.get(14)?;
+        let bookmarks: Option<i64> = row.get(15)?;
+        let comments: Option<i64> = row.get(16)?;
+        let date_published: String = row.get(17)?;
+        let date_updated: String = row.get(18)?;
+        let language: String = row.get(19)?;
+        let complete: i32 = row.get(20)?;
+        let series_json: String = row.get(21)?;
+        let fetched_at: String = row.get(22)?;
 
         // Deserialize JSON columns — use unwrap_or_default so a corrupted
         // row doesn't crash the whole query; the caller can still surface the
@@ -857,6 +944,9 @@ impl Storage {
 
         Ok(WorkSummary {
             id: id as u64,
+            source,
+            external_id,
+            url,
             title,
             authors,
             fandoms: Vec::new(),
@@ -867,13 +957,13 @@ impl Storage {
             characters: Vec::new(),
             tags: Vec::new(),
             summary,
-            word_count: word_count as u64,
+            word_count: word_count.map(|c| c as u64),
             chapter_count: chapter_count as u32,
             total_chapters: total_chapters.map(|c| c as u32),
-            kudos: kudos as u32,
-            hits: hits as u64,
-            bookmarks: bookmarks as u32,
-            comments: comments as u32,
+            kudos: kudos.map(|c| c as u32),
+            hits: hits.map(|c| c as u64),
+            bookmarks: bookmarks.map(|c| c as u32),
+            comments: comments.map(|c| c as u32),
             date_published,
             date_updated,
             language,

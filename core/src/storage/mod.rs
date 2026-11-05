@@ -10,14 +10,21 @@ use crate::error::AppError;
 use crate::models::Rating;
 
 mod accounts;
+pub use accounts::AccountRow;
 mod consts;
 mod drafts;
 pub use drafts::CommentDraft;
+mod fields;
+pub use fields::WorkStat;
 mod library;
 pub mod library_file;
+mod schema_v26;
 mod subscriptions;
-mod bookmarks_cache;
+mod ao3_bookmarks_cache;
+mod app_bookmarks_cache;
 mod collections_cache;
+mod fields_cache;
+pub use fields_cache::FieldEntity;
 mod series_cache;
 mod state_cache;
 mod tag_cache;
@@ -26,8 +33,10 @@ mod works;
 mod works_cache;
 mod works_search;
 
-use bookmarks_cache::BookmarksCache;
+use ao3_bookmarks_cache::Ao3BookmarksCache;
+use app_bookmarks_cache::AppBookmarksCache;
 use collections_cache::CollectionsCache;
+use fields_cache::FieldsCache;
 use series_cache::SeriesCache;
 use consts::*;
 pub use subscriptions::FollowRow;
@@ -64,8 +73,15 @@ pub struct Storage {
     /// authority — same contract as the caches above (see state_cache.rs).
     /// Settings lookups cost no SQL.
     state_cache: StateCache,
-    /// The bookmarks mirror — same contract (see bookmarks_cache.rs).
-    bookmarks_cache: BookmarksCache,
+    /// The app's own bookmark flags — same contract (see
+    /// app_bookmarks_cache.rs).
+    app_bookmarks: AppBookmarksCache,
+    /// AO3 bookmark records, own and others' — same contract (see
+    /// ao3_bookmarks_cache.rs).
+    ao3_bookmarks: Ao3BookmarksCache,
+    /// The source-specific field registry — same contract (see
+    /// fields_cache.rs).
+    fields_cache: FieldsCache,
     /// The collections (+ join tables) mirror — same contract
     /// (see collections_cache.rs). Tag names hydrate from `tag_cache`.
     collections_cache: CollectionsCache,
@@ -109,15 +125,11 @@ impl Drop for TxGuard<'_> {
     }
 }
 
-/// Account-scoped rows (bookmarks) made while signed out live under this
-/// sentinel. Brackets can't appear in an AO3 username, so it can never
-/// collide with a real account id.
-pub const LOGGED_OUT_ACCOUNT_ID: &str = "[none]";
-
-/// The account id for an AO3 username: the username itself, lowercased —
-/// every account is an AO3 account, so the identity needs no other shape.
-pub fn account_id_for(username: &str) -> String {
-    username.to_lowercase()
+/// The owner key an AO3 bookmark record is filed under: the bookmarker's
+/// username, lowercased (AO3 usernames are case-insensitive). "" is the
+/// owner of records made while signed out.
+pub fn owner_key_for(username: &str) -> String {
+    username.trim().to_lowercase()
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +194,9 @@ impl Storage {
             tag_cache: TagCache::default(),
             works_cache: WorksCache::default(),
             state_cache: StateCache::default(),
-            bookmarks_cache: BookmarksCache::default(),
+            app_bookmarks: AppBookmarksCache::default(),
+            ao3_bookmarks: Ao3BookmarksCache::default(),
+            fields_cache: FieldsCache::default(),
             collections_cache: CollectionsCache::default(),
             users_cache: UsersCache::default(),
             series_cache: SeriesCache::default(),
@@ -261,9 +275,11 @@ impl Storage {
         self.works_cache.load(&self.conn)?;
         self.state_cache.load(&self.conn)?;
         self.series_cache.load(&self.conn)?;
-        self.bookmarks_cache.load(&self.conn)?;
+        self.app_bookmarks.load(&self.conn)?;
+        self.ao3_bookmarks.load(&self.conn)?;
         self.collections_cache.load(&self.conn)?;
         self.users_cache.load(&self.conn)?;
+        self.fields_cache.load(&self.conn)?;
         // One-time: seed the tags table from works cached before it existed.
         let _ = self.backfill_tags();
         Ok(())
@@ -272,7 +288,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 25;
+    pub(crate) const SCHEMA_VERSION: u32 = 26;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -309,6 +325,11 @@ impl Storage {
         }
         while version < Self::SCHEMA_VERSION {
             let next = version + 1;
+            if next == 26 {
+                self.run_v26()?;
+                version = next;
+                continue;
+            }
             let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
             let step = match next {
                 2 => self.migrate_v2(),
@@ -339,6 +360,7 @@ impl Storage {
                 23 => self.migrate_v23_chapter_comment_stamps(),
                 24 => self.migrate_v24_follow_status(),
                 25 => self.migrate_v25_image_url_keys(),
+                26 => unreachable!("v26 runs through run_v26"),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -348,6 +370,25 @@ impl Storage {
             version = next;
         }
         Ok(())
+    }
+
+    /// v26 is a whole-schema rebuild (see schema_v26.rs): it needs the
+    /// foreign-key pragma off, which SQLite only allows outside a
+    /// transaction, and the library file snapshotted first so the user can
+    /// go back (undo is restoring the snapshot — Phase 1 of the
+    /// multi-source plan). The snapshot lands under Backups/ like every
+    /// other replacement backup.
+    fn run_v26(&self) -> Result<(), AppError> {
+        self.snapshot_before_migration(26)?;
+        self.conn.pragma_update(None, "foreign_keys", "OFF").map_err(map_sql)?;
+        let result = (|| -> Result<(), AppError> {
+            let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+            self.migrate_v26().map_err(|e| migration_failed(26, e))?;
+            tx.pragma_update(None, PRAGMA_USER_VERSION, 26).map_err(map_sql)?;
+            tx.commit().map_err(|e| migration_failed(26, e))
+        })();
+        let fk = self.conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql);
+        result.and(fk)
     }
 
     /// v19 — `request_log.transport`: the Tor stream that carried the
@@ -1254,9 +1295,11 @@ impl Storage {
         let _ = self.works_cache.load(&self.conn);
         let _ = self.state_cache.load(&self.conn);
         let _ = self.series_cache.load(&self.conn);
-        let _ = self.bookmarks_cache.load(&self.conn);
+        let _ = self.app_bookmarks.load(&self.conn);
+        let _ = self.ao3_bookmarks.load(&self.conn);
         let _ = self.collections_cache.load(&self.conn);
         let _ = self.users_cache.load(&self.conn);
+        let _ = self.fields_cache.load(&self.conn);
     }
 
     /// Run `f` atomically inside a named savepoint. Unlike BEGIN, savepoints

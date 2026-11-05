@@ -295,6 +295,8 @@ final class SearchModel {
     /// bookmark* state below), each paged independently.
     var splitCollectionName: String?
     var splitCollectionTitle: String?
+    /// The split collection's page at its source (from the cached record).
+    var splitCollectionURL: URL?
     /// What the collections results list was showing, restored when the
     /// split closes so its pager keeps working.
     var splitReturnQuery: ActiveQuery?
@@ -323,6 +325,7 @@ final class SearchModel {
         guard splitCollectionName != nil else { return }
         splitCollectionName = nil
         splitCollectionTitle = nil
+        splitCollectionURL = nil
         activeQuery = splitReturnQuery
         splitReturnQuery = nil
         bookmarkResults = []

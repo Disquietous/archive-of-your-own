@@ -1,7 +1,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
-use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile};
+use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile, SOURCE_AO3};
 
 use super::consts::*;
 
@@ -10,6 +10,27 @@ pub type LogRow = (i64, String, String, String, String);
 pub type InboxRow = (u64, String, String, String, String, String, String, bool, String);
 use super::users_cache::comment_byline;
 use super::{map_json, map_sql, Storage};
+
+/// One accounts row: a sign-in at one source. `external_id` is the
+/// account's key at the source (the lowercased AO3 username); `username`
+/// keeps the spelling the user signed in with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountRow {
+    pub id: i64,
+    pub source: String,
+    pub external_id: String,
+    pub username: String,
+    pub cookies: String,
+    pub is_active: bool,
+}
+
+impl AccountRow {
+    /// Logged in = the stored session carries the source's auth cookie;
+    /// independent of which account is active.
+    pub fn logged_in(&self) -> bool {
+        crate::client::has_login_cookie(&self.cookies)
+    }
+}
 
 impl Storage {
     /// Whether the app has an ao3_users row for this name — account
@@ -39,18 +60,21 @@ impl Storage {
     // -------------------------------------------------------------------
 
     /// Add a notification to the database. Returns the new notification id.
+    /// `ref_id` is whatever the notification is about — for inbox
+    /// notifications, the AO3 comment number (the column keeps its
+    /// historical name `work_id`).
     pub fn add_notification(
         &self,
         notif_type: &str,
-        work_id: u64,
+        ref_id: u64,
         author: &str,
         title: &str,
         message: &str,
     ) -> Result<i64, AppError> {
-        // Check for existing unread notification for same work and type
+        // Check for existing unread notification for same ref and type
         let existing: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM notifications WHERE notif_type = ?1 AND work_id = ?2 AND read = 0",
-            params![notif_type, work_id as i64],
+            params![notif_type, ref_id as i64],
             |row| row.get(0),
         ).unwrap_or(0);
         if existing > 0 {
@@ -61,14 +85,14 @@ impl Storage {
             .execute(
                 "INSERT INTO notifications (notif_type, work_id, author, title, message)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![notif_type, work_id as i64, author, title, message],
+                params![notif_type, ref_id as i64, author, title, message],
             )
             .map_err(map_sql)?;
         Ok(self.conn.last_insert_rowid())
     }
 
     /// Get all notifications, most recent first.
-    /// Returns Vec of (id, notif_type, work_id, author, title, message, created_at, read).
+    /// Returns Vec of (id, notif_type, ref_id, author, title, message, created_at, read).
     pub fn get_notifications(
         &self,
     ) -> Result<Vec<NotificationRow>, AppError> {
@@ -85,13 +109,13 @@ impl Storage {
             .query_map([], |row| {
                 let id: i64 = row.get(0)?;
                 let notif_type: String = row.get(1)?;
-                let work_id: i64 = row.get(2)?;
+                let ref_id: i64 = row.get(2)?;
                 let author: String = row.get(3)?;
                 let title: String = row.get(4)?;
                 let message: String = row.get(5)?;
                 let created_at: String = row.get(6)?;
                 let read: i32 = row.get(7)?;
-                Ok((id, notif_type, work_id as u64, author, title, message, created_at, read != 0))
+                Ok((id, notif_type, ref_id as u64, author, title, message, created_at, read != 0))
             })
             .map_err(map_sql)?;
 
@@ -138,7 +162,6 @@ impl Storage {
         Ok(())
     }
 
-    // -------------------------------------------------------------------
     // -------------------------------------------------------------------
     // Session Cache
     // -------------------------------------------------------------------
@@ -210,19 +233,20 @@ impl Storage {
     /// Insert drained request records; `max_rows` caps the table (oldest
     /// dropped), None = unlimited — the caller reads it from the
     /// request-log settings so the cap tracks the user's row limit.
+    /// Each record names the source it was sent for.
     #[allow(clippy::type_complexity)]
     pub fn insert_request_logs(
         &self,
-        records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>)],
+        records: &[(u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>, String)],
         max_rows: Option<u64>,
     ) -> Result<(), AppError> {
-        for (started, method, url, status, dur, req_b, resp_b, error, payload, transport) in records {
+        for (started, method, url, status, dur, req_b, resp_b, error, payload, transport, source) in records {
             self.conn.execute(
                 "INSERT INTO request_log
-                 (started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![*started as i64, method, url, *status as i64, *dur as i64,
-                        *req_b as i64, *resp_b as i64, error, payload, transport],
+                        *req_b as i64, *resp_b as i64, error, payload, transport, source],
             ).map_err(map_sql)?;
         }
         if let Some(max) = max_rows.filter(|_| !records.is_empty()) {
@@ -264,9 +288,9 @@ impl Storage {
     pub fn get_request_logs(
         &self,
         limit: u32,
-    ) -> Result<Vec<(i64, u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>)>, AppError> {
+    ) -> Result<Vec<(i64, u64, String, String, u16, u64, u64, u64, Option<String>, Option<String>, Option<String>, String)>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport
+            "SELECT id, started_ms, method, url, status, duration_ms, req_bytes, resp_bytes, error, payload, transport, source
              FROM request_log ORDER BY id DESC LIMIT ?1"
         ).map_err(map_sql)?;
         let rows = stmt.query_map(params![limit as i64], |row| {
@@ -282,6 +306,7 @@ impl Storage {
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
             ))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
@@ -302,58 +327,100 @@ impl Storage {
     }
 
     // -- Accounts -------------------------------------------------------------
+    //
+    // One row per sign-in at a source, keyed by row id. "Active" is per
+    // source (Area 1.2); account-scoped data keys on the row id, never
+    // the username (Area 1.3).
 
-    pub fn create_account(&self, id: &str, username: &str, cookies: &str) -> Result<(), AppError> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO accounts (id, username, password, cookies) VALUES (?1, ?2, '', ?3)",
-            params![id, username, cookies],
-        ).map_err(map_sql)?;
-        Ok(())
+    fn account_from_row(row: &rusqlite::Row<'_>) -> Result<AccountRow, rusqlite::Error> {
+        Ok(AccountRow {
+            id: row.get(0)?,
+            source: row.get(1)?,
+            external_id: row.get(2)?,
+            username: row.get(3)?,
+            cookies: row.get(4)?,
+            is_active: row.get::<_, i64>(5)? != 0,
+        })
     }
 
-    /// Subscriptions are account data: activating a different account
-    /// empties them (the new account's list loads on demand).
-    pub fn set_active_account(&self, id: &str) -> Result<(), AppError> {
-        let previous = self.get_active_account()?.map(|(prev, _, _)| prev);
-        if previous.as_deref() != Some(id) {
+    const ACCOUNT_COLS: &'static str = "id, source, external_id, username, cookies, is_active";
+
+    /// Create (or refresh the session of) the AO3 account for `username`
+    /// — the same account signing in again reuses its row. AO3 bookmark
+    /// records already cached under this username become the account's
+    /// own. Returns the row id.
+    pub fn create_account(&self, username: &str, cookies: &str) -> Result<i64, AppError> {
+        let external_id = super::owner_key_for(username);
+        self.conn.execute(
+            "INSERT INTO accounts (source, external_id, username, cookies)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source, external_id) DO UPDATE SET username = ?3, cookies = ?4",
+            params![SOURCE_AO3, external_id, username.trim(), cookies],
+        ).map_err(map_sql)?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM accounts WHERE source = ?1 AND external_id = ?2",
+            params![SOURCE_AO3, external_id], |r| r.get(0),
+        ).map_err(map_sql)?;
+        self.ao3_bookmarks.claim_owner(&self.conn, &external_id, id)?;
+        Ok(id)
+    }
+
+    /// Make `id` the active account of its source. Subscriptions are
+    /// account data: activating a different account empties them (the
+    /// new account's list loads on demand).
+    pub fn set_active_account(&self, id: i64) -> Result<(), AppError> {
+        let Some(target) = self.get_account(id)? else {
+            return Err(AppError::StorageError(format!("no account with id {id}")));
+        };
+        let previous = self.get_active_account()?.map(|a| a.id);
+        if previous != Some(id) {
             self.clear_subscriptions()?;
         }
-        self.conn.execute("UPDATE accounts SET is_active = 0", []).map_err(map_sql)?;
-        self.conn.execute("UPDATE accounts SET is_active = 1 WHERE id = ?1", params![id]).map_err(map_sql)?;
+        self.conn.execute("UPDATE accounts SET is_active = 0 WHERE source = ?1", params![target.source])
+            .map_err(map_sql)?;
+        self.conn.execute("UPDATE accounts SET is_active = 1 WHERE id = ?1", params![id])
+            .map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_active_account(&self) -> Result<Option<(String, String, String)>, AppError> {
+    pub fn get_account(&self, id: i64) -> Result<Option<AccountRow>, AppError> {
+        self.conn.query_row(
+            &format!("SELECT {} FROM accounts WHERE id = ?1", Self::ACCOUNT_COLS),
+            params![id], Self::account_from_row,
+        ).optional().map_err(map_sql)
+    }
+
+    /// The active AO3 account (the only source with accounts today).
+    pub fn get_active_account(&self) -> Result<Option<AccountRow>, AppError> {
+        self.conn.query_row(
+            &format!("SELECT {} FROM accounts WHERE source = ?1 AND is_active = 1", Self::ACCOUNT_COLS),
+            params![SOURCE_AO3], Self::account_from_row,
+        ).optional().map_err(map_sql)
+    }
+
+    fn is_active_account(&self, id: i64) -> Result<bool, AppError> {
+        Ok(self.get_active_account()?.is_some_and(|a| a.id == id))
+    }
+
+    /// Every account, oldest first.
+    pub fn get_all_accounts(&self) -> Result<Vec<AccountRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, username, cookies FROM accounts WHERE is_active = 1"
+            &format!("SELECT {} FROM accounts ORDER BY created_at, id", Self::ACCOUNT_COLS)
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map([], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))
-        }).map_err(map_sql)?;
-        match rows.next() {
-            Some(Ok(r)) => Ok(Some(r)),
-            _ => Ok(None),
-        }
+        let rows = stmt.query_map([], Self::account_from_row).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
 
-    fn is_active_account(&self, id: &str) -> Result<bool, AppError> {
-        Ok(self.get_active_account()?.is_some_and(|(active, _, _)| active == id))
+    /// The AO3 account row for a username, if the user has signed in as
+    /// it on this device.
+    pub fn find_account(&self, username: &str) -> Result<Option<AccountRow>, AppError> {
+        self.conn.query_row(
+            &format!("SELECT {} FROM accounts WHERE source = ?1 AND external_id = ?2", Self::ACCOUNT_COLS),
+            params![SOURCE_AO3, super::owner_key_for(username)], Self::account_from_row,
+        ).optional().map_err(map_sql)
     }
 
-    /// (id, username, is_active, logged_in). Logged in = the stored session
-    /// carries AO3's auth cookie; independent of which account is active.
-    pub fn get_all_accounts(&self) -> Result<Vec<(String, String, bool, bool)>, AppError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, username, is_active, cookies FROM accounts ORDER BY created_at"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,i64>(2)? != 0,
-                crate::client::has_login_cookie(&row.get::<_,String>(3)?)))
-        }).map_err(map_sql)?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    pub fn update_account_cookies(&self, id: &str, cookies: &str) -> Result<(), AppError> {
+    pub fn update_account_cookies(&self, id: i64, cookies: &str) -> Result<(), AppError> {
         self.conn.execute(
             "UPDATE accounts SET cookies = ?2 WHERE id = ?1",
             params![id, cookies],
@@ -362,7 +429,7 @@ impl Storage {
     }
 
     /// Signing out. Signing the active account out empties subscriptions.
-    pub fn clear_account_cookies(&self, id: &str) -> Result<(), AppError> {
+    pub fn clear_account_cookies(&self, id: i64) -> Result<(), AppError> {
         if self.is_active_account(id)? {
             self.clear_subscriptions()?;
         }
@@ -373,15 +440,21 @@ impl Storage {
         Ok(())
     }
 
-    pub fn delete_account(&self, id: &str) -> Result<(), AppError> {
+    /// Remove an account. Its subscriptions, drafts, and app bookmarks
+    /// cascade away; its AO3 bookmark records stay as that user's cached
+    /// bookmarks (the account link is cleared).
+    pub fn delete_account(&self, id: i64) -> Result<(), AppError> {
         if self.is_active_account(id)? {
             self.clear_subscriptions()?;
         }
         self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![id]).map_err(map_sql)?;
+        // Cascades the caches hold: app flags gone, AO3 records unlinked.
+        self.app_bookmarks.load(&self.conn)?;
+        self.ao3_bookmarks.unlink_account(id);
         Ok(())
     }
 
-    pub fn migrate_legacy_credentials(&self) -> Result<Option<String>, AppError> {
+    pub fn migrate_legacy_credentials(&self) -> Result<Option<i64>, AppError> {
         // Clear any stored passwords from existing accounts
         self.conn.execute("UPDATE accounts SET password = ''", []).map_err(map_sql)?;
 
@@ -390,10 +463,9 @@ impl Storage {
 
         if let Some(ref u) = username {
             if !u.is_empty() {
-                let id = format!("migrated-{}", u);
                 let c = cookies.unwrap_or_default();
-                self.create_account(&id, u, &c)?;
-                self.set_active_account(&id)?;
+                let id = self.create_account(u, &c)?;
+                self.set_active_account(id)?;
                 self.set_state("ao3_username", "")?;
                 self.set_state("ao3_password", "")?;
                 self.set_state("ao3_session_cookies", "")?;
@@ -406,9 +478,9 @@ impl Storage {
         // active); hand a live one to the active account if its row has
         // none, then retire the key either way.
         if let Some(c) = cookies.filter(|c| !c.is_empty()) {
-            if let Some((id, _, row)) = self.get_active_account()? {
-                if !crate::client::has_login_cookie(&row) && crate::client::has_login_cookie(&c) {
-                    self.update_account_cookies(&id, &c)?;
+            if let Some(active) = self.get_active_account()? {
+                if !active.logged_in() && crate::client::has_login_cookie(&c) {
+                    self.update_account_cookies(active.id, &c)?;
                 }
             }
             self.set_state("ao3_session_cookies", "")?;
@@ -416,30 +488,39 @@ impl Storage {
         Ok(None)
     }
 
-    // -- Comments -------------------------------------------------------------
-
     // -- Inbox persistence ---------------------------------------------------
+    //
+    // Inbox messages are keyed by row id with the AO3 comment number as
+    // their external id; the API addresses them by that number.
 
     /// Whether an inbox message is already stored locally.
     pub fn has_inbox_message(&self, comment_id: u64) -> Result<bool, AppError> {
         let mut stmt = self.conn
-            .prepare("SELECT 1 FROM inbox_messages WHERE comment_id = ?1 LIMIT 1")
+            .prepare("SELECT 1 FROM inbox_messages WHERE source = ?1 AND external_id = ?2 LIMIT 1")
             .map_err(map_sql)?;
-        stmt.exists(params![comment_id as i64]).map_err(map_sql)
+        stmt.exists(params![SOURCE_AO3, comment_id.to_string()]).map_err(map_sql)
     }
 
     pub fn save_inbox_messages(&self, items: &[crate::models::InboxItem]) -> Result<(), AppError> {
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO inbox_messages
-                 (comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT INTO inbox_messages
+                 (source, external_id, author, author_url, avatar_url, work_reference, work_url, posted_at,
+                  is_unread, content_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(source, external_id) DO UPDATE SET
+                     author = excluded.author, author_url = excluded.author_url,
+                     avatar_url = excluded.avatar_url, work_reference = excluded.work_reference,
+                     work_url = excluded.work_url, posted_at = excluded.posted_at,
+                     is_unread = excluded.is_unread, content_json = excluded.content_json,
+                     fetched_at = datetime('now')"
             ).map_err(map_sql)?;
             for item in items {
                 let content_json = serde_json::to_string(&item.content).unwrap_or_else(|_| "[]".to_string());
                 stmt.execute(params![
-                    item.comment_id as i64,
+                    SOURCE_AO3,
+                    item.comment_id.to_string(),
                     item.author,
                     item.author_url.as_deref().unwrap_or(""),
                     item.avatar_url.as_deref().unwrap_or(""),
@@ -455,17 +536,19 @@ impl Storage {
         Ok(())
     }
 
+    /// Cached inbox messages, newest comment first (AO3 comment numbers
+    /// are sequential).
     pub fn get_inbox_messages(&self, page: u32, per_page: u32) -> Result<Vec<InboxRow>, AppError> {
         let offset = (page.saturating_sub(1)) * per_page;
         let mut stmt = self.conn.prepare(
-            "SELECT comment_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json
-             FROM inbox_messages ORDER BY comment_id DESC LIMIT ?1 OFFSET ?2"
+            "SELECT external_id, author, author_url, avatar_url, work_reference, work_url, posted_at, is_unread, content_json
+             FROM inbox_messages ORDER BY CAST(external_id AS INTEGER) DESC LIMIT ?1 OFFSET ?2"
         ).map_err(map_sql)?;
         let rows = stmt.query_map(params![per_page, offset], |row| {
-            let id: i64 = row.get(0)?;
+            let external: String = row.get(0)?;
             let is_unread: i32 = row.get(7)?;
             Ok((
-                id as u64,
+                external.parse::<u64>().unwrap_or(0),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
@@ -490,9 +573,16 @@ impl Storage {
     }
 
     // -- Comment operations ---------------------------------------------------
+    //
+    // Comment rows are keyed by row id with the AO3 comment number as
+    // their external id. The row id never leaves storage: comments are a
+    // cache that is cleared and refetched, so the API addresses them by
+    // AO3 number (`Comment.id`) and parents by row.
 
+    /// Cache a comment tree under a work (row id) and chapter (AO3 chapter
+    /// id, 0 = whole work). Top-level comments have no parent.
     pub fn save_comment(&self, work_id: u64, chapter_id: u64, comment: &Comment) -> Result<(), AppError> {
-        self.save_comment_recursive(work_id, chapter_id, 0, comment)
+        self.save_comment_recursive(work_id, chapter_id, None, comment)
     }
 
     /// Re-save a cached comment (and its reply tree) in place: the row keeps
@@ -500,20 +590,42 @@ impl Storage {
     /// replies parsed from a thread page land in the same thread. None
     /// when the comment has never been cached.
     pub fn save_comment_in_place(&self, comment: &Comment) -> Result<bool, AppError> {
-        let Some((work_id, chapter_id, parent_id)) = self.comment_context(comment.id)? else {
+        let Some((work_id, chapter_id, parent_row)) = self.comment_row_context(comment.id)? else {
             return Ok(false);
         };
-        self.save_comment_recursive(work_id, chapter_id, parent_id, comment)?;
+        self.save_comment_recursive(work_id, chapter_id, parent_row, comment)?;
         Ok(true)
     }
 
-    /// (work_id, chapter_id, parent_id) of a cached comment.
+    /// Row id of a cached comment by AO3 number.
+    fn comment_row_id(&self, comment_id: u64) -> Result<Option<i64>, AppError> {
+        self.conn.query_row(
+            "SELECT id FROM comments WHERE source = ?1 AND external_id = ?2",
+            params![SOURCE_AO3, comment_id.to_string()],
+            |row| row.get(0),
+        ).optional().map_err(map_sql)
+    }
+
+    /// (work row id, chapter id, parent row id) of a cached comment.
+    fn comment_row_context(&self, comment_id: u64) -> Result<Option<(u64, u64, Option<i64>)>, AppError> {
+        self.conn.query_row(
+            "SELECT work_id, chapter_id, parent_id FROM comments WHERE source = ?1 AND external_id = ?2",
+            params![SOURCE_AO3, comment_id.to_string()],
+            |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64,
+                      row.get::<_, Option<i64>>(2)?)),
+        ).optional().map_err(map_sql)
+    }
+
+    /// (work row id, chapter id, parent AO3 comment number — 0 when top
+    /// level) of a cached comment.
     pub fn comment_context(&self, comment_id: u64) -> Result<Option<(u64, u64, u64)>, AppError> {
         self.conn.query_row(
-            "SELECT work_id, chapter_id, parent_id FROM comments WHERE id = ?1",
-            params![comment_id as i64],
+            "SELECT c.work_id, c.chapter_id, COALESCE(p.external_id, '0')
+             FROM comments c LEFT JOIN comments p ON p.id = c.parent_id
+             WHERE c.source = ?1 AND c.external_id = ?2",
+            params![SOURCE_AO3, comment_id.to_string()],
             |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64,
-                      row.get::<_, i64>(2)? as u64)),
+                      row.get::<_, String>(2)?.parse::<u64>().unwrap_or(0))),
         ).optional().map_err(map_sql)
     }
 
@@ -533,6 +645,26 @@ impl Storage {
             self.users_cache.record_byline(&self.conn, b, &now)?;
         }
         Ok(())
+    }
+
+    /// The users row id for any name form (account username, byline, or
+    /// recorded pseud), creating the account row when it has never been
+    /// seen. Follows and crawl stamps point at this.
+    pub fn ensure_user_row(&self, name: &str) -> Result<Option<i64>, AppError> {
+        Ok(self.users_cache
+            .record_byline(&self.conn, name, &crate::timefmt::now_utc_datetime())?
+            .map(|e| e.id))
+    }
+
+    /// The users row id for a name the library already knows; None when
+    /// never seen.
+    pub fn user_row_id(&self, name: &str) -> Option<i64> {
+        self.users_cache.resolve(name).map(|e| e.id)
+    }
+
+    /// The account username behind a users row id.
+    pub fn user_name_for_row(&self, id: i64) -> Option<String> {
+        self.users_cache.get(id).map(|e| e.username.clone())
     }
 
     /// The account for any name form (account username, byline, pseud,
@@ -566,9 +698,9 @@ impl Storage {
         else { return Ok(None) };
         let mut profile = entity.to_profile();
         if let Some(account) = self.subscription_account() {
-            profile.subscribed = self.has_subscription(&account, SUB_TYPE_AUTHOR, &profile.username)?;
+            profile.subscribed = self.has_subscription(account.id, SUB_TYPE_AUTHOR, &profile.username)?;
             profile.subscription_ao3_id =
-                self.get_subscription_ao3_id(&account, SUB_TYPE_AUTHOR, &profile.username)?;
+                self.get_subscription_ao3_id(account.id, SUB_TYPE_AUTHOR, &profile.username)?;
         }
         Ok(Some(profile))
     }
@@ -590,7 +722,8 @@ impl Storage {
                                         &crate::timefmt::now_utc_datetime())
     }
 
-    fn save_comment_recursive(&self, work_id: u64, chapter_id: u64, parent_id: u64, comment: &Comment) -> Result<(), AppError> {
+    fn save_comment_recursive(&self, work_id: u64, chapter_id: u64, parent_row: Option<i64>,
+                              comment: &Comment) -> Result<(), AppError> {
         // The author row is the account; which of its pseuds posted the
         // comment rides on the comment row so the byline can be rebuilt.
         let author = self.users_cache.record(
@@ -604,11 +737,11 @@ impl Storage {
         let chapter_id = if chapter_id > 0 { chapter_id } else { comment.chapter_id.unwrap_or(0) };
         let content_json = serde_json::to_string(&comment.content).map_err(map_json)?;
         self.conn.execute(
-            "INSERT INTO comments (id, work_id, chapter_id, parent_id, author_id, author_pseud, posted_at, content_json,
-                                   chapter_label, notice, more_replies)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT (id) DO UPDATE SET
-                 work_id = CASE WHEN excluded.work_id > 0 THEN excluded.work_id ELSE comments.work_id END,
+            "INSERT INTO comments (source, external_id, work_id, chapter_id, parent_id, author_id, author_pseud,
+                                   posted_at, content_json, chapter_label, notice, more_replies)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT (source, external_id) DO UPDATE SET
+                 work_id = excluded.work_id,
                  chapter_id = CASE WHEN excluded.chapter_id > 0 THEN excluded.chapter_id ELSE comments.chapter_id END,
                  parent_id = excluded.parent_id,
                  author_id = excluded.author_id,
@@ -621,10 +754,11 @@ impl Storage {
                  more_replies = excluded.more_replies,
                  cached_at = datetime('now')",
             params![
-                comment.id as i64,
+                SOURCE_AO3,
+                comment.id.to_string(),
                 work_id as i64,
                 chapter_id as i64,
-                parent_id as i64,
+                parent_row,
                 author.id,
                 pseud,
                 comment.posted_at,
@@ -634,31 +768,34 @@ impl Storage {
                 comment.more_replies,
             ],
         ).map_err(map_sql)?;
+        let row_id = self.comment_row_id(comment.id)?;
 
         for reply in &comment.replies {
-            self.save_comment_recursive(work_id, chapter_id, comment.id, reply)?;
+            self.save_comment_recursive(work_id, chapter_id, row_id, reply)?;
         }
         Ok(())
     }
 
+    /// Cached comments of a work (row id) or chapter (AO3 chapter id,
+    /// when > 0), as trees in AO3 order.
     pub fn get_comments(&self, work_id: u64, chapter_id: u64) -> Result<Vec<Comment>, AppError> {
         let (where_clause, param_val): (&str, i64) = if chapter_id > 0 {
-            ("chapter_id = ?1", chapter_id as i64)
+            ("c.chapter_id = ?1", chapter_id as i64)
         } else {
-            ("work_id = ?1", work_id as i64)
+            ("c.work_id = ?1", work_id as i64)
         };
         let sql = format!(
-            "SELECT id, posted_at, content_json, parent_id, author_id, author_pseud,
-                    chapter_label, notice, more_replies, chapter_id
-             FROM comments WHERE {} ORDER BY id",
+            "SELECT c.id, c.external_id, c.posted_at, c.content_json, c.parent_id, c.author_id,
+                    c.author_pseud, c.chapter_label, c.notice, c.more_replies, c.chapter_id
+             FROM comments c WHERE {} ORDER BY CAST(c.external_id AS INTEGER)",
             where_clause
         );
         let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-        type Row = (i64, String, String, i64, String, String, String, String, u32, i64);
+        type Row = (i64, String, String, String, Option<i64>, i64, String, String, String, u32, i64);
         let rows: Vec<Row> = stmt
             .query_map(params![param_val], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?))
             })
             .map_err(map_sql)?
             .filter_map(|r| r.ok())
@@ -666,10 +803,11 @@ impl Storage {
 
         // Authors come from the users cache: the account row plus the
         // pseud the comment was posted under.
-        let mut all: Vec<(Comment, u64)> = rows.into_iter().map(|(id, posted_at, content_json, parent_id, author_id, author_pseud,
-                                                          chapter_label, notice, more_replies, chapter_id)| {
+        let mut all: Vec<(i64, Comment, Option<i64>)> = rows.into_iter().map(
+            |(row_id, external_id, posted_at, content_json, parent_row, author_row, author_pseud,
+              chapter_label, notice, more_replies, chapter_id)| {
             let content: Vec<ContentBlock> = serde_json::from_str(&content_json).unwrap_or_default();
-            let author = match self.users_cache.resolve(&author_id) {
+            let author = match self.users_cache.get(author_row) {
                 Some(e) => {
                     let mut u = e.to_ao3_user();
                     if !e.is_guest() {
@@ -678,14 +816,14 @@ impl Storage {
                     u
                 }
                 None => AO3User {
-                    id: author_id,
+                    id: String::new(),
                     username: "Anonymous".to_string(),
                     profile_url: None,
                     avatar_url: None,
                 },
             };
             let c = Comment {
-                id: id as u64,
+                id: external_id.parse::<u64>().unwrap_or(0),
                 author,
                 posted_at,
                 content,
@@ -695,34 +833,31 @@ impl Storage {
                 notice: Some(notice).filter(|s| !s.is_empty()),
                 more_replies,
             };
-            (c, parent_id as u64)
+            (row_id, c, parent_row)
         }).collect();
 
-        // Build tree: collect replies under their parents
-        let ids: Vec<u64> = all.iter().map(|(c, _)| c.id).collect();
+        // Build tree: collect replies under their parents (by row id). A
+        // parent outside this selection makes its reply top-level.
+        let ids: Vec<i64> = all.iter().map(|(row, _, _)| *row).collect();
         let mut top_level = Vec::new();
+        let mut comments_map: std::collections::HashMap<i64, Comment> = std::collections::HashMap::new();
+        let mut parent_map: Vec<(i64, Option<i64>)> = Vec::new();
 
-        // Two-pass: first extract all, then nest
-        // Use indices to avoid borrow issues
-        let mut comments_map: std::collections::HashMap<u64, Comment> = std::collections::HashMap::new();
-        let mut parent_map: Vec<(u64, u64)> = Vec::new();
-
-        for (c, parent_id) in all.drain(..) {
-            parent_map.push((c.id, parent_id));
-            comments_map.insert(c.id, c);
+        for (row, c, parent) in all.drain(..) {
+            parent_map.push((row, parent));
+            comments_map.insert(row, c);
         }
 
         // Process in reverse order so children are added before parents try to collect them
-        let mut children_map: std::collections::HashMap<u64, Vec<Comment>> = std::collections::HashMap::new();
-        for &(id, parent_id) in parent_map.iter().rev() {
-            let mut comment = comments_map.remove(&id).unwrap();
-            if let Some(children) = children_map.remove(&id) {
+        let mut children_map: std::collections::HashMap<i64, Vec<Comment>> = std::collections::HashMap::new();
+        for &(row, parent) in parent_map.iter().rev() {
+            let mut comment = comments_map.remove(&row).unwrap();
+            if let Some(children) = children_map.remove(&row) {
                 comment.replies = children;
             }
-            if parent_id == 0 || !ids.contains(&parent_id) {
-                top_level.push(comment);
-            } else {
-                children_map.entry(parent_id).or_default().push(comment);
+            match parent {
+                Some(p) if ids.contains(&p) => children_map.entry(p).or_default().push(comment),
+                _ => top_level.push(comment),
             }
         }
 
@@ -730,46 +865,33 @@ impl Storage {
         Ok(top_level)
     }
 
-    /// Walk up from `comment_id` to the root via parent_id, then return the
-    /// full thread tree starting from that root.  Returns None if the comment
-    /// isn't in the cache.
+    /// Walk up from `comment_id` (AO3 number) to the root via parent rows,
+    /// then return the full thread tree starting from that root. Returns
+    /// None if the comment isn't in the cache.
     pub fn get_comment_thread(&self, comment_id: u64) -> Result<Option<Comment>, AppError> {
-        // 1. Find the root by walking parent_id
-        let mut current = comment_id;
+        let Some(mut current) = self.comment_row_id(comment_id)? else { return Ok(None) };
         loop {
-            let parent: i64 = self.conn.query_row(
+            let parent: Option<i64> = self.conn.query_row(
                 "SELECT parent_id FROM comments WHERE id = ?1",
-                params![current as i64],
+                params![current],
                 |row| row.get(0),
-            ).unwrap_or(-1);
-            if parent <= 0 { break; }
-            current = parent as u64;
+            ).optional().map_err(map_sql)?.flatten();
+            match parent {
+                Some(p) => current = p,
+                None => break,
+            }
         }
 
-        // If the comment doesn't exist at all, return None
-        if current == comment_id {
-            let exists: bool = self.conn.query_row(
-                "SELECT COUNT(*) > 0 FROM comments WHERE id = ?1",
-                params![comment_id as i64],
-                |row| row.get(0),
-            ).unwrap_or(false);
-            if !exists { return Ok(None); }
-        }
-
-        // 2. Load the whole subtree from root
-        let root_id = current;
-        let work_id: i64 = self.conn.query_row(
-            "SELECT work_id FROM comments WHERE id = ?1",
-            params![root_id as i64],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let (work_id, root_external): (i64, String) = self.conn.query_row(
+            "SELECT work_id, external_id FROM comments WHERE id = ?1",
+            params![current],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(map_sql)?;
+        let root_id = root_external.parse::<u64>().unwrap_or(0);
 
         // Load all comments for this work and find the root thread
         let all = self.get_comments(work_id as u64, 0)?;
-        fn find_root(comments: &[Comment], root_id: u64) -> Option<&Comment> {
-            comments.iter().find(|&c| c.id == root_id).map(|v| v as _)
-        }
-        Ok(find_root(&all, root_id).cloned())
+        Ok(all.iter().find(|c| c.id == root_id).cloned())
     }
 
     pub fn clear_comments(&self, work_id: u64, chapter_id: u64) -> Result<(), AppError> {

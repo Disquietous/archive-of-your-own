@@ -141,8 +141,7 @@ extension SearchView {
                 }
                 .accessibilityLabel("Filter the fetched results (this page only)")
             }
-        } else if let name = search.splitCollectionName,
-                  let url = ExternalLinkOpener.ao3CollectionURL(name) {
+        } else if let url = search.splitCollectionURL {
             ChromeIconButton(symbol: "arrow.up.right") {
                 ExternalLinkOpener.open(url, bridge: state.bridge)
             }

@@ -424,22 +424,24 @@ impl AO3Client {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_ao3_bookmark(
         &self,
-        target: crate::models::BookmarkTarget,
+        kind: crate::models::BookmarkKind,
+        number: u64,
         note: &str,
         tag_string: &str,
         collection_names: &str,
         private: bool,
         rec: bool,
     ) -> Result<Option<u64>, AppError> {
-        use crate::models::BookmarkTarget;
-        let (endpoint, form_page) = match target {
-            BookmarkTarget::Work(id) => (
-                format!("{BASE_URL}/works/{id}/bookmarks"),
-                format!("{BASE_URL}/works/{id}?view_adult=true"),
+        use crate::models::BookmarkKind;
+        // `number` is the target's AO3 number — the client never sees row ids.
+        let (endpoint, form_page) = match kind {
+            BookmarkKind::Work => (
+                format!("{BASE_URL}/works/{number}/bookmarks"),
+                format!("{BASE_URL}/works/{number}?view_adult=true"),
             ),
-            BookmarkTarget::Series(id) => (
-                format!("{BASE_URL}/series/{id}/bookmarks"),
-                format!("{BASE_URL}/series/{id}"),
+            BookmarkKind::Series => (
+                format!("{BASE_URL}/series/{number}/bookmarks"),
+                format!("{BASE_URL}/series/{number}"),
             ),
         };
         let mut refreshed = false;

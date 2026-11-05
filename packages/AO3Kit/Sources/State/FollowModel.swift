@@ -31,7 +31,8 @@ final class FollowModel {
     struct Target: Hashable {
         let kind: Kind
         /// author: AO3 username (a "Pseud (user)" byline is reduced to the
-        /// user); work/series: numeric id; fandom: tag name.
+        /// user); work/series: the library row id (what `Work.id` and
+        /// `SeriesInfo.seriesID` hold); fandom: tag name.
         let id: String
         /// Display name — byline, work title, series name, fandom.
         let name: String

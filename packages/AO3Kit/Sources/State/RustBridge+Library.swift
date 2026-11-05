@@ -119,6 +119,18 @@ extension RustBridge {
         try? app?.getCachedWork(workId: workId)
     }
 
+    /// The library row id for an AO3 work number — the one way an AO3
+    /// number enters the app (a pasted link, a series prev/next link, a
+    /// subscription). Creates an invisible stub row for a never-seen work.
+    func resolveAO3Work(_ workNumber: UInt64) -> UInt64? {
+        try? app?.resolveAo3Work(workNumber: workNumber)
+    }
+
+    /// The library row id for an AO3 series number (see `resolveAO3Work`).
+    func resolveAO3Series(_ seriesNumber: UInt64, name: String? = nil) -> UInt64? {
+        try? app?.resolveAo3Series(seriesNumber: seriesNumber, name: name)
+    }
+
     func getCachedChapters(_ workId: UInt64) -> [UChapter] {
         (try? app?.getCachedChapters(workId: workId)) ?? []
     }

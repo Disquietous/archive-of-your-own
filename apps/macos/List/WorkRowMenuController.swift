@@ -143,9 +143,9 @@ final class WorkRowMenuController: NSObject {
     }
 
     @objc private func menuCopyWorkLink(_ sender: NSMenuItem) {
-        guard let work = clickedWork(sender), UInt64(work.id) != nil else { return }
+        guard let work = clickedWork(sender), !work.url.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("https://archiveofourown.org/works/\(work.id)", forType: .string)
+        NSPasteboard.general.setString(work.url, forType: .string)
     }
 
     @objc private func menuExportEpub(_ sender: NSMenuItem) {

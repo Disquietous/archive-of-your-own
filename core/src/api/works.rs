@@ -105,7 +105,8 @@ impl AO3App {
     /// passes the same id for every page so the whole operation reads as one.
     pub async fn fetch_author_works(&self, username: String, pseud: Option<String>, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         let account = split_author_byline(&username).0;
-        self.run_listing_fetch("author_works", op_id, Some(("author".to_string(), account)), move |client| {
+        let target = { self.storage.lock().await.follow_target("author", &account) };
+        self.run_listing_fetch("author_works", op_id, target, move |client| {
             let (username, pseud) = (username.clone(), pseud.clone());
             async move {
                 let c = client.read().await;
@@ -117,12 +118,33 @@ impl AO3App {
         }).await
     }
 
+    /// `series_id` is the series row id.
     pub async fn fetch_series_works_paged(&self, series_id: u64, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
-        self.run_listing_fetch("series_works", op_id, Some(("series".to_string(), series_id.to_string())), move |client| async move {
+        let number = { let s = self.storage.lock().await; ao3_series_number(&s, series_id)? };
+        self.run_listing_fetch("series_works", op_id, Some(FollowTarget::Series(series_id)), move |client| async move {
             let c = client.read().await;
-            let (works, has_next, total) = c.fetch_series_works_page(series_id, page).await.map_err(AO3Error::from)?;
+            let (works, has_next, total) = c.fetch_series_works_page(number, page).await.map_err(AO3Error::from)?;
             Ok((works, has_next, total, None))
         }).await
+    }
+
+    /// The row id for an AO3 work number — the one way an AO3 number
+    /// enters the library from the UI (a pasted link, a series prev/next
+    /// link, a subscription). A work the library has never seen gets a
+    /// stub row, invisible everywhere until it is fetched. Phase 1 shim;
+    /// link classification moves into the core in Phase 6.
+    pub fn resolve_ao3_work(&self, work_number: u64) -> Result<u64, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let external = ExternalRef::ao3(work_number.to_string(), crate::parser::ao3_work_url(work_number));
+        s.ensure_work_stub(&external, "").map_err(AO3Error::from)
+    }
+
+    /// The row id for an AO3 series number (see `resolve_ao3_work`); a
+    /// never-seen series gets a name-only row, named `name` when given.
+    pub fn resolve_ao3_series(&self, series_number: u64, name: Option<String>) -> Result<u64, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let external = ExternalRef::ao3(series_number.to_string(), crate::parser::ao3_series_url(series_number));
+        s.ensure_series(&external, name.as_deref().unwrap_or("")).map_err(AO3Error::from)
     }
 
     pub async fn browse_works(&self, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
@@ -289,6 +311,13 @@ impl AO3App {
             .into_iter().map(UCollection::from).collect())
     }
 
+    /// The cached collection record for a slug (blurb, profile, or the
+    /// stub a listing fetch made), or None when never seen. No network.
+    pub fn get_library_collection(&self, name: String) -> Result<Option<UCollection>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        Ok(s.get_collection(&name).map_err(AO3Error::from)?.map(UCollection::from))
+    }
+
     /// The cached works seen in a collection's listing, in listing order —
     /// the library-mode view of a collection's works, no network.
     pub fn get_library_collection_works(&self, name: String) -> Result<Vec<UWorkSummary>, AO3Error> {
@@ -342,12 +371,15 @@ impl AO3App {
                 works.len());
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            for w in &works { log_db("save_work", s.save_work(w)); }
-            let ids: Vec<u64> = works.iter().map(|w| w.id).collect();
+            let ids = save_works(&s, &works);
             log_db("save_collection_works", s.add_collection_works(&slug, &ids));
             log_db("commit listing save", tx.commit());
+            let works: Vec<UWorkSummary> = works.into_iter()
+                .filter_map(|w| s.resolve_work(&w.source, &w.external_id).map(|id| WorkSummary { id, ..w }))
+                .map(UWorkSummary::from)
+                .collect();
             Ok(UPagedWorks {
-                works: works.into_iter().map(UWorkSummary::from).collect(),
+                works,
                 has_next_page: has_next,
                 total_pages: total,
                 total_works: found,
@@ -381,9 +413,9 @@ impl AO3App {
             let mut hits = Vec::new();
             let mut cached_ids = Vec::new();
             for l in listings {
-                let id = cache_bookmark_listing(&s, &l);
+                let (target, id) = cache_bookmark_listing(&s, &l);
                 if let Some(id) = id { cached_ids.push(id); }
-                hits.push(hit_from_listing(l, id));
+                hits.push(hit_from_listing(l, target, id));
             }
             log_debug!("collections",
                 "fetch_collection_bookmarks '{slug}' page {page}: parsed {listing_count} listing(s), {} cached (has_next={has_next}, total_pages={total}) — saving targets + bookmark rows + collection_bookmarks links",
@@ -424,9 +456,9 @@ impl AO3App {
             let mut hits = Vec::new();
             let mut cached = 0usize;
             for l in listings {
-                let id = cache_bookmark_listing(&s, &l);
+                let (target, id) = cache_bookmark_listing(&s, &l);
                 if id.is_some() { cached += 1; }
-                hits.push(hit_from_listing(l, id));
+                hits.push(hit_from_listing(l, target, id));
             }
             log_debug!("search",
                 "search_bookmarks page {page}: parsed {listing_count} listing(s), {cached} cached (has_next={has_next}, total_pages={total}) — saving targets + bookmark rows");
@@ -498,28 +530,32 @@ impl AO3App {
         }).await
     }
 
-    /// `op_id`: a caller-obtained `new_operation_id` ties the fetch to the
-    /// requesting view per the request-tracking standard; None = untracked
-    /// (the core assigns an internal id).
+    /// Fetch a work's page (summary, series, every chapter) by row id and
+    /// cache it. `op_id`: a caller-obtained `new_operation_id` ties the
+    /// fetch to the requesting view per the request-tracking standard;
+    /// None = untracked (the core assigns an internal id).
     pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
         self.run_on_runtime_for(op_id, move |client, storage| async move {
+            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let fetched = super::with_recovery_as(
                 client, storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
-                    client.read().await.get_work(work_id).await.map_err(AO3Error::from)
+                    client.read().await.get_work(number).await.map_err(AO3Error::from)
                 }).await;
-            let (summary, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
+            let (mut summary, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
             let s = storage.lock().await;
             // Work + series + chapters land atomically.
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            log_db("save_work", s.save_work(&summary));
-            log_db("set_work_series", s.set_work_series(summary.id, &summary.series));
-            record_kudos_if_listed(&s, work_id, &kudos_names);
-            for ch in &chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
+            let saved = s.save_work(&summary).map_err(AO3Error::from)?;
+            log_db("set_work_series", s.set_work_series(saved, &summary.series));
+            record_kudos_if_listed(&s, saved, &kudos_names);
+            for ch in &chapters { log_db("save_chapter", s.save_chapter(saved, ch)); }
             log_db("commit work save", tx.commit());
-            Ok(UWorkSummary::from(summary))
+            summary.id = saved;
+            // The saved record carries the resolved series rows.
+            Ok(UWorkSummary::from(s.get_work(saved).ok().flatten().unwrap_or(summary)))
         }).await
     }
 
@@ -530,12 +566,13 @@ impl AO3App {
     /// `op_id`: request-tracking standard (see `fetch_work_full`).
     pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
         self.run_on_runtime_for(op_id, move |client, storage| async move {
+            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let fetched = super::with_recovery_as(
                 client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
-                    client.read().await.get_work(work_id).await.map_err(AO3Error::from)
+                    client.read().await.get_work(number).await.map_err(AO3Error::from)
                 }).await;
             let (_, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
             let c = client.read().await;

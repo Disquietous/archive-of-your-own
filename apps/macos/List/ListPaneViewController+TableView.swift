@@ -180,14 +180,7 @@ extension ListPaneViewController {
 
         if isShowingSubscriptionList {
             guard row < displayedSubscriptions.count else { return }
-            let sub = displayedSubscriptions[row]
-            let type = sub.subType.lowercased()
-            if type.contains("author") || type.contains("user") || type.contains("series") {
-                model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name,
-                                                  subType: normalizedSubType(sub))
-            } else if type.contains("work") {
-                model.selectWork(sub.id)
-            }
+            model.openSubscriptionTarget(displayedSubscriptions[row])
             tableView.deselectAll(nil)
             return
         }

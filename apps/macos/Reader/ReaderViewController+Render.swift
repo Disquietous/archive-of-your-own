@@ -91,7 +91,7 @@ extension ReaderViewController {
         nextChapterButton.isHidden = isLastChapter
         endNoteBig.isHidden = !isLastChapter
         endNoteSub.isHidden = !isLastChapter
-        nextWorkButton.isHidden = !(isLastChapter && work.nextInSeries?.nextWorkID != nil)
+        nextWorkButton.isHidden = !(isLastChapter && work.nextInSeries?.nextWorkExternalID != nil)
         if isLastChapter {
             endNoteBig.stringValue = work.complete ? "The end" : "You’re all caught up"
             endNoteBig.textColor = theme.nsInk2

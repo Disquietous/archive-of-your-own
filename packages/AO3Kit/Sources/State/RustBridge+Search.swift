@@ -60,6 +60,11 @@ extension RustBridge {
 
     /// The cached works seen in a collection's listing — the library-mode
     /// view of a collection's works, no network.
+    /// The cached collection record for a slug, if the library has one.
+    func getLibraryCollection(name: String) -> UCollection? {
+        (try? app?.getLibraryCollection(name: name)) ?? nil
+    }
+
     func getLibraryCollectionWorks(name: String) -> [UWorkSummary] {
         (try? app?.getLibraryCollectionWorks(name: name)) ?? []
     }

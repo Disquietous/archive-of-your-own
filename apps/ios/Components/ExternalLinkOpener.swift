@@ -36,6 +36,7 @@ enum ExternalLinkOpener {
 
     // MARK: - AO3 entity URLs
 
+    /// Only for callers that have no record URL yet; records carry `url`.
     static func ao3WorkURL(_ id: String) -> URL? {
         URL(string: "https://archiveofourown.org/works/\(id)")
     }

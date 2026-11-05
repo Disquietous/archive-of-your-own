@@ -379,7 +379,7 @@ final class BookmarkRowCellView: NSTableCellView {
         metaLabel.isHidden = hit.mystery
         if let work {
             let total = work.complete ? String(work.totalChapters) : "?"
-            metaLabel.stringValue = "♥ \(Fmt.k(Int(work.kudos)))   \(Fmt.k(Int(work.wordCount))) words   \(work.chapterCount)/\(total)"
+            metaLabel.stringValue = "♥ \(Fmt.k(Int(work.kudos ?? 0)))   \(Fmt.k(Int(work.wordCount ?? 0))) words   \(work.chapterCount)/\(total)"
         } else if let series {
             let works = series.workCount == 1 ? "1 work" : "\(series.workCount) works"
             metaLabel.stringValue = "\(works)   \(Fmt.k(Int(series.wordCount))) words   \(series.complete ? "Complete" : "In progress")"

@@ -74,7 +74,10 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
     let series = extract_blurb_series(blurb);
 
     Ok(WorkSummary {
-        id,
+        id: 0,
+        source: SOURCE_AO3.to_string(),
+        external_id: id.to_string(),
+        url: super::ao3_work_url(id),
         title,
         authors,
         fandoms,
@@ -85,13 +88,13 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         characters,
         tags,
         summary,
-        word_count,
+        word_count: Some(word_count),
         chapter_count,
         total_chapters,
-        kudos,
-        hits,
-        bookmarks,
-        comments,
+        kudos: Some(kudos),
+        hits: Some(hits),
+        bookmarks: Some(bookmarks),
+        comments: Some(comments),
         // List blurbs carry a single date (the last-updated date); AO3 only
         // exposes the publish date on the work page itself.
         date_published: String::new(),
@@ -128,11 +131,12 @@ fn extract_blurb_series(blurb: &ElementRef) -> Vec<SeriesMembership> {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
         out.push(SeriesMembership {
-            series_id,
+            series_id: 0,
+            series_external_id: series_id.to_string(),
             name: text(&link),
             part,
-            prev_work_id: None,
-            next_work_id: None,
+            prev_work_external_id: None,
+            next_work_external_id: None,
         });
     }
     out
@@ -363,9 +367,9 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
         .next()
         .and_then(|a| a.value().attr("href"))
         .and_then(|href| id_after(href, "/series/"));
-    let target = match (work_id, series_id) {
-        (Some(id), _) => BookmarkTarget::Work(id),
-        (None, Some(id)) => BookmarkTarget::Series(id),
+    let (kind, external_id) = match (work_id, series_id) {
+        (Some(id), _) => (BookmarkKind::Work, id),
+        (None, Some(id)) => (BookmarkKind::Series, id),
         (None, None) => return Err(AppError::ElementNotFound("bookmark target".to_string())),
     };
 
@@ -430,11 +434,14 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     // The work blurb data. A mystery blurb has none — synthesize a display
     // stub carrying the only things AO3 shows: the placeholder title and
     // the reveal notice. Callers must never cache it (see the field docs).
-    let work_summary = if let BookmarkTarget::Series(_) = target {
+    let work_summary = if kind == BookmarkKind::Series {
         None
     } else if mystery {
         Some(WorkSummary {
-            id: target.id(),
+            id: 0,
+            source: SOURCE_AO3.to_string(),
+            external_id: external_id.to_string(),
+            url: super::ao3_work_url(external_id),
             title: "Mystery Work".to_string(),
             summary: extract_blurb_summary(blurb),
             rating: Rating::NotRated,
@@ -445,13 +452,13 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
             relationships: Vec::new(),
             characters: Vec::new(),
             tags: Vec::new(),
-            word_count: 0,
+            word_count: None,
             chapter_count: 0,
             total_chapters: None,
-            kudos: 0,
-            hits: 0,
-            bookmarks: 0,
-            comments: 0,
+            kudos: None,
+            hits: None,
+            bookmarks: None,
+            comments: None,
             date_published: String::new(),
             date_updated: String::new(),
             language: String::new(),
@@ -462,13 +469,13 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
     } else {
         parse_single_blurb(blurb).ok()
     };
-    let series_summary = match target {
-        BookmarkTarget::Series(id) => Some(parse_series_blurb(blurb, id)),
-        BookmarkTarget::Work(_) => None,
+    let series_summary = match kind {
+        BookmarkKind::Series => Some(parse_series_blurb(blurb, external_id)),
+        BookmarkKind::Work => None,
     };
 
     Ok(BookmarkListing {
-        target,
+        kind,
         ao3_bookmark_id,
         note,
         bookmarker,
@@ -494,7 +501,10 @@ fn parse_series_blurb(blurb: &ElementRef, id: u64) -> SeriesSummary {
         .unwrap_or_default();
     let complete_text = extract_stat_text(blurb, "dd.complete, dd.status").to_lowercase();
     SeriesSummary {
-        id,
+        id: 0,
+        source: SOURCE_AO3.to_string(),
+        external_id: id.to_string(),
+        url: super::ao3_series_url(id),
         name,
         authors: extract_blurb_authors(blurb),
         summary: extract_blurb_summary(blurb),

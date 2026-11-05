@@ -181,13 +181,13 @@ impl AO3App {
     /// `new_operation_id` ties the fetch to the requesting view per the
     /// request-tracking standard; None = untracked (internal id).
     ///
-    /// `follow_target` (kind, id) names the author or series a listing
-    /// belongs to. When that target is followed and has a What's New
-    /// baseline, the page goes through the check's own rules before it is
-    /// cached (`diff_and_flag_works`): any listing fetch — Refresh Works,
-    /// paging a drill-in — finds new and updated works the same way the
-    /// What's New check does.
-    async fn run_listing_fetch<F, Fut>(&self, key: &str, op_id: Option<u64>, follow_target: Option<(String, String)>, fetch: F) -> Result<UPagedWorks, AO3Error>
+    /// `follow_target` names the author or series a listing belongs to.
+    /// When that target is followed and has a What's New baseline, the
+    /// page goes through the check's own rules before it is cached
+    /// (`diff_and_flag_works`): any listing fetch — Refresh Works, paging
+    /// a drill-in — finds new and updated works the same way the What's
+    /// New check does.
+    async fn run_listing_fetch<F, Fut>(&self, key: &str, op_id: Option<u64>, follow_target: Option<FollowTarget>, fetch: F) -> Result<UPagedWorks, AO3Error>
     where
         F: Fn(Arc<tokio::sync::RwLock<AO3Client>>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AO3Error>> + Send + 'static,
@@ -201,20 +201,27 @@ impl AO3App {
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 kind, RetrySafety::Idempotent, fetch).await?;
             let s = storage.lock().await;
-            let flagged = match &follow_target {
-                Some((kind, id)) if s.is_followed(kind, id).unwrap_or(false)
-                    && s.get_follow_baseline(kind, id).ok().flatten().is_some() =>
-                    diff_and_flag_works(&s, &works, kind, id, false).0,
+            let flagged = match follow_target {
+                Some(target) if s.is_followed(target).unwrap_or(false)
+                    && s.get_follow_baseline(target).ok().flatten().is_some() =>
+                    diff_and_flag_works(&s, &works, target.kind(), &s.follow_bridge_id(target), false).0,
                 _ => Vec::new(),
             };
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            for w in &works { log_db("save_work", s.save_work(w)); }
+            let ids = save_works(&s, &works);
             if !flagged.is_empty() {
-                log_db("add_new_work_ids", s.add_new_work_ids(&flagged));
+                log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &flagged)));
             }
             log_db("commit listing save", tx.commit());
+            // Saved summaries carry their row ids; a summary that failed
+            // to save is dropped rather than returned without an id.
+            let works: Vec<UWorkSummary> = works.into_iter()
+                .filter_map(|w| s.resolve_work(&w.source, &w.external_id).map(|id| WorkSummary { id, ..w }))
+                .map(UWorkSummary::from)
+                .collect();
+            debug_assert!(works.len() <= ids.len() + works.len());
             Ok(UPagedWorks {
-                works: works.into_iter().map(UWorkSummary::from).collect(),
+                works,
                 has_next_page: has_next,
                 total_pages: total,
                 total_works: found,
@@ -298,8 +305,8 @@ impl AO3App {
     async fn purge_expired_session(&self) {
         self.client.read().await.clear_auth_cookies();
         let s = self.storage.lock().await;
-        if let Ok(Some((id, _, _))) = s.get_active_account() {
-            log_db("clear_account_cookies", s.clear_account_cookies(&id));
+        if let Ok(Some(account)) = s.get_active_account() {
+            log_db("clear_account_cookies", s.clear_account_cookies(account.id));
         }
         log_info!("auth", "Session expired — cleared cached token; user must sign in again");
     }
@@ -307,9 +314,11 @@ impl AO3App {
     fn flush_request_log(&self) {
         let records = crate::client::drain_request_records();
         if records.is_empty() { return; }
+        // Every request today is for AO3 — the one source with a transport.
         let tuples: Vec<_> = records.into_iter().map(|r| (
             r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
             r.request_bytes, r.response_bytes, r.error, r.payload, r.transport,
+            SOURCE_AO3.to_string(),
         )).collect();
         if let Ok(storage) = self.storage.try_lock() {
             let cap = upkeep::request_log_row_cap(&storage);

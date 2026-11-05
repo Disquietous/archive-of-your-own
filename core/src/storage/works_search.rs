@@ -61,7 +61,7 @@ pub(super) fn categories_mask(categories: &[String]) -> i64 {
 
 /// AO3's numeric range grammar, parsed. Mirrors `range_matches`.
 #[derive(Debug, PartialEq)]
-enum NumRange {
+pub(super) enum NumRange {
     Ge(u64),
     Le(u64),
     Gt(u64),
@@ -211,7 +211,7 @@ fn split_names(field: &str) -> impl Iterator<Item = &str> {
 /// The `range_matches` grammar as a parser: "500", ">500", "<500", ">=500",
 /// "<=500", "100-5000". Blank or unparseable expressions return None — they
 /// don't filter.
-fn parse_range(expr: &str) -> Option<NumRange> {
+pub(super) fn parse_range(expr: &str) -> Option<NumRange> {
     let expr: String = expr.chars().filter(|c| *c != ',' && !c.is_whitespace()).collect();
     if expr.is_empty() {
         return None;
@@ -308,11 +308,9 @@ impl Storage {
         for pred in parse_criteria(c) {
             self.compile_predicate(&pred, &mut fragments, &mut params)?;
         }
-        let where_clause = if fragments.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", fragments.join("\n   AND "))
-        };
+        // Stub rows (known by id, never fetched) are not library content.
+        fragments.insert(0, "works.stub = 0".into());
+        let where_clause = format!(" WHERE {}", fragments.join("\n   AND "));
         let sql = format!(
             "SELECT works.id FROM works{where_clause} ORDER BY {}",
             sort_sql(&c.sort_column, &c.sort_direction),
@@ -532,6 +530,7 @@ impl Storage {
         Ok(ids
             .iter()
             .filter_map(|id| self.works_cache.get(*id))
+            .filter(|e| !e.stub)
             .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
             .collect())
     }

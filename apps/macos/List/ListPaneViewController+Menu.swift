@@ -97,9 +97,7 @@ extension ListPaneViewController: NSMenuDelegate {
 
     @objc private func menuShowSubscriptionWorks(_ sender: NSMenuItem) {
         guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }
-        let sub = displayedSubscriptions[sender.tag]
-        model.openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name,
-                                          subType: normalizedSubType(sub))
+        model.openSubscriptionTarget(displayedSubscriptions[sender.tag])
     }
 
     /// The drill-in/cache key for a subscription ("author" or "series").
@@ -109,27 +107,28 @@ extension ListPaneViewController: NSMenuDelegate {
 
     /// The bell target for a subscription row — the same target its
     /// follow (if any) is keyed by.
+    /// A subscription names its target by AO3 id; follows key works and
+    /// series by library id, so those resolve first (a never-seen target
+    /// gets its stub row).
     func followTarget(for sub: USubscription) -> FollowModel.Target {
         let type = sub.subType.lowercased()
-        let kind: FollowModel.Kind = type.contains("series") ? .series
-            : (type.contains("author") || type.contains("user")) ? .author : .work
-        return FollowModel.Target(kind: kind, id: sub.id, name: sub.name)
+        if type.contains("series") {
+            return FollowModel.Target(kind: .series,
+                                      id: appState.rowID(forAO3Series: sub.id, name: sub.name) ?? sub.id,
+                                      name: sub.name)
+        }
+        if type.contains("author") || type.contains("user") {
+            return FollowModel.Target(kind: .author, id: sub.id, name: sub.name)
+        }
+        return FollowModel.Target(kind: .work, id: appState.rowID(forAO3Work: sub.id) ?? sub.id, name: sub.name)
     }
 
     /// Star button on the search toolbar — names and saves the current criteria.
     @objc private func menuCopySubscriptionLink(_ sender: NSMenuItem) {
         guard sender.tag >= 0, sender.tag < displayedSubscriptions.count else { return }
         let sub = displayedSubscriptions[sender.tag]
-        let type = sub.subType.lowercased()
-        let url: String
-        if type.contains("author") || type.contains("user") {
-            url = "https://archiveofourown.org/users/\(sub.id)"
-        } else if type.contains("series") {
-            url = "https://archiveofourown.org/series/\(sub.id)"
-        } else {
-            url = "https://archiveofourown.org/works/\(sub.id)"
-        }
+        guard !sub.url.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url, forType: .string)
+        NSPasteboard.general.setString(sub.url, forType: .string)
     }
 }

@@ -260,9 +260,9 @@ impl AO3App {
 
             client_ref.read().await.clear_cloudflare_cookies();
             let s = storage.lock().await;
-            if let Ok(Some((id, _, cookies))) = s.get_active_account() {
+            if let Ok(Some(account)) = s.get_active_account() {
                 log_db("update_account_cookies",
-                    s.update_account_cookies(&id, &crate::client::strip_cloudflare_cookies(&cookies)));
+                    s.update_account_cookies(account.id, &crate::client::strip_cloudflare_cookies(&account.cookies)));
             }
             Ok(())
         })

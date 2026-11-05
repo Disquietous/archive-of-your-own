@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rusqlite::{params, Connection};
 
 use crate::error::AppError;
-use crate::models::{join_author_byline, split_author_byline, AO3User, UserProfile};
+use crate::models::{join_author_byline, split_author_byline, AO3User, UserProfile, SOURCE_AO3};
 
 use super::{map_json, map_sql};
 
@@ -14,16 +14,19 @@ use super::{map_json, map_sql};
 pub(super) const GUEST_ID_PREFIX: &str = "guest:";
 
 /// One AO3 account as the app knows it — the single ao3_users row for
-/// that account. `id` is the account key: the AO3 username for registered
-/// users (or `guest:<hash>` for guest commenters). A pseud is a detail of
-/// the account, never its own row: every pseud seen attached to the
-/// account lives in `pseuds_json`, and the cache indexes the row under
-/// each of them.
+/// that account. `id` is the row id; `external_id` is the account key at
+/// the source: the AO3 username for registered users (or `guest:<hash>`
+/// for guest commenters). A pseud is a detail of the account, never its
+/// own row: every pseud seen attached to the account lives in
+/// `pseuds_json`, and the cache indexes the row under each of them.
 #[derive(Clone, Debug)]
 pub(super) struct UserEntity {
-    pub id: String,
+    pub id: i64,
+    pub source: String,
+    pub external_id: String,
     pub username: String,
-    pub profile_url: String,
+    /// Canonical profile URL ("" for guests).
+    pub url: String,
     pub avatar_url: String,
     pub updated_at: String,
     pub numeric_id: String,
@@ -45,10 +48,11 @@ pub(super) struct UserEntity {
 }
 
 impl UserEntity {
-    fn blank(id: &str, username: &str) -> UserEntity {
+    fn blank(external_id: &str, username: &str) -> UserEntity {
         UserEntity {
-            id: id.to_string(), username: username.to_string(),
-            profile_url: String::new(), avatar_url: String::new(), updated_at: String::new(),
+            id: 0, source: SOURCE_AO3.to_string(),
+            external_id: external_id.to_string(), username: username.to_string(),
+            url: String::new(), avatar_url: String::new(), updated_at: String::new(),
             numeric_id: String::new(), joined: String::new(), location: String::new(),
             birthday: String::new(), pseuds_json: "[]".into(), bio_json: "[]".into(),
             works_count: 0, series_count: 0, bookmarks_count: 0,
@@ -60,7 +64,7 @@ impl UserEntity {
     }
 
     pub(super) fn is_guest(&self) -> bool {
-        self.id.starts_with(GUEST_ID_PREFIX)
+        self.external_id.starts_with(GUEST_ID_PREFIX)
     }
 
     pub(super) fn pseuds(&self) -> Vec<String> {
@@ -86,9 +90,9 @@ impl UserEntity {
     pub(super) fn to_ao3_user(&self) -> AO3User {
         let opt = |s: &str| if s.is_empty() { None } else { Some(s.to_string()) };
         AO3User {
-            id: self.id.clone(),
+            id: self.external_id.clone(),
             username: self.username.clone(),
-            profile_url: opt(&self.profile_url),
+            profile_url: opt(&self.url),
             avatar_url: opt(&self.avatar_url),
         }
     }
@@ -127,12 +131,14 @@ fn key_of(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
-/// Two views of one entity set: by account key (ASCII-lowercased, SQLite's
-/// NOCASE), and by each recorded pseud → account key. Lookups try the
-/// account key first, so a pseud that happens to equal some other real
-/// username never shadows that user.
+/// Three views of one entity set: by row id, by account key
+/// (ASCII-lowercased external id — SQLite's NOCASE), and by each recorded
+/// pseud → account key. Lookups try the account key first, so a pseud
+/// that happens to equal some other real username never shadows that
+/// user.
 #[derive(Default)]
 struct Indexes {
+    by_id: HashMap<i64, Arc<UserEntity>>,
     by_key: HashMap<String, Arc<UserEntity>>,
     by_pseud: HashMap<String, String>,
 }
@@ -140,7 +146,7 @@ struct Indexes {
 impl Indexes {
     fn insert(&mut self, entity: UserEntity) -> Arc<UserEntity> {
         let entity = Arc::new(entity);
-        let key = key_of(&entity.id);
+        let key = key_of(&entity.external_id);
         if let Some(old) = self.by_key.insert(key.clone(), Arc::clone(&entity)) {
             for p in old.pseuds() {
                 if self.by_pseud.get(&key_of(&p)) == Some(&key) {
@@ -148,6 +154,7 @@ impl Indexes {
                 }
             }
         }
+        self.by_id.insert(entity.id, Arc::clone(&entity));
         for p in entity.pseuds() {
             self.by_pseud.insert(key_of(&p), key.clone());
         }
@@ -168,8 +175,8 @@ impl Indexes {
 
 /// The ao3_users table's in-memory mirror and single write authority —
 /// same contract as the other storage caches. Every read of author /
-/// AO3-user data is answered here, keyed by account username or by any
-/// of the account's pseuds; every write mutates the cache and then
+/// AO3-user data is answered here, keyed by row id, account username, or
+/// any of the account's pseuds; every write mutates the cache and then
 /// writes the row through.
 ///
 /// Exceptions to the invariant, both safe by ordering:
@@ -184,7 +191,7 @@ impl UsersCache {
     pub(super) fn load(&self, conn: &Connection) -> Result<(), AppError> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, username, profile_url, avatar_url, updated_at,
+                "SELECT id, source, external_id, username, url, avatar_url, updated_at,
                         numeric_id, joined, location, birthday, pseuds_json, bio_json,
                         works_count, series_count, bookmarks_count, collections_count,
                         gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id,
@@ -196,30 +203,33 @@ impl UsersCache {
             .query_map([], |r| {
                 Ok(UserEntity {
                     id: r.get(0)?,
-                    username: r.get(1)?,
-                    profile_url: r.get(2)?,
-                    avatar_url: r.get(3)?,
-                    updated_at: r.get(4)?,
-                    numeric_id: r.get(5)?,
-                    joined: r.get(6)?,
-                    location: r.get(7)?,
-                    birthday: r.get(8)?,
-                    pseuds_json: r.get(9)?,
-                    bio_json: r.get(10)?,
-                    works_count: r.get(11)?,
-                    series_count: r.get(12)?,
-                    bookmarks_count: r.get(13)?,
-                    collections_count: r.get(14)?,
-                    gifts_count: r.get(15)?,
-                    is_blocked: r.get::<_, i64>(16)? != 0,
-                    block_ao3_id: r.get(17)?,
-                    is_muted: r.get::<_, i64>(18)? != 0,
-                    mute_ao3_id: r.get(19)?,
-                    profile_fetched_at: r.get(20)?,
+                    source: r.get(1)?,
+                    external_id: r.get(2)?,
+                    username: r.get(3)?,
+                    url: r.get(4)?,
+                    avatar_url: r.get(5)?,
+                    updated_at: r.get(6)?,
+                    numeric_id: r.get(7)?,
+                    joined: r.get(8)?,
+                    location: r.get(9)?,
+                    birthday: r.get(10)?,
+                    pseuds_json: r.get(11)?,
+                    bio_json: r.get(12)?,
+                    works_count: r.get(13)?,
+                    series_count: r.get(14)?,
+                    bookmarks_count: r.get(15)?,
+                    collections_count: r.get(16)?,
+                    gifts_count: r.get(17)?,
+                    is_blocked: r.get::<_, i64>(18)? != 0,
+                    block_ao3_id: r.get(19)?,
+                    is_muted: r.get::<_, i64>(20)? != 0,
+                    mute_ao3_id: r.get(21)?,
+                    profile_fetched_at: r.get(22)?,
                 })
             })
             .map_err(map_sql)?;
         let mut inner = self.inner.borrow_mut();
+        inner.by_id.clear();
         inner.by_key.clear();
         inner.by_pseud.clear();
         for row in rows {
@@ -236,6 +246,10 @@ impl UsersCache {
     /// "Pseud (account)" byline, a bare recorded pseud, or a guest id.
     pub(super) fn resolve(&self, name: &str) -> Option<Arc<UserEntity>> {
         self.inner.borrow().resolve(name)
+    }
+
+    pub(super) fn get(&self, id: i64) -> Option<Arc<UserEntity>> {
+        self.inner.borrow().by_id.get(&id).cloned()
     }
 
     pub(super) fn has_user(&self, name: &str) -> bool {
@@ -289,17 +303,18 @@ impl UsersCache {
     /// Write the whole row: the cache entity is the truth, the table
     /// mirrors it. ON CONFLICT DO UPDATE (not OR REPLACE) so the comments
     /// foreign key into ao3_users(id) is never broken by a delete+insert.
-    fn persist(conn: &Connection, e: &UserEntity) -> Result<(), AppError> {
+    /// Fills in `e.id` for a new row.
+    fn persist(conn: &Connection, e: &mut UserEntity) -> Result<(), AppError> {
         conn.prepare_cached(
-                "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at,
+                "INSERT INTO ao3_users (source, external_id, username, url, avatar_url, updated_at,
                         numeric_id, joined, location, birthday, pseuds_json, bio_json,
                         works_count, series_count, bookmarks_count, collections_count,
                         gifts_count, is_blocked, block_ao3_id, is_muted, mute_ao3_id,
                         profile_fetched_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                         ?16, ?17, ?18, ?19, ?20, ?21)
-                 ON CONFLICT(id) DO UPDATE SET
-                    username = excluded.username, profile_url = excluded.profile_url,
+                         ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                 ON CONFLICT(source, external_id) DO UPDATE SET
+                    username = excluded.username, url = excluded.url,
                     avatar_url = excluded.avatar_url, updated_at = excluded.updated_at,
                     numeric_id = excluded.numeric_id, joined = excluded.joined,
                     location = excluded.location, birthday = excluded.birthday,
@@ -313,13 +328,19 @@ impl UsersCache {
                     profile_fetched_at = excluded.profile_fetched_at")
             .map_err(map_sql)?
             .execute(params![
-                e.id, e.username, e.profile_url, e.avatar_url, e.updated_at,
+                e.source, e.external_id, e.username, e.url, e.avatar_url, e.updated_at,
                 e.numeric_id, e.joined, e.location, e.birthday, e.pseuds_json, e.bio_json,
                 e.works_count, e.series_count, e.bookmarks_count, e.collections_count,
                 e.gifts_count, e.is_blocked as i64, e.block_ao3_id,
                 e.is_muted as i64, e.mute_ao3_id, e.profile_fetched_at,
             ])
             .map_err(map_sql)?;
+        if e.id == 0 {
+            e.id = conn.query_row(
+                "SELECT id FROM ao3_users WHERE source = ?1 AND external_id = ?2",
+                params![e.source, e.external_id], |r| r.get(0),
+            ).map_err(map_sql)?;
+        }
         Ok(())
     }
 
@@ -339,7 +360,7 @@ impl UsersCache {
             None => {
                 let mut e = UserEntity::blank(&account, &account);
                 if !account.starts_with(GUEST_ID_PREFIX) {
-                    e.profile_url = format!("{}/users/{account}", crate::client::BASE_URL);
+                    e.url = crate::parser::ao3_user_url(&account);
                 }
                 e
             }
@@ -349,7 +370,7 @@ impl UsersCache {
         }
         f(&mut e);
         e.updated_at = now.to_string();
-        Self::persist(conn, &e)?;
+        Self::persist(conn, &mut e)?;
         Ok(self.inner.borrow_mut().insert(e))
     }
 
@@ -365,7 +386,7 @@ impl UsersCache {
             return self.mutate(conn, &user.id, now, |e| {
                 e.username = user.username.clone();
                 if let Some(url) = user.profile_url.as_deref().filter(|u| !u.is_empty()) {
-                    e.profile_url = url.to_string();
+                    e.url = url.to_string();
                 }
                 if let Some(url) = user.avatar_url.as_deref().filter(|u| !u.is_empty()) {
                     e.avatar_url = url.to_string();
@@ -380,7 +401,7 @@ impl UsersCache {
             // Adopt AO3's casing of the account name from the sighting.
             e.username = account.clone();
             if let Some(url) = user.profile_url.as_deref().filter(|u| !u.is_empty()) {
-                e.profile_url = url.to_string();
+                e.url = url.to_string();
             }
             if let Some(url) = user.avatar_url.as_deref().filter(|u| !u.is_empty()) {
                 e.avatar_url = url.to_string();
@@ -390,13 +411,14 @@ impl UsersCache {
 
     /// Record an author byline seen on AO3 data (a work blurb, a bookmark,
     /// a series page): ensures the account row and learns the pseud.
-    /// Cheap when nothing is new — one map lookup, no SQL.
+    /// Cheap when nothing is new — one map lookup, no SQL. Returns the
+    /// account entity.
     pub(super) fn record_byline(&self, conn: &Connection, byline: &str, now: &str)
-        -> Result<(), AppError>
+        -> Result<Option<Arc<UserEntity>>, AppError>
     {
         let (account, pseud) = split_author_byline(byline);
         if account.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         if let Some(e) = self.resolve(byline) {
             let known = match pseud.as_deref() {
@@ -404,10 +426,10 @@ impl UsersCache {
                 None => true,
             };
             if known {
-                return Ok(());
+                return Ok(Some(e));
             }
         }
-        self.mutate(conn, byline, now, |_| {}).map(|_| ())
+        self.mutate(conn, byline, now, |_| {}).map(Some)
     }
 
     /// Persist a fetched profile onto the account row. The profile page's
@@ -421,8 +443,8 @@ impl UsersCache {
         let (account, _) = split_author_byline(&p.username);
         self.mutate(conn, &p.username, now, |e| {
             e.username = account.clone();
-            if e.profile_url.is_empty() {
-                e.profile_url = format!("{}/users/{account}", crate::client::BASE_URL);
+            if e.url.is_empty() {
+                e.url = crate::parser::ao3_user_url(&account);
             }
             if let Some(url) = p.avatar_url.as_deref().filter(|u| !u.is_empty()) {
                 e.avatar_url = url.to_string();
@@ -455,10 +477,10 @@ impl UsersCache {
         }).map(|_| ())
     }
 
-    /// The account id behind any name form the UI may hand us (account,
+    /// The account key behind any name form the UI may hand us (account,
     /// byline, or a recorded pseud); the name itself when unknown.
     fn account_for(&self, name: &str) -> String {
-        self.resolve(name).map(|e| e.id.clone()).unwrap_or_else(|| name.to_string())
+        self.resolve(name).map(|e| e.external_id.clone()).unwrap_or_else(|| name.to_string())
     }
 
     /// Record block state (mirrors an AO3-side change) on the account row.

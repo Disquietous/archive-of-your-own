@@ -3,22 +3,26 @@ use std::sync::Arc;
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
-use crate::models::{split_author_byline, WorkSummary};
+use crate::models::{split_author_byline, FollowTarget, WorkSummary};
 
+use super::accounts::AccountRow;
 use super::consts::*;
 use super::works_cache::WorkEntity;
 use super::{map_sql, Storage};
 
-/// (sub_type, sub_id, name, ao3_id)
+/// (sub_type, sub_id, name, ao3_id) — AO3's own vocabulary: username,
+/// work number, or series number.
 pub type SubscriptionRow = (String, String, String, Option<String>);
 /// (total_works, last_census_at, census_state)
 pub type FollowCensusMeta = (Option<u32>, Option<String>, Option<String>);
 
-/// One follow as stored.
+/// One follow as stored: the target by row id, plus the identifier the
+/// bridge shows for it (`bridge_id`: a work/series row id as text, the
+/// author's username, or the fandom's tag name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FollowRow {
-    pub kind: String,
-    pub target_id: String,
+    pub target: FollowTarget,
+    pub bridge_id: String,
     pub name: String,
     pub added_at: String,
     pub last_checked_at: Option<String>,
@@ -29,77 +33,124 @@ pub struct FollowRow {
 
 impl Storage {
     // -------------------------------------------------------------------
+    // Follow targets ⇄ bridge identifiers
+    // -------------------------------------------------------------------
+
+    /// The identifier the bridge shows for a follow target: row id as text
+    /// for works and series, username for authors, tag name for fandoms.
+    pub fn follow_bridge_id(&self, target: FollowTarget) -> String {
+        match target {
+            FollowTarget::Work(id) | FollowTarget::Series(id) => id.to_string(),
+            FollowTarget::Author(id) => self.user_name_for_row(id).unwrap_or_default(),
+            FollowTarget::Fandom(id) => self.tag_cache.get(id).map(|t| t.name.to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// The target behind a bridge identifier (see `follow_bridge_id`),
+    /// resolving but never creating: None when the library doesn't know
+    /// it.
+    pub fn follow_target(&self, kind: &str, bridge_id: &str) -> Option<FollowTarget> {
+        let id = bridge_id.trim();
+        match kind {
+            "work" => id.parse().ok().filter(|id| self.works_cache.get(*id).is_some()).map(FollowTarget::Work),
+            "series" => id.parse().ok().filter(|id| self.series_cache.get(*id).is_some()).map(FollowTarget::Series),
+            "author" => self.user_row_id(&split_author_byline(id).0).map(FollowTarget::Author),
+            "fandom" => self.tag_cache.get_by_name(id).map(|t| FollowTarget::Fandom(t.id)),
+            _ => None,
+        }
+    }
+
+    /// Like `follow_target`, but an unknown author or fandom gets its row
+    /// (users rows and tags are cheap and never library content). Works
+    /// and series must already have a row — a stub, if nothing else.
+    pub fn ensure_follow_target(&self, kind: &str, bridge_id: &str) -> Result<Option<FollowTarget>, AppError> {
+        let id = bridge_id.trim();
+        match kind {
+            "author" => Ok(self.ensure_user_row(&split_author_byline(id).0)?.map(FollowTarget::Author)),
+            "fandom" if !id.is_empty() => {
+                let tag = self.tag_cache.resolve(&self.conn, id, TAG_TYPE_FANDOM)?;
+                Ok(Some(FollowTarget::Fandom(tag.id)))
+            }
+            _ => Ok(self.follow_target(kind, id)),
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Follows (library-level; the What's New check's only input)
     // -------------------------------------------------------------------
+
+    fn follow_from_row(&self, row: &rusqlite::Row<'_>) -> Result<Option<FollowRow>, rusqlite::Error> {
+        let kind: String = row.get(0)?;
+        let target_id: i64 = row.get(1)?;
+        let Some(target) = FollowTarget::from_parts(&kind, target_id) else { return Ok(None) };
+        Ok(Some(FollowRow {
+            target,
+            bridge_id: self.follow_bridge_id(target),
+            name: row.get(2)?,
+            added_at: row.get(3)?,
+            last_checked_at: row.get(4)?,
+            status: row.get(5)?,
+        }))
+    }
 
     /// Follows of `kind` (all kinds when None), in the order they were added.
     pub fn get_follows(&self, kind: Option<&str>) -> Result<Vec<FollowRow>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT kind, target_id, name, added_at, last_checked_at, status FROM follows
-             WHERE ?1 IS NULL OR kind = ?1 ORDER BY rowid"
+             WHERE ?1 IS NULL OR kind = ?1 ORDER BY id"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![kind], |r| Ok(FollowRow {
-            kind: r.get(0)?,
-            target_id: r.get(1)?,
-            name: r.get(2)?,
-            added_at: r.get(3)?,
-            last_checked_at: r.get(4)?,
-            status: r.get(5)?,
-        })).map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        let rows = stmt.query_map(params![kind], |r| self.follow_from_row(r)).map_err(map_sql)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)?.into_iter().flatten().collect())
     }
 
-    pub fn is_followed(&self, kind: &str, target_id: &str) -> Result<bool, AppError> {
+    pub fn is_followed(&self, target: FollowTarget) -> Result<bool, AppError> {
         let count: u32 = self.conn.query_row(
             "SELECT COUNT(*) FROM follows WHERE kind = ?1 AND target_id = ?2",
-            params![kind, target_id], |r| r.get(0),
+            params![target.kind(), target.id()], |r| r.get(0),
         ).map_err(map_sql)?;
         Ok(count > 0)
     }
 
     /// True when the follow was created (false: it already existed).
-    pub fn add_follow(&self, kind: &str, target_id: &str, name: &str) -> Result<bool, AppError> {
+    pub fn add_follow(&self, target: FollowTarget, name: &str) -> Result<bool, AppError> {
         let n = self.conn.execute(
             "INSERT OR IGNORE INTO follows (kind, target_id, name) VALUES (?1, ?2, ?3)",
-            params![kind, target_id, name],
+            params![target.kind(), target.id(), name],
         ).map_err(map_sql)?;
         Ok(n > 0)
     }
 
     /// True when a follow was removed. Its check state goes with it.
-    pub fn remove_follow(&self, kind: &str, target_id: &str) -> Result<bool, AppError> {
+    pub fn remove_follow(&self, target: FollowTarget) -> Result<bool, AppError> {
         let n = self.conn.execute(
             "DELETE FROM follows WHERE kind = ?1 AND target_id = ?2",
-            params![kind, target_id],
+            params![target.kind(), target.id()],
         ).map_err(map_sql)?;
         Ok(n > 0)
     }
 
-    /// Everything a What's New round covers: (kind, target_id, name) for
-    /// every checkable follow, sorted by display name so the request order
-    /// is predictable.
-    pub fn get_check_targets(&self) -> Result<Vec<(String, String, String)>, AppError> {
+    /// Everything a What's New round covers: every checkable follow,
+    /// sorted by display name so the request order is predictable.
+    pub fn get_check_targets(&self) -> Result<Vec<FollowRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT kind, target_id, name FROM follows
+            "SELECT kind, target_id, name, added_at, last_checked_at, status FROM follows
              WHERE kind IN ('author', 'work', 'series') AND status >= 0
              ORDER BY name COLLATE NOCASE"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        let rows = stmt.query_map([], |r| self.follow_from_row(r)).map_err(map_sql)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)?.into_iter().flatten().collect())
     }
 
     // -------------------------------------------------------------------
     // Subscriptions (the signed-in account's AO3 subscriptions only)
     // -------------------------------------------------------------------
 
-    /// The account subscription data belongs to: the active account's
-    /// username. None when no account is active — no subscription data is
-    /// readable or writable then.
-    pub fn subscription_account(&self) -> Option<String> {
+    /// The account subscription data belongs to: the active account. None
+    /// when no account is active — no subscription data is readable or
+    /// writable then.
+    pub fn subscription_account(&self) -> Option<AccountRow> {
         self.get_active_account().ok().flatten()
-            .map(|(_, username, _)| username)
-            .filter(|u| !u.is_empty())
+            .filter(|a| !a.username.is_empty())
     }
 
     /// Drop every subscription row. Runs on every account transition
@@ -109,8 +160,8 @@ impl Storage {
         Ok(())
     }
 
-    /// Replace `account`'s subscription list.
-    pub fn save_subscriptions(&self, account: &str,
+    /// Replace an account's subscription list.
+    pub fn save_subscriptions(&self, account_id: i64,
                               subs: &[(String, String, String, Option<String>)]) -> Result<(), AppError> {
         let mut seen = std::collections::HashSet::new();
         for (sub_type, sub_id, name, _) in subs {
@@ -120,69 +171,75 @@ impl Storage {
             }
         }
         let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
-        tx.execute("DELETE FROM subscriptions WHERE account = ?1", params![account]).map_err(map_sql)?;
+        tx.execute("DELETE FROM subscriptions WHERE account_id = ?1", params![account_id]).map_err(map_sql)?;
         let mut stmt = tx.prepare(SQL_UPSERT_SUBSCRIPTION).map_err(map_sql)?;
         for (sub_type, sub_id, name, ao3_id) in subs {
-            stmt.execute(params![account, sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
+            stmt.execute(params![account_id, sub_type, sub_id, name, ao3_id]).map_err(map_sql)?;
         }
         drop(stmt);
         tx.commit().map_err(map_sql)
     }
 
-    pub fn add_subscription(&self, account: &str, sub_type: &str, sub_id: &str, name: &str,
+    pub fn add_subscription(&self, account_id: i64, sub_type: &str, sub_id: &str, name: &str,
                             ao3_id: Option<&str>) -> Result<(), AppError> {
         self.conn.execute(
             SQL_UPSERT_SUBSCRIPTION,
-            params![account, sub_type, sub_id, name, ao3_id],
+            params![account_id, sub_type, sub_id, name, ao3_id],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn remove_subscription(&self, account: &str, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
+    pub fn remove_subscription(&self, account_id: i64, sub_type: &str, sub_id: &str) -> Result<(), AppError> {
         self.conn.execute(
-            "DELETE FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3",
-            params![account, sub_type, sub_id],
+            "DELETE FROM subscriptions WHERE account_id = ?1 AND sub_type = ?2 AND sub_id = ?3",
+            params![account_id, sub_type, sub_id],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_subscriptions(&self, account: &str) -> Result<Vec<SubscriptionRow>, AppError> {
+    pub fn get_subscriptions(&self, account_id: i64) -> Result<Vec<SubscriptionRow>, AppError> {
         let mut stmt = self.conn.prepare(
-            "SELECT sub_type, sub_id, name, ao3_id FROM subscriptions WHERE account = ?1"
+            "SELECT sub_type, sub_id, name, ao3_id FROM subscriptions WHERE account_id = ?1"
         ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![account], |row| {
+        let rows = stmt.query_map(params![account_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
         }).map_err(map_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
     }
 
-    /// `account`'s subscriptions with no matching follow.
-    pub fn get_unfollowed_subscriptions(&self, account: &str)
+    /// An account's subscriptions whose target has no follow. A
+    /// subscription names its target by AO3 id; the follow keys on the
+    /// target's row, so the comparison goes through the library's rows
+    /// (a target the library never cached cannot be followed yet and
+    /// counts as unfollowed).
+    pub fn get_unfollowed_subscriptions(&self, account_id: i64)
         -> Result<Vec<SubscriptionRow>, AppError>
     {
-        let mut stmt = self.conn.prepare(
-            "SELECT s.sub_type, s.sub_id, s.name, s.ao3_id FROM subscriptions s
-             WHERE s.account = ?1 AND NOT EXISTS (
-                 SELECT 1 FROM follows f
-                 WHERE f.kind = s.sub_type AND f.target_id = s.sub_id)
-             ORDER BY s.name COLLATE NOCASE"
-        ).map_err(map_sql)?;
-        let rows = stmt.query_map(params![account], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?))
-        }).map_err(map_sql)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+        let mut out: Vec<SubscriptionRow> = self.get_subscriptions(account_id)?
+            .into_iter()
+            .filter(|(sub_type, sub_id, _, _)| {
+                let target = match sub_type.as_str() {
+                    "author" => self.user_row_id(sub_id).map(FollowTarget::Author),
+                    "work" => self.resolve_work(crate::models::SOURCE_AO3, sub_id).map(FollowTarget::Work),
+                    "series" => self.resolve_series(crate::models::SOURCE_AO3, sub_id).map(FollowTarget::Series),
+                    _ => None,
+                };
+                !target.is_some_and(|t| self.is_followed(t).unwrap_or(false))
+            })
+            .collect();
+        out.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()));
+        Ok(out)
     }
 
-    /// AO3's subscription record id for one of `account`'s subscriptions.
-    pub fn get_subscription_ao3_id(&self, account: &str, sub_type: &str, sub_id: &str)
+    /// AO3's subscription record id for one of an account's subscriptions.
+    pub fn get_subscription_ao3_id(&self, account_id: i64, sub_type: &str, sub_id: &str)
         -> Result<Option<String>, AppError>
     {
         let mut stmt = self.conn.prepare(
-            "SELECT ao3_id FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3"
+            "SELECT ao3_id FROM subscriptions WHERE account_id = ?1 AND sub_type = ?2 AND sub_id = ?3"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![account, sub_type, sub_id],
+        let mut rows = stmt.query_map(params![account_id, sub_type, sub_id],
                                       |row| row.get::<_, Option<String>>(0)).map_err(map_sql)?;
         match rows.next() {
             Some(Ok(id)) => Ok(id),
@@ -190,10 +247,10 @@ impl Storage {
         }
     }
 
-    pub fn has_subscription(&self, account: &str, sub_type: &str, sub_id: &str) -> Result<bool, AppError> {
+    pub fn has_subscription(&self, account_id: i64, sub_type: &str, sub_id: &str) -> Result<bool, AppError> {
         let count: u32 = self.conn.query_row(
-            "SELECT COUNT(*) FROM subscriptions WHERE account = ?1 AND sub_type = ?2 AND sub_id = ?3",
-            params![account, sub_type, sub_id], |row| row.get(0)
+            "SELECT COUNT(*) FROM subscriptions WHERE account_id = ?1 AND sub_type = ?2 AND sub_id = ?3",
+            params![account_id, sub_type, sub_id], |row| row.get(0)
         ).map_err(map_sql)?;
         Ok(count > 0)
     }
@@ -206,11 +263,11 @@ impl Storage {
 
     /// The newest update date the last check saw. Ok(None) = no follow row
     /// or never checked (the next check seeds silently).
-    pub fn get_follow_baseline(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
+    pub fn get_follow_baseline(&self, target: FollowTarget) -> Result<Option<String>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT date_updated FROM follows WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![kind, target_id], |row| {
+        let mut rows = stmt.query_map(params![target.kind(), target.id()], |row| {
             row.get::<_, Option<String>>(0)
         }).map_err(map_sql)?;
         match rows.next() {
@@ -220,20 +277,20 @@ impl Storage {
         }
     }
 
-    pub fn set_follow_baseline(&self, kind: &str, target_id: &str, date_updated: &str) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "date_updated", &date_updated)
+    pub fn set_follow_baseline(&self, target: FollowTarget, date_updated: &str) -> Result<(), AppError> {
+        self.update_follow_column(target, "date_updated", &date_updated)
     }
 
     /// Census metadata for one follow: (total_works, last_census_at,
     /// census_state). All None when the follow doesn't exist.
-    pub fn get_follow_census_meta(&self, kind: &str, target_id: &str)
+    pub fn get_follow_census_meta(&self, target: FollowTarget)
         -> Result<FollowCensusMeta, AppError>
     {
         let mut stmt = self.conn.prepare(
             "SELECT total_works, last_census_at, census_state
              FROM follows WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![kind, target_id], |row| {
+        let mut rows = stmt.query_map(params![target.kind(), target.id()], |row| {
             Ok((
                 row.get::<_, Option<u32>>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -247,31 +304,31 @@ impl Storage {
         }
     }
 
-    pub fn set_follow_total_works(&self, kind: &str, target_id: &str, total: u32) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "total_works", &total)
+    pub fn set_follow_total_works(&self, target: FollowTarget, total: u32) -> Result<(), AppError> {
+        self.update_follow_column(target, "total_works", &total)
     }
 
     /// Persist (or clear, with None) the in-progress census JSON.
-    pub fn set_follow_census_state(&self, kind: &str, target_id: &str, state: Option<&str>) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "census_state", &state)
+    pub fn set_follow_census_state(&self, target: FollowTarget, state: Option<&str>) -> Result<(), AppError> {
+        self.update_follow_column(target, "census_state", &state)
     }
 
-    pub fn set_follow_last_census(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "last_census_at", &at)
+    pub fn set_follow_last_census(&self, target: FollowTarget, at: &str) -> Result<(), AppError> {
+        self.update_follow_column(target, "last_census_at", &at)
     }
 
     /// Stamp "this follow's own check completed now" — per-row, so an
     /// interrupted round can't misrepresent when each target was actually
     /// checked (the global queue-drain time only describes the round).
-    pub fn set_follow_last_checked(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "last_checked_at", &at)
+    pub fn set_follow_last_checked(&self, target: FollowTarget, at: &str) -> Result<(), AppError> {
+        self.update_follow_column(target, "last_checked_at", &at)
     }
 
-    pub fn get_follow_last_checked(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
+    pub fn get_follow_last_checked(&self, target: FollowTarget) -> Result<Option<String>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT last_checked_at FROM follows WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![kind, target_id], |row| {
+        let mut rows = stmt.query_map(params![target.kind(), target.id()], |row| {
             row.get::<_, Option<String>>(0)
         }).map_err(map_sql)?;
         match rows.next() {
@@ -284,32 +341,32 @@ impl Storage {
     /// Count one more consecutive 404 for this follow. Reaching `limit`
     /// (0 = no limit) sets the status to -1, which drops the follow from
     /// every future check. Returns the new status.
-    pub fn record_follow_not_found(&self, kind: &str, target_id: &str, limit: u32) -> Result<i32, AppError> {
+    pub fn record_follow_not_found(&self, target: FollowTarget, limit: u32) -> Result<i32, AppError> {
         self.conn.execute(
             "UPDATE follows SET status = CASE WHEN ?3 > 0 AND status + 1 >= ?3 THEN -1 ELSE status + 1 END
              WHERE kind = ?1 AND target_id = ?2 AND status >= 0",
-            params![kind, target_id, limit],
+            params![target.kind(), target.id(), limit],
         ).map_err(map_sql)?;
-        self.get_follow_status(kind, target_id)
+        self.get_follow_status(target)
     }
 
     /// A successful fetch — the not-found streak is over.
-    pub fn reset_follow_status(&self, kind: &str, target_id: &str) -> Result<(), AppError> {
-        self.update_follow_column(kind, target_id, "status", &0)
+    pub fn reset_follow_status(&self, target: FollowTarget) -> Result<(), AppError> {
+        self.update_follow_column(target, "status", &0)
     }
 
-    pub fn get_follow_status(&self, kind: &str, target_id: &str) -> Result<i32, AppError> {
+    pub fn get_follow_status(&self, target: FollowTarget) -> Result<i32, AppError> {
         self.conn.query_row(
             "SELECT status FROM follows WHERE kind = ?1 AND target_id = ?2",
-            params![kind, target_id], |r| r.get(0),
+            params![target.kind(), target.id()], |r| r.get(0),
         ).optional().map_err(map_sql).map(|v| v.unwrap_or(0))
     }
 
-    fn update_follow_column(&self, kind: &str, target_id: &str, column: &str,
+    fn update_follow_column(&self, target: FollowTarget, column: &str,
                             value: &dyn rusqlite::ToSql) -> Result<(), AppError> {
         self.conn.execute(
             &format!("UPDATE follows SET {column} = ?3 WHERE kind = ?1 AND target_id = ?2"),
-            params![kind, target_id, value],
+            params![target.kind(), target.id(), value],
         ).map_err(map_sql)?;
         Ok(())
     }
@@ -318,20 +375,20 @@ impl Storage {
     // Works crawls (Refresh Works stamp per author/series)
     // -------------------------------------------------------------------
 
-    pub fn set_works_crawled_at(&self, kind: &str, target_id: &str, at: &str) -> Result<(), AppError> {
+    pub fn set_works_crawled_at(&self, target: FollowTarget, at: &str) -> Result<(), AppError> {
         self.conn.execute(
             "INSERT INTO crawl_stamps (kind, target_id, crawled_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(kind, target_id) DO UPDATE SET crawled_at = ?3",
-            params![kind, target_id, at],
+            params![target.kind(), target.id(), at],
         ).map_err(map_sql)?;
         Ok(())
     }
 
-    pub fn get_works_crawled_at(&self, kind: &str, target_id: &str) -> Result<Option<String>, AppError> {
+    pub fn get_works_crawled_at(&self, target: FollowTarget) -> Result<Option<String>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT crawled_at FROM crawl_stamps WHERE kind = ?1 AND target_id = ?2"
         ).map_err(map_sql)?;
-        let mut rows = stmt.query_map(params![kind, target_id], |row| row.get::<_, String>(0))
+        let mut rows = stmt.query_map(params![target.kind(), target.id()], |row| row.get::<_, String>(0))
             .map_err(map_sql)?;
         match rows.next() {
             Some(Ok(v)) => Ok(Some(v)),
@@ -344,32 +401,28 @@ impl Storage {
     // Subscription works (derived from the works table)
     // -------------------------------------------------------------------
 
-    /// Every cached work that belongs to an author or series subscription,
-    /// answered from the works table (author bylines / series memberships)
-    /// — the set the census reconciles against.
-    pub fn get_subscription_member_ids(&self, sub_type: &str, sub_id: &str) -> Result<Vec<u64>, AppError> {
-        Ok(self.subscription_member_entities(sub_type, sub_id)?
+    /// Every cached work that belongs to an author or series, answered
+    /// from the works table (author bylines / series memberships) — the
+    /// set the census reconciles against.
+    pub fn get_subscription_member_ids(&self, target: FollowTarget) -> Result<Vec<u64>, AppError> {
+        Ok(self.subscription_member_entities(target)?
             .into_iter()
             .map(|e| e.summary.id)
             .collect())
     }
 
-    fn subscription_member_entities(&self, sub_type: &str, sub_id: &str)
+    fn subscription_member_entities(&self, target: FollowTarget)
         -> Result<Vec<Arc<WorkEntity>>, AppError>
     {
-        match sub_type {
-            SUB_TYPE_AUTHOR => {
-                let account = self.users_cache
-                    .resolve(sub_id)
-                    .map(|e| e.username.clone())
-                    .unwrap_or_else(|| split_author_byline(sub_id).0);
+        match target {
+            FollowTarget::Author(row) => {
+                let Some(account) = self.user_name_for_row(row) else { return Ok(Vec::new()) };
                 Ok(self.works_cache.all().into_iter()
                     .filter(|e| e.summary.authors.iter()
                         .any(|a| split_author_byline(a).0.eq_ignore_ascii_case(&account)))
                     .collect())
             }
-            SUB_TYPE_SERIES => {
-                let Ok(series_id) = sub_id.parse::<u64>() else { return Ok(Vec::new()) };
+            FollowTarget::Series(series_id) => {
                 Ok(self.works_cache.all().into_iter()
                     .filter(|e| e.summary.series.iter().any(|m| m.series_id == series_id))
                     .collect())
@@ -414,16 +467,16 @@ impl Storage {
             .collect())
     }
 
-    /// Works of a subscription. Author/series come from the works table
-    /// (see `get_subscription_member_ids`); series works sort by part,
-    /// everything else newest-first like the live listing.
-    pub fn get_subscription_works(&self, sub_type: &str, sub_id: &str) -> Result<Vec<WorkSummary>, AppError> {
-        let mut works: Vec<WorkSummary> = self.subscription_member_entities(sub_type, sub_id)?
+    /// Works of an author or series. Author/series come from the works
+    /// table (see `get_subscription_member_ids`); series works sort by
+    /// part, everything else newest-first like the live listing.
+    pub fn get_subscription_works(&self, target: FollowTarget) -> Result<Vec<WorkSummary>, AppError> {
+        let mut works: Vec<WorkSummary> = self.subscription_member_entities(target)?
             .iter()
             .map(|e| self.works_cache.hydrate(e, &self.tag_cache))
             .collect();
-        match (sub_type, sub_id.parse::<u64>()) {
-            (SUB_TYPE_SERIES, Ok(series_id)) => works.sort_by_key(|w| w.series.iter()
+        match target {
+            FollowTarget::Series(series_id) => works.sort_by_key(|w| w.series.iter()
                 .find(|m| m.series_id == series_id).map(|m| m.part).unwrap_or(0)),
             _ => works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated)),
         }

@@ -24,18 +24,20 @@ impl AO3App {
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
 
-        for (kind, id, name) in s.get_check_targets().map_err(AO3Error::from)? {
+        for row in s.get_check_targets().map_err(AO3Error::from)? {
+            let kind = row.target.kind();
+            let id = row.bridge_id;
             let queued = queue.iter().any(|q|
-                q["kind"].as_str() == Some(kind.as_str())
+                q["kind"].as_str() == Some(kind)
                     && q["target_id"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(&id)));
             let wanted = match older_than_secs {
-                Some(age) => follow_older_than(&s, &kind, &id, age),
-                None => !only_stale || follow_check_due(&s, &kind, &id),
+                Some(age) => follow_older_than(&s, row.target, age),
+                None => !only_stale || follow_check_due(&s, row.target),
             };
             if queued || !wanted {
                 continue;
             }
-            queue.push(serde_json::json!({"kind": kind, "target_id": id, "name": name}));
+            queue.push(serde_json::json!({"kind": kind, "target_id": id, "name": row.name}));
         }
         let json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
         s.set_check_queue(&json).map_err(AO3Error::from)?;
@@ -57,7 +59,7 @@ impl AO3App {
         }
         Ok(s.get_check_targets().map_err(AO3Error::from)?
             .iter()
-            .any(|(kind, id, _)| follow_check_due(&s, kind, id)))
+            .any(|row| follow_check_due(&s, row.target)))
     }
 
     /// How many checked follows were last checked longer ago than
@@ -69,12 +71,12 @@ impl AO3App {
         let targets = s.get_check_targets().map_err(AO3Error::from)?;
         let mut overdue = 0u32;
         let mut never_checked = 0u32;
-        for (kind, id, _) in &targets {
-            if !follow_older_than(&s, kind, id, max_age_secs) {
+        for row in &targets {
+            if !follow_older_than(&s, row.target, max_age_secs) {
                 continue;
             }
             overdue += 1;
-            if !matches!(s.get_follow_last_checked(kind, id), Ok(Some(at)) if !at.is_empty()) {
+            if !matches!(s.get_follow_last_checked(row.target), Ok(Some(at)) if !at.is_empty()) {
                 never_checked += 1;
             }
         }
@@ -95,8 +97,8 @@ impl AO3App {
             // The page cursor lives in the persisted census state, not the
             // queue marker (see check_next_follow).
             let (page, total_pages) = if census {
-                s.get_follow_census_meta(&kind, &target_id)
-                    .ok()
+                s.follow_target(&kind, &target_id)
+                    .and_then(|t| s.get_follow_census_meta(t).ok())
                     .and_then(|(_, _, state)| state)
                     .and_then(|json| serde_json::from_str::<CensusState>(&json).ok())
                     .map(|c| (c.next_page, c.total_pages))
@@ -193,11 +195,16 @@ impl AO3App {
     /// census time adopted — and the follow is marked checked with a fresh
     /// baseline. (Each page was already compared and new or
     /// updated works flagged as it arrived; see `run_listing_fetch`.)
+    /// `target_id`: the author's username or the series row id; `work_ids`
+    /// are row ids.
     pub fn complete_works_crawl(&self, kind: String, target_id: String, work_ids: Vec<u64>) -> Result<(), AO3Error> {
         let s = self.storage.blocking_lock();
         let now = now_utc();
-        s.set_works_crawled_at(&kind, &target_id, &now).map_err(AO3Error::from)?;
-        if !s.is_followed(&kind, &target_id).map_err(AO3Error::from)? {
+        let Some(target) = s.ensure_follow_target(&kind, &target_id).map_err(AO3Error::from)? else {
+            return Err(AO3Error::NotFound { message: format!("{kind} '{target_id}' is not in the library") });
+        };
+        s.set_works_crawled_at(target, &now).map_err(AO3Error::from)?;
+        if !s.is_followed(target).map_err(AO3Error::from)? {
             return Ok(());
         }
         let state = CensusState {
@@ -206,9 +213,9 @@ impl AO3App {
             seen_ids: work_ids.clone(),
             started_at: now.clone(),
             reason: "full works crawl (Refresh Works)".to_string(),
-            seed: s.get_follow_census_meta(&kind, &target_id).map(|(_, last, _)| last.is_none()).unwrap_or(true),
+            seed: s.get_follow_census_meta(target).map(|(_, last, _)| last.is_none()).unwrap_or(true),
         };
-        finalize_census(&s, &kind, &target_id, &target_id, &state);
+        finalize_census(&s, target, &target_id, &state);
         // The newest update date the crawl saw — what a check's page 1
         // would have recorded.
         let newest = work_ids.iter()
@@ -217,16 +224,18 @@ impl AO3App {
             .max()
             .unwrap_or_default();
         if !newest.is_empty() {
-            log_db("set_follow_baseline", s.set_follow_baseline(&kind, &target_id, &newest));
+            log_db("set_follow_baseline", s.set_follow_baseline(target, &newest));
         }
-        log_db("set_follow_last_checked", s.set_follow_last_checked(&kind, &target_id, &now));
+        log_db("set_follow_last_checked", s.set_follow_last_checked(target, &now));
         Ok(())
     }
 
     /// UTC "YYYY-MM-DD HH:MM:SS" of the last completed works crawl, or None.
+    /// `target_id`: the author's username or the series row id.
     pub fn get_works_crawled_at(&self, kind: String, target_id: String) -> Result<Option<String>, AO3Error> {
         let s = self.storage.blocking_lock();
-        s.get_works_crawled_at(&kind, &target_id).map_err(AO3Error::from)
+        let Some(target) = s.follow_target(&kind, &target_id) else { return Ok(None) };
+        s.get_works_crawled_at(target).map_err(AO3Error::from)
     }
 
     pub fn remove_new_work(&self, work_id: u64) -> Result<(), AO3Error> {
@@ -246,7 +255,7 @@ impl AO3App {
             // after the check whatever the outcome — success, 404, other
             // failure — so a target that keeps failing doesn't hold the
             // overdue warning up forever.
-            let mut checked: Option<(String, String)> = None;
+            let mut checked: Option<FollowTarget> = None;
             let result: Result<Option<UFollowCheckResult>, AO3Error> = async {
                 let s = storage.lock().await;
                 // Pop the first item from the queue
@@ -258,21 +267,37 @@ impl AO3App {
                     return Ok(None);
                 }
                 // Items whose follow was removed since they were queued are
-                // dropped — an unfollowed target is never fetched.
+                // dropped — an unfollowed target is never fetched. (Queue
+                // items name targets the way the bridge does.)
+                fn followed_target(s: &Storage, item: &serde_json::Value) -> Option<FollowTarget> {
+                    s.follow_target(item["kind"].as_str().unwrap_or(""), item["target_id"].as_str().unwrap_or(""))
+                        .filter(|t| s.is_followed(*t).unwrap_or(false))
+                }
                 let mut item = queue.remove(0);
-                while !s.is_followed(item["kind"].as_str().unwrap_or(""),
-                                     item["target_id"].as_str().unwrap_or("")).unwrap_or(false) {
+                let mut target = followed_target(&s, &item);
+                while target.is_none() {
                     if queue.is_empty() {
                         log_db("set_check_queue", s.set_check_queue("[]"));
                         return Ok(None);
                     }
                     item = queue.remove(0);
+                    target = followed_target(&s, &item);
                 }
-                let sub_type = item["kind"].as_str().unwrap_or("").to_string();
-                let sub_id = item["target_id"].as_str().unwrap_or("").to_string();
+                let target = target.expect("loop exits with a followed target");
+                let sub_type = target.kind().to_string();
+                // The bridge id for the result and for the queue marker.
+                let sub_id = s.follow_bridge_id(target);
                 let sub_name = item["name"].as_str().unwrap_or("").to_string();
                 let is_census = item["census"].as_bool().unwrap_or(false);
-                checked = Some((sub_type.clone(), sub_id.clone()));
+                checked = Some(target);
+                // What AO3 is asked for: the username or the AO3 number.
+                let Some(ao3_id) = ao3_follow_id(&s, target) else {
+                    return Ok(Some(UFollowCheckResult {
+                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
+                        remaining: queue.len() as u32,
+                        error: Some("Not an AO3 target".to_string()),
+                    }));
+                };
 
                 // Persist updated queue before the fetch (so a crash mid-fetch
                 // skips this item rather than retrying it forever).
@@ -283,7 +308,7 @@ impl AO3App {
                 // Census continuations read their page cursor from the persisted
                 // state, not the queue marker — cancel/crash resumes cleanly.
                 let census_state: Option<CensusState> = if is_census {
-                    s.get_follow_census_meta(&sub_type, &sub_id)
+                    s.get_follow_census_meta(target)
                         .ok()
                         .and_then(|(_, _, state)| state)
                         .and_then(|json| serde_json::from_str(&json).ok())
@@ -303,11 +328,11 @@ impl AO3App {
                 let base = crate::client::BASE_URL;
                 let census_page = census_state.as_ref().map(|c| c.next_page);
                 let url = match (sub_type.as_str(), census_page) {
-                    ("author", None) => format!("{base}/users/{sub_id}/works"),
-                    ("author", Some(p)) => format!("{base}/users/{sub_id}/works?page={p}"),
-                    ("series", None) => format!("{base}/series/{sub_id}"),
-                    ("series", Some(p)) => format!("{base}/series/{sub_id}?page={p}"),
-                    ("work", _) => format!("{base}/works/{sub_id}?view_adult=true"),
+                    ("author", None) => format!("{base}/users/{ao3_id}/works"),
+                    ("author", Some(p)) => format!("{base}/users/{ao3_id}/works?page={p}"),
+                    ("series", None) => format!("{base}/series/{ao3_id}"),
+                    ("series", Some(p)) => format!("{base}/series/{ao3_id}?page={p}"),
+                    ("work", _) => format!("{base}/works/{ao3_id}?view_adult=true"),
                     _ => return Ok(Some(UFollowCheckResult {
                         kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
                         error: Some("Unknown subscription type".to_string()),
@@ -337,7 +362,7 @@ impl AO3App {
                     Ok(h) => {
                         // A successful fetch ends any not-found streak.
                         let s = storage.lock().await;
-                        log_db("reset_follow_status", s.reset_follow_status(&sub_type, &sub_id));
+                        log_db("reset_follow_status", s.reset_follow_status(target));
                         h
                     }
                     Err(e) => {
@@ -349,7 +374,7 @@ impl AO3App {
                         if matches!(classify(&e), Some(crate::client::FailureKind::Http { code: 404 })) {
                             let s = storage.lock().await;
                             let limit = not_found_limit(&s);
-                            match s.record_follow_not_found(&sub_type, &sub_id, limit) {
+                            match s.record_follow_not_found(target, limit) {
                                 Ok(-1) => { log_info!("whats_new",
                                     "{sub_type} '{sub_name}' not found on {limit} consecutive checks — excluded from What's New checks"); }
                                 Ok(n) => { log_info!("whats_new",
@@ -411,7 +436,7 @@ impl AO3App {
                         (date, works)
                     }
                     "work" => {
-                        let parsed = sub_id.parse::<u64>().ok()
+                        let parsed = ao3_id.parse::<u64>().ok()
                             .and_then(|id| crate::parser::parse_work_page(&html, id).ok());
                         if let Some((w, _)) = parsed {
                             let date = w.date_updated.clone();
@@ -431,10 +456,7 @@ impl AO3App {
                     // One transaction per census page: works + associations +
                     // flags land together or not at all.
                     let tx = s.begin_tx().map_err(AO3Error::from)?;
-                    for w in &parsed_works {
-                        log_db("save_work", s.save_work(w));
-                    }
-                    let page_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+                    let page_ids = save_works(&s, &parsed_works);
                     for id in page_ids {
                         if !state.seen_ids.contains(&id) {
                             state.seen_ids.push(id);
@@ -442,7 +464,7 @@ impl AO3App {
                     }
                     let changed = !flagged.is_empty();
                     if changed {
-                        log_db("add_new_work_ids", s.add_new_work_ids(&flagged));
+                        log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &flagged)));
                     }
                     log_db("commit census page", tx.commit());
 
@@ -454,12 +476,12 @@ impl AO3App {
                             "Census for {sub_type} '{sub_name}' hit the {CENSUS_MAX_PAGES}-page cap with pages left — listing walk truncated");
                     }
                     if done {
-                        finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
+                        finalize_census(&s, target, &sub_name, &state);
                     } else {
                         state.next_page += 1;
-                        log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
-                            &sub_id, serde_json::to_string(&state).ok().as_deref()));
-                        remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
+                        log_db("set_follow_census_state", s.set_follow_census_state(target,
+                            serde_json::to_string(&state).ok().as_deref()));
+                        remaining = requeue_census_marker(&s, target, &sub_name);
                     }
                     if remaining == 0 {
                         log_db("set_last_check_time", s.set_last_check_time(&now_utc()));
@@ -473,7 +495,7 @@ impl AO3App {
                 // The snapshot's job here: distinguish a first run (seed
                 // silently) from a repeat check. An empty date also counts as
                 // first run — census bookkeeping may create the row early.
-                let first_run = s.get_follow_baseline(&sub_type, &sub_id)
+                let first_run = s.get_follow_baseline(target)
                     .unwrap_or(None)
                     .is_none();
 
@@ -490,19 +512,16 @@ impl AO3App {
                 // Cache works and mark new/updated ones for the What's New feed —
                 // one transaction, so a crash can't leave a half-saved page.
                 let tx = s.begin_tx().map_err(AO3Error::from)?;
-                for w in &parsed_works {
-                    log_db("save_work", s.save_work(w));
-                }
                 // Membership (author byline / series part) rides on the saved
                 // works themselves — nothing to record per subscription.
-                let all_ids: Vec<u64> = parsed_works.iter().map(|w| w.id).collect();
+                let all_ids = save_works(&s, &parsed_works);
                 if changed {
-                    log_db("add_new_work_ids", s.add_new_work_ids(&updated_ids));
+                    log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &updated_ids)));
                 }
 
                 // Save snapshot (always, even on first run)
                 if !newest_date.is_empty() {
-                    log_db("set_follow_baseline", s.set_follow_baseline(&sub_type, &sub_id, &newest_date));
+                    log_db("set_follow_baseline", s.set_follow_baseline(target, &newest_date));
                 }
                 log_db("commit check page", tx.commit());
 
@@ -516,7 +535,7 @@ impl AO3App {
                 if sub_type == "author" || sub_type == "series" {
                     let header_total = crate::parser::parse_listing_works_total(&html);
                     let (prev_total, last_census_at, existing_state) =
-                        s.get_follow_census_meta(&sub_type, &sub_id).unwrap_or((None, None, None));
+                        s.get_follow_census_meta(target).unwrap_or((None, None, None));
 
                     let mut census_reason: Option<String> = None;
                     if existing_state.is_some() {
@@ -579,16 +598,16 @@ impl AO3App {
                             sub_type, sub_name, reason, state.next_page, state.total_pages);
                         if fresh && !crate::parser::has_next_page(&html) {
                             // Single-page listing: page 1 was the whole census.
-                            finalize_census(&s, &sub_type, &sub_id, &sub_name, &state);
+                            finalize_census(&s, target, &sub_name, &state);
                         } else {
-                            log_db("set_follow_census_state", s.set_follow_census_state(&sub_type,
-                                &sub_id, serde_json::to_string(&state).ok().as_deref()));
-                            remaining = requeue_census_marker(&s, &sub_type, &sub_id, &sub_name);
+                            log_db("set_follow_census_state", s.set_follow_census_state(target,
+                                serde_json::to_string(&state).ok().as_deref()));
+                            remaining = requeue_census_marker(&s, target, &sub_name);
                         }
                     } else if let Some(t) = header_total {
                         // Counts reconcile — adopt the fresh total as the next
                         // check's baseline.
-                        log_db("set_follow_total_works", s.set_follow_total_works(&sub_type, &sub_id, t));
+                        log_db("set_follow_total_works", s.set_follow_total_works(target, t));
                     }
                 }
 
@@ -602,9 +621,9 @@ impl AO3App {
                     error: None,
                 }))
             }.await;
-            if let Some((kind, id)) = checked {
+            if let Some(target) = checked {
                 let s = storage.lock().await;
-                log_db("set_follow_last_checked", s.set_follow_last_checked(&kind, &id, &now_utc()));
+                log_db("set_follow_last_checked", s.set_follow_last_checked(target, &now_utc()));
             }
             result
         }).await

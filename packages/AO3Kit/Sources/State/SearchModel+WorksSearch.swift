@@ -100,6 +100,14 @@ extension SearchModel {
         Task { await fetch(page: 1, appState: appState) }
     }
 
+    /// The collection's page at its source, from the cached record ("open
+    /// on AO3" is never built from the slug). nil until the library has
+    /// the collection.
+    func collectionURL(_ name: String, appState: AppState) -> URL? {
+        guard let url = appState.bridge.getLibraryCollection(name: name)?.url, !url.isEmpty else { return nil }
+        return URL(string: url)
+    }
+
     /// A collection's works — `name` is the /collections/{name} slug.
     /// Library mode reads what this collection's cached listings already
     /// recorded (no network, per the source toggle's promise) — split into
@@ -143,6 +151,7 @@ extension SearchModel {
             splitReturnQuery = activeQuery
             splitCollectionName = name
             splitCollectionTitle = title.isEmpty ? name : title
+            splitCollectionURL = collectionURL(name, appState: appState)
             activeQuery = nil
             onNewQuery?()
             appState.searchResults = works
@@ -168,6 +177,7 @@ extension SearchModel {
             splitReturnQuery = activeQuery
             splitCollectionName = name
             splitCollectionTitle = title.isEmpty ? name : title
+            splitCollectionURL = collectionURL(name, appState: appState)
             activeQuery = .collection(name)
             onNewQuery?()
             appState.searchResults = []

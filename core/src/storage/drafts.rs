@@ -5,7 +5,9 @@ use crate::error::AppError;
 use super::{map_sql, Storage};
 
 /// An unposted comment: the text in one composer (a work's whole-work box
-/// or one chapter's box) and the comment it replies to (0 = top-level).
+/// or one chapter's box) and the comment it replies to (AO3 comment
+/// number; 0 = top-level). Comment rows are a cache whose row ids change
+/// on refetch, so the reply target is kept by its AO3 number.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommentDraft {
     pub parent_comment_id: u64,
@@ -15,13 +17,14 @@ pub struct CommentDraft {
 
 impl Storage {
     /// The signed-in account's draft for a composer; None when there is
-    /// none (or nobody is signed in). `chapter_id` 0 = whole-work comments.
+    /// none (or nobody is signed in). `work_id` is the work row id;
+    /// `chapter_id` 0 = whole-work comments.
     pub fn get_comment_draft(&self, work_id: u64, chapter_id: u64) -> Result<Option<CommentDraft>, AppError> {
         let Some(account) = self.subscription_account() else { return Ok(None) };
         self.conn.query_row(
             "SELECT parent_comment_id, body, updated_at FROM comment_drafts
              WHERE account_id = ?1 AND work_id = ?2 AND chapter_id = ?3",
-            params![account, work_id as i64, chapter_id as i64],
+            params![account.id, work_id as i64, chapter_id as i64],
             |row| Ok(CommentDraft {
                 parent_comment_id: row.get::<_, i64>(0)? as u64,
                 body: row.get(1)?,
@@ -45,7 +48,7 @@ impl Storage {
                  parent_comment_id = excluded.parent_comment_id,
                  body = excluded.body,
                  updated_at = excluded.updated_at",
-            params![account, work_id as i64, chapter_id as i64, parent_comment_id as i64,
+            params![account.id, work_id as i64, chapter_id as i64, parent_comment_id as i64,
                     body, crate::timefmt::now_utc_datetime()],
         ).map_err(map_sql)?;
         Ok(())
@@ -56,7 +59,7 @@ impl Storage {
         let Some(account) = self.subscription_account() else { return Ok(()) };
         self.conn.execute(
             "DELETE FROM comment_drafts WHERE account_id = ?1 AND work_id = ?2 AND chapter_id = ?3",
-            params![account, work_id as i64, chapter_id as i64],
+            params![account.id, work_id as i64, chapter_id as i64],
         ).map_err(map_sql)?;
         Ok(())
     }

@@ -2,7 +2,7 @@ use super::*;
 
 use std::path::{Path, PathBuf};
 
-use crate::storage::library_file::{self, EMBED_PREFIX};
+use crate::storage::library_file::{self, BackupMeta, BACKUPS_DIR, EMBED_PREFIX};
 
 // ---------------------------------------------------------------------------
 // Whole-file iCloud sync and local backups.
@@ -27,7 +27,6 @@ use crate::storage::library_file::{self, EMBED_PREFIX};
 
 pub const MANIFEST_FORMAT: u32 = 1;
 const SIDECAR_NAME: &str = "library-sync.json";
-const BACKUPS_DIR: &str = "Backups";
 
 /// The manifest published beside the cloud copy.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
@@ -126,16 +125,6 @@ struct SyncState {
 
 fn unsynced_default() -> bool {
     true
-}
-
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-struct BackupMeta {
-    #[serde(default)]
-    created_at: i64,
-    #[serde(default)]
-    reason: String,
-    #[serde(default)]
-    source_device: String,
 }
 
 fn now_ms() -> i64 {
@@ -297,16 +286,7 @@ impl AO3App {
     }
 
     fn new_backup_slot(&self, reason: &str, source_device: &str) -> Result<(String, PathBuf), AO3Error> {
-        let dir = self.backups_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| io_err("create backups dir", e))?;
-        let mut id = now_ms();
-        while dir.join(format!("{id}.db")).exists() {
-            id += 1;
-        }
-        let meta = BackupMeta { created_at: id, reason: reason.to_string(), source_device: source_device.to_string() };
-        let json = serde_json::to_vec_pretty(&meta).map_err(|e| storage_err(e.to_string()))?;
-        std::fs::write(dir.join(format!("{id}.json")), json).map_err(|e| io_err("write backup info", e))?;
-        Ok((id.to_string(), dir.join(format!("{id}.db"))))
+        library_file::new_backup_slot(self.state_path(), reason, source_device).map_err(AO3Error::from)
     }
 
     fn backup_info(&self, id: &str) -> Option<UBackupInfo> {

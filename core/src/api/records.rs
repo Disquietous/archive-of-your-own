@@ -36,12 +36,20 @@ pub struct URequestLogEntry {
     /// fingerprints, connect time, and TLS first-byte offsets (or
     /// "never"). None off Tor.
     pub transport: Option<String>,
+    /// The source the request was sent for ("ao3").
+    pub source: String,
 }
 
-/// An AO3 series as a listing shows it (a series bookmark blurb).
+/// A series as a listing shows it (a series bookmark blurb).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USeriesSummary {
+    /// Row id.
     pub id: u64,
+    pub source: String,
+    /// The series' id at its source (AO3 series number).
+    pub external_id: String,
+    /// Canonical page URL at the source; "" when it has none.
+    pub url: String,
     pub name: String,
     pub authors: Vec<String>,
     pub summary: String,
@@ -55,7 +63,8 @@ pub struct USeriesSummary {
 impl From<SeriesSummary> for USeriesSummary {
     fn from(s: SeriesSummary) -> Self {
         USeriesSummary {
-            id: s.id, name: s.name, authors: s.authors, summary: s.summary,
+            id: s.id, source: s.source, external_id: s.external_id, url: s.url,
+            name: s.name, authors: s.authors, summary: s.summary,
             word_count: s.word_count, work_count: s.work_count, complete: s.complete,
             date_updated: s.date_updated, fetched_at: s.fetched_at,
         }
@@ -99,12 +108,16 @@ pub struct UActiveRequest {
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USeriesMembership {
+    /// Series row id.
     pub series_id: u64,
     pub name: String,
     /// 1-based position within the series; 0 = unknown.
     pub part: u32,
-    pub prev_work_id: Option<u64>,
-    pub next_work_id: Option<u64>,
+    /// The adjacent works' ids at the source (AO3 work numbers) — they are
+    /// usually not in the library. Resolve through `resolve_ao3_work`
+    /// before opening.
+    pub prev_work_external_id: Option<String>,
+    pub next_work_external_id: Option<String>,
 }
 
 impl From<SeriesMembership> for USeriesMembership {
@@ -113,15 +126,22 @@ impl From<SeriesMembership> for USeriesMembership {
             series_id: s.series_id,
             name: s.name,
             part: s.part,
-            prev_work_id: s.prev_work_id,
-            next_work_id: s.next_work_id,
+            prev_work_external_id: s.prev_work_external_id,
+            next_work_external_id: s.next_work_external_id,
         }
     }
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UWorkSummary {
+    /// Row id. Every id the bridge takes for a work is this.
     pub id: u64,
+    pub source: String,
+    /// The work's id at its source (AO3 work number). Display only.
+    pub external_id: String,
+    /// Canonical page URL at the source; "" when it has none. The only
+    /// thing "open on site" uses.
+    pub url: String,
     pub title: String,
     pub authors: Vec<String>,
     pub fandoms: Vec<String>,
@@ -132,13 +152,15 @@ pub struct UWorkSummary {
     pub characters: Vec<String>,
     pub tags: Vec<String>,
     pub summary: String,
-    pub word_count: u64,
+    /// Stats are None when the source does not report them — absent, never
+    /// zero. AO3 always reports them.
+    pub word_count: Option<u64>,
     pub chapter_count: u32,
     pub total_chapters: i32,
-    pub kudos: u32,
-    pub hits: u64,
-    pub bookmarks_count: u32,
-    pub comments: u32,
+    pub kudos: Option<u32>,
+    pub hits: Option<u64>,
+    pub bookmarks_count: Option<u32>,
+    pub comments: Option<u32>,
     pub date_published: String,
     pub date_updated: String,
     pub language: String,
@@ -153,6 +175,9 @@ impl From<WorkSummary> for UWorkSummary {
     fn from(w: WorkSummary) -> Self {
         UWorkSummary {
             id: w.id,
+            source: w.source,
+            external_id: w.external_id,
+            url: w.url,
             title: w.title,
             authors: w.authors,
             fandoms: w.fandoms,
@@ -183,8 +208,12 @@ impl From<WorkSummary> for UWorkSummary {
 /// One collection blurb from the /collections index.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UCollection {
-    /// URL slug — the path segment in /collections/{name}.
+    pub source: String,
+    /// The collection's id at its source: the URL slug, the path segment
+    /// in /collections/{name}. Collections cross the bridge by this.
     pub name: String,
+    /// Canonical page URL at the source.
+    pub url: String,
     pub title: String,
     pub summary: String,
     pub is_open: bool,
@@ -204,7 +233,9 @@ pub struct UCollection {
 impl From<CollectionSummary> for UCollection {
     fn from(c: CollectionSummary) -> Self {
         UCollection {
+            source: c.source,
             name: c.name,
+            url: c.url,
             title: c.title,
             summary: c.summary,
             is_open: c.is_open,
@@ -725,6 +756,10 @@ pub struct URouteTimeout {
     pub timeout_secs: Option<u64>,
 }
 
+/// One of the signed-in account's AO3 subscriptions — an AO3 record, so
+/// `id` is AO3's identifier for the target (username, work number, or
+/// series number), never a row id. Open a work or series subscription
+/// through `resolve_ao3_work` / `resolve_ao3_series`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USubscription {
     pub sub_type: String,
@@ -733,6 +768,8 @@ pub struct USubscription {
     /// AO3's subscription record id (from unsubscribe form actions) —
     /// stored so unsubscribing can POST directly without a page fetch.
     pub ao3_id: Option<String>,
+    /// The target's page on AO3.
+    pub url: String,
 }
 
 /// A follow: a target (author / work / series / fandom) the What's New
@@ -740,7 +777,7 @@ pub struct USubscription {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UFollow {
     pub kind: String,
-    /// author: AO3 username; work/series: numeric id; fandom: tag name.
+    /// author: AO3 username; work/series: the row id; fandom: tag name.
     pub target_id: String,
     pub name: String,
     pub added_at: String,
@@ -755,8 +792,8 @@ pub struct UFollow {
 impl From<crate::storage::FollowRow> for UFollow {
     fn from(r: crate::storage::FollowRow) -> Self {
         UFollow {
-            kind: r.kind,
-            target_id: r.target_id,
+            kind: r.target.kind().to_string(),
+            target_id: r.bridge_id,
             name: r.name,
             added_at: r.added_at,
             last_checked_at: r.last_checked_at,
@@ -791,6 +828,7 @@ impl From<crate::models::Subscription> for USubscription {
             id: s.id,
             name: s.name,
             ao3_id: s.ao3_id,
+            url: s.url,
         }
     }
 }

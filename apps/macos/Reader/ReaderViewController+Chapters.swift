@@ -104,7 +104,7 @@ extension ReaderViewController {
     }
 
     @objc func openNextWorkInSeries() {
-        guard let next = work?.nextInSeries?.nextWorkID else { return }
+        guard let next = work?.nextInSeries?.nextWorkExternalID else { return }
         session.openNextWork(next)
     }
 

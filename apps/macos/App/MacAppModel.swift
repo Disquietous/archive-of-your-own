@@ -222,11 +222,14 @@ final class MacAppModel {
 
     private func open(_ link: AO3Link) {
         switch link {
-        case .work(let id), .entireWork(let id):
+        case .work(let number), .entireWork(let number):
             // The mac reader has no entire-work mode; the detail is the
-            // closest landing.
+            // closest landing. Links name works by AO3 number; the app
+            // keys by library id.
+            guard let id = appState.rowID(forAO3Work: number) else { return }
             openWorkByID(id)
-        case .chapter(let workID, let chapterID):
+        case .chapter(let workNumber, let chapterID):
+            guard let workID = appState.rowID(forAO3Work: workNumber) else { return }
             Task { @MainActor in
                 if let chapter = await appState.resolveChapterLink(workID: workID, chapterID: chapterID) {
                     openReader(workID, chapter: chapter)
@@ -242,9 +245,10 @@ final class MacAppModel {
             case .bookmarks: showAuthorPane(name, .bookmarks)
             case .collections: showAuthorPane(name, .collections)
             }
-        case .series(let id):
-            goSection(.subscriptions)
-            openSubscriptionAuthorWorks(subscriptionID: id, author: "Series \(id)", subType: "series")
+        case .series(let number):
+            guard let id = appState.rowID(forAO3Series: number) else { return }
+            let name = appState.bridge.getCachedSeries(UInt64(id) ?? 0)?.name ?? ""
+            openSeries(id: id, name: name.isEmpty ? "Series \(number)" : name)
         case .collection(let name):
             openSearch { [self] in
                 search.scope = .collections
@@ -283,9 +287,28 @@ final class MacAppModel {
         }
     }
 
+    /// Open what a subscription row points at. A subscription names its
+    /// target by AO3 id (username, work number, series number); works and
+    /// series resolve to library ids first.
+    func openSubscriptionTarget(_ sub: USubscription) {
+        let type = sub.subType.lowercased()
+        if type.contains("series") {
+            guard let id = appState.rowID(forAO3Series: sub.id, name: sub.name) else { return }
+            openSeries(id: id, name: sub.name)
+        } else if type.contains("author") || type.contains("user") {
+            openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name, subType: "author")
+        } else if type.contains("work") {
+            guard let id = appState.rowID(forAO3Work: sub.id) else { return }
+            openWorkByID(id)
+        }
+    }
+
     /// Jump from the end of a work straight into the next work of its
     /// series, fetching metadata first when it isn't known locally.
-    func openNextWorkInSeries(_ id: String) {
+    /// `number` is the next work's AO3 number (series links name works
+    /// by number); it resolves to a library id here.
+    func openNextWorkInSeries(_ number: String) {
+        guard let id = appState.rowID(forAO3Work: number) else { return }
         Task { @MainActor in
             if appState.work(byID: id) == nil {
                 await appState.fetchWorkMetadata(id)

@@ -37,13 +37,23 @@ struct SharedLinkRouterModifier: ViewModifier {
 
     private func open(_ link: AO3Link) async {
         switch link {
-        case .work(let id):
-            guard await ensureWork(id) else { return }
+        case .work(let number):
+            guard let id = state.rowID(forAO3Work: number), await ensureWork(id) else {
+                failure = unresolvable
+                return
+            }
             nav.openWork(id)
-        case .entireWork(let id):
-            guard await ensureWork(id) else { return }
+        case .entireWork(let number):
+            guard let id = state.rowID(forAO3Work: number), await ensureWork(id) else {
+                failure = unresolvable
+                return
+            }
             nav.openEntireWork(id)
-        case .chapter(let workID, let chapterID):
+        case .chapter(let workNumber, let chapterID):
+            guard let workID = state.rowID(forAO3Work: workNumber) else {
+                failure = unresolvable
+                return
+            }
             if let chapter = await state.resolveChapterLink(workID: workID, chapterID: chapterID) {
                 nav.openReader(workID, chapterIndex: chapter)
             } else if await ensureWork(workID) {
@@ -58,8 +68,13 @@ struct SharedLinkRouterModifier: ViewModifier {
             case .collections: .collections
             }
             nav.openAuthor(name, pane: profilePane)
-        case .series(let id):
-            nav.openSubscriptionWorks(id: id, name: "Series \(id)", subType: "series")
+        case .series(let number):
+            guard let id = state.rowID(forAO3Series: number) else {
+                failure = unresolvable
+                return
+            }
+            let name = state.bridge.getCachedSeries(UInt64(id) ?? 0)?.name ?? ""
+            nav.openSubscriptionWorks(id: id, name: name.isEmpty ? "Series \(number)" : name, subType: "series")
         case .collection(let name):
             nav.openCollection(name: name, title: name)
         case .tag(let name):
@@ -69,8 +84,13 @@ struct SharedLinkRouterModifier: ViewModifier {
         }
     }
 
+    private var unresolvable: String {
+        "The link couldn’t be opened — the library isn’t available."
+    }
+
     /// The work's metadata from the library, or one fetch from AO3. False
     /// (with the alert) when it can't be had — nothing half-opens.
+    /// `id` is the library id.
     private func ensureWork(_ id: String) async -> Bool {
         if state.work(byID: id) == nil {
             await state.fetchWorkMetadata(id)

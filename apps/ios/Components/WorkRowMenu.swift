@@ -62,9 +62,9 @@ struct WorkRowMenu<Tail: View>: View {
                 Label("Download for Offline", systemImage: "arrow.down.circle")
             }
         }
-        if isReal {
+        if !work.url.isEmpty {
             Button {
-                UIPasteboard.general.string = "https://archiveofourown.org/works/\(work.id)"
+                UIPasteboard.general.string = work.url
             } label: {
                 Label("Copy AO3 Link", systemImage: "link")
             }

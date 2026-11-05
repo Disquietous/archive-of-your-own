@@ -1,7 +1,7 @@
 use scraper::{Html, ElementRef};
 
 use crate::error::AppError;
-use crate::models::CollectionSummary;
+use crate::models::{CollectionSummary, SOURCE_AO3};
 
 use super::{sel, text, parse_number};
 use super::listings::verify_empty_listing;
@@ -45,6 +45,8 @@ fn parse_single_collection_blurb(blurb: &ElementRef) -> Result<CollectionSummary
     let tags = collect_texts(blurb, "h5.tags a.tag");
 
     Ok(CollectionSummary {
+        source: SOURCE_AO3.to_string(),
+        url: super::ao3_collection_url(&name),
         name,
         title,
         summary,
@@ -213,6 +215,8 @@ pub fn parse_collection_profile(html: &str, name: &str) -> Result<CollectionSumm
         .unwrap_or_default();
 
     Ok(CollectionSummary {
+        source: SOURCE_AO3.to_string(),
+        url: super::ao3_collection_url(name),
         name: name.to_string(),
         title,
         summary,

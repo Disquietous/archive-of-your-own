@@ -76,7 +76,8 @@ fn test_parse_search_results() {
     assert!(!works.is_empty(), "Should parse at least one work");
 
     let first = &works[0];
-    assert!(first.id > 0, "Work should have a valid ID");
+    assert!(!first.external_id.is_empty(), "Work should have a valid ID");
+    assert_eq!(first.id, 0, "Unsaved summaries have no row id");
     assert!(!first.title.is_empty(), "Work should have a title");
     assert!(!first.authors.is_empty(), "Work should have authors");
     assert!(!first.fandoms.is_empty(), "Work should have fandoms");
@@ -112,9 +113,9 @@ fn test_blurb_series() {
     assert_eq!(works.len(), 1);
     let s = &works[0].series;
     assert_eq!(s.len(), 2);
-    assert_eq!((s[0].series_id, s[0].part, s[0].name.as_str()), (501, 2, "1st Series"));
-    assert_eq!((s[1].series_id, s[1].part), (502, 1));
-    assert!(s[0].prev_work_id.is_none() && s[0].next_work_id.is_none());
+    assert_eq!((s[0].series_external_id.as_str(), s[0].part, s[0].name.as_str()), ("501", 2, "1st Series"));
+    assert_eq!((s[1].series_external_id.as_str(), s[1].part), ("502", 1));
+    assert!(s[0].prev_work_external_id.is_none() && s[0].next_work_external_id.is_none());
 }
 
 #[test]
@@ -138,8 +139,8 @@ fn test_parse_search_results_stats() {
     let works = parse_work_listings(&html).expect("Failed to parse");
     let first = &works[0];
 
-    assert!(first.word_count > 0 || first.chapter_count > 0,
-        "Should parse some stats: words={}, chapters={}",
+    assert!(first.word_count.unwrap_or(0) > 0 || first.chapter_count > 0,
+        "Should parse some stats: words={:?}, chapters={}",
         first.word_count, first.chapter_count);
 }
 
@@ -151,7 +152,9 @@ fn test_parse_work_page() {
     assert!(result.is_ok(), "Should parse work page: {:?}", result.err());
     let (summary, chapters) = result.unwrap();
 
-    assert_eq!(summary.id, 2000001, "Should carry the requested work ID");
+    assert_eq!(summary.external_id, "2000001", "Should carry the requested work ID");
+    assert_eq!(summary.id, 0, "Unsaved summaries have no row id");
+    assert_eq!(summary.url, "https://archiveofourown.org/works/2000001");
     assert!(!summary.title.is_empty(), "Should have title");
     assert!(!chapters.is_empty(), "Should have at least one chapter");
     assert!(!chapters[0].content.is_empty(), "Chapter should have content blocks");
@@ -166,18 +169,18 @@ fn test_parse_work_page_series() {
     assert_eq!(summary.series.len(), 2, "Should find both memberships");
 
     let alpha = &summary.series[0];
-    assert_eq!(alpha.series_id, 9000001);
+    assert_eq!(alpha.series_external_id, "9000001");
     assert_eq!(alpha.name, "Alpha Test Series");
     assert_eq!(alpha.part, 2);
-    assert_eq!(alpha.prev_work_id, Some(2000010));
-    assert_eq!(alpha.next_work_id, Some(2000012));
+    assert_eq!(alpha.prev_work_external_id.as_deref(), Some("2000010"));
+    assert_eq!(alpha.next_work_external_id.as_deref(), Some("2000012"));
 
     let beta = &summary.series[1];
-    assert_eq!(beta.series_id, 9000002);
+    assert_eq!(beta.series_external_id, "9000002");
     assert_eq!(beta.name, "Beta Test Series");
     assert_eq!(beta.part, 1);
-    assert_eq!(beta.prev_work_id, None);
-    assert_eq!(beta.next_work_id, Some(2000013));
+    assert_eq!(beta.prev_work_external_id, None);
+    assert_eq!(beta.next_work_external_id.as_deref(), Some("2000013"));
 }
 
 #[test]
@@ -199,10 +202,10 @@ fn test_extract_series_edge_cases() {
     let doc = Html::parse_document(html);
     let series = extract_work_page_series(&doc);
     assert_eq!(series.len(), 1);
-    assert_eq!(series[0].series_id, 77);
+    assert_eq!(series[0].series_external_id, "77");
     assert_eq!(series[0].part, 1002);
-    assert_eq!(series[0].prev_work_id, None);
-    assert_eq!(series[0].next_work_id, None);
+    assert_eq!(series[0].prev_work_external_id, None);
+    assert_eq!(series[0].next_work_external_id, None);
 
     // No leading number → part 0, membership still captured.
     let html = r#"<dd class="series"><span class="series">
@@ -763,11 +766,11 @@ mod comment_tests {
             .expect("Failed to read collection works fixture");
         let works = parse_work_listings(&html).expect("collection works parse");
         assert_eq!(works.len(), 2);
-        assert_eq!(works[0].id, 2000001);
+        assert_eq!(works[0].external_id, "2000001");
         assert_eq!(works[0].title, "Nested Link Work");
         assert_eq!(works[0].authors, vec!["MockAuthor".to_string()]);
-        assert_eq!(works[0].word_count, 5000);
-        assert_eq!(works[1].id, 2000002);
+        assert_eq!(works[0].word_count, Some(5000));
+        assert_eq!(works[1].external_id, "2000002");
         assert_eq!(works[1].title, "Plain Link Work");
     }
 
@@ -783,7 +786,8 @@ mod comment_tests {
             .expect("Failed to read collection bookmarks fixture");
         let bookmarks = parse_bookmark_listings(&html).expect("bookmark listing parse");
         assert_eq!(bookmarks.len(), 4);
-        assert_eq!(bookmarks[0].target, crate::models::BookmarkTarget::Work(3000001));
+        assert_eq!(bookmarks[0].kind, crate::models::BookmarkKind::Work);
+        assert_eq!(bookmarks[0].work_summary.as_ref().unwrap().external_id, "3000001");
         assert_eq!(bookmarks[0].ao3_bookmark_id, 9000001);
         assert_eq!(bookmarks[0].bookmarker, "MockReader");
         assert_eq!(bookmarks[0].note, "A synthetic bookmarker note.");
@@ -795,9 +799,10 @@ mod comment_tests {
         assert_eq!(bookmarks[0].date_bookmarked, "10 Aug 2026");
         let work = bookmarks[0].work_summary.as_ref().expect("work blurb");
         assert_eq!(work.title, "Bookmarked Mock Work");
-        assert_eq!(work.word_count, 7777);
+        assert_eq!(work.word_count, Some(7777));
         assert!(!bookmarks[0].mystery);
-        assert_eq!(bookmarks[1].target, crate::models::BookmarkTarget::Work(3000002));
+        assert_eq!(bookmarks[1].kind, crate::models::BookmarkKind::Work);
+        assert_eq!(bookmarks[1].work_summary.as_ref().unwrap().external_id, "3000002");
         assert_eq!(bookmarks[1].bookmarker, "OtherReader");
         assert_eq!(bookmarks[1].note, "");
         assert!(bookmarks[1].tags.is_empty());
@@ -812,16 +817,17 @@ mod comment_tests {
         // stub carries only the placeholder title and reveal notice.
         // The series bookmark: target and series blurb, no work blurb.
         let series = &bookmarks[2];
-        assert_eq!(series.target, crate::models::BookmarkTarget::Series(555555));
+        assert_eq!(series.kind, crate::models::BookmarkKind::Series);
         assert_eq!(series.ao3_bookmark_id, 9000003);
         assert!(series.work_summary.is_none());
         let sr = series.series_summary.as_ref().expect("series blurb");
-        assert_eq!((sr.id, sr.name.as_str()), (555555, "A Mock Series Bookmark"));
+        assert_eq!((sr.external_id.as_str(), sr.name.as_str()), ("555555", "A Mock Series Bookmark"));
+        assert_eq!(sr.url, "https://archiveofourown.org/series/555555");
         assert_eq!(sr.authors, vec!["MockAuthor".to_string()]);
 
         let mystery = &bookmarks[3];
         assert!(mystery.mystery);
-        assert_eq!(mystery.target, crate::models::BookmarkTarget::Work(3000004));
+        assert_eq!(mystery.kind, crate::models::BookmarkKind::Work);
         assert_eq!(mystery.ao3_bookmark_id, 9000004);
         assert_eq!(mystery.bookmarker, "MockReader");
         assert!(mystery.rec);
@@ -829,12 +835,12 @@ mod comment_tests {
         assert_eq!(mystery.mystery_collection_name, "mock_mystery_fest");
         assert_eq!(mystery.mystery_collection_title, "Mock Mystery Fest");
         let stub = mystery.work_summary.as_ref().expect("mystery stub");
-        assert_eq!(stub.id, 3000004);
+        assert_eq!(stub.external_id, "3000004");
         assert_eq!(stub.title, "Mystery Work");
         assert_eq!(stub.summary,
                    "This is part of an ongoing challenge and will be revealed soon!");
         assert!(stub.authors.is_empty());
-        assert_eq!(stub.word_count, 0);
+        assert_eq!(stub.word_count, None);
     }
 
     #[test]

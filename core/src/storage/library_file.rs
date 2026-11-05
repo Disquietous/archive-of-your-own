@@ -16,6 +16,40 @@ use crate::error::AppError;
 /// who wrote it and which version it is without any side file.
 pub const EMBED_PREFIX: &str = "cloud:";
 
+/// Where filed-away libraries live, relative to the state directory (the
+/// database's parent). Shared with api/cloud_sync.rs, which lists and
+/// restores them.
+pub const BACKUPS_DIR: &str = "Backups";
+
+/// The sidecar beside each backup: `<id>.json` next to `<id>.db`.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BackupMeta {
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub source_device: String,
+}
+
+/// Reserve a `Backups/<id>.db` slot (id = unix ms, bumped past any
+/// collision) and write its sidecar. Returns the id and the db path.
+pub fn new_backup_slot(state_dir: &Path, reason: &str, source_device: &str) -> Result<(String, PathBuf), AppError> {
+    let dir = state_dir.join(BACKUPS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| io_err("create backups dir", e))?;
+    let mut id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    while dir.join(format!("{id}.db")).exists() {
+        id += 1;
+    }
+    let meta = BackupMeta { created_at: id, reason: reason.to_string(), source_device: source_device.to_string() };
+    let json = serde_json::to_vec_pretty(&meta).map_err(|e| AppError::StorageError(e.to_string()))?;
+    std::fs::write(dir.join(format!("{id}.json")), json).map_err(|e| io_err("write backup info", e))?;
+    Ok((id.to_string(), dir.join(format!("{id}.db"))))
+}
+
 fn io_err(what: &str, e: std::io::Error) -> AppError {
     AppError::StorageError(format!("{what}: {e}"))
 }
@@ -77,6 +111,23 @@ impl Storage {
 
     pub fn passphrase(&self) -> &str {
         &self.passphrase
+    }
+
+    /// File a complete copy of the library under Backups/ before a schema
+    /// version that rewrites it, so the user can go back to the previous
+    /// app with the previous library. The copy is keyed like the library
+    /// (every backup is). No-op for in-memory stores.
+    pub(super) fn snapshot_before_migration(&self, to_version: u32) -> Result<(), AppError> {
+        let Some(path) = self.path.as_deref().map(PathBuf::from) else { return Ok(()) };
+        let state_dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone());
+        // Fold the WAL into the main file so the copy is one complete file.
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(map_sql)?;
+        let reason = format!("Before the library update to v{to_version}");
+        let (_, dest) = new_backup_slot(&state_dir, &reason, "")?;
+        std::fs::copy(&path, &dest).map_err(|e| io_err("snapshot library before migration", e))?;
+        Ok(())
     }
 
     fn require_path(&self) -> Result<PathBuf, AppError> {
@@ -215,7 +266,9 @@ impl Storage {
         self.tag_cache = Default::default();
         self.works_cache = Default::default();
         self.state_cache = Default::default();
-        self.bookmarks_cache = Default::default();
+        self.app_bookmarks = Default::default();
+        self.ao3_bookmarks = Default::default();
+        self.fields_cache = Default::default();
         self.collections_cache = Default::default();
         self.users_cache = Default::default();
         self.series_cache = Default::default();

@@ -146,12 +146,21 @@ fn passes_list_filter(w: &WorkSummary, q: &UWorkListQuery) -> bool {
     let tags_ok = q.tags.is_empty() || w.tags.iter().any(|t| q.tags.contains(t));
     let fandoms_ok = q.fandoms.is_empty()
         || work_fandoms(w).iter().any(|f| q.fandoms.contains(f));
-    let kudos_ok = matches_count(w.kudos as i64, &q.kudos_expr);
-    let words_ok = matches_count(w.word_count as i64, &q.words_expr);
+    // An absent stat matches only an empty expression — absent is never
+    // zero.
+    let kudos_ok = matches_count_opt(w.kudos.map(i64::from), &q.kudos_expr);
+    let words_ok = matches_count_opt(w.word_count.map(|v| v as i64), &q.words_expr);
     // Chapter counts, not AO3's complete flag: 32/32 passes, 5/32 and 5/?
     // do not.
     let completed_ok = !q.completed_only || w.total_chapters == Some(w.chapter_count);
     text_ok && tags_ok && fandoms_ok && kudos_ok && words_ok && completed_ok
+}
+
+fn matches_count_opt(value: Option<i64>, expression: &str) -> bool {
+    match value {
+        Some(v) => matches_count(v, expression),
+        None => expression.trim().is_empty(),
+    }
 }
 
 /// ">" / "<" prefixed comparisons; a plain number means "at least".
@@ -186,6 +195,9 @@ mod tests {
             complete: bool, rating: Rating, tags: &[&str], fandoms: &[&str]) -> WorkSummary {
         WorkSummary {
             id,
+            source: "ao3".to_string(),
+            external_id: id.to_string(),
+            url: String::new(),
             title: title.to_string(),
             authors: vec!["author_a".to_string()],
             fandoms: fandoms.iter().map(|s| s.to_string()).collect(),
@@ -196,13 +208,13 @@ mod tests {
             characters: vec![],
             tags: tags.iter().map(|s| s.to_string()).collect(),
             summary: "a quiet summary".to_string(),
-            word_count: words,
+            word_count: Some(words),
             chapter_count: 1,
             total_chapters: Some(1),
-            kudos,
-            hits: 0,
-            bookmarks: 0,
-            comments: 0,
+            kudos: Some(kudos),
+            hits: Some(0),
+            bookmarks: Some(0),
+            comments: Some(0),
             date_published: "2024-01-01".to_string(),
             date_updated: updated.to_string(),
             language: "en".to_string(),

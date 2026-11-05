@@ -34,11 +34,15 @@ struct Work: Identifiable, Hashable {
     /// When this work's metadata last arrived from AO3 (DB datetime text,
     /// "" = unknown). Shown to the user; never triggers a refetch.
     var fetchedAt: String = ""
+    /// The work's page at its source ("" for sample data and sources
+    /// without one). The only thing "open on site" and "copy link" use —
+    /// `id` is the library's row id, never a site identifier.
+    var url: String = ""
 
     /// The membership to follow at end-of-work — first series that has a
     /// next work.
     var nextInSeries: SeriesInfo? {
-        series.first { $0.nextWorkID != nil }
+        series.first { $0.nextWorkExternalID != nil }
     }
 
     /// Every fandom on the work — falls back to the single `fandom` for
@@ -59,12 +63,16 @@ struct Work: Identifiable, Hashable {
 }
 
 struct SeriesInfo: Hashable {
+    /// The series' library row id.
     let seriesID: String
     let name: String
     /// 1-based "Part N" position; 0 = unknown.
     let part: Int
-    let prevWorkID: String?
-    let nextWorkID: String?
+    /// The adjacent works' ids at the source (AO3 work numbers) — usually
+    /// not in the library. Resolve with `AppState.rowID(forAO3Work:)`
+    /// before opening.
+    let prevWorkExternalID: String?
+    let nextWorkExternalID: String?
 }
 
 struct ChapterContent: Hashable {

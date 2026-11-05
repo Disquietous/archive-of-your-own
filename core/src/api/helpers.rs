@@ -24,9 +24,54 @@ pub(super) fn seed_posting_credentials(c: &crate::client::AO3Client, s: &crate::
 /// so the heart shows full. The list truncates past ~150 names, so absence
 /// never clears anything.
 pub(super) fn record_kudos_if_listed(s: &crate::storage::Storage, work_id: u64, kudos_names: &[String]) {
-    let Ok(Some((_, username, _))) = s.get_active_account() else { return };
+    let Ok(Some(account)) = s.get_active_account() else { return };
+    let username = account.username;
     if !username.is_empty() && kudos_names.iter().any(|n| n.eq_ignore_ascii_case(&username)) {
         log_db("mark_kudos_given", s.mark_kudos_given(work_id));
+    }
+}
+
+/// The AO3 identity of a work row — what a fetch or a site URL needs.
+/// Errors for an unknown row, or one from another source (there are none
+/// yet; the AO3 client cannot fetch them).
+pub(super) fn ao3_work_number(s: &Storage, work_id: u64) -> Result<u64, AO3Error> {
+    let Some(external) = s.work_ref(work_id) else {
+        return Err(AO3Error::NotFound { message: format!("no work with id {work_id}") });
+    };
+    if external.source != SOURCE_AO3 {
+        return Err(AO3Error::NotFound { message: format!("work {work_id} is not an AO3 work") });
+    }
+    external.external_id.parse().map_err(|_| AO3Error::NotFound {
+        message: format!("work {work_id} has no AO3 number"),
+    })
+}
+
+/// The AO3 identity of a series row (see `ao3_work_number`).
+pub(super) fn ao3_series_number(s: &Storage, series_id: u64) -> Result<u64, AO3Error> {
+    let Some(series) = s.get_series(series_id).map_err(AO3Error::from)? else {
+        return Err(AO3Error::NotFound { message: format!("no series with id {series_id}") });
+    };
+    if series.source != SOURCE_AO3 {
+        return Err(AO3Error::NotFound { message: format!("series {series_id} is not an AO3 series") });
+    }
+    series.external_id.parse().map_err(|_| AO3Error::NotFound {
+        message: format!("series {series_id} has no AO3 number"),
+    })
+}
+
+/// The AO3 identifier a follow target is fetched by: username for
+/// authors, the AO3 number for works and series. None for a fandom (never
+/// fetched) or a target from another source.
+pub(super) fn ao3_follow_id(s: &Storage, target: FollowTarget) -> Option<String> {
+    match target {
+        FollowTarget::Author(_) => Some(s.follow_bridge_id(target)).filter(|u| !u.is_empty()),
+        FollowTarget::Work(id) => s.work_ref(id)
+            .filter(|r| r.source == SOURCE_AO3)
+            .map(|r| r.external_id),
+        FollowTarget::Series(id) => s.get_series(id).ok().flatten()
+            .filter(|r| r.source == SOURCE_AO3)
+            .map(|r| r.external_id),
+        FollowTarget::Fandom(_) => None,
     }
 }
 
@@ -56,13 +101,13 @@ pub(super) fn not_found_limit(s: &Storage) -> u32 {
 
 /// Is this follow's own check stale? A missing follow, NULL, or
 /// unparseable stamp all count as never-checked.
-pub(super) fn follow_check_due(s: &Storage, kind: &str, target_id: &str) -> bool {
-    follow_older_than(s, kind, target_id, CHECK_INTERVAL_SECS)
+pub(super) fn follow_check_due(s: &Storage, target: FollowTarget) -> bool {
+    follow_older_than(s, target, CHECK_INTERVAL_SECS)
 }
 
 /// Was this follow last checked more than `max_age_secs` ago (or never)?
-pub(super) fn follow_older_than(s: &Storage, kind: &str, target_id: &str, max_age_secs: u64) -> bool {
-    match s.get_follow_last_checked(kind, target_id) {
+pub(super) fn follow_older_than(s: &Storage, target: FollowTarget, max_age_secs: u64) -> bool {
+    match s.get_follow_last_checked(target) {
         Ok(Some(at)) if !at.is_empty() => {
             let then = crate::timefmt::datetime_to_epoch(&at).unwrap_or(0);
             crate::timefmt::epoch_now().saturating_sub(then) > max_age_secs
@@ -80,8 +125,9 @@ pub(super) const CENSUS_MAX_PAGES: u32 = 200;
 /// well above the client's global 500ms limiter.
 pub(super) const SUBSCRIPTION_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// In-progress census bookkeeping, persisted in the snapshot row so a
-/// cancelled or crashed check resumes where it left off.
+/// In-progress census bookkeeping, persisted in the follow row so a
+/// cancelled or crashed check resumes where it left off. `seen_ids` are
+/// work row ids (every listed work is saved before it is recorded).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct CensusState {
     pub(super) next_page: u32,
@@ -95,24 +141,28 @@ pub(super) struct CensusState {
     pub(super) seed: bool,
 }
 
-/// The What's-New qualification rules applied to one page of parsed blurbs.
-/// Returns (work ids to flag, how many were never in the cache).
+/// The What's-New qualification rules applied to one page of parsed blurbs,
+/// BEFORE they are saved. Returns (external ids of works to flag, how many
+/// were never in the cache); the caller maps flagged external ids to row
+/// ids once the page is saved (`flagged_row_ids`).
 pub(super) fn diff_and_flag_works(
     s: &Storage,
     parsed_works: &[WorkSummary],
     sub_type: &str,
     sub_name: &str,
     seed: bool,
-) -> (Vec<u64>, usize) {
+) -> (Vec<String>, usize) {
     // Per-work diff against the local cache, BEFORE overwriting it.
     // date_updated is day-granular, so a chapter posted later the
     // same day is invisible to date comparison — chapter and word
     // counts (already in the parsed blurbs) catch it.
-    let mut updated_ids: Vec<u64> = Vec::new();
+    let mut updated_ids: Vec<String> = Vec::new();
     let mut unseen = 0usize;
     for w in parsed_works {
-        match s.get_work(w.id) {
-            Ok(Some(old)) => {
+        let cached = s.resolve_work(&w.source, &w.external_id)
+            .and_then(|id| s.get_work(id).ok().flatten());
+        match cached {
+            Some(old) => {
                 if seed {
                     continue;
                 }
@@ -134,7 +184,7 @@ pub(super) fn diff_and_flag_works(
                 }
                 if words_changed {
                     reasons.push(format!(
-                        "word_count {} → {} (rule: edits that add/remove text without a new chapter still count as an update)",
+                        "word_count {:?} → {:?} (rule: edits that add/remove text without a new chapter still count as an update)",
                         old.word_count, w.word_count));
                 }
                 // A date change alone is NOT sufficient: AO3 has
@@ -146,36 +196,50 @@ pub(super) fn diff_and_flag_works(
                 if chapters_changed || words_changed {
                     log_info!("whats_new",
                         "Flagged work {} '{}' from {} subscription '{}': {}",
-                        w.id, w.title, sub_type, sub_name, reasons.join("; "));
-                    updated_ids.push(w.id);
+                        w.external_id, w.title, sub_type, sub_name, reasons.join("; "));
+                    updated_ids.push(w.external_id.clone());
                 } else if date_changed {
                     log_info!("whats_new",
                         "Suppressed work {} '{}' from {} subscription '{}': {} — no chapter/word change corroborates it (rule: an uncorroborated date change is site-side date drift, not an update; the fresh date is cached so it won't re-trigger)",
-                        w.id, w.title, sub_type, sub_name, reasons.join("; "));
+                        w.external_id, w.title, sub_type, sub_name, reasons.join("; "));
                 }
             }
-            Ok(None) => {
-                // never seen — new work
+            None => {
+                // never seen — new work (a stub row counts as never seen:
+                // nothing was ever fetched for it)
                 unseen += 1;
                 if seed {
                     continue;
                 }
                 log_info!("whats_new",
                     "Flagged work {} '{}' from {} subscription '{}': not in the local works cache (rule: a work we've never cached from any source is new to us)",
-                    w.id, w.title, sub_type, sub_name);
-                updated_ids.push(w.id);
+                    w.external_id, w.title, sub_type, sub_name);
+                updated_ids.push(w.external_id.clone());
             }
-            Err(_) => {}
         }
     }
     (updated_ids, unseen)
 }
 
+/// Save every parsed work and return their row ids, in order.
+pub(super) fn save_works(s: &Storage, works: &[WorkSummary]) -> Vec<u64> {
+    works.iter().filter_map(|w| match s.save_work(w) {
+        Ok(id) => Some(id),
+        Err(e) => { log_error!("db", "save_work failed: {e}"); None }
+    }).collect()
+}
+
+/// The row ids of flagged works, after the page was saved.
+pub(super) fn flagged_row_ids(s: &Storage, flagged: &[String]) -> Vec<u64> {
+    flagged.iter().filter_map(|ext| s.resolve_work(SOURCE_AO3, ext)).collect()
+}
+
 /// Census complete: `seen_ids` is everything AO3 still lists. Reconcile the
 /// gone-from-AO3 flags, adopt the authoritative total, stamp the census
 /// time, and clear the in-progress state.
-pub(super) fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_name: &str, state: &CensusState) {
-    let known = s.get_subscription_member_ids(sub_type, sub_id).unwrap_or_default();
+pub(super) fn finalize_census(s: &Storage, target: FollowTarget, sub_name: &str, state: &CensusState) {
+    let sub_type = target.kind();
+    let known = s.get_subscription_member_ids(target).unwrap_or_default();
     let seen: std::collections::HashSet<u64> = state.seen_ids.iter().copied().collect();
     let gone: Vec<u64> = known.into_iter().filter(|id| !seen.contains(id)).collect();
     if !gone.is_empty() {
@@ -186,9 +250,9 @@ pub(super) fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_nam
     }
     // A reappearance (undeleted, un-anonymized, unrestricted) clears the flag.
     log_db("set_works_gone", s.set_works_gone(&state.seen_ids, false));
-    log_db("set_follow_total_works", s.set_follow_total_works(sub_type, sub_id, seen.len() as u32));
-    log_db("set_follow_last_census", s.set_follow_last_census(sub_type, sub_id, &now_utc()));
-    log_db("set_follow_census_state", s.set_follow_census_state(sub_type, sub_id, None));
+    log_db("set_follow_total_works", s.set_follow_total_works(target, seen.len() as u32));
+    log_db("set_follow_last_census", s.set_follow_last_census(target, &now_utc()));
+    log_db("set_follow_census_state", s.set_follow_census_state(target, None));
     log_info!("whats_new",
         "Census complete for {} subscription '{}' ({}): {} works listed{}",
         sub_type, sub_name, state.reason, seen.len(),
@@ -198,12 +262,12 @@ pub(super) fn finalize_census(s: &Storage, sub_type: &str, sub_id: &str, sub_nam
 /// Append this subscription's census-continuation marker to the check queue
 /// (at the tail, so other subscriptions get their turn first). Returns the
 /// new queue length.
-pub(super) fn requeue_census_marker(s: &Storage, sub_type: &str, sub_id: &str, name: &str) -> u32 {
+pub(super) fn requeue_census_marker(s: &Storage, target: FollowTarget, name: &str) -> u32 {
     let queue_json = s.get_check_queue().ok().flatten().unwrap_or_else(|| "[]".to_string());
     let mut queue: Vec<serde_json::Value> = serde_json::from_str(&queue_json).unwrap_or_default();
     queue.push(serde_json::json!({
-        "kind": sub_type,
-        "target_id": sub_id,
+        "kind": target.kind(),
+        "target_id": s.follow_bridge_id(target),
         "name": name,
         "census": true,
     }));
@@ -251,39 +315,48 @@ pub(super) fn now_utc() -> String {
 
 /// Cache everything a bookmark listing showed, target first so the
 /// bookmarks target-exists trigger passes: the work (or series) blurb,
-/// then the bookmark row attributed to whoever made it. Mystery blurbs
-/// (unrevealed challenge works) carry only a synthetic display stub — no
-/// real data to cache — and are skipped. Returns the bookmark row id, or
-/// None when nothing was cached (mystery, unattributed, or no blurb).
-pub(super) fn cache_bookmark_listing(s: &Storage, l: &BookmarkListing) -> Option<i64> {
+/// then the AO3 bookmark record attributed to whoever made it. Mystery
+/// blurbs (unrevealed challenge works) carry only a synthetic display
+/// stub — no real data to cache — and are skipped. Returns the target's
+/// row id (once saved) and the bookmark record's row id, or None for
+/// each that was not cached (mystery, unattributed, or no blurb).
+pub(super) fn cache_bookmark_listing(s: &Storage, l: &BookmarkListing) -> (Option<BookmarkTarget>, Option<i64>) {
     if l.mystery {
-        return None;
+        return (None, None);
     }
-    match l.target {
-        BookmarkTarget::Work(_) => {
-            let w = l.work_summary.as_ref()?;
-            log_db("save_work", s.save_work(w));
+    let target = match l.kind {
+        BookmarkKind::Work => {
+            let Some(w) = l.work_summary.as_ref() else { return (None, None) };
+            match s.save_work(w) {
+                Ok(id) => BookmarkTarget::Work(id),
+                Err(e) => { log_error!("db", "save_work failed: {e}"); return (None, None); }
+            }
         }
-        BookmarkTarget::Series(_) => {
-            let sr = l.series_summary.as_ref()?;
-            log_db("save_series", s.save_series(sr));
+        BookmarkKind::Series => {
+            let Some(sr) = l.series_summary.as_ref() else { return (None, None) };
+            match s.save_series(sr) {
+                Ok(id) => BookmarkTarget::Series(id),
+                Err(e) => { log_error!("db", "save_series failed: {e}"); return (None, None); }
+            }
         }
-    }
-    match s.cache_fetched_bookmark_for(&l.bookmarker, l.target, l.ao3_bookmark_id,
-                                       &l.note, &l.tags.join(", "), l.rec) {
+    };
+    let id = match s.cache_fetched_bookmark_for(&l.bookmarker, target, l.ao3_bookmark_id,
+                                                &l.note, &l.tags.join(", "), l.rec) {
         Ok(id) => id,
         Err(e) => {
             crate::log_error!("db", "cache_fetched_bookmark failed: {e}");
             None
         }
-    }
+    };
+    (Some(target), id)
 }
 
-/// A remote listing as a search hit (cached or not).
-pub(super) fn hit_from_listing(l: BookmarkListing, id: Option<i64>) -> BookmarkHit {
+/// A remote listing as a search hit (cached or not). `target` is the
+/// saved target's row id; a hit that was not cached has target id 0.
+pub(super) fn hit_from_listing(l: BookmarkListing, target: Option<BookmarkTarget>, id: Option<i64>) -> BookmarkHit {
     BookmarkHit {
         id: id.unwrap_or(0),
-        target: l.target,
+        target: target.unwrap_or_else(|| l.kind.with_id(0)),
         bookmarker: l.bookmarker,
         note: l.note,
         tags: l.tags,
