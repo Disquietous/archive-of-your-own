@@ -286,6 +286,12 @@ impl AO3Client {
         // Every terminal outcome lands in the request log, like page fetches.
         let audit = AuditCtx::new("GET (image)", url, None);
 
+        if crate::mock_site::enabled() {
+            let bytes = crate::mock_site::image(url);
+            audit.record(200, bytes.len() as u64, None);
+            return Ok(bytes);
+        }
+
         self.enforce_rate_limit().await;
         let client = self.http()?;
         let timeout = self.request_timeout();

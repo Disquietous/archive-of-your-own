@@ -72,14 +72,27 @@ final class RustBridge {
     @ObservationIgnored private var torRequirementObserver: NSObjectProtocol?
 
     /// Push the Tor setting into the core, which enforces it: while Tor is
-    /// required and not connected, nothing is sent.
+    /// required and not connected, nothing is sent. The mock-archive
+    /// setting rides along: while it is on the core answers every request
+    /// itself and sends nothing, so Tor is not required for it.
     private func applyTorRequirement() {
         let required = torRequired
         (app ?? torOnlyApp)?.setTorRequired(required: required)
+        let mock = mockArchiveEnabled
+        if app?.mockSiteEnabled() != mock { app?.setMockSite(enabled: mock) }
+        if torOnlyApp?.mockSiteEnabled() != mock { torOnlyApp?.setMockSite(enabled: mock) }
     }
 
+    /// Testing tool (Settings › Diagnostics in debug builds): every request
+    /// is answered by the core's synthetic archive; nothing reaches AO3.
+    var mockArchiveEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "mockArchive")
+    }
+
+    /// Whether a network action needs a Tor connection first. The mock
+    /// archive needs no connection at all, so it never gates anything.
     var torRequired: Bool {
-        UserDefaults.standard.bool(forKey: "useTorByDefault")
+        UserDefaults.standard.bool(forKey: "useTorByDefault") && !mockArchiveEnabled
     }
 
     var networkBlocked: Bool {
@@ -103,7 +116,6 @@ final class RustBridge {
         if !isInitialized && hasDbPassword { return .locked }
         if !isInitialized { return .autoUnlock }
         if showingRecoveryKey { return .firstLaunch }
-        let torRequired = UserDefaults.standard.bool(forKey: "useTorByDefault")
         if torRequired && (!torHasConnectedOnce || !cloudflareReady) { return .connectingTor }
         return .ready
     }

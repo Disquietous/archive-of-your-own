@@ -9,6 +9,17 @@ impl AO3Client {
     /// Log in to AO3 with username and password.
     /// Returns true on success, false on failure.
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AppError> {
+        if crate::mock_site::enabled() {
+            let audit = AuditCtx::new("POST", &format!("{BASE_URL}/users/login"), None);
+            let ok = crate::mock_site::login(username, password);
+            if ok {
+                // The same cookies a real login leaves in the jar, so every
+                // "am I signed in" check (`has_login_cookie`) agrees.
+                self.set_session_cookies("remember_user_token=mock-remember-token; _otwarchive_session=mock-session");
+            }
+            audit.record(if ok { 302 } else { 200 }, 0, if ok { None } else { Some("rejected (mock)".to_string()) });
+            return Ok(ok);
+        }
         // Step 1: GET login page to get authenticity_token and session cookie
         let login_html = self.fetch(&format!("{BASE_URL}/users/login")).await?;
 
@@ -166,6 +177,19 @@ impl AO3Client {
 
     /// POST pre-assembled form params (token already included).
     pub(super) async fn post_form_raw(&self, url: &str, form_params: Vec<(String, String)>) -> Result<String, AppError> {
+        if crate::mock_site::enabled() {
+            let audit = AuditCtx::new("POST", url, Some(redact_payload(
+                &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
+            let reply = crate::mock_site::respond_post(url, &form_params);
+            if reply.status >= 400 {
+                let detail = format!("HTTP {} for {url} (mock)", reply.status);
+                audit.record(reply.status, reply.body.len() as u64, Some(detail.clone()));
+                return Err(AppError::Http { kind: FailureKind::from_status(reply.status, None), detail });
+            }
+            audit.record(reply.status, reply.body.len() as u64, None);
+            return Ok(reply.body);
+        }
+
         self.enforce_rate_limit().await;
 
         let client = self.http()?;
@@ -249,6 +273,13 @@ impl AO3Client {
     }
 
     async fn post_kudos_raw(&self, work_id: u64, token: &str, work_url: &str) -> Result<(u16, String), AppError> {
+        if crate::mock_site::enabled() {
+            let audit = AuditCtx::new("POST", &format!("{BASE_URL}/kudos"), None);
+            let (status, body) = crate::mock_site::kudos(work_id);
+            let accepted = status < 300 || body.contains("already left kudos");
+            audit.record(status, body.len() as u64, if accepted { None } else { Some(format!("HTTP {status}")) });
+            return Ok((status, body));
+        }
         let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"), self.request_timeout().as_secs());
         self.enforce_rate_limit().await;
 

@@ -126,7 +126,7 @@ final class MainWindowController: NSWindowController {
 
     private func autoConnectTorIfEnabled() {
         guard !torAutoStarted,
-              UserDefaults.standard.bool(forKey: "useTorByDefault"),
+              appState.bridge.torRequired,
               !appState.torStatus.isConnected else { return }
         torAutoStarted = true
         // Block the whole app behind the connect overlay until the circuit

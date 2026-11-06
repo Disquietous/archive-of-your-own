@@ -39,6 +39,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 32) {
                     requestsGroup
                     #if DEBUG
+                    mockArchiveGroup
                     sampleDataGroup
                     #endif
                 }
@@ -62,6 +63,23 @@ struct SettingsView: View {
     }
 
     #if DEBUG
+    var mockArchiveGroup: some View {
+        settingsGroup(title: "Mock Archive") {
+            ToggleRowView(isOn: Binding(
+                get: { theme.mockArchive },
+                set: { theme.mockArchive = $0 }
+            )) {
+                settingsLabel(icon: "shippingbox", title: "Answer requests from the mock archive")
+            }
+            settingsCaption("""
+                A synthetic archive built into the core stands in for AO3: browse, search, works, comments, \
+                profiles, series, collections, login (any name; password "wrong" fails), kudos, bookmarks and \
+                subscriptions all work and round-trip. Nothing is sent to AO3 while this is on, and Tor is not \
+                needed. Fetched works enter the library like real ones, so use a test library.
+                """)
+        }
+    }
+
     var sampleDataGroup: some View {
         settingsGroup(title: "Sample Data") {
             Button {

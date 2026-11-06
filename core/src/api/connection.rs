@@ -277,6 +277,21 @@ impl AO3App {
         crate::client::set_tor_required(required);
     }
 
+    /// Answer every request from the built-in synthetic archive instead of
+    /// AO3 — a testing tool for when the archive is unreachable. While on,
+    /// nothing is sent to the network at all (a request the mock has no
+    /// page for fails as `NetworkDisabled` rather than going out). Fetched
+    /// mock works enter the library like real ones, so use a test library.
+    /// Process-wide, like the Tor requirement; off at launch. Switching off
+    /// forgets the session's mock login, kudos, subscriptions and posts.
+    pub fn set_mock_site(&self, enabled: bool) {
+        crate::mock_site::set_enabled(enabled);
+    }
+
+    pub fn mock_site_enabled(&self) -> bool {
+        crate::mock_site::enabled()
+    }
+
     pub async fn new_circuit(&self) -> Result<(), AO3Error> {
         #[cfg(feature = "tor")]
         {

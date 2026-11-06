@@ -50,6 +50,12 @@ final class AppTheme {
     var useTorByDefault: Bool {
         didSet { UserDefaults.standard.set(useTorByDefault, forKey: "useTorByDefault") }
     }
+    /// Testing tool: answer every request from the core's built-in
+    /// synthetic archive instead of AO3. The bridge mirrors it into the
+    /// core, which then sends nothing at all.
+    var mockArchive: Bool {
+        didSet { UserDefaults.standard.set(mockArchive, forKey: "mockArchive") }
+    }
     /// Reader column width in points (desktop). Design range 560–860, default 680.
     var measure: Int {
         didSet { UserDefaults.standard.set(measure, forKey: "measure") }
@@ -133,6 +139,7 @@ final class AppTheme {
         density = Density(rawValue: d.string(forKey: "density") ?? "") ?? .regular
         requestTimeout = d.object(forKey: "requestTimeout") as? Int ?? 30
         useTorByDefault = d.bool(forKey: "useTorByDefault")
+        mockArchive = d.bool(forKey: "mockArchive")
         measure = d.object(forKey: "measure") as? Int ?? 680
         uiFontScale = d.object(forKey: "uiFontScale") as? Double ?? 1.0
         readHyphenation = d.object(forKey: "readHyphenation") as? Bool ?? false

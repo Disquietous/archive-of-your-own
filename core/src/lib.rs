@@ -157,6 +157,7 @@ macro_rules! log_error {
 }
 
 pub mod parser;
+pub mod mock_site;
 pub mod client;
 pub mod events;
 pub mod api;

@@ -148,6 +148,13 @@ impl AO3Client {
     /// choke point every request passes, and so where the Tor requirement
     /// is enforced.
     fn http(&self) -> Result<&reqwest::Client, AppError> {
+        // The mock archive answers every request before it gets here; a
+        // request that still reaches the transport is one the mock does
+        // not cover, and it must not go out for real.
+        if crate::mock_site::enabled() {
+            log_info!("network", "Refused request: mock archive is enabled and does not serve this path");
+            return Err(AppError::NetworkDisabled);
+        }
         if tor_required() && !self.is_tor() {
             log_info!("network", "Refused request: Tor is required and not connected");
             crate::events::emit(crate::events::CoreEvent::NetworkRefused { id: crate::events::current_op() });
@@ -345,6 +352,22 @@ impl AO3Client {
                 }
             };
         }
+        if crate::mock_site::enabled() {
+            progress!(crate::events::OpPhase::Connecting, 0, None);
+            let reply = crate::mock_site::respond_get(url, ajax);
+            let len = reply.body.len() as u64;
+            if reply.status >= 400 {
+                progress!(crate::events::OpPhase::Failed, 0, None);
+                let detail = format!("HTTP {} for {url} (mock)", reply.status);
+                audit.record(reply.status, len, Some(detail.clone()));
+                return Err(AppError::Http { kind: FailureKind::from_status(reply.status, None), detail });
+            }
+            progress!(crate::events::OpPhase::Complete, len, Some(len));
+            audit.record(reply.status, len, None);
+            self.harvest_credentials(&reply.body);
+            return Ok(crate::parser::strip_admin_banner(reply.body));
+        }
+
         loop {
             self.enforce_rate_limit().await;
             progress!(crate::events::OpPhase::Connecting, 0, None);
@@ -528,6 +551,9 @@ impl AO3Client {
     }
 
     pub async fn fetch_health_check(&self) -> Result<u16, AppError> {
+        if crate::mock_site::enabled() {
+            return Ok(200);
+        }
         self.enforce_rate_limit().await;
         let client = self.http()?;
         let response = client.head(BASE_URL)

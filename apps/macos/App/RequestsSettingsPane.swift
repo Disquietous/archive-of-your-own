@@ -77,8 +77,25 @@ struct RequestsSettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // A testing tool: debug builds only.
+            // Testing tools: debug builds only.
             #if DEBUG
+            SettingsGroup(theme: theme, label: "Mock Archive") {
+                SettingsCard(theme: theme) {
+                    SettingsToggleRow(theme: theme, label: "Answer requests from the mock archive",
+                                      sublabel: "Nothing is sent to AO3 while this is on",
+                                      isOn: $theme.mockArchive)
+                }
+                Text("""
+                    A synthetic archive built into the core stands in for AO3: browse, search, works, \
+                    comments, profiles, series, collections, login (any name; password "wrong" fails), kudos, \
+                    bookmarks and subscriptions all work and round-trip. Fetched works enter the library like \
+                    real ones, so use a test library. Tor is not needed while this is on.
+                    """)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             SettingsGroup(theme: theme, label: "Sample Data") {
                 SettingsCard(theme: theme) {
                     SettingsInfoRow(theme: theme, label: "Sample works",
