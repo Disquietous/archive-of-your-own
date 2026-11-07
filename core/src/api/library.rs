@@ -135,6 +135,13 @@ impl AO3App {
         Ok(work.map(UWorkSummary::from))
     }
 
+    /// Chapter titles only — for a chapter picker, which must not decode
+    /// every chapter's text to label its rows.
+    pub fn get_cached_chapter_titles(&self, work_id: u64) -> Result<Vec<String>, AO3Error> {
+        let storage = self.storage.blocking_lock();
+        storage.get_chapter_titles(work_id).map_err(AO3Error::from)
+    }
+
     pub fn get_cached_chapters(&self, work_id: u64) -> Result<Vec<UChapter>, AO3Error> {
         let storage = self.storage.blocking_lock();
         let chapters = storage.get_chapters(work_id).map_err(AO3Error::from)?;
@@ -242,6 +249,10 @@ impl AO3App {
     /// the local one). Targets are cached first — the blurb's work or
     /// series — so every bookmark row has its referent.
     pub async fn pull_bookmarks(&self, username: String) -> Result<Vec<UBookmark>, AO3Error> {
+        // AO3 lists 20 bookmarks a page; this is 10,000 bookmarks. A
+        // listing that still claims a next page past it is a parser or
+        // site fault, not a bigger collection, and must not crawl forever.
+        const MAX_PAGES: u32 = 500;
         self.run_on_runtime(move |client, storage| async move {
             let mut all_bookmarks = Vec::new();
             let mut page = 1u32;
@@ -295,6 +306,10 @@ impl AO3App {
                 drop(s);
 
                 if !has_more || listings.is_empty() {
+                    break;
+                }
+                if page >= MAX_PAGES {
+                    log_error!("bookmarks", "bookmark pull stopped at the {MAX_PAGES}-page cap with more pages claimed");
                     break;
                 }
                 page += 1;
@@ -524,4 +539,17 @@ impl AO3App {
         }).await
     }
 
+}
+
+/// Whether `passphrase` opens the library at `db_path` — the key check on
+/// a throwaway connection, without building an `AO3App` (runtime, caches,
+/// migrations) to find out. Ok(false) is a rejected key; Err is anything
+/// else wrong with the file.
+#[uniffi::export]
+pub fn library_passphrase_valid(db_path: String, passphrase: String) -> Result<bool, AO3Error> {
+    match Storage::check_passphrase(&db_path, &passphrase) {
+        Ok(()) => Ok(true),
+        Err(AppError::WrongPassphrase) => Ok(false),
+        Err(e) => Err(AO3Error::from(e)),
+    }
 }

@@ -15,8 +15,18 @@ use super::listings::verify_empty_listing;
 /// group") inside `ul.collection.picture.index.group`. Fails closed like
 /// parse_work_listings: zero blurbs are only trusted when the page still
 /// carries the index container or an empty-state notice.
-pub fn parse_collections_page(html: &str) -> Result<Vec<CollectionSummary>, AppError> {
+/// (collections, has_next_page, total_pages) from one parse.
+pub fn parse_collections_listing_page(html: &str) -> Result<(Vec<CollectionSummary>, bool, u32), AppError> {
     let doc = Html::parse_document(html);
+    let collections = collections_page(&doc)?;
+    Ok((collections, super::has_next(&doc), super::page_count(&doc)))
+}
+
+pub fn parse_collections_page(html: &str) -> Result<Vec<CollectionSummary>, AppError> {
+    collections_page(&Html::parse_document(html))
+}
+
+fn collections_page(doc: &Html) -> Result<Vec<CollectionSummary>, AppError> {
     let blurb_sel = sel("li.collection.blurb");
     let mut collections = Vec::new();
 

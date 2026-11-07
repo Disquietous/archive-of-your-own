@@ -260,11 +260,39 @@ impl AO3App {
         // Store abort handle for cancellation
         let abort = handle.abort_handle();
         let task_id = self.next_task_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        { self.active_tasks.lock().unwrap().insert(task_id, abort); }
+        { self.active_tasks.lock().unwrap().insert(task_id, abort.clone()); }
         let op_entry = op_id.map(|id| self.ops.register(id, task_id, handle.abort_handle()));
+
+        // If the awaiting side goes away first (Swift cancelled the async
+        // call, so this future is dropped mid-await), the task must go
+        // with it: a JoinHandle drop alone detaches the task, which then
+        // runs to completion unseen with its id still registered.
+        struct AbortOnDrop<'a> {
+            app: &'a AO3App,
+            task_id: u64,
+            abort: tokio::task::AbortHandle,
+            op_entry: Option<(u64, u64)>,
+            finished: bool,
+        }
+        impl Drop for AbortOnDrop<'_> {
+            fn drop(&mut self) {
+                if self.finished { return; }
+                self.abort.abort();
+                self.app.active_tasks.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.task_id);
+                if let Some((id, task)) = self.op_entry {
+                    self.app.ops.finished(id, task);
+                    crate::events::emit(crate::events::CoreEvent::OperationFinished {
+                        id, outcome: crate::events::OpOutcome::Cancelled,
+                    });
+                    crate::events::untrack_operation(id);
+                }
+            }
+        }
+        let mut guard = AbortOnDrop { app: self, task_id, abort, op_entry, finished: false };
 
         // Await the JoinHandle — this works from any async context
         let result = handle.await;
+        guard.finished = true;
 
         { self.active_tasks.lock().unwrap().remove(&task_id); }
         if let Some((id, task)) = op_entry { self.ops.finished(id, task); }

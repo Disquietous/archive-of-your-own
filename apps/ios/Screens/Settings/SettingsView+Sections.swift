@@ -151,11 +151,10 @@ extension SettingsView {
 
     var privacyGroup: some View {
         settingsGroup(title: "Privacy") {
-            ToggleRowView(isOn: Binding(
-                get: { theme.useTorByDefault },
-                set: { theme.useTorByDefault = $0 }
-            )) {
-                settingsLabel(icon: "shield.checkmark", title: "Connect via Tor on launch")
+            navRow(icon: "shield.checkmark", title: "Privacy mode",
+                   detail: theme.privacyMode.title,
+                   detailTint: theme.privacyMode == .open ? Color(hex: "CE514D") : theme.sage) {
+                nav.settingsPath.append(AppDestination.privacyMode)
             }
 
             divider

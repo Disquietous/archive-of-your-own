@@ -6,7 +6,7 @@ struct DatabaseUnlockScreen: View {
 
     @State private var password = ""
     @State private var error: String?
-    @State private var useTor: Bool = UserDefaults.standard.bool(forKey: "useTorByDefault")
+    @State private var useTor: Bool = PrivacyModeSetting.current == .tor
     @State private var showRecovery = false
     @State private var recoveryKeyInput = ""
     @State private var showWipeConfirm = false
@@ -136,7 +136,7 @@ struct DatabaseUnlockScreen: View {
                     state.bridge.hasDbPassword = false
                     RustBridge.persistDbPasswordFlag(false)
                     RustBridge.promptForPassword = true
-                    UserDefaults.standard.set(false, forKey: "useTorByDefault")
+                    PrivacyModeSetting.current = .open
                     RecoveryKey.resetFailureCount()
                 }
                 Button("Cancel", role: .cancel) {}
@@ -158,7 +158,7 @@ struct DatabaseUnlockScreen: View {
             .padding(.horizontal, 32)
             .padding(.top, 16)
             .onChange(of: useTor) { _, newValue in
-                UserDefaults.standard.set(newValue, forKey: "useTorByDefault")
+                PrivacyModeSetting.current = newValue ? .tor : .open
             }
 
             Spacer()

@@ -33,7 +33,17 @@ pub fn enabled() -> bool {
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
     *lock() = if on { Some(MockState::default()) } else { None };
+    if !on { data::set_snapshot(0); }
     crate::log_info!("mock", "Mock archive {}", if on { "enabled — every request is answered locally" } else { "disabled" });
+}
+
+/// Forget the session's actions and return to the baseline snapshot
+/// without touching the enabled flag (tests drive the router directly;
+/// enabling the mock process-wide would hijack other tests' requests).
+#[cfg(test)]
+fn reset() {
+    *lock() = Some(MockState::default());
+    data::set_snapshot(0);
 }
 
 fn lock() -> std::sync::MutexGuard<'static, Option<MockState>> {
@@ -113,11 +123,34 @@ impl Request {
 // GET
 // ---------------------------------------------------------------------------
 
+/// The mock login cookie carries the username, so a restored jar (the
+/// app persists session cookies across launches) signs the viewer back
+/// in here as it does on the archive.
+pub const LOGIN_COOKIE_PREFIX: &str = "mock-user-";
+
+fn viewer_from_cookies(cookies: &str) -> Option<String> {
+    cookies.split(';').map(str::trim)
+        .find_map(|c| c.strip_prefix("remember_user_token="))
+        .and_then(|v| v.strip_prefix(LOGIN_COOKIE_PREFIX))
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+}
+
+fn adopt_viewer(state: &mut MockState, cookies: &str) {
+    if state.viewer.is_none() {
+        state.viewer = viewer_from_cookies(cookies);
+    }
+}
+
 /// Answer a page fetch. `ajax` requests get fragments where AO3 serves
-/// them (comment pages, autocomplete).
-pub fn respond_get(url: &str, ajax: bool) -> MockResponse {
+/// them (comment pages, autocomplete). `cookies` is the client's jar
+/// (Cookie header form).
+pub fn respond_get(url: &str, ajax: bool, cookies: &str) -> MockResponse {
     let req = Request::parse(url);
-    with_state(|state| route_get(&req, ajax, state).unwrap_or_else(|| not_found(url)))
+    with_state(|state| {
+        adopt_viewer(state, cookies);
+        route_get(&req, ajax, state).unwrap_or_else(|| not_found(url))
+    })
 }
 
 fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockResponse> {
@@ -130,7 +163,7 @@ fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockRe
 
         // -- Works --
         ["works"] => {
-            let all: Vec<usize> = sorted_by_updated((0..WORKS.len()).collect());
+            let all: Vec<usize> = sorted_by_updated(live());
             let heading = render::range_heading(all.len(), page_no, "");
             render::page("Works", "works-index region", &render::listing(&heading, &all, page_no, "/works", ""), state)
         }
@@ -204,7 +237,7 @@ fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockRe
         ["collections", name, "bookmarks"] => {
             let ci = collection_index(name)?;
             let items = canned_bookmarks().into_iter()
-                .filter(|b| b.work_idx.is_some_and(|w| COLLECTIONS[ci].works.contains(&w))).collect::<Vec<_>>();
+                .filter(|b| b.work_idx.is_some_and(|w| COLLECTIONS[ci].works.contains(&w) && visible(w))).collect::<Vec<_>>();
             let heading = format!("<h2 class=\"heading\">{} Bookmarked Items in {}</h2>", items.len(), render::esc(COLLECTIONS[ci].title));
             render::page("Bookmarks", "bookmarks-index region", &render::bookmarks_listing(&heading, &items, page_no, &format!("/collections/{name}/bookmarks")), state)
         }
@@ -233,13 +266,17 @@ fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockRe
         }
 
         // -- Users --
-        ["users", user, "profile"] | ["users", user] => render::user_profile(user, state),
+        ["users", user, "profile"] | ["users", user] => {
+            if !user_exists(user, state) { return None; }
+            render::user_profile(user, state)
+        }
         ["users", user, "works"] | ["users", user, "pseuds", _, "works"] => {
+            if !user_exists(user, state) { return None; }
             let (hits, label) = match author_index(user) {
                 Some(ai) => {
                     let pseud = if let ["users", _, "pseuds", p, "works"] = segs.as_slice() { Some(*p) } else { None };
                     let by_pseud = pseud.filter(|p| !p.eq_ignore_ascii_case(user));
-                    let mut hits: Vec<usize> = (0..WORKS.len()).filter(|&i| WORKS[i].author == ai).collect();
+                    let mut hits: Vec<usize> = live().into_iter().filter(|&i| WORKS[i].author == ai).collect();
                     if let Some(p) = by_pseud { if AUTHORS[ai].pseud != Some(p) { hits.clear(); } }
                     (sorted_by_updated(hits), AUTHORS[ai].user.to_string())
                 }
@@ -249,11 +286,13 @@ fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockRe
             render::page(&format!("{label} - Works"), "works-index region", &render::listing(&heading, &hits, page_no, &format!("/users/{user}/works"), ""), state)
         }
         ["users", user, "bookmarks"] => {
+            if !user_exists(user, state) { return None; }
             let items = user_bookmarks(user, state);
             let heading = format!("<h2 class=\"heading\">{} Bookmarks by {}</h2>", items.len(), render::esc(user));
             render::page("Bookmarks", "bookmarks-index region", &render::bookmarks_listing(&heading, &items, page_no, &format!("/users/{user}/bookmarks")), state)
         }
         ["users", user, "collections"] => {
+            if !user_exists(user, state) { return None; }
             let owned: Vec<usize> = (0..COLLECTIONS.len())
                 .filter(|&c| COLLECTIONS[c].owners.iter().any(|&o| AUTHORS[o].user.eq_ignore_ascii_case(user))).collect();
             render::collections_index(&owned, &format!("{}'s Collections", render::esc(user)), state)
@@ -266,11 +305,11 @@ fn route_get(req: &Request, _ajax: bool, state: &mut MockState) -> Option<MockRe
         ["autocomplete", kind] => {
             let term = req.q("term").unwrap_or("").to_lowercase();
             let names: Vec<&str> = match *kind {
-                "fandom" => WORKS.iter().flat_map(|w| w.fandoms.iter().copied()).collect(),
-                "character" => WORKS.iter().flat_map(|w| w.characters.iter().copied()).collect(),
-                "relationship" => WORKS.iter().flat_map(|w| w.relationships.iter().copied()).collect(),
+                "fandom" => live().into_iter().flat_map(|i| WORKS[i].fandoms.iter().copied()).collect(),
+                "character" => live().into_iter().flat_map(|i| WORKS[i].characters.iter().copied()).collect(),
+                "relationship" => live().into_iter().flat_map(|i| WORKS[i].relationships.iter().copied()).collect(),
                 "pseud" => AUTHORS.iter().map(|a| a.user).collect(),
-                _ => WORKS.iter().flat_map(|w| w.tags.iter().copied()).collect(),
+                _ => live().into_iter().flat_map(|i| WORKS[i].tags.iter().copied()).collect(),
             };
             let mut seen: Vec<&str> = Vec::new();
             for n in names { if n.to_lowercase().contains(&term) && !seen.contains(&n) { seen.push(n); } }
@@ -292,18 +331,26 @@ fn comments_page(threads: &[RenderComment], page_no: u32, base: &str) -> String 
     render::comments_fragment(slice, page_no, total_pages, base)
 }
 
+/// The archive knows its authors, its readers, and whoever is signed in;
+/// any other name is a 404, as on AO3 (so a typo cannot be followed).
+fn user_exists(user: &str, state: &MockState) -> bool {
+    author_index(user).is_some()
+        || READERS.iter().any(|r| r.eq_ignore_ascii_case(user))
+        || state.viewer.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(user))
+}
+
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 fn sorted_by_updated(mut idx: Vec<usize>) -> Vec<usize> {
-    idx.sort_by(|&a, &b| WORKS[b].updated.cmp(WORKS[a].updated).then(WORKS[b].id.cmp(&WORKS[a].id)));
+    idx.sort_by(|&a, &b| work(b).updated.cmp(work(a).updated).then(WORKS[b].id.cmp(&WORKS[a].id)));
     idx
 }
 
 fn works_with_tag(tag: &str) -> Vec<usize> {
     let t = tag.to_lowercase();
-    (0..WORKS.len()).filter(|&i| {
+    live().into_iter().filter(|&i| {
         let w = &WORKS[i];
         w.fandoms.iter().chain(w.characters).chain(w.relationships).chain(w.tags)
             .chain(std::iter::once(&w.rating)).chain(w.warnings).chain(w.categories)
@@ -314,7 +361,7 @@ fn works_with_tag(tag: &str) -> Vec<usize> {
 /// The search form's fields, applied as substring filters.
 fn search(req: &Request) -> Vec<usize> {
     let field = |k: &str| req.q(&format!("work_search[{k}]")).map(str::to_lowercase);
-    let mut hits: Vec<usize> = (0..WORKS.len()).collect();
+    let mut hits: Vec<usize> = live();
     if let Some(q) = field("query") {
         hits.retain(|&i| {
             let w = &WORKS[i];
@@ -339,10 +386,10 @@ fn search(req: &Request) -> Vec<usize> {
         }
     }
     if field("complete").as_deref() == Some("t") {
-        hits.retain(|&i| WORKS[i].total.is_some_and(|t| WORKS[i].chapters >= t));
+        hits.retain(|&i| work(i).total.is_some_and(|t| work(i).chapters >= t));
     }
     match field("sort_column").as_deref() {
-        Some("kudos_count") => hits.sort_by_key(|&i| std::cmp::Reverse(WORKS[i].kudos)),
+        Some("kudos_count") => hits.sort_by_key(|&i| std::cmp::Reverse(work(i).kudos)),
         Some("hits") => hits.sort_by_key(|&i| std::cmp::Reverse(WORKS[i].hits)),
         Some("word_count") => hits.sort_by_key(|&i| std::cmp::Reverse(word_count(i))),
         Some("created_at") => hits.sort_by(|&a, &b| WORKS[b].published.cmp(WORKS[a].published)),
@@ -356,8 +403,9 @@ fn canned_bookmarks() -> Vec<RenderBookmark> {
     let mut out = Vec::new();
     let mut id = 94_000_000;
     for (ri, reader) in READERS.iter().enumerate() {
-        for (k, &w) in [ri % WORKS.len(), (ri * 3 + 1) % WORKS.len()].iter().enumerate() {
+        for (k, &w) in [ri % 12, (ri * 3 + 1) % 12].iter().enumerate() {
             id += 1;
+            if !visible(w) { continue; }
             out.push(RenderBookmark {
                 id, work_idx: Some(w), series_idx: None, bookmarker: reader.to_string(),
                 date: format!("2026-0{}-{:02}", 1 + (ri % 8), 1 + (k * 9 + ri) % 27),
@@ -410,9 +458,10 @@ fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
 
 /// Answer a form POST. Mirrors what AO3 redirects to after each action,
 /// so the client's success checks read the same pages they would live.
-pub fn respond_post(url: &str, params: &[(String, String)]) -> MockResponse {
+pub fn respond_post(url: &str, params: &[(String, String)], cookies: &str) -> MockResponse {
     let req = Request::parse(url);
     with_state(|state| {
+        adopt_viewer(state, cookies);
         if state.viewer.is_none() {
             return MockResponse { status: 200, body: render::login_page(state) };
         }
@@ -492,17 +541,20 @@ fn subscription_result_page(kind: &str, target: &str, state: &MockState) -> Stri
 // ---------------------------------------------------------------------------
 
 /// Any username signs in; the password "wrong" is refused so the failure
-/// path can be exercised too.
-pub fn login(username: &str, password: &str) -> bool {
-    if username.trim().is_empty() || password == "wrong" { return false; }
-    with_state(|s| s.viewer = Some(username.trim().to_string()));
-    true
+/// path can be exercised too. Returns the cookie string to put in the
+/// jar — the same names a real login sets, so `has_login_cookie` agrees.
+pub fn login(username: &str, password: &str) -> Option<String> {
+    let username = username.trim();
+    if username.is_empty() || password == "wrong" { return None; }
+    with_state(|s| s.viewer = Some(username.to_string()));
+    Some(format!("remember_user_token={LOGIN_COOKIE_PREFIX}{username}; _otwarchive_session=mock-session"))
 }
 
 /// (status, body) as AO3's kudos endpoint answers: 201 the first time,
 /// 422 "already left kudos" after.
-pub fn kudos(work_id: u64) -> (u16, String) {
+pub fn kudos(work_id: u64, cookies: &str) -> (u16, String) {
     with_state(|s| {
+        adopt_viewer(s, cookies);
         if s.viewer.is_none() {
             return (401, "{\"errors\":{\"user\":[\"must be signed in\"]}}".to_string());
         }
@@ -528,7 +580,7 @@ mod tests {
     use crate::parser;
 
     fn get(url: &str) -> String {
-        let r = respond_get(&format!("{}{url}", crate::client::BASE_URL), false);
+        let r = respond_get(&format!("{}{url}", crate::client::BASE_URL), false, "");
         assert_eq!(r.status, 200, "{url}");
         r.body
     }
@@ -539,14 +591,73 @@ mod tests {
 
     fn setup() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_enabled(true);
+        reset();
         guard
+    }
+
+    #[test]
+    fn every_author_lists_their_works() {
+        let _g = setup();
+        for (ai, a) in AUTHORS.iter().enumerate() {
+            let expect = live().into_iter().filter(|&i| WORKS[i].author == ai).count();
+            let html = get(&format!("/users/{}/works?page=1", a.user));
+            let works = parser::parse_work_listings(&html).unwrap();
+            assert_eq!(works.len(), expect, "{} listing:\n{}", a.user, html);
+            assert_eq!(parser::parse_listing_works_total(&html), Some(expect as u32), "{}", a.user);
+            assert!(parser::parse_user_profile(&get(&format!("/users/{}/profile", a.user))).is_ok(), "{}", a.user);
+        }
+    }
+
+    #[test]
+    fn snapshots_change_what_update_detection_sees() {
+        let _g = setup();
+        let baseline = parser::parse_work_page(&get("/works/9100002?view_full_work=true"), 9100002).unwrap().0;
+        assert_eq!(baseline.chapter_count, 7);
+        let drift_before = parser::parse_work_page(&get("/works/9100004?view_full_work=true"), 9100004).unwrap().0;
+        assert_eq!(parser::parse_work_listings(&get("/users/quietcartographer/works?page=1")).unwrap().len(), 3);
+        assert_eq!(parser::parse_work_listings(&get("/series/9200001?page=1")).unwrap().len(), 3);
+        assert_eq!(respond_get("https://archiveofourown.org/works/9100013", false, "").status, 404);
+
+        data::set_snapshot(1);
+        let (updated, chapters) = parser::parse_work_page(&get("/works/9100002?view_full_work=true"), 9100002).unwrap();
+        assert_eq!(updated.chapter_count, 8);
+        assert_eq!(chapters.len(), 8);
+        assert!(updated.word_count > baseline.word_count);
+        assert_ne!(updated.date_updated, baseline.date_updated);
+        // Date drift only: the date moves, nothing countable does.
+        let drift_after = parser::parse_work_page(&get("/works/9100004?view_full_work=true"), 9100004).unwrap().0;
+        assert_ne!(drift_after.date_updated, drift_before.date_updated);
+        assert_eq!(drift_after.chapter_count, drift_before.chapter_count);
+        assert_eq!(drift_after.word_count, drift_before.word_count);
+        // A new work by a followed author; a removed one is gone everywhere.
+        let by_author = parser::parse_work_listings(&get("/users/quietcartographer/works?page=1")).unwrap();
+        assert_eq!(by_author.len(), 4);
+        assert!(by_author.iter().any(|w| w.external_id == "9100013"));
+        assert_eq!(respond_get("https://archiveofourown.org/works/9100012?view_full_work=true", false, "").status, 404);
+        let series = parser::parse_work_listings(&get("/series/9200001?page=1")).unwrap();
+        assert_eq!(series.len(), 2);
+        assert!(series.iter().all(|w| w.external_id != "9100012"));
+        assert!(parser::parse_work_listings(&get("/works?page=3")).unwrap().iter().all(|w| w.external_id != "9100012"));
+
+        data::set_snapshot(2);
+        let done = parser::parse_work_page(&get("/works/9100002?view_full_work=true"), 9100002).unwrap().0;
+        assert_eq!((done.chapter_count, done.total_chapters, done.complete), (9, Some(9), true));
+        assert_eq!(respond_get("https://archiveofourown.org/works/9100012?view_full_work=true", false, "").status, 200);
+        let series = parser::parse_work_listings(&get("/series/9200001?page=1")).unwrap();
+        assert_eq!(series.len(), 4);
+        let tide = parser::parse_work_page(&get("/works/9100001?view_full_work=true"), 9100001).unwrap().0;
+        assert_eq!(tide.kudos, Some(1901));
+
+        data::set_snapshot(99);
+        assert_eq!(data::snapshot(), data::snapshot_count() - 1);
+        data::set_snapshot(0);
     }
 
     #[test]
     fn every_work_parses_with_all_chapters() {
         let _g = setup();
-        for w in WORKS {
+        for w in live().into_iter().map(work) {
+            let w = &w;
             let html = get(&format!("/works/{}?view_full_work=true&view_adult=true", w.id));
             let (summary, chapters) = parser::parse_work_page(&html, w.id).unwrap();
             assert_eq!(summary.title, w.title);
@@ -571,13 +682,13 @@ mod tests {
         assert!(parser::has_next_page(&html));
         assert_eq!(parser::total_pages(&html), 3);
         let last = get("/works?page=3");
-        assert_eq!(parser::parse_work_listings(&last).unwrap().len(), WORKS.len() - 2 * render::PAGE_SIZE);
+        assert_eq!(parser::parse_work_listings(&last).unwrap().len(), live().len() - 2 * render::PAGE_SIZE);
         assert!(!parser::has_next_page(&last));
 
         let search = get("/works/search?page=1&commit=Search&work_search%5Bquery%5D=tide");
         let hits = parser::parse_work_listings(&search).unwrap();
         assert!(hits.iter().any(|h| h.title == "The Clockwork Tide"));
-        assert!(hits.len() < WORKS.len());
+        assert!(hits.len() < live().len());
         assert_eq!(parser::parse_results_total(&search), Some(hits.len() as u32));
 
         let empty = get("/works/search?page=1&work_search%5Btitle%5D=zzz-no-such-title");
@@ -626,14 +737,23 @@ mod tests {
         let bms = parser::parse_bookmark_listings(&get("/users/driftwoodreader/bookmarks?page=1")).unwrap();
         assert_eq!(bms.len(), 2);
         assert!(parser::parse_bookmark_listings(&get("/bookmarks/search?page=1")).unwrap().len() > 2);
-        assert_eq!(respond_get("https://archiveofourown.org/users/x/gifts", false).status, 404);
+        assert_eq!(respond_get("https://archiveofourown.org/users/x/gifts", false, "").status, 404);
+        assert_eq!(respond_get("https://archiveofourown.org/users/TallowAndTide./profile", false, "").status, 404);
+        assert_eq!(respond_get("https://archiveofourown.org/users/TallowAndTide./works?page=1", false, "").status, 404);
+        assert_eq!(respond_get("https://archiveofourown.org/users/driftwoodreader/profile", false, "").status, 200);
     }
 
     #[test]
     fn signed_in_actions_round_trip() {
         let _g = setup();
-        assert!(!login("someone", "wrong"));
-        assert!(login("tester", "pw"));
+        assert!(login("someone", "wrong").is_none());
+        let cookie = login("tester", "pw").unwrap();
+        assert!(crate::client::has_login_cookie(&cookie));
+        assert_eq!(viewer_from_cookies(&cookie).as_deref(), Some("tester"));
+        // A relaunch restores the jar but not the mock's memory: the cookie signs the viewer back in.
+        reset();
+        assert_eq!(respond_get("https://archiveofourown.org/users/tester/profile", false, &cookie).status, 200);
+        assert!(parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap().viewer_signed_in);
         let w = &WORKS[2];
         let html = get(&format!("/works/{}?view_adult=true", w.id));
         let form = parser::parse_work_subscription_form(&html).unwrap();
@@ -645,7 +765,7 @@ mod tests {
         let r = respond_post(&format!("{}/users/tester/subscriptions", crate::client::BASE_URL), &[
             ("subscription[subscribable_id]".into(), w.id.to_string()),
             ("subscription[subscribable_type]".into(), "Work".into()),
-        ]);
+        ], "");
         let f = parser::parse_work_subscription_form(&r.body).unwrap();
         assert!(f.subscribed);
         let sid = f.action.rsplit('/').next().unwrap().to_string();
@@ -654,12 +774,12 @@ mod tests {
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].ao3_id.as_deref(), Some(sid.as_str()));
         let r = respond_post(&format!("{}/users/tester/subscriptions/{sid}", crate::client::BASE_URL),
-                             &[("_method".into(), "delete".into())]);
+                             &[("_method".into(), "delete".into())], "");
         assert!(!parser::parse_work_subscription_form(&r.body).unwrap().subscribed);
 
         // Kudos: once, then "already".
-        assert_eq!(kudos(w.id).0, 201);
-        assert!(kudos(w.id).1.contains("already left kudos"));
+        assert_eq!(kudos(w.id, "").0, 201);
+        assert!(kudos(w.id, "").1.contains("already left kudos"));
         assert!(parser::parse_kudos_usernames(&get(&format!("/works/{}?view_adult=true", w.id))).contains(&"tester".to_string()));
 
         // Bookmark create → listed under the viewer; delete → gone.
@@ -667,25 +787,25 @@ mod tests {
             ("bookmark[bookmarker_notes]".into(), "keep".into()),
             ("bookmark[tag_string]".into(), "Comfort Read, Reread".into()),
             ("bookmark[rec]".into(), "1".into()),
-        ]);
+        ], "");
         let id = r.body.split("id=\"bookmark_").nth(1).unwrap().split('"').next().unwrap().parse::<u64>().unwrap();
         let mine = parser::parse_bookmark_listings(&get("/users/tester/bookmarks?page=1")).unwrap();
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].ao3_bookmark_id, id);
         assert!(mine[0].rec && mine[0].tags.len() == 2 && mine[0].note == "keep");
-        respond_post(&format!("{}/bookmarks/{id}", crate::client::BASE_URL), &[("_method".into(), "delete".into())]);
+        respond_post(&format!("{}/bookmarks/{id}", crate::client::BASE_URL), &[("_method".into(), "delete".into())], "");
         assert!(parser::parse_bookmark_listings(&get("/users/tester/bookmarks?page=1")).unwrap().is_empty());
 
         // Comment on a chapter, then reply to it; both show in the thread.
         let cid = chapter_id(2, 1);
         let r = respond_post(&format!("{}/chapters/{cid}/comments", crate::client::BASE_URL), &[
             ("comment[comment_content]".into(), "A fresh comment from the test".into()),
-        ]);
+        ], "");
         assert!(r.body.contains("Comment created") && r.body.contains("A fresh comment from the test"));
         let posted = parser::parse_comments(&r.body).comments.into_iter().find(|c| c.author.username == "tester").unwrap();
         let r = respond_post(&format!("{}/comments/{}/comments", crate::client::BASE_URL, posted.id), &[
             ("comment[comment_content]".into(), "and a reply".into()),
-        ]);
+        ], "");
         let tree = parser::parse_comments(&r.body).comments;
         assert_eq!(tree[0].id, posted.id);
         assert_eq!(tree[0].replies.len(), 1);
@@ -694,21 +814,41 @@ mod tests {
         let p = parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap();
         assert!(p.viewer_signed_in && !p.blocked);
         let r = respond_post(&format!("{}/users/tester/blocked/users", crate::client::BASE_URL),
-                             &[("blocked_id".into(), "Marrow_and_Moss".into())]);
+                             &[("blocked_id".into(), "Marrow_and_Moss".into())], "");
         let list = parser::parse_moderation_list(&r.body, "confirm_unblock");
         assert_eq!(list.len(), 1);
         let rid = list[0].1.clone().unwrap();
         assert!(parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap().blocked);
         let r = respond_post(&format!("{}/users/tester/blocked/users/{rid}", crate::client::BASE_URL),
-                             &[("_method".into(), "delete".into())]);
+                             &[("_method".into(), "delete".into())], "");
         assert!(parser::parse_moderation_list(&r.body, "confirm_unblock").is_empty());
 
         let inbox = parser::parse_inbox(&get("/users/tester/inbox?page=1"));
         assert_eq!(inbox.items.len(), 3);
         assert_eq!(inbox.items.iter().filter(|i| i.is_unread).count(), 2);
+        // Every inbox entry's thread is reachable the way the app fetches
+        // it: crawl the work's comment pages until the id turns up.
+        for item in &inbox.items {
+            let work_id: u64 = item.work_url.as_deref().unwrap_or("")
+                .split('/').find_map(|s| s.parse().ok()).expect("work id in inbox link");
+            let mut page = 1;
+            let mut found = false;
+            loop {
+                let r = respond_get(&format!("{}/comments/show_comments?work_id={work_id}&page={page}", crate::client::BASE_URL), true, "");
+                assert_eq!(r.status, 200);
+                let cp = parser::parse_comments(&r.body);
+                fn has(list: &[crate::models::Comment], id: u64) -> bool {
+                    list.iter().any(|c| c.id == id || has(&c.replies, id))
+                }
+                if has(&cp.comments, item.comment_id) { found = true; break; }
+                if page >= cp.total_pages.max(1) { break; }
+                page += 1;
+            }
+            assert!(found, "inbox comment {} not on any comment page of work {work_id}", item.comment_id);
+            assert_eq!(respond_get(&format!("{}/comments/{}", crate::client::BASE_URL, item.comment_id), false, "").status, 200);
+        }
 
         let img = image("/images/mock/long-table-9100010.png");
         assert_eq!(crate::client::sniff_image_kind(&img), "png");
-        set_enabled(false);
     }
 }

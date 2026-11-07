@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MacFont.scale = CGFloat(theme.uiFontScale)
         buildMainMenu()
+        ReaderPosLog.sink = { [weak appState] message in
+            appState?.bridge.writeLog(level: "DEBUG", tag: "readerpos", message: message)
+        }
 
         // What's New: notify when a background check finds updates, and keep
         // the dock badge on the unviewed count.
@@ -336,13 +339,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentNetworkDisabled() {
         guard appState.networkDisabledNotice else { return }
         let alert = NSAlert()
-        alert.messageText = "Tor isn’t connected"
-        alert.informativeText = """
-            This needs the internet, and the app only goes online through Tor, which isn’t \
-            connected — so nothing was sent. Connect to Tor, or turn off “Connect via Tor \
-            on launch” in Settings › Privacy to use a direct connection.
+        let status = appState.bridge.privacyStatus
+        let viaVPN: Bool
+        if case .vpn = status { viaVPN = true } else { viaVPN = false }
+        alert.messageText = status.title
+        alert.informativeText = viaVPN
+            ? """
+            This needs the internet, and the app only goes online while your registered VPN \
+            carries the connection — so nothing was sent. \(status.subtitle) You can change \
+            the privacy mode in Settings › Privacy.
             """
-        alert.addButton(withTitle: "Connect to Tor")
+            : """
+            This needs the internet, and the app only goes online through Tor, which isn’t \
+            connected — so nothing was sent. Connect to Tor, or choose a different privacy \
+            mode in Settings › Privacy.
+            """
+        alert.addButton(withTitle: viaVPN ? "Check Again" : "Connect to Tor")
         alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "OK")
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
@@ -350,7 +362,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             appState.networkDisabledNotice = false
             switch response {
             case .alertFirstButtonReturn:
-                appState.connectFromNotice()
+                if viaVPN {
+                    appState.bridge.refreshVpnStatus()
+                } else {
+                    appState.connectFromNotice()
+                }
             case .alertSecondButtonReturn:
                 model.settingsTabRequest = "Privacy"
                 model.goSection(.settings)

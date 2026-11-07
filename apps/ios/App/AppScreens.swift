@@ -27,6 +27,8 @@ enum AppScreens {
             AccountManagementView()
         case .diagnostics:
             SettingsView(page: .diagnostics)
+        case .privacyMode:
+            PrivacyModeScreen()
         case .routeTimeouts:
             RouteTimeoutsScreen()
         case .logRetention:

@@ -179,6 +179,12 @@ struct LogRetentionScreen: View {
                     }
 
                     group("Debug log") {
+                        @Bindable var theme = theme
+                        Toggle("Log every SQL statement", isOn: $theme.sqlLogging)
+                            .font(Typography.uiBody())
+                            .foregroundStyle(theme.ink)
+                        caption("Each library statement and its duration, tagged sql. Off makes the log much smaller and quieter.")
+                        Divider().foregroundStyle(theme.line)
                         trimAgeRow(value: intBinding(\.debugLogMaxAgeValue),
                                    unit: unitBinding(\.debugLogMaxAgeUnit))
                         Divider().foregroundStyle(theme.line)

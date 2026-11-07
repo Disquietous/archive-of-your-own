@@ -208,26 +208,50 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Key the connection and prove the key. SQLCipher only checks it on
+    /// the first page read, so that read happens here and names the
+    /// outcome: a rejected key surfaces as WrongPassphrase and nothing
+    /// else does (a schema newer than this build, or a damaged file, is a
+    /// different error and the unlock UI must not count it as a bad
+    /// password).
+    fn apply_key(conn: &Connection, passphrase: &str) -> Result<(), AppError> {
+        if passphrase.is_empty() {
+            return Ok(());
+        }
+        conn.pragma_update(None, "key", passphrase).map_err(map_sql)?;
+        if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(())) {
+            return Err(match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::NotADatabase => AppError::WrongPassphrase,
+                other => map_sql(other),
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `passphrase` opens the library file at `path`: the key
+    /// check alone, on a throwaway connection — no migrations, caches or
+    /// runtime. Err(WrongPassphrase) is a rejected key.
+    pub fn check_passphrase(path: &str, passphrase: &str) -> Result<(), AppError> {
+        let conn = Connection::open(path).map_err(map_sql)?;
+        Self::apply_key(&conn, passphrase)
+    }
+
     /// Key, pragmas, tracing, and SQL functions for a raw connection —
     /// everything a `Storage` connection needs before the schema is
     /// touched. Shared by open and by the post-swap reopen.
     fn prepare_connection(conn: Connection, passphrase: &str) -> Result<Connection, AppError> {
-        if !passphrase.is_empty() {
-            conn.pragma_update(None, "key", passphrase).map_err(map_sql)?;
-            // SQLCipher only checks the key on the first page read. Do that
-            // read here and name the outcome, so a rejected key surfaces as
-            // WrongPassphrase and nothing else does (a schema that is newer
-            // than this build, or a damaged file, is a different error and
-            // the unlock UI must not count it as a bad password).
-            if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(())) {
-                return Err(match e {
-                    rusqlite::Error::SqliteFailure(f, _)
-                        if f.code == rusqlite::ErrorCode::NotADatabase => AppError::WrongPassphrase,
-                    other => map_sql(other),
-                });
-            }
-        }
+        Self::apply_key(&conn, passphrase)?;
         conn.pragma_update(None, "journal_mode", "WAL").map_err(map_sql)?;
+        // WAL at synchronous=FULL flushes the WAL to disk on every commit.
+        // NORMAL defers that to the checkpoint: a committed transaction
+        // still survives an app crash (it is in the WAL file), and only an
+        // OS crash or power loss can lose the last transactions — never
+        // corrupt the file. Progress persists on a debounced scroll tick,
+        // so FULL cost a disk flush per tick for no gain against the
+        // failure mode that actually happens (the app dying).
+        conn.pragma_update(None, "synchronous", "NORMAL").map_err(map_sql)?;
+        conn.pragma_update(None, "temp_store", "MEMORY").map_err(map_sql)?;
         // SQLite leaves foreign key enforcement off by default; the join
         // tables (work_tags, collection_tags, collection_works) rely on
         // ON DELETE CASCADE to clean up when a work, collection, or tag
@@ -288,7 +312,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 26;
+    pub(crate) const SCHEMA_VERSION: u32 = 28;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -361,6 +385,8 @@ impl Storage {
                 24 => self.migrate_v24_follow_status(),
                 25 => self.migrate_v25_image_url_keys(),
                 26 => unreachable!("v26 runs through run_v26"),
+                27 => self.migrate_v27_work_indexes(),
+                28 => self.migrate_v28_chapter_char_len(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -658,6 +684,39 @@ impl Storage {
             .execute("DELETE FROM image_cache WHERE key LIKE 'chimg:%'", [])
             .map_err(map_sql)?;
         Ok(())
+    }
+
+    /// v27 — indexes on the work_id side of the join tables that had it
+    /// second in their primary key (work_authors, reading_list_items) or
+    /// unindexed (history): every save_work rewrote work_authors with a
+    /// full scan, reading-list membership lookups scanned, and a work
+    /// delete's cascades scanned all three.
+    /// v28 — `chapters.char_len`: the chapter text's character count,
+    /// written by save_chapter. Reading progress is a character offset,
+    /// and reporting it as a fraction needed the whole chapter decoded —
+    /// per in-progress work, at every launch. NULL on rows from before
+    /// this version; `chapter_char_len` fills those in on first read.
+    fn migrate_v28_chapter_char_len(&self) -> Result<(), AppError> {
+        let has: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('chapters') WHERE name = 'char_len'",
+            [], |r| r.get(0),
+        ).map_err(map_sql)?;
+        if has == 0 {
+            self.conn
+                .execute("ALTER TABLE chapters ADD COLUMN char_len INTEGER", [])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    fn migrate_v27_work_indexes(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_work_authors_work ON work_authors (work_id);
+                 CREATE INDEX IF NOT EXISTS idx_history_work ON history (work_id);
+                 CREATE INDEX IF NOT EXISTS idx_reading_list_items_work ON reading_list_items (work_id);",
+            )
+            .map_err(map_sql)
     }
 
     fn table_exists(&self, table: &str) -> Result<bool, AppError> {

@@ -80,7 +80,7 @@ final class AuthorProfileModel {
         worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
         let cached = appState.bridge.getWorksByAuthor(username: username)
         let works = cached.map(AppState.workFromSummary)
-        for work in works { appState.fetchedWorks[work.id] = work }
+        appState.adoptFetchedWorks(works)
         self.works = works
 
         // Bookmarks and collections hydrate lazily when their pane is
@@ -137,7 +137,7 @@ final class AuthorProfileModel {
                     // that disappeared from AO3 stay on the author's list.
                     let cached = appState.bridge.getWorksByAuthor(username: username)
                     let works = cached.map(AppState.workFromSummary)
-                    for work in works { appState.fetchedWorks[work.id] = work }
+                    appState.adoptFetchedWorks(works)
                     self.works = works.isEmpty ? all : works
                 }
             } catch {
@@ -198,9 +198,7 @@ final class AuthorProfileModel {
         case .bookmarks:
             if bookmarks.isEmpty {
                 let cached = appState.bridge.getLibraryUserBookmarks(username: username)
-                for work in cached.compactMap(\.work).map(AppState.workFromSummary) {
-                    appState.fetchedWorks[work.id] = work
-                }
+                appState.adoptFetchedWorks(cached.compactMap(\.work).map(AppState.workFromSummary))
                 bookmarks = cached
             }
         case .collections:
@@ -274,9 +272,7 @@ final class AuthorProfileModel {
             guard self.username == username else { return nil }
             // The core cached the targets and bookmark rows; reopening the
             // author replays them from the library without touching AO3.
-            for work in result.bookmarks.compactMap(\.work).map(AppState.workFromSummary) {
-                appState.fetchedWorks[work.id] = work
-            }
+            appState.adoptFetchedWorks(result.bookmarks.compactMap(\.work).map(AppState.workFromSummary))
             let existing = Set(bookmarks.map(\.targetKey))
             bookmarks.append(contentsOf: result.bookmarks.filter { !existing.contains($0.targetKey) })
             bookmarksPage = page

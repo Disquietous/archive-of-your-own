@@ -231,6 +231,7 @@ extension AppState {
         let len = chapterLen > 0 ? chapterLen
             : (existing?.chapter == chapter ? existing?.chapterLen ?? 0 : 0)
         progressMap[id] = ReadingProgress(chapter: chapter, pos: pos, chapterLen: len)
+        if existing == nil { readingIDs.insert(id) }
         if let workId = UInt64(id) {
             bridge.saveProgress(workId: workId, chapter: UInt32(chapter),
                                 position: UInt32(max(0, pos)))
@@ -239,6 +240,7 @@ extension AppState {
 
     func resetProgress(_ id: String) {
         progressMap.removeValue(forKey: id)
+        readingIDs.remove(id)
         if let workId = UInt64(id) {
             bridge.deleteProgress(workId: workId)
         }

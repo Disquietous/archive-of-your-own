@@ -112,12 +112,15 @@ extension AppState {
         case .connectionChanged(let state):
             handleConnectionChanged(state)
 
-        case .networkRefused(let id):
+        case .networkRefused(let id, _):
             // Passive image loads (avatars, auto-loaded pictures) fail
             // quietly into their own placeholders; anything else the user
             // asked for gets the explanation.
             if let id, case .image = operationKinds[id] { break }
             reportNetworkDisabled()
+
+        case .vpnStatusChanged(let status):
+            bridge.vpnStatus = status
 
         case .operationTick, .dataInvalidated:
             break

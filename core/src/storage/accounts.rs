@@ -838,7 +838,7 @@ impl Storage {
 
         // Build tree: collect replies under their parents (by row id). A
         // parent outside this selection makes its reply top-level.
-        let ids: Vec<i64> = all.iter().map(|(row, _, _)| *row).collect();
+        let ids: std::collections::HashSet<i64> = all.iter().map(|(row, _, _)| *row).collect();
         let mut top_level = Vec::new();
         let mut comments_map: std::collections::HashMap<i64, Comment> = std::collections::HashMap::new();
         let mut parent_map: Vec<(i64, Option<i64>)> = Vec::new();
@@ -851,7 +851,7 @@ impl Storage {
         // Process in reverse order so children are added before parents try to collect them
         let mut children_map: std::collections::HashMap<i64, Vec<Comment>> = std::collections::HashMap::new();
         for &(row, parent) in parent_map.iter().rev() {
-            let mut comment = comments_map.remove(&row).unwrap();
+            let Some(mut comment) = comments_map.remove(&row) else { continue };
             if let Some(children) = children_map.remove(&row) {
                 comment.replies = children;
             }
@@ -870,7 +870,13 @@ impl Storage {
     /// None if the comment isn't in the cache.
     pub fn get_comment_thread(&self, comment_id: u64) -> Result<Option<Comment>, AppError> {
         let Some(mut current) = self.comment_row_id(comment_id)? else { return Ok(None) };
+        // A parent cycle (only possible from a damaged table) would loop
+        // forever; the first repeated row is treated as the root.
+        let mut visited = std::collections::HashSet::new();
         loop {
+            if !visited.insert(current) {
+                break;
+            }
             let parent: Option<i64> = self.conn.query_row(
                 "SELECT parent_id FROM comments WHERE id = ?1",
                 params![current],

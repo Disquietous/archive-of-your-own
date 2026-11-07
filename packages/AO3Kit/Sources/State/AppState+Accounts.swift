@@ -55,7 +55,7 @@ extension AppState {
     private func runAO3Login(failure: String, _ attempt: () async throws -> Bool) async -> Bool {
         guard !ao3LoginInFlight else { return false }
         guard !bridge.networkBlocked else {
-            ao3LoginError = "Connect to Tor first."
+            ao3LoginError = bridge.privacyStatus.connectHint + "."
             return false
         }
         ao3LoginInFlight = true
@@ -106,6 +106,7 @@ extension AppState {
         for p in progressEntries {
             progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pos: Int(p.position), chapterLen: Int(p.chapterLen))
         }
+        readingIDs = Set(progressMap.keys)
         lastReadMap = Dictionary(uniqueKeysWithValues:
             bridge.getWorkLastReadTimes().map { (String($0.workId), $0.lastReadDt) })
 

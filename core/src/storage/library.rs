@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
 use crate::models::{BookmarkHit, BookmarkTarget};
@@ -78,10 +78,52 @@ impl Storage {
 
     /// Character count of a cached chapter's plain text (0 when the chapter
     /// isn't cached). Lets position offsets read back as a fraction of the
-    /// chapter without the UI having to load the text itself.
+    /// chapter without the UI having to load the text itself. Read from
+    /// `chapters.char_len`, which save_chapter writes; a row from before
+    /// that column (NULL) is measured once here and the result stored.
     pub fn chapter_char_len(&self, work_id: u64, chapter_number: u32) -> u32 {
-        use crate::models::{ContentBlock, InlineContent};
+        let stored: Option<Option<i64>> = self.conn.query_row(
+            "SELECT char_len FROM chapters WHERE work_id = ?1 AND number = ?2",
+            params![work_id as i64, chapter_number as i64],
+            |r| r.get(0),
+        ).optional().unwrap_or(None);
+        match stored {
+            None => 0,
+            Some(Some(n)) => n.max(0) as u32,
+            Some(None) => {
+                let len = match self.get_chapter(work_id, chapter_number) {
+                    Ok(Some(chapter)) => content_char_len(&chapter.content),
+                    _ => 0,
+                };
+                let _ = self.conn.execute(
+                    "UPDATE chapters SET char_len = ?3 WHERE work_id = ?1 AND number = ?2",
+                    params![work_id as i64, chapter_number as i64, len as i64],
+                );
+                len
+            }
+        }
+    }
 
+    /// Titles of a work's cached chapters in order ("" for an untitled
+    /// chapter), without decoding any chapter text.
+    pub fn get_chapter_titles(&self, work_id: u64) -> Result<Vec<String>, AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT title FROM chapters WHERE work_id = ?1 ORDER BY number ASC")
+            .map_err(map_sql)?;
+        let rows = stmt.query_map(params![work_id as i64], |r| {
+            Ok(r.get::<_, Option<String>>(0)?.unwrap_or_default())
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+}
+
+/// Character count of chapter content as the readers measure it: text
+/// characters, one per line break, rule and block end. Reading positions
+/// are offsets in this count, so it has one definition.
+pub fn content_char_len(blocks: &[crate::models::ContentBlock]) -> u32 {
+    use crate::models::{ContentBlock, InlineContent};
+
+    {
         fn inline_len(items: &[InlineContent]) -> usize {
             items
                 .iter()
@@ -113,12 +155,11 @@ impl Storage {
                 .sum()
         }
 
-        match self.get_chapter(work_id, chapter_number) {
-            Ok(Some(chapter)) => block_len(&chapter.content) as u32,
-            _ => 0,
-        }
+        block_len(blocks) as u32
     }
+}
 
+impl Storage {
     pub fn get_all_progress(&self) -> Result<Vec<(u64, u32, u32)>, AppError> {
         Ok(self.works_cache
             .all()

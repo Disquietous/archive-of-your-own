@@ -138,16 +138,34 @@ final class ReadFooterView: NSView {
 /// NSTextView that reports its laid-out height as intrinsic size so it can
 /// live inside a stack view without its own scroll view.
 final class SelfSizingTextView: NSTextView {
+    /// Width the cached height was measured at; -1 when the text changed
+    /// and nothing is cached. Measuring means laying out the whole
+    /// document (TextKit 2 is otherwise viewport-lazy), so it happens once
+    /// per width per text, not on every layout pass of the column.
+    private var measuredWidth: CGFloat = -1
+    private var measuredHeight: CGFloat = 0
+
+    /// Call after replacing the text: the cached height is for the old text.
+    func invalidateMeasuredHeight() {
+        measuredWidth = -1
+        invalidateIntrinsicContentSize()
+    }
+
     override var intrinsicContentSize: NSSize {
         guard let layoutManager = textLayoutManager else { return super.intrinsicContentSize }
-        layoutManager.ensureLayout(for: layoutManager.documentRange)
-        let height = layoutManager.usageBoundsForTextContainer.height
-        return NSSize(width: NSView.noIntrinsicMetric, height: ceil(height))
+        if bounds.width != measuredWidth {
+            layoutManager.ensureLayout(for: layoutManager.documentRange)
+            measuredHeight = ceil(layoutManager.usageBoundsForTextContainer.height)
+            measuredWidth = bounds.width
+        }
+        return NSSize(width: NSView.noIntrinsicMetric, height: measuredHeight)
     }
 
     override func layout() {
         super.layout()
-        invalidateIntrinsicContentSize()
+        if bounds.width != measuredWidth {
+            invalidateIntrinsicContentSize()
+        }
     }
 }
 

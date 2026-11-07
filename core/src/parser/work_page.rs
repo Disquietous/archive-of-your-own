@@ -23,9 +23,18 @@ fn is_landmark_heading(block: &ContentBlock) -> bool {
 /// can be a chapter page whose IDs (the comment form's among them) are the
 /// chapter's, not the work's.
 pub fn parse_work_page(html: &str, id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
-    let doc = Html::parse_document(html);
+    work_page(&Html::parse_document(html), id)
+}
 
-    let title = extract_work_page_title(&doc);
+/// The work page plus the usernames in its kudos list, from one parse.
+pub fn parse_work_page_with_kudos(html: &str, id: u64) -> Result<(WorkSummary, Vec<Chapter>, Vec<String>), AppError> {
+    let doc = Html::parse_document(html);
+    let (summary, chapters) = work_page(&doc, id)?;
+    Ok((summary, chapters, kudos_usernames(&doc)))
+}
+
+fn work_page(doc: &Html, id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppError> {
+    let title = extract_work_page_title(doc);
     let authors = extract_work_page_authors(&doc);
     let (rating, warnings, categories, fandoms, relationships, characters, tags) =
         extract_work_meta(&doc);
@@ -361,15 +370,32 @@ fn parse_chapters_content(doc: &Html) -> Vec<Chapter> {
     Vec::new()
 }
 
+/// Deepest element nesting the content builders follow. AO3's sanitizer
+/// doesn't limit nesting, so a work (or a hostile page) can nest
+/// blockquotes or spans thousands deep; past this depth the subtree is
+/// flattened to its text rather than recursed into.
+const MAX_CONTENT_DEPTH: usize = 64;
+
 pub fn parse_element_children(el: &ElementRef) -> Vec<ContentBlock> {
+    parse_element_children_at(el, 0)
+}
+
+fn parse_element_children_at(el: &ElementRef, depth: usize) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
+    if depth >= MAX_CONTENT_DEPTH {
+        let flat = collapse_whitespace(&text(el));
+        if !flat.trim().is_empty() {
+            blocks.push(ContentBlock::Paragraph { text: vec![InlineContent::Text { value: flat }] });
+        }
+        return blocks;
+    }
 
     for child in el.children() {
         if let Some(element) = child.value().as_element() {
             let child_ref = ElementRef::wrap(child).unwrap();
             match element.name() {
                 "p" => {
-                    let inlines = parse_inline_content(&child_ref);
+                    let inlines = parse_inline_content_at(&child_ref, depth + 1);
                     if !inlines.is_empty() {
                         blocks.push(ContentBlock::Paragraph { text: inlines });
                     }
@@ -390,25 +416,25 @@ pub fn parse_element_children(el: &ElementRef) -> Vec<ContentBlock> {
                     });
                 }
                 "blockquote" => {
-                    let inner = parse_element_children(&child_ref);
+                    let inner = parse_element_children_at(&child_ref, depth + 1);
                     blocks.push(ContentBlock::Blockquote { blocks: inner });
                 }
                 "hr" => {
                     blocks.push(ContentBlock::HorizontalRule);
                 }
                 "ul" => {
-                    let items = parse_list_items(&child_ref);
+                    let items = parse_list_items(&child_ref, depth + 1);
                     blocks.push(ContentBlock::List { ordered: false, items });
                 }
                 "ol" => {
-                    let items = parse_list_items(&child_ref);
+                    let items = parse_list_items(&child_ref, depth + 1);
                     blocks.push(ContentBlock::List { ordered: true, items });
                 }
                 "pre" => {
                     blocks.push(ContentBlock::PreFormatted { text: text(&child_ref) });
                 }
                 "div" | "center" => {
-                    let inner = parse_element_children(&child_ref);
+                    let inner = parse_element_children_at(&child_ref, depth + 1);
                     blocks.extend(inner);
                 }
                 "img" => {
@@ -441,7 +467,7 @@ fn image_block(img: &ElementRef) -> Option<ContentBlock> {
     Some(ContentBlock::Image { src, alt })
 }
 
-fn parse_list_items(list: &ElementRef) -> Vec<Vec<ContentBlock>> {
+fn parse_list_items(list: &ElementRef, depth: usize) -> Vec<Vec<ContentBlock>> {
     let li_sel = sel("li");
     list.select(&li_sel)
         .map(|li| {
@@ -451,9 +477,9 @@ fn parse_list_items(list: &ElementRef) -> Vec<Vec<ContentBlock>> {
                 })
             });
             if has_block_children {
-                parse_element_children(&li)
+                parse_element_children_at(&li, depth + 1)
             } else {
-                let inlines = parse_inline_content(&li);
+                let inlines = parse_inline_content_at(&li, depth + 1);
                 if inlines.is_empty() {
                     Vec::new()
                 } else {
@@ -485,7 +511,18 @@ fn collapse_whitespace(s: &str) -> String {
 }
 
 pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
+    parse_inline_content_at(el, 0)
+}
+
+fn parse_inline_content_at(el: &ElementRef, depth: usize) -> Vec<InlineContent> {
     let mut inlines = Vec::new();
+    if depth >= MAX_CONTENT_DEPTH {
+        let flat = collapse_whitespace(&text(el));
+        if !flat.trim().is_empty() {
+            inlines.push(InlineContent::Text { value: flat });
+        }
+        return inlines;
+    }
 
     for child in el.children() {
         if child.value().is_text() {
@@ -506,42 +543,42 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
                     inlines.push(InlineContent::LineBreak);
                 }
                 "strong" | "b" => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {
                         inlines.push(InlineContent::Bold { content });
                     }
                 }
                 "em" | "i" => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {
                         inlines.push(InlineContent::Italic { content });
                     }
                 }
                 "a" => {
                     let href = element.attr("href").unwrap_or("").to_string();
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {
                         inlines.push(InlineContent::Link { href, content });
                     }
                 }
                 "s" | "strike" | "del" => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {
                         inlines.push(InlineContent::Strikethrough { content });
                     }
                 }
                 "sup" => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {
                         inlines.push(InlineContent::Superscript { content });
                     }
                 }
                 "span" | "u" => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     inlines.extend(content);
                 }
                 _ => {
-                    let content = parse_inline_content(&child_ref);
+                    let content = parse_inline_content_at(&child_ref, depth + 1);
                     inlines.extend(content);
                 }
             }
@@ -560,7 +597,10 @@ pub fn parse_inline_content(el: &ElementRef) -> Vec<InlineContent> {
 /// this work"). Truncated by AO3 past ~150 names ("and N more users"), so
 /// absence proves nothing — presence proves the user left kudos.
 pub fn parse_kudos_usernames(html: &str) -> Vec<String> {
-    let doc = Html::parse_document(html);
+    kudos_usernames(&Html::parse_document(html))
+}
+
+fn kudos_usernames(doc: &Html) -> Vec<String> {
     let link_sel = sel("#kudos a[href^='/users/']");
     doc.select(&link_sel).map(|el| text(&el)).collect()
 }

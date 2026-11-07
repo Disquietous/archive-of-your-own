@@ -131,7 +131,7 @@ pub fn pagination(base: &str, page: u32, total: u32) -> String {
 /// One `li.work.blurb`. `href_prefix` nests the title link under a
 /// collection path when non-empty.
 pub fn blurb(idx: usize, href_prefix: &str) -> String {
-    let w = &WORKS[idx];
+    let w = &work(idx);
     let a = &AUTHORS[w.author];
     let complete = w.total.is_some_and(|t| w.chapters >= t);
     let fandoms = w.fandoms.iter().map(|f| tag_link(f)).collect::<Vec<_>>().join("\n");
@@ -214,7 +214,7 @@ pub fn range_heading(count: usize, page: u32, suffix: &str) -> String {
 
 /// Chapter body paragraphs with inline markup sprinkled in deterministically.
 pub fn chapter_body(idx: usize, chapter: u32) -> String {
-    let w = &WORKS[idx];
+    let w = &work(idx);
     let mut rng = Lcg::new(w.id * 7 + chapter as u64 * 13);
     let mut out = String::new();
     for (i, p) in chapter_paragraphs(idx, chapter).iter().enumerate() {
@@ -246,13 +246,14 @@ fn series_dd(idx: usize) -> String {
     if m.is_empty() { return String::new(); }
     let spans = m.iter().map(|&(si, part)| {
         let s = &SERIES[si];
+        let members = series_works(si);
         let pos = (part - 1) as usize;
         let mut span = format!("<span class=\"series\"><span class=\"position\">Part {part} of <a href=\"/series/{}\">{}</a></span>", s.id, esc(s.title));
         if pos > 0 {
-            span.push_str(&format!("<span class=\"divider\">, </span><a class=\"previous\" href=\"/works/{}\">&#171; Previous Work</a>", WORKS[s.works[pos - 1]].id));
+            span.push_str(&format!("<span class=\"divider\">, </span><a class=\"previous\" href=\"/works/{}\">&#171; Previous Work</a>", WORKS[members[pos - 1]].id));
         }
-        if pos + 1 < s.works.len() {
-            span.push_str(&format!("<span class=\"divider\">, </span><a class=\"next\" href=\"/works/{}\">Next Work &#187;</a>", WORKS[s.works[pos + 1]].id));
+        if pos + 1 < members.len() {
+            span.push_str(&format!("<span class=\"divider\">, </span><a class=\"next\" href=\"/works/{}\">Next Work &#187;</a>", WORKS[members[pos + 1]].id));
         }
         span.push_str("</span>");
         span
@@ -273,7 +274,7 @@ pub fn subscription_form(state: &MockState, kind: &str, target: &str) -> String 
 /// The work page. `full` renders every chapter (?view_full_work=true);
 /// otherwise just `chapter` (1 by default), as AO3 does.
 pub fn work_page(idx: usize, full: bool, chapter: u32, state: &MockState, comments_html: &str) -> String {
-    let w = &WORKS[idx];
+    let w = &work(idx);
     let a = &AUTHORS[w.author];
     let complete = w.total.is_some_and(|t| w.chapters >= t);
     let status_row = if complete && w.chapters > 1 {
@@ -461,8 +462,8 @@ pub fn user_profile(user: &str, state: &MockState) -> String {
     let author = author_index(user).map(|i| &AUTHORS[i]);
     let name = author.map(|a| a.user).unwrap_or(user);
     let numeric = author.map(|a| a.numeric_id).unwrap_or_else(|| 92_000_000 + (user.len() as u64 * 7919) % 100_000);
-    let works = author_index(user).map(|ai| WORKS.iter().filter(|w| w.author == ai).count()).unwrap_or(0);
-    let series = author_index(user).map(|ai| SERIES.iter().filter(|s| s.works.iter().any(|&w| WORKS[w].author == ai)).count()).unwrap_or(0);
+    let works = author_index(user).map(|ai| live().into_iter().filter(|&i| WORKS[i].author == ai).count()).unwrap_or(0);
+    let series = author_index(user).map(|ai| SERIES.iter().filter(|s| s.works.iter().any(|&w| work(w).author == ai)).count()).unwrap_or(0);
     let bookmarks = state.bookmarks_of(user).len();
     let pseuds = match author {
         Some(a) => { let mut v = vec![a.user]; if let Some(p) = a.pseud { v.push(p); } v }
@@ -512,7 +513,7 @@ pub fn subscriptions_page(state: &MockState) -> String {
     let rows = state.subs.iter().map(|s| {
         let link = match s.kind.as_str() {
             "Work" => work_index(s.target.parse().unwrap_or(0))
-                .map(|i| format!("<a href=\"/works/{}\">{}</a>", WORKS[i].id, esc(WORKS[i].title)))
+                .map(|i| format!("<a href=\"/works/{}\">{}</a>", work(i).id, esc(work(i).title)))
                 .unwrap_or_else(|| format!("<a href=\"/works/{}\">Work {}</a>", s.target, s.target)),
             "Series" => series_index(s.target.parse().unwrap_or(0))
                 .map(|i| format!("<a href=\"/series/{}\">{}</a>", SERIES[i].id, esc(SERIES[i].title)))
@@ -531,22 +532,38 @@ pub fn subscriptions_page(state: &MockState) -> String {
 
 /// /users/{me}/inbox — a few comments addressed to the viewer.
 pub fn inbox_page(state: &MockState) -> String {
-    let items: Vec<(u64, &str, usize, u32, &str, &str, bool)> = vec![
-        (super::comments::comment_id(0, 1, 0), READERS[0], 0, 1, "2026-10-30", COMMENT_TEXT[0], true),
-        (super::comments::comment_id(3, 2, 1), READERS[2], 3, 2, "2026-10-28", COMMENT_TEXT[7], true),
-        (super::comments::comment_id(9, 1, 0), READERS[4], 9, 1, "2026-10-21", COMMENT_TEXT[2], false),
+    // Each entry is a comment the generator actually produced, so the
+    // thread fetch (which crawls the work's comment pages looking for the
+    // id) finds it: the first signed-in top-level comment of a chapter,
+    // or, for the middle entry, its reply when the thread has one.
+    fn pick(work_idx: usize, chapter: u32, reply: bool) -> RenderComment {
+        let threads = super::comments::chapter_threads(work_idx, chapter, false, &MockState::default());
+        let top = threads.iter().find(|t| t.user.is_some()).unwrap_or(&threads[0]);
+        match top.replies.first() {
+            Some(r) if reply => r.clone(),
+            _ => top.clone(),
+        }
+    }
+    let items: Vec<(RenderComment, usize, u32, bool)> = vec![
+        (pick(0, 1, false), 0, 1, true),
+        (pick(3, 2, true), 3, 2, true),
+        (pick(9, 1, false), 9, 1, false),
     ];
-    let unread = items.iter().filter(|i| i.6).count();
-    let lis = items.iter().map(|(id, user, widx, ch, date, text, is_unread)| {
-        let w = &WORKS[*widx];
+    let unread = items.iter().filter(|i| i.3).count();
+    let lis = items.iter().map(|(c, widx, ch, is_unread)| {
+        let w = &work(*widx);
+        let byline = match &c.user {
+            Some(u) => format!(r#"<a href="/users/{u}/pseuds/{u}">{u}</a>"#),
+            None => esc(&c.guest),
+        };
         format!(r#"<li class="comment group{unread}" id="feedback_comment_{id}" role="article">
   <div class="icon"><img alt="" class="icon" src="{USER_ICON}"/></div>
-  <h4 class="heading byline"><a href="/users/{user}/pseuds/{user}">{user}</a> on <a href="/works/{wid}/chapters/{cid}">{title}</a></h4>
+  <h4 class="heading byline">{byline} on <a href="/works/{wid}/chapters/{cid}">{title}</a></h4>
   <span class="posted datetime"><span class="date">{date}</span></span>
   <blockquote class="userstuff"><p>{text}</p></blockquote>
   <ul class="actions"><li><a href="/comments/{id}">Reply</a></li></ul>
-</li>"#, unread = if *is_unread { " unread" } else { "" }, wid = w.id, cid = chapter_id(*widx, *ch),
-            title = esc(w.title), text = esc(text))
+</li>"#, unread = if *is_unread { " unread" } else { "" }, id = c.id, wid = w.id, cid = chapter_id(*widx, *ch),
+            title = esc(w.title), date = c.date, text = esc(&c.text))
     }).collect::<String>();
     let body = format!("<h2 class=\"heading\">My Inbox ({} comments, {unread} unread)</h2><ol class=\"comment index group\">{lis}</ol>", items.len());
     page("Inbox", "inbox-index region", &body, state)
@@ -599,9 +616,10 @@ fn bookmark_li(b: &RenderBookmark) -> String {
         }
         (None, Some(si)) => {
             let s = &SERIES[si];
-            let a = &AUTHORS[WORKS[s.works[0]].author];
+            let first = series_works(si).first().copied().unwrap_or(s.works[0]);
+            let a = &AUTHORS[WORKS[first].author];
             format!("<div class=\"header module\"><h4 class=\"heading\"><a href=\"/series/{}\">{}</a> by {}</h4><p class=\"datetime\">{}</p></div>",
-                    s.id, esc(s.title), author_link(a), blurb_date(WORKS[s.works[0]].updated))
+                    s.id, esc(s.title), author_link(a), blurb_date(work(first).updated))
         }
         (None, None) => String::new(),
     };
@@ -651,11 +669,12 @@ pub fn bookmark_page(b: &RenderBookmark, state: &MockState) -> String {
 
 pub fn series_page(si: usize, page_no: u32, state: &MockState) -> String {
     let s = &SERIES[si];
-    let words: u64 = s.works.iter().map(|&w| word_count(w)).sum();
-    let complete = s.works.iter().all(|&w| WORKS[w].total.is_some_and(|t| WORKS[w].chapters >= t));
+    let members = series_works(si);
+    let words: u64 = members.iter().map(|&w| word_count(w)).sum();
+    let complete = members.iter().all(|&w| work(w).total.is_some_and(|t| work(w).chapters >= t));
     let creators = {
         let mut seen: Vec<usize> = Vec::new();
-        for &w in s.works { if !seen.contains(&WORKS[w].author) { seen.push(WORKS[w].author); } }
+        for &w in &members { if !seen.contains(&WORKS[w].author) { seen.push(WORKS[w].author); } }
         seen.iter().map(|&a| author_link(&AUTHORS[a])).collect::<Vec<_>>().join(", ")
     };
     let body = format!(r#"
@@ -675,12 +694,12 @@ pub fn series_page(si: usize, page_no: u32, state: &MockState) -> String {
 </div>
 <ul class="navigation actions" role="navigation"><li>{sub_form}</li></ul>
 {listing}"#,
-        title = esc(s.title), begun = WORKS[s.works[0]].published,
-        updated = s.works.iter().map(|&w| WORKS[w].updated).max().unwrap_or(""),
-        summary = esc(s.summary), words = with_commas(words), count = s.works.len(),
+        title = esc(s.title), begun = members.first().map(|&w| work(w).published).unwrap_or(""),
+        updated = members.iter().map(|&w| work(w).updated).max().unwrap_or(""),
+        summary = esc(s.summary), words = with_commas(words), count = members.len(),
         complete = if complete { "Yes" } else { "No" },
         sub_form = subscription_form(state, "Series", &s.id.to_string()),
-        listing = listing("", s.works, page_no, &format!("/series/{}", s.id), ""));
+        listing = listing("", &members, page_no, &format!("/series/{}", s.id), ""));
     page(s.title, "series-show region", &body, state)
 }
 
@@ -704,7 +723,7 @@ fn collection_blurb(ci: usize) -> String {
     <dt class="bookmarks">Bookmarked Items:</dt><dd class="bookmarks"><a href="/collections/{name}/bookmarks">{bookmarks}</a></dd>
   </dl>
 </li>"#, name = c.name, title = esc(c.title), date = blurb_date(c.active_since), summary = esc(c.summary),
-        kind = c.kind, works = c.works.len(), bookmarks = 1)
+        kind = c.kind, works = c.works.iter().filter(|&&w| visible(w)).count(), bookmarks = 1)
 }
 
 pub fn collections_index(indexes: &[usize], heading: &str, state: &MockState) -> String {
@@ -715,8 +734,9 @@ pub fn collections_index(indexes: &[usize], heading: &str, state: &MockState) ->
 
 pub fn collection_works(ci: usize, page_no: u32, state: &MockState) -> String {
     let c = &COLLECTIONS[ci];
-    let heading = format!("<h2 class=\"heading\">{} Works in {}</h2>", c.works.len(), esc(c.title));
-    let body = listing(&heading, c.works, page_no, &format!("/collections/{}/works", c.name), &format!("/collections/{}", c.name));
+    let members: Vec<usize> = c.works.iter().copied().filter(|&w| visible(w)).collect();
+    let heading = format!("<h2 class=\"heading\">{} Works in {}</h2>", members.len(), esc(c.title));
+    let body = listing(&heading, &members, page_no, &format!("/collections/{}/works", c.name), &format!("/collections/{}", c.name));
     page(c.title, "works-index region", &body, state)
 }
 

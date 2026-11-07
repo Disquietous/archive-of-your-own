@@ -9,8 +9,19 @@ use super::{sel, text, parse_number, normalize_ao3_date};
 // Work listing parser (search results / tag pages)
 // ---------------------------------------------------------------------------
 
-pub fn parse_work_listings(html: &str) -> Result<Vec<WorkSummary>, AppError> {
+/// A listing page with its pagination, from one parse of the document:
+/// (works, has_next_page, total_pages, results_total).
+pub fn parse_work_listing_page(html: &str) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
     let doc = Html::parse_document(html);
+    let works = work_listings(&doc)?;
+    Ok((works, super::has_next(&doc), super::page_count(&doc), super::results_total(&doc)))
+}
+
+pub fn parse_work_listings(html: &str) -> Result<Vec<WorkSummary>, AppError> {
+    work_listings(&Html::parse_document(html))
+}
+
+fn work_listings(doc: &Html) -> Result<Vec<WorkSummary>, AppError> {
     let blurb_sel = sel("li.work.blurb");
     let mut works = Vec::new();
     let mut blurbs = 0;
@@ -310,8 +321,18 @@ pub(super) fn parse_chapters(s: &str) -> (u32, Option<u32>) {
 // display stub; see `BookmarkListing::mystery`.)
 // ---------------------------------------------------------------------------
 
-pub fn parse_bookmark_listings(html: &str) -> Result<Vec<BookmarkListing>, AppError> {
+/// (bookmarks, has_next_page, total_pages, results_total) from one parse.
+pub fn parse_bookmark_listing_page(html: &str) -> Result<(Vec<BookmarkListing>, bool, u32, Option<u32>), AppError> {
     let doc = Html::parse_document(html);
+    let bookmarks = bookmark_listings(&doc)?;
+    Ok((bookmarks, super::has_next(&doc), super::page_count(&doc), super::results_total(&doc)))
+}
+
+pub fn parse_bookmark_listings(html: &str) -> Result<Vec<BookmarkListing>, AppError> {
+    bookmark_listings(&Html::parse_document(html))
+}
+
+fn bookmark_listings(doc: &Html) -> Result<Vec<BookmarkListing>, AppError> {
     let blurb_sel = sel("li.bookmark.blurb");
     let mut bookmarks = Vec::new();
 

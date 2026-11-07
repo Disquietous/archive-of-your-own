@@ -11,11 +11,14 @@ impl AO3Client {
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AppError> {
         if crate::mock_site::enabled() {
             let audit = AuditCtx::new("POST", &format!("{BASE_URL}/users/login"), None);
-            let ok = crate::mock_site::login(username, password);
-            if ok {
-                // The same cookies a real login leaves in the jar, so every
-                // "am I signed in" check (`has_login_cookie`) agrees.
-                self.set_session_cookies("remember_user_token=mock-remember-token; _otwarchive_session=mock-session");
+            let cookies = crate::mock_site::login(username, password);
+            let ok = cookies.is_some();
+            if let Some(c) = cookies {
+                // The same cookie names a real login leaves in the jar, so
+                // every "am I signed in" check (`has_login_cookie`) agrees;
+                // the value names the user so a restored jar signs the mock
+                // viewer back in after a relaunch.
+                self.set_session_cookies(&c);
             }
             audit.record(if ok { 302 } else { 200 }, 0, if ok { None } else { Some("rejected (mock)".to_string()) });
             return Ok(ok);
@@ -180,7 +183,7 @@ impl AO3Client {
         if crate::mock_site::enabled() {
             let audit = AuditCtx::new("POST", url, Some(redact_payload(
                 &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
-            let reply = crate::mock_site::respond_post(url, &form_params);
+            let reply = crate::mock_site::respond_post(url, &form_params, &self.get_session_cookies());
             if reply.status >= 400 {
                 let detail = format!("HTTP {} for {url} (mock)", reply.status);
                 audit.record(reply.status, reply.body.len() as u64, Some(detail.clone()));
@@ -275,7 +278,7 @@ impl AO3Client {
     async fn post_kudos_raw(&self, work_id: u64, token: &str, work_url: &str) -> Result<(u16, String), AppError> {
         if crate::mock_site::enabled() {
             let audit = AuditCtx::new("POST", &format!("{BASE_URL}/kudos"), None);
-            let (status, body) = crate::mock_site::kudos(work_id);
+            let (status, body) = crate::mock_site::kudos(work_id, &self.get_session_cookies());
             let accepted = status < 300 || body.contains("already left kudos");
             audit.record(status, body.len() as u64, if accepted { None } else { Some(format!("HTTP {status}")) });
             return Ok((status, body));

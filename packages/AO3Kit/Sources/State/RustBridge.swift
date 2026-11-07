@@ -56,7 +56,7 @@ final class RustBridge {
         app?.setPlatformCapabilities(capabilities: recoveryCapabilities)
         torOnlyApp?.setObserver(observer: recoveryObserver)
         torOnlyApp?.setPlatformCapabilities(capabilities: recoveryCapabilities)
-        applyTorRequirement()
+        applyPrivacyPolicy()
         if torRequirementObserver == nil {
             // The setting is written from several screens straight into
             // UserDefaults; follow the store itself so the core never
@@ -64,39 +64,130 @@ final class RustBridge {
             torRequirementObserver = NotificationCenter.default.addObserver(
                 forName: UserDefaults.didChangeNotification, object: nil, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.applyTorRequirement() }
+                MainActor.assumeIsolated { self?.applyPrivacyPolicy() }
             }
         }
     }
 
     @ObservationIgnored private var torRequirementObserver: NSObjectProtocol?
 
-    /// Push the Tor setting into the core, which enforces it: while Tor is
-    /// required and not connected, nothing is sent. The mock-archive
-    /// setting rides along: while it is on the core answers every request
-    /// itself and sends nothing, so Tor is not required for it.
-    private func applyTorRequirement() {
-        let required = torRequired
-        (app ?? torOnlyApp)?.setTorRequired(required: required)
+    /// Push the privacy policy into the core, which enforces it before
+    /// every request: Tor mode sends nothing without a Tor transport, VPN
+    /// mode nothing while the registered VPN is not verified. The
+    /// mock-archive setting rides along: while it is on the core answers
+    /// every request itself and sends nothing, so no protection is needed.
+    private func applyPrivacyPolicy() {
+        let mode = effectivePrivacyMode
+        let required = VpnSettings.required
+        let fingerprint = VpnSettings.fingerprintJSON
+        for runtime in [app, torOnlyApp].compactMap({ $0 }) {
+            runtime.setPrivacyMode(mode: mode.core)
+            runtime.setVpnRequired(required: required)
+            if runtime.vpnFingerprintJson() != fingerprint {
+                try? runtime.setVpnFingerprintJson(json: fingerprint)
+            }
+        }
+        if PrivacyModeSetting.current == .vpn { refreshVpnStatus() }
+        if pathWatcher == nil {
+            pathWatcher = NetworkPathWatcher { [weak self] in self?.networkPathChanged() }
+        }
         let mock = mockArchiveEnabled
         if app?.mockSiteEnabled() != mock { app?.setMockSite(enabled: mock) }
         if torOnlyApp?.mockSiteEnabled() != mock { torOnlyApp?.setMockSite(enabled: mock) }
+        let snapshot = UInt32(max(0, UserDefaults.standard.integer(forKey: "mockArchiveSnapshot")))
+        if app?.mockSiteSnapshot() != snapshot { app?.setMockSiteSnapshot(snapshot: snapshot) }
+        let sqlLogging = UserDefaults.standard.object(forKey: "sqlLogging") as? Bool ?? true
+        if app?.sqlLoggingEnabled() != sqlLogging { app?.setSqlLogging(enabled: sqlLogging) }
     }
 
     /// Testing tool (Settings › Diagnostics in debug builds): every request
     /// is answered by the core's synthetic archive; nothing reaches AO3.
     var mockArchiveEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "mockArchive")
+        MockLaunch.isActive || UserDefaults.standard.bool(forKey: "mockArchive")
     }
 
-    /// Whether a network action needs a Tor connection first. The mock
-    /// archive needs no connection at all, so it never gates anything.
+    /// The mode the core enforces: the setting, except that the mock
+    /// archive needs no protection at all (it never sends), so it runs open.
+    var effectivePrivacyMode: PrivacyModeSetting {
+        mockArchiveEnabled ? .open : PrivacyModeSetting.current
+    }
+
+    /// Whether a network action needs a Tor connection first.
     var torRequired: Bool {
-        UserDefaults.standard.bool(forKey: "useTorByDefault") && !mockArchiveEnabled
+        effectivePrivacyMode == .tor
     }
 
+    /// Requests would be refused right now: Tor mode without a connection,
+    /// or VPN mode (required) without a verified VPN. Open never blocks.
     var networkBlocked: Bool {
-        torRequired && !torStatus.isConnected
+        switch effectivePrivacyMode {
+        case .tor: !torStatus.isConnected
+        case .vpn: VpnSettings.required && vpnStatus != .matched
+        case .open: false
+        }
+    }
+
+    /// The one status the privacy surfaces show, whatever the mode. Follows
+    /// the setting, not the effective mode: under the mock archive nothing
+    /// is gated, but the VPN state is still worth seeing.
+    var privacyStatus: PrivacyStatus {
+        switch PrivacyModeSetting.current {
+        case .tor: .tor(torStatus)
+        case .vpn: .vpn(vpnStatus, label: vpnFingerprint?.label)
+        case .open: .open
+        }
+    }
+
+    // MARK: - VPN
+
+    @ObservationIgnored private var pathWatcher: NetworkPathWatcher?
+
+    /// The registered VPN's verified state, as of the last check (every
+    /// request, every path change, every register).
+    var vpnStatus: VpnStatus = .notRegistered {
+        didSet { vpnCheckedAt = Date() }
+    }
+    /// When `vpnStatus` was last read, so a check that changes nothing is
+    /// still visibly a check.
+    var vpnCheckedAt: Date?
+
+    var vpnFingerprint: VpnFingerprint? {
+        (app ?? torOnlyApp)?.vpnFingerprint()
+    }
+
+    /// "Register this VPN": capture the network as it is now, with the VPN
+    /// connected. Throws, with the reason, when no tunnel carries traffic.
+    func registerVPN(label: String) throws -> VpnFingerprint {
+        ensureRuntime()
+        guard let runtime = app ?? torOnlyApp else {
+            throw Ao3Error.Network(message: "No runtime available")
+        }
+        let fingerprint = try runtime.registerVpn(label: label)
+        VpnSettings.fingerprintJSON = runtime.vpnFingerprintJson()
+        vpnStatus = runtime.vpnStatus()
+        return fingerprint
+    }
+
+    func forgetVPN() {
+        VpnSettings.fingerprintJSON = nil
+        for runtime in [app, torOnlyApp].compactMap({ $0 }) {
+            try? runtime.setVpnFingerprintJson(json: nil)
+        }
+        vpnStatus = .notRegistered
+    }
+
+    func refreshVpnStatus() {
+        guard let runtime = app ?? torOnlyApp else { return }
+        vpnStatus = runtime.vpnStatus()
+    }
+
+    /// The system's network path changed: the core re-verifies and reports
+    /// a change through `VpnStatusChanged`; read it directly too so the
+    /// UI is right even before the event lands.
+    func networkPathChanged() {
+        guard let runtime = app ?? torOnlyApp else { return }
+        runtime.networkPathChanged()
+        if PrivacyModeSetting.current == .vpn { vpnStatus = runtime.vpnStatus() }
     }
 
     nonisolated static var dbFileExists: Bool {
@@ -112,7 +203,10 @@ final class RustBridge {
     }
 
     var launchState: LaunchState {
-        if !Self.dbFileExists { return .firstLaunch }
+        // A mock launch skips the first-launch chooser: its library is
+        // created on the spot under an auto key (open() creates a missing
+        // file), with no password and no iCloud probe.
+        if !Self.dbFileExists { return MockLaunch.isActive ? .autoUnlock : .firstLaunch }
         if !isInitialized && hasDbPassword { return .locked }
         if !isInitialized { return .autoUnlock }
         if showingRecoveryKey { return .firstLaunch }
@@ -302,11 +396,11 @@ final class RustBridge {
         let dbPath = Self.databasePath()
         lastOpenFailure = nil
         do {
-            let testApp = try Ao3App(dbPath: dbPath, dbPassphrase: password)
-            // If it opened successfully, the password is correct.
-            // We don't keep this instance — just testing.
-            _ = testApp
-            return true
+            // The key check alone: opening a whole Ao3App to test a
+            // password built a second runtime and ran the caches' load.
+            if try libraryPassphraseValid(dbPath: dbPath, passphrase: password) { return true }
+            lastOpenFailure = .wrongPassword
+            return false
         } catch {
             lastOpenFailure = Self.classifyOpenError(error)
             return false
@@ -315,7 +409,9 @@ final class RustBridge {
 
     // MARK: - Auto Key (Keychain)
 
-    static let autoKeyAccount = "ao3_auto_db_key"
+    /// The mock library has a key of its own: minting one for it must
+    /// never replace the real library's.
+    static var autoKeyAccount: String { MockLaunch.isActive ? "ao3_auto_db_key.mock" : "ao3_auto_db_key" }
 
     private static func autoKey() -> String? {
         let query: [String: Any] = [
@@ -373,12 +469,15 @@ final class RustBridge {
         registerRecoveryHooks()
     }
 
-    var hasDbPassword: Bool = UserDefaults.standard.bool(forKey: "userSetDbPassword") {
+    var hasDbPassword: Bool = UserDefaults.standard.bool(forKey: dbPasswordFlagKey) {
         didSet { Self.persistDbPasswordFlag(hasDbPassword) }
     }
 
+    /// Per library: the mock library's flag must not overwrite the real one's.
+    private static var dbPasswordFlagKey: String { MockLaunch.isActive ? "userSetDbPassword.mock" : "userSetDbPassword" }
+
     static func persistDbPasswordFlag(_ value: Bool) {
-        UserDefaults.standard.set(value, forKey: "userSetDbPassword")
+        UserDefaults.standard.set(value, forKey: dbPasswordFlagKey)
         UserDefaults.standard.synchronize()
     }
 

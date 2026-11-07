@@ -13,6 +13,7 @@ pub struct Author {
     pub bio: &'static str,
 }
 
+#[derive(Clone, Copy)]
 pub struct Work {
     pub id: u64,
     pub title: &'static str,
@@ -166,12 +167,115 @@ pub const WORKS: &[Work] = &[
            summary: "One hundred words at the lowest tide of the year.",
            published: "2026-01-02", updated: "2026-01-02", chapters: 1, total: Some(1),
            kudos: 71, hits: 980, bookmarks: 9, image_chapter: None },
+    // Appears in snapshot 1 (see PRESENCE): a new work by a followed author.
+    Work { id: 9100013, title: "The Unmapped Quarter", author: 1,
+           fandoms: &["Ninefold Bridge"], rating: "Teen And Up Audiences",
+           warnings: &["No Archive Warnings Apply"], categories: &["M/M"],
+           relationships: &["Aurel Penhallow/Cassian Reed"], characters: &["Aurel Penhallow", "Cassian Reed"],
+           tags: &["Post-Canon", "Maps", "Reconciliation"],
+           summary: "After the ninth bridge: a district nobody drew, and two people who have to.",
+           published: "2026-11-06", updated: "2026-11-06", chapters: 1, total: Some(3),
+           kudos: 12, hits: 140, bookmarks: 2, image_chapter: None },
+    // Appears in snapshot 2: a new instalment of The Saltmarsh Cycle.
+    Work { id: 9100014, title: "Neap", author: 0,
+           fandoms: &["Saltmarsh Chronicles"], rating: "General Audiences",
+           warnings: &["No Archive Warnings Apply"], categories: &["Gen"],
+           relationships: &[], characters: &["Ilse Varren", "The Harbourmaster"],
+           tags: &["Quiet", "Tides"],
+           summary: "The smallest tide of the month, and the longest conversation.",
+           published: "2026-11-20", updated: "2026-11-20", chapters: 1, total: Some(1),
+           kudos: 5, hits: 60, bookmarks: 0, image_chapter: None },
 ];
+
+// ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+//
+// The catalog has a timeline: snapshot 0 is the baseline, each later one
+// is "the archive some weeks on". Advancing the snapshot is how update
+// detection (What's New, census, gone/reappeared) gets something to find.
+
+/// What each snapshot changes, for the settings UI.
+pub const SNAPSHOT_NOTES: &[&str] = &[
+    "Baseline: 12 works, nothing has changed yet.",
+    "Salt in the Lamplight +1 chapter (8/?); Smallcraft Advisory +1 chapter (3/10); Nine Bridges date bumped with no content change (drift, must not flag); new work The Unmapped Quarter by quietcartographer; Low Water removed from the archive.",
+    "Salt in the Lamplight completes at 9/9; The Clockwork Tide gains kudos only (must not flag); new work Neap joins The Saltmarsh Cycle; Low Water is back.",
+];
+
+pub fn snapshot_count() -> u32 { SNAPSHOT_NOTES.len() as u32 }
+
+static SNAPSHOT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn snapshot() -> u32 { SNAPSHOT.load(std::sync::atomic::Ordering::Relaxed) }
+
+pub fn set_snapshot(n: u32) { SNAPSHOT.store(n.min(snapshot_count() - 1), std::sync::atomic::Ordering::Relaxed); }
+
+/// A change to one work that takes effect from `snapshot` on. Fields left
+/// None keep their earlier value; `total` is Some(None) for "?".
+pub struct Update {
+    pub id: u64,
+    pub snapshot: u32,
+    pub chapters: Option<u32>,
+    pub total: Option<Option<u32>>,
+    pub updated: Option<&'static str>,
+    pub kudos: Option<u32>,
+}
+
+pub const UPDATES: &[Update] = &[
+    Update { id: 9100002, snapshot: 1, chapters: Some(8), total: None, updated: Some("2026-11-05"), kudos: Some(640) },
+    Update { id: 9100008, snapshot: 1, chapters: Some(3), total: None, updated: Some("2026-11-04"), kudos: None },
+    Update { id: 9100004, snapshot: 1, chapters: None, total: None, updated: Some("2026-11-03"), kudos: None },
+    Update { id: 9100002, snapshot: 2, chapters: Some(9), total: Some(Some(9)), updated: Some("2026-11-19"), kudos: Some(702) },
+    Update { id: 9100001, snapshot: 2, chapters: None, total: None, updated: None, kudos: Some(1901) },
+];
+
+/// Works that are not present in every snapshot: (id, first snapshot it
+/// is in, snapshot it vanishes at, snapshot it returns at). Absent works
+/// behave as deleted: 404s, out of every listing.
+pub const PRESENCE: &[(u64, u32, Option<u32>, Option<u32>)] = &[
+    (9100012, 0, Some(1), Some(2)),
+    (9100013, 1, None, None),
+    (9100014, 2, None, None),
+];
+
+/// Is this work in the archive at the current snapshot?
+pub fn visible(idx: usize) -> bool {
+    let now = snapshot();
+    match PRESENCE.iter().find(|p| p.0 == WORKS[idx].id) {
+        None => true,
+        Some(&(_, since, gone, back)) => {
+            if now < since { return false; }
+            match (gone, back) {
+                (Some(g), Some(b)) => now < g || now >= b,
+                (Some(g), None) => now < g,
+                _ => true,
+            }
+        }
+    }
+}
+
+/// The work as it stands at the current snapshot.
+pub fn work(idx: usize) -> Work {
+    let mut w = WORKS[idx];
+    let now = snapshot();
+    for u in UPDATES.iter().filter(|u| u.id == w.id && u.snapshot <= now) {
+        if let Some(c) = u.chapters { w.chapters = c; }
+        if let Some(t) = u.total { w.total = t; }
+        if let Some(d) = u.updated { w.updated = d; }
+        if let Some(k) = u.kudos { w.kudos = k; }
+    }
+    w
+}
+
+/// Indexes of every work present at the current snapshot.
+pub fn live() -> Vec<usize> {
+    (0..WORKS.len()).filter(|&i| visible(i)).collect()
+}
 
 pub const SERIES: &[Series] = &[
     Series { id: 9200001, title: "The Saltmarsh Cycle",
              summary: "The tide, the town, and the people who keep both running.",
-             works: &[0, 1, 11] },
+             works: &[0, 1, 11, 13] },
     Series { id: 9200002, title: "Bridgework",
              summary: "Nine bridges and the orrery that charts them.",
              works: &[3, 4] },
@@ -259,8 +363,10 @@ pub fn author_index(user: &str) -> Option<usize> {
     AUTHORS.iter().position(|a| a.user.eq_ignore_ascii_case(user))
 }
 
+/// The index of a work present at the current snapshot; an absent one
+/// is None, like a deleted work on the archive.
 pub fn work_index(id: u64) -> Option<usize> {
-    WORKS.iter().position(|w| w.id == id)
+    WORKS.iter().position(|w| w.id == id).filter(|&i| visible(i))
 }
 
 pub fn series_index(id: u64) -> Option<usize> {
@@ -280,7 +386,7 @@ pub fn chapter_id(work_idx: usize, chapter: u32) -> u64 {
 pub fn chapter_from_id(id: u64) -> Option<(usize, u32)> {
     let rest = id.checked_sub(95_000_000)?;
     let (idx, n) = ((rest / 100) as usize, (rest % 100) as u32);
-    if idx < WORKS.len() && n >= 1 && n <= WORKS[idx].chapters { Some((idx, n)) } else { None }
+    if idx < WORKS.len() && visible(idx) && n >= 1 && n <= work(idx).chapters { Some((idx, n)) } else { None }
 }
 
 /// Byline as AO3 renders it: "pseud (user)" when the pseud differs.
@@ -295,16 +401,22 @@ pub fn pseud_of(a: &Author) -> &'static str {
     a.pseud.unwrap_or(a.user)
 }
 
-/// Series memberships of a work: (series index, 1-based part).
+/// A series' works present at the current snapshot, in part order.
+pub fn series_works(si: usize) -> Vec<usize> {
+    SERIES[si].works.iter().copied().filter(|&w| visible(w)).collect()
+}
+
+/// Series memberships of a work: (series index, 1-based part), numbered
+/// over the works present now (the archive renumbers around a removal).
 pub fn memberships(work_idx: usize) -> Vec<(usize, u32)> {
-    SERIES.iter().enumerate().filter_map(|(si, s)| {
-        s.works.iter().position(|&w| w == work_idx).map(|p| (si, p as u32 + 1))
+    (0..SERIES.len()).filter_map(|si| {
+        series_works(si).iter().position(|&w| w == work_idx).map(|p| (si, p as u32 + 1))
     }).collect()
 }
 
 /// A chapter's paragraphs — plain text, deterministic per (work, chapter).
 pub fn chapter_paragraphs(work_idx: usize, chapter: u32) -> Vec<&'static str> {
-    let w = &WORKS[work_idx];
+    let w = &WORKS[work_idx]; // id and tags never change across snapshots
     let mut rng = Lcg::new(w.id * 1000 + chapter as u64);
     // Drabbles stay short; serials run 6–11 paragraphs.
     let count = if w.tags.contains(&"Drabble") { 1 } else { 6 + rng.below(6) as usize };
@@ -314,7 +426,7 @@ pub fn chapter_paragraphs(work_idx: usize, chapter: u32) -> Vec<&'static str> {
 
 /// Approximate word count across all chapters, as the stats block shows.
 pub fn word_count(work_idx: usize) -> u64 {
-    (1..=WORKS[work_idx].chapters)
+    (1..=work(work_idx).chapters)
         .flat_map(|n| chapter_paragraphs(work_idx, n))
         .map(|p| p.split_whitespace().count() as u64)
         .sum()

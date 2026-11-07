@@ -117,6 +117,9 @@ extension AppState {
         // caller retries on the fresh circuit either way.
         if isRotatingCircuit {
             while isRotatingCircuit {
+                // A cancelled caller stops waiting; the rotation it was
+                // waiting on finishes on its own.
+                if Task.isCancelled { return }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
             return
@@ -130,6 +133,7 @@ extension AppState {
         // circuit those requests only end at their own timeout anyway.
         var waitedMs = 0
         while !bridge.getActiveRequests().isEmpty && waitedMs < 15_000 {
+            if Task.isCancelled { return }
             try? await Task.sleep(nanoseconds: 500_000_000)
             waitedMs += 500
         }
@@ -196,13 +200,25 @@ extension AppState {
         await resolveCloudflare()
     }
 
-    /// Whether a user action may go online now. Tor not required, or
-    /// connected: yes. A connection being built: wait for it. Otherwise
-    /// (never connected, failed, or cancelled) the app stays offline — it
-    /// never connects on its own; the user is told why the action can't
-    /// run, and chooses whether to connect.
+    /// Whether a user action may go online now. Open mode: yes. VPN mode:
+    /// yes while the registered VPN verifies (re-checked here, and again
+    /// by the core before the request itself). Tor mode: connected, yes; a
+    /// connection being built: wait for it. Otherwise (never connected,
+    /// failed, or cancelled) the app stays offline — it never connects on
+    /// its own; the user is told why the action can't run, and chooses
+    /// whether to connect.
     func ensureTorConnected() async -> Bool {
-        guard bridge.torRequired else { return true }
+        switch bridge.effectivePrivacyMode {
+        case .open:
+            return true
+        case .vpn:
+            bridge.refreshVpnStatus()
+            if !bridge.networkBlocked { return true }
+            reportNetworkDisabled()
+            return false
+        case .tor:
+            break
+        }
         while isConnectingTor || torReconnecting || isResettingTorIdentity {
             try? await Task.sleep(nanoseconds: 200_000_000)
         }

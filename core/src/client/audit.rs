@@ -81,7 +81,9 @@ impl AuditCtx {
             response_bytes,
             error,
             payload: self.payload.clone(),
-            transport: super::circuit::current_stream().map(|s| s.summary()),
+            transport: super::circuit::current_stream()
+                .map(|s| s.summary())
+                .or_else(super::privacy::transport_label),
         });
     }
 }

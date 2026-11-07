@@ -62,6 +62,14 @@ struct RequestsSettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            SettingsGroup(theme: theme, label: "Debug log") {
+                SettingsCard(theme: theme) {
+                    SettingsToggleRow(theme: theme, label: "Log every SQL statement",
+                                      sublabel: "Each library statement and its duration, tagged sql. Off makes the log much smaller and quieter.",
+                                      isOn: $theme.sqlLogging)
+                }
+            }
+
             SettingsGroup(theme: theme, label: "Log cleanup") {
                 HStack(spacing: 8) {
                     Text("Run cleanup every")
@@ -82,8 +90,12 @@ struct RequestsSettingsPane: View {
             SettingsGroup(theme: theme, label: "Mock Archive") {
                 SettingsCard(theme: theme) {
                     SettingsToggleRow(theme: theme, label: "Answer requests from the mock archive",
-                                      sublabel: "Nothing is sent to AO3 while this is on",
-                                      isOn: $theme.mockArchive)
+                                      sublabel: MockLaunch.isActive
+                                        ? "On for this session (launched with --mock-archive, own library in Application Support/ArchiveOfYourOwn/mock)"
+                                        : "Nothing is sent to AO3 while this is on",
+                                      isOn: Binding(get: { theme.mockArchive || MockLaunch.isActive },
+                                                    set: { theme.mockArchive = $0 }))
+                        .disabled(MockLaunch.isActive)
                 }
                 Text("""
                     A synthetic archive built into the core stands in for AO3: browse, search, works, \
@@ -91,6 +103,27 @@ struct RequestsSettingsPane: View {
                     bookmarks and subscriptions all work and round-trip. Fetched works enter the library like \
                     real ones, so use a test library. Tor is not needed while this is on.
                     """)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+                let notes = appState.bridge.app?.mockSiteSnapshotNotes() ?? []
+                HStack(spacing: 3) {
+                    ForEach(Array(notes.indices), id: \.self) { i in
+                        segButton("Snapshot \(i)", on: theme.mockArchiveSnapshot == i) {
+                            theme.mockArchiveSnapshot = i
+                        }
+                    }
+                }
+                .padding(3)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                if theme.mockArchiveSnapshot < notes.count {
+                    Text(notes[theme.mockArchiveSnapshot])
+                        .font(Font(MacFont.ui(11.5)))
+                        .foregroundStyle(theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Advance the snapshot, then run a What's New check: each step changes the catalog the way the archive would over a few weeks.")
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)
                     .fixedSize(horizontal: false, vertical: true)

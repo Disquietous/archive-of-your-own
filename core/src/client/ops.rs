@@ -37,9 +37,7 @@ impl AO3Client {
         }
         let url = format!("{BASE_URL}/works/search?{}", parts.join("&"));
         let html = self.fetch(&url).await?;
-        let works = parser::parse_work_listings(&html)?;
-        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_work_listing_page(&html)
     }
 
     /// Search works using AO3's search engine (/works/search).
@@ -128,9 +126,7 @@ impl AO3Client {
         let encoded_tag = ao3_tag_encode(tag);
         let url = format!("{BASE_URL}/tags/{encoded_tag}/works?page={page}");
         let html = self.fetch(&url).await?;
-        let works = parser::parse_work_listings(&html)?;
-        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_work_listing_page(&html)
     }
 
     /// Browse the public collections index (/collections?page=N), optionally
@@ -161,8 +157,7 @@ impl AO3Client {
             }
         }
         let html = self.fetch(&url).await?;
-        let collections = parser::parse_collections_page(&html)?;
-        Ok((collections, parser::has_next_page(&html), parser::total_pages(&html)))
+        parser::parse_collections_listing_page(&html)
     }
 
     /// A collection's /profile page: full metadata plus the collection's
@@ -180,9 +175,7 @@ impl AO3Client {
     pub async fn fetch_collection_works(&self, name: &str, page: u32) -> Result<(Vec<WorkSummary>, bool, u32, Option<u32>), AppError> {
         let url = format!("{BASE_URL}/collections/{}/works?page={page}", urlencoded(name));
         let html = self.fetch(&url).await?;
-        let works = parser::parse_work_listings(&html)?;
-        Ok((works, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_work_listing_page(&html)
     }
 
     /// One page of a collection's bookmarked items
@@ -193,9 +186,7 @@ impl AO3Client {
     pub async fn fetch_collection_bookmarks(&self, name: &str, page: u32) -> Result<(Vec<BookmarkListing>, bool, u32, Option<u32>), AppError> {
         let url = format!("{BASE_URL}/collections/{}/bookmarks?page={page}", urlencoded(name));
         let html = self.fetch(&url).await?;
-        let bookmarks = parser::parse_bookmark_listings(&html)?;
-        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_bookmark_listing_page(&html)
     }
 
     /// One page of AO3's bookmark search (/bookmarks/search,
@@ -233,9 +224,7 @@ impl AO3Client {
         }
         let url = format!("{BASE_URL}/bookmarks/search?{}", parts.join("&"));
         let html = self.fetch(&url).await?;
-        let bookmarks = parser::parse_bookmark_listings(&html)?;
-        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_bookmark_listing_page(&html)
     }
 
     /// Fetch a single work's metadata and all its chapters.
@@ -245,9 +234,7 @@ impl AO3Client {
     pub async fn get_work(&self, work_id: u64) -> Result<(WorkSummary, Vec<Chapter>, Vec<String>), AppError> {
         let url = format!("{BASE_URL}/works/{work_id}?view_full_work=true&view_adult=true");
         let html = self.fetch(&url).await?;
-        let (summary, chapters) = parser::parse_work_page(&html, work_id)?;
-        let kudos_names = parser::parse_kudos_usernames(&html);
-        Ok((summary, chapters, kudos_names))
+        parser::parse_work_page_with_kudos(&html, work_id)
     }
 
     // -- Inbox operations -----------------------------------------------------
@@ -341,6 +328,11 @@ impl AO3Client {
             audit.record(status.as_u16(), 0, Some(detail.clone()));
             return Err(AppError::Http { kind: FailureKind::from_status(status.as_u16(), None), detail });
         }
+        if response.content_length().is_some_and(|n| n > super::MAX_IMAGE_BYTES) {
+            let detail = format!("image too large: {} bytes declared (cap {})", response.content_length().unwrap_or(0), super::MAX_IMAGE_BYTES);
+            audit.record(status.as_u16(), 0, Some(detail.clone()));
+            return Err(AppError::Http { kind: FailureKind::Malformed, detail });
+        }
 
         let bytes = match tokio::time::timeout(timeout, response.bytes()).await {
             Err(_) => {
@@ -357,6 +349,11 @@ impl AO3Client {
             }
             Ok(Ok(b)) => b,
         };
+        if bytes.len() as u64 > super::MAX_IMAGE_BYTES {
+            let detail = format!("image too large: {} bytes (cap {})", bytes.len(), super::MAX_IMAGE_BYTES);
+            audit.record(status.as_u16(), bytes.len() as u64, Some(detail.clone()));
+            return Err(AppError::Http { kind: FailureKind::Malformed, detail });
+        }
 
         let kind = sniff_image_kind(&bytes);
         log_info!("image", "Downloaded {} bytes ({}) from {}", bytes.len(), kind, full_url);
@@ -403,9 +400,7 @@ impl AO3Client {
     ) -> Result<(Vec<crate::models::BookmarkListing>, bool, u32, Option<u32>), AppError> {
         let url = format!("{BASE_URL}/users/{username}/bookmarks?page={page}");
         let html = self.fetch(&url).await?;
-        let bookmarks = parser::parse_bookmark_listings(&html)?;
-        Ok((bookmarks, parser::has_next_page(&html), parser::total_pages(&html),
-            parser::parse_results_total(&html)))
+        parser::parse_bookmark_listing_page(&html)
     }
 
     /// One page of a user's collections (/users/{name}/collections — the
@@ -418,8 +413,7 @@ impl AO3Client {
     ) -> Result<(Vec<CollectionSummary>, bool, u32), AppError> {
         let url = format!("{BASE_URL}/users/{}/collections?page={page}", urlencoded(username));
         let html = self.fetch(&url).await?;
-        let collections = parser::parse_collections_page(&html)?;
-        Ok((collections, parser::has_next_page(&html), parser::total_pages(&html)))
+        parser::parse_collections_listing_page(&html)
     }
 
     /// Create a bookmark on AO3, mirroring the site's form exactly
@@ -760,9 +754,7 @@ impl AO3Client {
         match self.fetch(&url).await {
             Ok(html) => {
                 log_info!("http"," Success in {:?}: {} bytes from {url}", start.elapsed(), html.len());
-                let works = parser::parse_work_listings(&html)?;
-                let has_next = parser::has_next_page(&html);
-                let total = parser::total_pages(&html);
+                let (works, has_next, total, _) = parser::parse_work_listing_page(&html)?;
                 Ok((works, has_next, total))
             }
             Err(e) => {
@@ -782,9 +774,7 @@ impl AO3Client {
     ) -> Result<(Vec<WorkSummary>, bool, u32), AppError> {
         let url = format!("{BASE_URL}/series/{series_id}?page={page}");
         let html = self.fetch(&url).await?;
-        let works = parser::parse_work_listings(&html)?;
-        let has_next = parser::has_next_page(&html);
-        let total = parser::total_pages(&html);
+        let (works, has_next, total, _) = parser::parse_work_listing_page(&html)?;
         Ok((works, has_next, total))
     }
 }

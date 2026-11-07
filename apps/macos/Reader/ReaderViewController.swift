@@ -1,18 +1,15 @@
 import AppKit
 
-/// Diagnostic trail readable outside Xcode. Mirrors the [ReaderPos] NSLogs.
+/// Diagnostic trail for reading positions. Lines go to the encrypted debug
+/// log (tag "readerpos") through the sink the app installs once the
+/// library is open; with no sink they are dropped. Never a plaintext file:
+/// the trail names works and where in them the reader is.
+enum ReaderPosLog {
+    nonisolated(unsafe) static var sink: ((String) -> Void)?
+}
+
 func aoyoPosLog(_ message: String) {
-    NSLog("[ReaderPos] %@", message)
-    let line = "\(Date()) \(message)\n"
-    if let data = line.data(using: .utf8),
-       let handle = FileHandle(forWritingAtPath: "/tmp/aoyo-readerpos.log") {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        handle.closeFile()
-    } else {
-        try? (line as NSString).write(toFile: "/tmp/aoyo-readerpos.log",
-                                      atomically: false, encoding: String.Encoding.utf8.rawValue)
-    }
+    ReaderPosLog.sink?(message)
 }
 import SwiftUI
 
@@ -144,10 +141,22 @@ final class ReaderViewController: NSViewController {
 
         ObservationRelay.track { [weak self] in
             guard let self else { return }
-            // Reading settings that require re-render.
-            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.density, theme.measure,
+            // Reading settings that require re-render. Density is a list
+            // setting; the reader never reads it.
+            _ = (theme.activeTheme.id, theme.fontSize, theme.readingFont, theme.measure,
                  theme.readHyphenation, theme.readJustified, session.immersive)
-            DispatchQueue.main.async { self.renderChapter() }
+            scheduleRerender()
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(liveResizeEnded(_:)),
+                                               name: NSWindow.didEndLiveResizeNotification, object: nil)
+    }
+
+    /// The re-render a width change asks for, once the drag is over.
+    @objc private func liveResizeEnded(_ note: Notification) {
+        guard let window = note.object as? NSWindow, window === view.window else { return }
+        if rerenderAfterLiveResize {
+            rerenderAfterLiveResize = false
+            scheduleRerender()
         }
     }
 
@@ -257,6 +266,9 @@ final class ReaderViewController: NSViewController {
     /// Viewport width the current text layout was produced for; a change
     /// means the text reflowed and the anchor must be re-applied.
     var lastLayoutWidth: CGFloat = 0
+    /// A width change during a live resize wants a re-render (fixed-width
+    /// attachments); it waits for the drag to end instead of running per frame.
+    var rerenderAfterLiveResize = false
     /// Document height the anchor was last placed against. TextKit 2 keeps
     /// refining estimated heights after a reflow; when the document grows or
     /// shrinks without the user scrolling, the text has shifted under the
@@ -329,7 +341,13 @@ final class ReaderViewController: NSViewController {
         // which requires a re-render, not just a re-wrap. renderChapter is
         // anchor-preserving, so the reader stays on the same words.
         if widthChanged, currentChapterContent != nil {
-            scheduleRerender()
+            // The text re-wraps on its own during the drag; only the
+            // attachments need the rebuild, and once is enough.
+            if view.inLiveResize {
+                rerenderAfterLiveResize = true
+            } else {
+                scheduleRerender()
+            }
         }
         if anchorOffset != nil, pendingRestorePos == nil, !isLiveScrolling {
             scheduleAnchorRestore()

@@ -17,6 +17,8 @@ enum AppDestination: Hashable {
     case authorWorks(username: String, pane: AuthorProfileModel.Pane? = nil)
     case inboxThread
     case accountManagement
+    /// Settings › Privacy › Privacy mode (iOS).
+    case privacyMode
     /// Settings › Requests drill-ins (iOS).
     case routeTimeouts
     case logRetention

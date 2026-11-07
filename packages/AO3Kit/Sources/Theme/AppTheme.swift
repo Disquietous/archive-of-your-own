@@ -47,14 +47,35 @@ final class AppTheme {
     var requestTimeout: Int {
         didSet { UserDefaults.standard.set(requestTimeout, forKey: "requestTimeout") }
     }
+    /// How requests are protected (Tor, the user's VPN, or nothing). The
+    /// bridge follows the store and pushes it into the core.
+    var privacyMode: PrivacyModeSetting {
+        didSet { PrivacyModeSetting.current = privacyMode }
+    }
+    /// VPN mode: refuse requests while the VPN is not verified.
+    var vpnRequired: Bool {
+        didSet { VpnSettings.required = vpnRequired }
+    }
+    /// The pre-mode toggle, kept for screens not yet speaking in modes:
+    /// on is Tor, off is Open.
     var useTorByDefault: Bool {
-        didSet { UserDefaults.standard.set(useTorByDefault, forKey: "useTorByDefault") }
+        get { privacyMode == .tor }
+        set { privacyMode = newValue ? .tor : .open }
     }
     /// Testing tool: answer every request from the core's built-in
     /// synthetic archive instead of AO3. The bridge mirrors it into the
     /// core, which then sends nothing at all.
     var mockArchive: Bool {
         didSet { UserDefaults.standard.set(mockArchive, forKey: "mockArchive") }
+    }
+    /// Where along its timeline the mock archive sits (0 = baseline).
+    var mockArchiveSnapshot: Int {
+        didSet { UserDefaults.standard.set(mockArchiveSnapshot, forKey: "mockArchiveSnapshot") }
+    }
+    /// Diagnostics: profile every library SQL statement into the debug
+    /// log. On by default; the bridge mirrors it into the core.
+    var sqlLogging: Bool {
+        didSet { UserDefaults.standard.set(sqlLogging, forKey: "sqlLogging") }
     }
     /// Reader column width in points (desktop). Design range 560–860, default 680.
     var measure: Int {
@@ -138,8 +159,11 @@ final class AppTheme {
         fontSize = d.object(forKey: "fontSize") as? Int ?? 19
         density = Density(rawValue: d.string(forKey: "density") ?? "") ?? .regular
         requestTimeout = d.object(forKey: "requestTimeout") as? Int ?? 30
-        useTorByDefault = d.bool(forKey: "useTorByDefault")
+        privacyMode = PrivacyModeSetting.current
+        vpnRequired = VpnSettings.required
         mockArchive = d.bool(forKey: "mockArchive")
+        mockArchiveSnapshot = d.object(forKey: "mockArchiveSnapshot") as? Int ?? 0
+        sqlLogging = d.object(forKey: "sqlLogging") as? Bool ?? true
         measure = d.object(forKey: "measure") as? Int ?? 680
         uiFontScale = d.object(forKey: "uiFontScale") as? Double ?? 1.0
         readHyphenation = d.object(forKey: "readHyphenation") as? Bool ?? false

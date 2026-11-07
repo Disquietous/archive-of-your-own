@@ -59,7 +59,7 @@ final class SubscriptionWorksModel {
 
         let cached = appState.bridge.getSubscriptionWorks(subType: subType, subId: subscriptionID)
         let works = cached.map(AppState.workFromSummary)
-        for work in works { appState.fetchedWorks[work.id] = work }
+        appState.adoptFetchedWorks(works)
         self.works = works
         return changed
     }

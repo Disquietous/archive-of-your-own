@@ -235,7 +235,7 @@ final class FollowModel {
                     return .confirm(Confirmation(
                         target: target,
                         title: "Subscribe to \(target.name) on AO3?",
-                        message: "This changes your AO3 account: AO3 will notify you when \(notify). The request is sent over Tor.",
+                        message: "This changes your AO3 account: AO3 will notify you when \(notify). The request is \(appState.bridge.privacyStatus.transportPhrase).",
                         options: [ConfirmationOption(label: "Subscribe", isDestructive: false,
                                                      followed: true, subscribed: true)]))
                 }
@@ -268,7 +268,7 @@ final class FollowModel {
             return .confirm(Confirmation(
                 target: target,
                 title: "Unsubscribe from \(target.name) on AO3?",
-                message: "This changes your AO3 account: AO3 will stop notifying you about \(target.name). The request is sent over Tor.",
+                message: "This changes your AO3 account: AO3 will stop notifying you about \(target.name). The request is \(appState.bridge.privacyStatus.transportPhrase).",
                 options: [ConfirmationOption(label: "Unsubscribe", isDestructive: true,
                                              followed: false, subscribed: false)]))
         }

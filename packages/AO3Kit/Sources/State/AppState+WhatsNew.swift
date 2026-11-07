@@ -37,7 +37,7 @@ extension AppState {
         if bridge.networkBlocked {
             guard await ensureTorConnected() else {
                 isCheckingWhatsNew = false
-                checkMonitor.end(error: "Tor did not connect.")
+                checkMonitor.end(error: bridge.privacyStatus.refusalMessage)
                 return
             }
         }

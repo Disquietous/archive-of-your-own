@@ -32,8 +32,13 @@ extension ReaderViewController {
                 return
             }
 
-            // Local database cache (downloaded / recently read works).
-            let cached = appState.bridge.getCachedChapters(workId)
+            // Local database cache (downloaded / recently read works). Every
+            // chapter's text decodes here — off the main thread, since a
+            // long work is many MB of JSON. The reader may have moved on
+            // while that ran.
+            let app = appState.bridge.coreApp
+            let cached = await Task.detached { (try? app?.getCachedChapters(workId: workId)) ?? [] }.value
+            guard self.work?.id == work.id else { return }
             if !cached.isEmpty, chapterIndex < cached.count, !cached[chapterIndex].isStub {
                 appState.fetchedChapters[work.id] = cached
                 chapters = cached

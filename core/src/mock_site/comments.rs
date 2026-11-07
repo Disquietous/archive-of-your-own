@@ -19,7 +19,7 @@ pub fn locate(id: u64) -> Option<(usize, u32, u64)> {
     let rest = id.checked_sub(BASE)?;
     let (work_idx, rest) = ((rest / 100_000) as usize, rest % 100_000);
     let (chapter, slot) = ((rest / 1_000) as u32, rest % 1_000);
-    if work_idx >= WORKS.len() || chapter == 0 || chapter > WORKS[work_idx].chapters { return None; }
+    if work_idx >= WORKS.len() || !visible(work_idx) || chapter == 0 || chapter > work(work_idx).chapters { return None; }
     Some((work_idx, chapter, slot))
 }
 
@@ -30,7 +30,7 @@ fn top_count(work_idx: usize, chapter: u32) -> u64 {
 
 /// Date within the work's posting window, deterministic per slot.
 fn date_for(work_idx: usize, chapter: u32, slot: u64) -> String {
-    let w = &WORKS[work_idx];
+    let w = &work(work_idx);
     let mut rng = Lcg::new(w.id + chapter as u64 * 97 + slot * 7);
     let year: u32 = w.updated[..4].parse().unwrap_or(2025);
     let month = 1 + rng.below(12) as u32;
@@ -122,7 +122,7 @@ fn attach(threads: &mut [RenderComment], parent: u64, reply: RenderComment) -> b
 /// Every chapter's threads, in chapter order, with "on Chapter N" spans —
 /// the whole-work comments endpoint.
 pub fn work_threads(work_idx: usize, state: &MockState) -> Vec<RenderComment> {
-    let mut all: Vec<RenderComment> = (1..=WORKS[work_idx].chapters)
+    let mut all: Vec<RenderComment> = (1..=work(work_idx).chapters)
         .flat_map(|c| chapter_threads(work_idx, c, true, state))
         .collect();
     // Whole-work (chapter 0) posts have no chapter to merge under.
@@ -151,7 +151,7 @@ pub fn comment_total(work_idx: usize) -> u64 {
         threads.iter().map(|t| 1 + count(&t.replies)).sum()
     }
     let empty = MockState::default();
-    (1..=WORKS[work_idx].chapters).map(|c| count(&chapter_threads(work_idx, c, false, &empty))).sum()
+    (1..=work(work_idx).chapters).map(|c| count(&chapter_threads(work_idx, c, false, &empty))).sum()
 }
 
 /// The work and chapter a posted comment lands on, from its endpoint.

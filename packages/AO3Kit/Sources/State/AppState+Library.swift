@@ -13,7 +13,7 @@ extension AppState {
     /// Works with a saved position, most recently read first; works never
     /// stamped (read before last_read_dt existed) sink to the bottom.
     var currentlyReading: [Work] {
-        progressMap.keys
+        readingIDs
             .compactMap { work(byID: $0) }
             .sorted {
                 let a = lastReadMap[$0.id] ?? ""
@@ -136,6 +136,7 @@ extension AppState {
         // Seed library state so every section has examples.
         progressMap["baker"] = ReadingProgress(chapter: 4, pos: 1180, chapterLen: 3100)
         progressMap["olive"] = ReadingProgress(chapter: 17, pos: 4930, chapterLen: 6950)
+        readingIDs.formUnion(["baker", "olive"])
         for id in ["lamplight", "baker"] where !history.contains(id) {
             history.append(id)
         }
@@ -152,6 +153,7 @@ extension AppState {
         fetchedWorks = fetchedWorks.filter { !isSample($0.key) }
         fetchedChapters = fetchedChapters.filter { !isSample($0.key) }
         progressMap = progressMap.filter { !isSample($0.key) }
+        readingIDs = Set(progressMap.keys)
         history.removeAll(where: isSample)
         lastReadID = history.first
         bookmarkedWorkIDs = bookmarkedWorkIDs.filter { !isSample($0) }

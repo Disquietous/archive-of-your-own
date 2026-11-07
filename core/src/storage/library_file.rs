@@ -32,11 +32,40 @@ pub struct BackupMeta {
     pub source_device: String,
 }
 
+/// How many filed-away libraries are kept. Every replacement (adopting
+/// the iCloud copy, restoring a backup, a migration) files one, each a
+/// whole library, so without a cap the directory grew by the library's
+/// size per event forever. The newest stay.
+pub const MAX_BACKUPS: usize = 10;
+
+/// Delete the oldest backups past `keep` (ids are unix ms, so the id
+/// order is the age order). Best effort: a file that won't delete is
+/// skipped, never an error.
+pub fn prune_backups(state_dir: &Path, keep: usize) {
+    let dir = state_dir.join(BACKUPS_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut ids: Vec<i64> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.strip_suffix(".db")?.parse::<i64>().ok()
+        })
+        .collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    for id in ids.into_iter().skip(keep) {
+        remove_file_set(&dir.join(format!("{id}.db")));
+        let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+    }
+}
+
 /// Reserve a `Backups/<id>.db` slot (id = unix ms, bumped past any
 /// collision) and write its sidecar. Returns the id and the db path.
+/// Makes room first, so with the new one filed there are at most
+/// `MAX_BACKUPS`.
 pub fn new_backup_slot(state_dir: &Path, reason: &str, source_device: &str) -> Result<(String, PathBuf), AppError> {
     let dir = state_dir.join(BACKUPS_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| io_err("create backups dir", e))?;
+    prune_backups(state_dir, MAX_BACKUPS.saturating_sub(1));
     let mut id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -156,43 +185,7 @@ impl Storage {
     /// `app_state` (keys should carry `EMBED_PREFIX`). The live database
     /// is untouched. Returns the copy's size in bytes.
     pub fn export_copy(&self, dest: &Path, key: &str, embed: &[(&str, &str)]) -> Result<u64, AppError> {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_err("create export dir", e))?;
-        }
-        let _ = std::fs::remove_file(dest);
-        remove_sidecars(dest);
-        let dest_str = dest.to_string_lossy().to_string();
-
-        // sqlcipher_export copies tables in creation order; FK checks on
-        // the attached copy could reject a child before its parent lands.
-        self.conn.pragma_update(None, "foreign_keys", "OFF").map_err(map_sql)?;
-        let result = (|| -> Result<(), AppError> {
-            self.conn
-                .execute("ATTACH DATABASE ?1 AS export KEY ?2", params![dest_str, key])
-                .map_err(map_sql)?;
-            let inner = (|| -> Result<(), AppError> {
-                self.conn
-                    .query_row("SELECT sqlcipher_export('export')", [], |_| Ok(()))
-                    .map_err(map_sql)?;
-                for (k, v) in embed {
-                    self.conn
-                        .execute("INSERT OR REPLACE INTO export.app_state (key, value) VALUES (?1, ?2)", params![k, v])
-                        .map_err(map_sql)?;
-                }
-                self.conn
-                    .pragma_update(Some("export"), "user_version", Self::SCHEMA_VERSION)
-                    .map_err(map_sql)?;
-                Ok(())
-            })();
-            let detach = self.conn.execute_batch("DETACH DATABASE export").map_err(map_sql);
-            inner.and(detach)
-        })();
-        let fk = self.conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql);
-        result.and(fk)?;
-
-        std::fs::metadata(dest)
-            .map(|m| m.len())
-            .map_err(|e| io_err("stat export", e))
+        export_via(&self.conn, dest, key, embed)
     }
 
     /// Replace the live database with `incoming` — a file already keyed
@@ -233,8 +226,7 @@ impl Storage {
         // One atomic step: the replacement is live, the old library sits
         // where the replacement was.
         if let Err(e) = swap_files(&path, incoming) {
-            let _ = self.reopen(&path);
-            return Err(io_err("exchange library with replacement", e));
+            return Err(self.recover_after_failed_replace(&path, &path, io_err("exchange library with replacement", e)));
         }
         remove_sidecars(incoming);
         if let Err(e) = std::fs::rename(incoming, backup_dest) {
@@ -242,8 +234,7 @@ impl Storage {
             // on it rather than leave it at the staging path.
             let _ = swap_files(&path, incoming);
             remove_sidecars(&path);
-            let _ = self.reopen(&path);
-            return Err(io_err("move current library to backup", e));
+            return Err(self.recover_after_failed_replace(&path, &path, io_err("move current library to backup", e)));
         }
 
         match self.reopen(&path) {
@@ -254,8 +245,25 @@ impl Storage {
                 remove_sidecars(&path);
                 let _ = swap_files(&path, incoming);
                 remove_sidecars(&path);
-                let _ = self.reopen(&path);
-                Err(AppError::StorageError(format!("replacement library could not be opened: {e}")))
+                Err(self.recover_after_failed_replace(&path, incoming,
+                    AppError::StorageError(format!("replacement library could not be opened: {e}"))))
+            }
+        }
+    }
+
+    /// After a failed replacement: come back up on `path`. If even that
+    /// fails, the store is unusable until the app restarts — the error
+    /// says so and names where the previous library file is, instead of
+    /// leaving a silent in-memory placeholder behind the first error.
+    fn recover_after_failed_replace(&mut self, path: &Path, previous: &Path, failure: AppError) -> AppError {
+        match self.reopen(path) {
+            Ok(()) => failure,
+            Err(e) => {
+                crate::log_error!("library", "replacement failed ({failure}) and the library could not be reopened ({e}); previous library file: {}", previous.display());
+                AppError::StorageError(format!(
+                    "{failure}; the library could not be reopened afterwards ({e}) — restart the app. The previous library file is at {}",
+                    previous.display()
+                ))
             }
         }
     }
@@ -277,6 +285,51 @@ impl Storage {
         self.set_sync_mark();
         Ok(())
     }
+}
+
+/// `export_copy` on a connection of the caller's own: a second connection
+/// to the live file reads one consistent WAL snapshot, so the copy can be
+/// made without holding the store's lock for the whole copy (which
+/// stalled every other library access for as long as the file took).
+pub fn export_copy_of(db_path: &Path, passphrase: &str, dest: &Path, key: &str, embed: &[(&str, &str)]) -> Result<u64, AppError> {
+    let conn = open_closed(db_path, passphrase)?;
+    export_via(&conn, dest, key, embed)
+}
+
+fn export_via(conn: &Connection, dest: &Path, key: &str, embed: &[(&str, &str)]) -> Result<u64, AppError> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io_err("create export dir", e))?;
+    }
+    let _ = std::fs::remove_file(dest);
+    remove_sidecars(dest);
+    let dest_str = dest.to_string_lossy().to_string();
+
+    // sqlcipher_export copies tables in creation order; FK checks on
+    // the attached copy could reject a child before its parent lands.
+    conn.pragma_update(None, "foreign_keys", "OFF").map_err(map_sql)?;
+    let result = (|| -> Result<(), AppError> {
+        conn.execute("ATTACH DATABASE ?1 AS export KEY ?2", params![dest_str, key])
+            .map_err(map_sql)?;
+        let inner = (|| -> Result<(), AppError> {
+            conn.query_row("SELECT sqlcipher_export('export')", [], |_| Ok(()))
+                .map_err(map_sql)?;
+            for (k, v) in embed {
+                conn.execute("INSERT OR REPLACE INTO export.app_state (key, value) VALUES (?1, ?2)", params![k, v])
+                    .map_err(map_sql)?;
+            }
+            conn.pragma_update(Some("export"), "user_version", Storage::SCHEMA_VERSION)
+                .map_err(map_sql)?;
+            Ok(())
+        })();
+        let detach = conn.execute_batch("DETACH DATABASE export").map_err(map_sql);
+        inner.and(detach)
+    })();
+    let fk = conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql);
+    result.and(fk)?;
+
+    std::fs::metadata(dest)
+        .map(|m| m.len())
+        .map_err(|e| io_err("stat export", e))
 }
 
 // ---------------------------------------------------------------------------

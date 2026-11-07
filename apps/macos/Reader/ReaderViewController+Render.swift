@@ -51,6 +51,7 @@ extension ReaderViewController {
             // Loading, error, or no content — clear the body.
             titleLabel.stringValue = isLoading || loadError != nil ? "" : "Chapter \(chapterIndex + 1)"
             textView.textStorage?.setAttributedString(NSAttributedString())
+            textView.invalidateMeasuredHeight()
             dropCapLabel.isHidden = true
             [endRule, ornamentLabel, chapterEndActions, nextChapterButton, endNoteBig, endNoteSub,
              nextWorkButton].forEach { $0.isHidden = true }
@@ -76,7 +77,7 @@ extension ReaderViewController {
         applyDropCap(to: body, bodySize: bodySize)
         remapAnchor(toNewText: body.string)
         textView.textStorage?.setAttributedString(body)
-        textView.invalidateIntrinsicContentSize()
+        textView.invalidateMeasuredHeight()
 
         endRule.isHidden = false
         ornamentLabel.isHidden = false

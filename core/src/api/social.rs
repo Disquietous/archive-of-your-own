@@ -79,9 +79,7 @@ impl AO3App {
             persist_posting_credentials(&c, &s);
             let Some(body) = posted else { return Ok(UPostResult { posted: false, comment_json: String::new() }) };
             let page = crate::parser::parse_comments(&body).comments;
-            for comment in &page {
-                log_db("save_comment", s.save_comment(work_id, chapter_id, comment));
-            }
+            save_comments(&s, work_id, chapter_id, &page, false);
             log_db("clear_comment_draft", s.clear_comment_draft(work_id, chapter_id));
             let account = s.subscription_account().map(|a| a.username);
             Ok(posted_result(&page, account.as_deref()))
@@ -96,9 +94,7 @@ impl AO3App {
                     client.read().await.fetch_comments_for_chapter(number, chapter_id, page).await.map_err(AO3Error::from)
                 }).await?;
             let s = storage.lock().await;
-            for comment in &cp.comments {
-                log_db("save_comment", s.save_comment(work_id, chapter_id, comment));
-            }
+            save_comments(&s, work_id, chapter_id, &cp.comments, false);
             let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
             Ok(UCommentsPage {
                 comments_json: serde_json::to_string(&json_comments).unwrap_or("[]".to_string()),
@@ -116,15 +112,7 @@ impl AO3App {
                     client.read().await.fetch_comments_for_work(number, page).await.map_err(AO3Error::from)
                 }).await?;
             let s = storage.lock().await;
-            for comment in &cp.comments {
-                // Each comment lands on its chapter (the "on Chapter N"
-                // link); a chapter with no row yet gets a stub so it can
-                // carry the comment-fetch stamp later.
-                if let (Some(cid), Some(n)) = (comment.chapter_id, chapter_number(comment)) {
-                    log_db("ensure_chapter_stub", s.ensure_chapter_stub(work_id, n, Some(cid)));
-                }
-                log_db("save_comment", s.save_comment(work_id, 0, comment));
-            }
+            save_comments(&s, work_id, 0, &cp.comments, true);
             let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
             Ok(UCommentsPage {
                 comments_json: serde_json::to_string(&json_comments).unwrap_or("[]".to_string()),
@@ -279,6 +267,9 @@ impl AO3App {
             let mut all_subs = Vec::new();
             let mut seen = std::collections::HashSet::new();
             let mut page = 1u32;
+            // 20 subscriptions a page; 200 pages is 4,000 subscriptions.
+            // Past that the next-page link is a fault, not a bigger list.
+            const MAX_PAGES: u32 = 200;
             loop {
                 let username_for_fetch = username.clone();
                 let (subs, has_more) = with_recovery(
@@ -296,6 +287,10 @@ impl AO3App {
                     }
                 }
                 if !has_more { break; }
+                if page >= MAX_PAGES {
+                    log_error!("subscriptions", "subscription fetch stopped at the {MAX_PAGES}-page cap with more pages claimed");
+                    break;
+                }
                 page += 1;
             }
 
@@ -546,9 +541,7 @@ impl AO3App {
                 // Persist all comments from this page
                 {
                     let s = storage.lock().await;
-                    for comment in &comments_page.comments {
-                        log_db("save_comment", s.save_comment(work_id, 0, comment));
-                    }
+                    save_comments(&s, work_id, 0, &comments_page.comments, true);
                 }
 
                 // Check if the target is on this page
@@ -612,6 +605,29 @@ impl AO3App {
             super::works::fetch_image_cached(client, storage, &url, 0).await.map(|(bytes, _)| bytes)
         }).await
     }
+}
+
+/// Persist a page of comment trees as one transaction. A tree is many
+/// rows plus a user upsert per author; saved as autocommits that was one
+/// WAL commit per row. A comment that fails to save is logged and skipped,
+/// as before — the rest of the page still lands. `with_chapter_stubs`:
+/// whole-work pages name each comment's chapter (the "on Chapter N"
+/// link); a chapter with no row yet gets a stub so it can carry the
+/// comment-fetch stamp later.
+fn save_comments(s: &crate::storage::Storage, work_id: u64, chapter_id: u64, comments: &[Comment], with_chapter_stubs: bool) {
+    let result = (|| -> Result<(), AppError> {
+        let tx = s.begin_tx()?;
+        for comment in comments {
+            if with_chapter_stubs {
+                if let (Some(cid), Some(n)) = (comment.chapter_id, chapter_number(comment)) {
+                    log_db("ensure_chapter_stub", s.ensure_chapter_stub(work_id, n, Some(cid)));
+                }
+            }
+            log_db("save_comment", s.save_comment(work_id, chapter_id, comment));
+        }
+        tx.commit()
+    })();
+    log_db("save_comments", result);
 }
 
 /// The comment a post just created, found on the page AO3 redirected to:

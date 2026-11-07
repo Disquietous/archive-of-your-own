@@ -7,6 +7,19 @@ pub mod timefmt;
 
 static GLOBAL_LOG_DB: std::sync::OnceLock<std::sync::Mutex<rusqlite::Connection>> = std::sync::OnceLock::new();
 
+/// Whether the per-statement SQL profile hook writes rows (tag "sql").
+/// Diagnostics preference, on by default; the hook itself always stays
+/// installed so the switch takes effect without reopening the library.
+static SQL_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_sql_logging(enabled: bool) {
+    SQL_LOG.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn sql_logging_enabled() -> bool {
+    SQL_LOG.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn init_logging(db_path: &str, passphrase: &str) {
     if GLOBAL_LOG_DB.get().is_some() { return; }
     let log_path = format!("{}.log", db_path);
@@ -31,6 +44,12 @@ fn open_log_db(path: &str, passphrase: &str) -> Option<rusqlite::Connection> {
         conn.pragma_update(None, "key", passphrase).ok()?;
     }
     conn.pragma_update(None, "journal_mode", "WAL").ok()?;
+    // One row per log line, so a commit per line: at the WAL default of
+    // synchronous=FULL that was one disk flush per line (and the SQL
+    // profile hook logs every library statement). NORMAL keeps every
+    // committed line through an app crash; only an OS crash or power
+    // loss can drop the tail, which is nothing for a debug log.
+    conn.pragma_update(None, "synchronous", "NORMAL").ok()?;
     conn.busy_timeout(std::time::Duration::from_millis(5000)).ok()?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS debug_log (
@@ -112,7 +131,7 @@ pub fn log_sql(
     expanded: impl FnOnce() -> Option<String>,
     duration: std::time::Duration,
 ) {
-    if GLOBAL_LOG_DB.get().is_none() {
+    if GLOBAL_LOG_DB.get().is_none() || !sql_logging_enabled() {
         return;
     }
     const MAX_SQL_CHARS: usize = 2000;

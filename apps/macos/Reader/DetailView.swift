@@ -242,7 +242,7 @@ struct DetailView: View {
         if let session = appState.chaptersForWork(work.id) {
             chapterTitles = session.map(\.title)
         } else if let workId = UInt64(work.id) {
-            chapterTitles = appState.bridge.getCachedChapters(workId).map(\.title)
+            chapterTitles = appState.bridge.getCachedChapterTitles(workId)
         } else {
             chapterTitles = []
         }

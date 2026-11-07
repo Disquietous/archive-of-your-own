@@ -107,6 +107,14 @@ extension AppState {
         mergeCachedWorks(summaries.map(Self.workFromSummary))
     }
 
+    /// Put a batch of works into the session cache as one change. A
+    /// per-work subscript write notified every observer of `fetchedWorks`
+    /// once per work — a whole list re-render per row on an author load.
+    func adoptFetchedWorks(_ works: [Work]) {
+        guard !works.isEmpty else { return }
+        fetchedWorks.merge(works.map { ($0.id, $0) }) { _, new in new }
+    }
+
     func loadNotifications() {
         notifications = bridge.getNotifications()
         // The rows carry the read flag — counting here avoids a second

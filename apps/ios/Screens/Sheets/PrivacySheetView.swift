@@ -14,8 +14,23 @@ struct PrivacySheetView: View {
         state.bridge.torStatus == .connecting || state.isTestingCircuit || state.isResolvingCloudflare
     }
 
+    /// Tor is connected: the hops and New Identity exist only then.
     private var isPrivate: Bool {
         state.bridge.torStatus.isConnected && !isInProgress
+    }
+
+    private var privacyStatus: PrivacyStatus {
+        state.bridge.privacyStatus
+    }
+
+    private var isTorMode: Bool {
+        if case .tor = privacyStatus { return true }
+        return false
+    }
+
+    /// Requests can go out protected right now, whatever the mode.
+    private var protected: Bool {
+        privacyStatus.isProtected && !isInProgress
     }
 
     var body: some View {
@@ -112,9 +127,9 @@ struct PrivacySheetView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(isInProgress ? theme.accent2 : (isPrivate ? theme.sage : theme.ink3))
+                    .fill(isInProgress ? theme.accent2 : (protected ? theme.sage : theme.ink3))
                     .frame(width: 10, height: 10)
-                    .shadow(color: (isPrivate ? theme.sage : theme.ink3).opacity(0.4), radius: 4)
+                    .shadow(color: (protected ? theme.sage : theme.ink3).opacity(0.4), radius: 4)
 
                 Text(statusTitle)
                     .font(.custom("HankenGrotesk", size: 15).weight(.semibold))
@@ -171,6 +186,20 @@ struct PrivacySheetView: View {
                 .controlSize(.small)
                 .tint(theme.sage)
                 .frame(width: 30, height: 30)
+        } else if !isTorMode {
+            // No circuit to rotate; the shield re-checks the VPN.
+            Button {
+                state.bridge.refreshVpnStatus()
+            } label: {
+                Image(systemName: privacyStatus.icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(protected ? theme.sage : Color(hex: "CE514D"))
+                    .frame(width: 30, height: 30)
+                    .background((protected ? theme.sage : Color(hex: "CE514D")).opacity(0.12))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(IconButtonPressStyle())
+            .accessibilityLabel("Check the VPN")
         } else {
             Button {
                 if isPrivate {
@@ -211,7 +240,9 @@ struct PrivacySheetView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(Color(hex: "CE514D"))
-            Text("Tor is enabled in settings but not connected. Network requests are blocked.")
+            Text(isTorMode
+                 ? "Tor is enabled in settings but not connected. Network requests are blocked."
+                 : "\(privacyStatus.title). \(privacyStatus.subtitle) Network requests are blocked.")
                 .font(.custom("HankenGrotesk", size: 13).weight(.medium))
                 .foregroundStyle(theme.ink2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -226,6 +257,41 @@ struct PrivacySheetView: View {
 
     private var actionButtons: some View {
         VStack(spacing: 10) {
+            if isTorMode {
+                torActions
+            } else {
+                nonTorActions
+            }
+        }
+        .padding(.horizontal, theme.pad)
+    }
+
+    @ViewBuilder
+    private var nonTorActions: some View {
+        if case .vpn = privacyStatus {
+            Button {
+                state.bridge.refreshVpnStatus()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Check VPN")
+                        .font(Typography.smallButtonLabel())
+                }
+                .foregroundStyle(theme.ink)
+                .frame(maxWidth: .infinity)
+                .frame(height: 40)
+                .background(RoundedRectangle(cornerRadius: Radius.button).stroke(theme.line, lineWidth: 1))
+            }
+            .buttonStyle(ButtonPressStyle())
+        }
+        Text("Change the privacy mode in Settings › Privacy.")
+            .font(Typography.uiCaption())
+            .foregroundStyle(theme.ink3)
+    }
+
+    @ViewBuilder
+    private var torActions: some View {
             switch state.bridge.torStatus {
             case .disconnected, .error:
                 Button {
@@ -311,13 +377,12 @@ struct PrivacySheetView: View {
                 }
                 .buttonStyle(ButtonPressStyle())
             }
-        }
-        .padding(.horizontal, theme.pad)
     }
 
     // MARK: - Status
 
     private var statusTitle: String {
+        guard isTorMode else { return privacyStatus.title }
         if isInProgress { return "Connecting" }
         switch state.bridge.torStatus {
         case .connected: return "Private"
@@ -328,6 +393,7 @@ struct PrivacySheetView: View {
     }
 
     private var statusSubtitle: String {
+        guard isTorMode else { return privacyStatus.subtitle }
         if state.isTestingCircuit { return "Testing exit node… (\(state.circuitAttempt))" }
         if state.isResolvingCloudflare { return "Cloudflare…" }
         switch state.bridge.torStatus {

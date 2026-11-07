@@ -60,6 +60,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     /// and the first render happens before layout gives the table its real
     /// width — rows measured at the fallback width keep excess bottom space.
     private var lastLayoutWidth: CGFloat = 0
+    /// Measured row heights by `rowHeightKey` (everything the height depends
+    /// on: the work's text, the row's flags, density and text scale). Keyed
+    /// to one width — a width change empties it, since every row re-wraps.
+    var rowHeightCache: [Int: CGFloat] = [:]
+    var rowHeightCacheWidth: CGFloat = 0
     var isShowingSubscriptionList: Bool {
         model.section == .subscriptions
     }
@@ -129,6 +134,11 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
             barH,
         ])
         view = root
+        // A reload per live-resize frame re-measured every row; the width
+        // check in viewDidLayout skips those frames, and this catches up once
+        // the drag ends (AppKit does not promise a layout pass after it).
+        NotificationCenter.default.addObserver(self, selector: #selector(liveResizeEnded(_:)),
+                                               name: NSWindow.didEndLiveResizeNotification, object: nil)
 
         ObservationRelay.track { [weak self] in
             self?.render()
@@ -209,8 +219,20 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        reloadIfWidthChanged()
+    }
+
+    @objc private func liveResizeEnded(_ note: Notification) {
+        guard let window = note.object as? NSWindow, window === view.window else { return }
+        reloadIfWidthChanged()
+    }
+
+    /// Rows wrap to the table width, so a changed width means every height
+    /// is stale. Not during a live resize: rows keep their last measurement
+    /// through the drag and one reload follows when it ends.
+    private func reloadIfWidthChanged() {
         let width = tableView.bounds.width
-        guard width > 0, abs(width - lastLayoutWidth) > 0.5 else { return }
+        guard width > 0, abs(width - lastLayoutWidth) > 0.5, !tableView.inLiveResize else { return }
         lastLayoutWidth = width
         tableView.reloadData()
     }

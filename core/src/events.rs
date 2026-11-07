@@ -120,9 +120,13 @@ pub enum CoreEvent {
     OperationFinished { id: OpId, outcome: OpOutcome },
     ConnectionChanged { state: ConnectionState },
     DataInvalidated { scope: InvalidationScope },
-    /// A request was refused because Tor is required and not connected.
-    /// `id` is the operation it belonged to, when it ran inside one.
-    NetworkRefused { id: Option<OpId> },
+    /// A request was refused by the privacy policy before it was sent:
+    /// Tor mode without a Tor transport, or VPN mode without a verified
+    /// VPN. `id` is the operation it belonged to, when it ran inside one.
+    NetworkRefused { id: Option<OpId>, reason: crate::client::NetworkRefusal },
+    /// The registered VPN's verified state changed (a path change, a
+    /// register, or the first check after one). Only emitted on change.
+    VpnStatusChanged { status: crate::client::VpnStatus },
 }
 
 // ---------------------------------------------------------------------------

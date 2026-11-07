@@ -17,8 +17,22 @@ pub use work_page::*;
 #[cfg(test)]
 mod tests;
 
+/// A compiled selector. Parsing one is far costlier than the match it
+/// drives and the listing parsers call this per blurb, so each distinct
+/// selector string is compiled once per thread and cloned out.
 fn sel(s: &str) -> Selector {
-    Selector::parse(s).unwrap()
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<String, Selector>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with(|c| {
+        if let Some(found) = c.borrow().get(s) {
+            return found.clone();
+        }
+        let parsed = Selector::parse(s).unwrap();
+        c.borrow_mut().insert(s.to_string(), parsed.clone());
+        parsed
+    })
 }
 
 fn text(el: &ElementRef) -> String {
@@ -123,7 +137,10 @@ pub fn normalize_ao3_date(raw: &str) -> String {
 /// series pages carry it in the stats block ("Works: 12"). None when no
 /// count is present — callers must treat that as "unknown", never zero.
 pub fn parse_listing_works_total(html: &str) -> Option<u32> {
-    let doc = Html::parse_document(html);
+    listing_works_total(&Html::parse_document(html))
+}
+
+fn listing_works_total(doc: &Html) -> Option<u32> {
     let heading = sel("h2.heading");
     for el in doc.select(&heading) {
         if let Some(n) = works_total_from_heading(&text(&el)) {
@@ -152,7 +169,10 @@ fn works_total_from_heading(heading: &str) -> Option<u32> {
 /// "834 Found" in an h3 heading; tag works listings carry the
 /// "1 - 20 of 834 Works in …" h2 shape. None when neither is present.
 pub fn parse_results_total(html: &str) -> Option<u32> {
-    let doc = Html::parse_document(html);
+    results_total(&Html::parse_document(html))
+}
+
+pub(crate) fn results_total(doc: &Html) -> Option<u32> {
     let h3 = sel("h3.heading");
     for el in doc.select(&h3) {
         let t = text(&el).replace(',', "");
@@ -165,12 +185,15 @@ pub fn parse_results_total(html: &str) -> Option<u32> {
             }
         }
     }
-    parse_listing_works_total(html)
+    listing_works_total(doc)
 }
 
 /// Check whether the HTML page has a "next" pagination link.
 pub fn has_next_page(html: &str) -> bool {
-    let doc = Html::parse_document(html);
+    has_next(&Html::parse_document(html))
+}
+
+pub(crate) fn has_next(doc: &Html) -> bool {
     let next_sel1 = sel("li.next a");
     let next_sel2 = sel("a[rel='next']");
     doc.select(&next_sel1).next().is_some() || doc.select(&next_sel2).next().is_some()
@@ -179,7 +202,10 @@ pub fn has_next_page(html: &str) -> bool {
 /// Total page count from the pagination bar — the highest numbered page link.
 /// Returns 1 when the page has no pagination.
 pub fn total_pages(html: &str) -> u32 {
-    let doc = Html::parse_document(html);
+    page_count(&Html::parse_document(html))
+}
+
+pub(crate) fn page_count(doc: &Html) -> u32 {
     let s = sel("ol.pagination a");
     doc.select(&s)
         .filter_map(|a| text(&a).trim().parse::<u32>().ok())

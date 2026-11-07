@@ -84,7 +84,7 @@ struct AccountSection: View {
         VStack(spacing: 8) {
             if appState.bridge.networkBlocked {
                 SettingsCard(theme: theme) {
-                    SettingsInfoRow(theme: theme, label: "Sign in", value: "Connect to Tor first")
+                    SettingsInfoRow(theme: theme, label: "Sign in", value: appState.bridge.privacyStatus.connectHint)
                 }
             } else {
                 credentialsFields(buttonLabel: "Log In") {
@@ -102,7 +102,7 @@ struct AccountSection: View {
         VStack(spacing: 8) {
             if appState.bridge.networkBlocked {
                 SettingsCard(theme: theme) {
-                    SettingsInfoRow(theme: theme, label: "Log in", value: "Connect to Tor first")
+                    SettingsInfoRow(theme: theme, label: "Log in", value: appState.bridge.privacyStatus.connectHint)
                 }
             } else {
                 SecureField("Password for \(appState.ao3ActiveAccount ?? "account")", text: $password)

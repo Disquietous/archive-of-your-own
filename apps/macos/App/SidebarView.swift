@@ -156,9 +156,9 @@ struct SidebarView: View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
                 Circle()
-                    .fill(torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3)
+                    .fill(protected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3)
                     .frame(width: 8, height: 8)
-                    .shadow(color: (torConnected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3).opacity(0.4), radius: 3)
+                    .shadow(color: (protected ? theme.sage : torConnecting ? theme.accent2 : theme.ink3).opacity(0.4), radius: 3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(identityLine)
                         .font(Font(MacFont.ui(12.5, weight: .bold)))
@@ -173,7 +173,7 @@ struct SidebarView: View {
             .padding(.vertical, 8)
             .background((torConnecting
                 ? theme.accent2.opacity(hubHover ? 0.18 : 0.1)
-                : theme.sage.opacity(torConnected ? (hubHover ? 0.2 : 0.12) : (hubHover ? 0.14 : 0.07))))
+                : theme.sage.opacity(protected ? (hubHover ? 0.2 : 0.12) : (hubHover ? 0.14 : 0.07))))
             .clipShape(RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9)
                 .stroke(theme.line.opacity(hubHover ? 1 : 0), lineWidth: 1))
@@ -265,9 +265,9 @@ struct SidebarView: View {
                 }
             }
         } else {
-            // With Tor required the core sends nothing until Tor connects,
-            // so there is no connection at all — not a direct one.
-            Text(theme.useTorByDefault ? "Not connected" : "Direct connection")
+            // Tor mode without a connection sends nothing, so that reads
+            // "not connected"; the VPN and open modes say what they are.
+            Text(appState.bridge.privacyStatus.title)
                 .font(Font(MacFont.ui(11)))
                 .foregroundStyle(theme.ink3)
         }
@@ -380,11 +380,11 @@ struct SidebarView: View {
                     privacyShown = true
                 }
             } label: {
-                Image(systemName: torConnected ? "checkmark.shield" : "xmark.shield")
+                Image(systemName: appState.bridge.privacyStatus.icon)
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(torConnected ? theme.sage : Color(hex: "CE514D"))
+                    .foregroundStyle(protected ? theme.sage : Color(hex: "CE514D"))
                     .frame(width: 26, height: 26)
-                    .background((torConnected ? theme.sage : Color(hex: "CE514D"))
+                    .background((protected ? theme.sage : Color(hex: "CE514D"))
                         .opacity(shieldHover ? 0.15 : 0))
                     .clipShape(Circle())
                     .contentShape(Circle())
@@ -404,9 +404,7 @@ struct SidebarView: View {
     /// ate the first click on the shield — the circuit only rotated on the
     /// second try.
     private var shieldBalloon: some View {
-        Text(torConnected
-             ? "Private connection — click to request new relay nodes"
-             : "Public connection — traffic is not routed through relays. Click to connect.")
+        Text(shieldBalloonText)
             .font(Font(MacFont.ui(11.5)))
             .foregroundStyle(theme.ink)
             .fixedSize(horizontal: false, vertical: true)
@@ -436,6 +434,27 @@ struct SidebarView: View {
 
     private var identityNeedsAttention: Bool {
         appState.needsReauth
+    }
+
+    private var shieldBalloonText: String {
+        switch appState.bridge.privacyStatus {
+        case .tor(let status):
+            return status.isConnected
+                ? "Private connection — click to request new relay nodes"
+                : "Public connection — traffic is not routed through relays. Click to connect."
+        case .vpn(let status, let label):
+            let name = label ?? "your VPN"
+            return status == .matched
+                ? "Private connection through \(name)."
+                : "\(name) is not carrying your traffic. Nothing is sent until it is."
+        case .open:
+            return "Public connection — your address is visible to AO3 and your network."
+        }
+    }
+
+    /// Requests can go out protected right now, whatever the mode.
+    private var protected: Bool {
+        appState.bridge.privacyStatus.isProtected
     }
 
     private var torConnected: Bool {

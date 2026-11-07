@@ -34,15 +34,16 @@ extension AppState {
         if bridge.networkBlocked {
             let connected = await ensureTorConnected()
             if !connected {
-                throw Ao3Error.Network(message: "Tor connection failed. Try again or disable Tor in Settings.")
+                throw Ao3Error.Network(message: bridge.privacyStatus.refusalMessage + " Try again, or change the privacy mode in Settings.")
             }
         }
         // Mark a user-initiated fetch in flight — the subscription checker
         // yields between its items while this counter is non-zero.
-        await MainActor.run { activeUserFetches += 1 }
-        defer {
-            Task { @MainActor in self.activeUserFetches -= 1 }
-        }
+        // AppState is main-actor isolated, so both edges are immediate: the
+        // decrement used to hop through a Task and land a turn late, long
+        // enough for the checker to see a fetch that had already finished.
+        activeUserFetches += 1
+        defer { activeUserFetches -= 1 }
         task.reset()
         do {
             return try await operation()
@@ -52,10 +53,8 @@ extension AppState {
             // has already purged the cached token; surface the manual
             // sign-in prompt and stop.
             if error.isSessionExpired || error.isPasswordNeeded {
-                await MainActor.run {
-                    needsReauth = true
-                    refreshAO3Username()
-                }
+                needsReauth = true
+                refreshAO3Username()
                 throw Ao3Error.Network(message: "Session expired. Please sign in again.")
             }
             throw error

@@ -135,6 +135,11 @@ extension RustBridge {
         (try? app?.getCachedChapters(workId: workId)) ?? []
     }
 
+    /// Titles only — no chapter text is decoded.
+    func getCachedChapterTitles(_ workId: UInt64) -> [String] {
+        (try? app?.getCachedChapterTitles(workId: workId)) ?? []
+    }
+
     // MARK: - Bookmarks
 
     func addBookmark(_ workId: UInt64, note: String? = nil, syncToAo3: Bool = false) {
@@ -233,7 +238,12 @@ extension RustBridge {
 
     nonisolated static func databasePath() -> String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = dir.appendingPathComponent("ArchiveOfYourOwn", isDirectory: true)
+        var appDir = dir.appendingPathComponent("ArchiveOfYourOwn", isDirectory: true)
+        // A mock-archive launch lives in its own folder: everything derived
+        // from this path (instance lock, Tor state, backups, logs) follows.
+        if MockLaunch.isActive {
+            appDir = appDir.appendingPathComponent("mock", isDirectory: true)
+        }
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("library.db").path
     }

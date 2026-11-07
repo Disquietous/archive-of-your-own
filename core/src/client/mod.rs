@@ -13,15 +13,18 @@ mod circuit;
 mod failure;
 mod helpers;
 mod ops;
+pub mod privacy;
 pub mod routes;
 #[cfg(feature = "tor")]
 mod socks;
+mod vpn;
 
 pub use audit::{ActiveRequest, ActiveRequestGuard, RequestRecord, active_requests_snapshot,
                 drain_request_records, now_ms, push_request_record, redact_payload};
 pub use circuit::{CircuitHopInfo, StreamInfo, current_circuit_hops, current_stream};
 pub use failure::FailureKind;
 pub use helpers::sniff_image_kind;
+pub use privacy::{NetworkRefusal, PrivacyMode, VpnFingerprint, VpnStatus};
 
 use audit::AuditCtx;
 use helpers::scan_attr_near;
@@ -36,6 +39,14 @@ pub fn kill_socks_streams() {}
 pub fn live_socks_streams() -> usize { 0 }
 
 pub const BASE_URL: &str = "https://archiveofourown.org";
+
+/// Largest page body the client will buffer. The biggest real AO3 pages
+/// (a long work with view_full_work) run a few MB; past this the body is
+/// not a page the parsers could use, and buffering it unbounded is the
+/// only way a hostile or broken response could exhaust memory.
+pub const MAX_PAGE_BYTES: u64 = 24 * 1024 * 1024;
+/// Largest image body the client will buffer.
+pub const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Cookies that prove an AO3 login: `remember_user_token` (what AO3 sets
 /// now) and the older `user_credentials`. `_otwarchive_session` is issued to
@@ -127,25 +138,20 @@ pub struct AO3Client {
     socks_proxy_task: Option<tokio::task::AbortHandle>,
 }
 
-/// Whether the user requires Tor. While set, a client without a Tor
-/// transport sends nothing: every request fails with `NetworkDisabled`
-/// instead of falling through to a direct connection. Process-wide (not
-/// per client) so no client swap — connect, rotation, reconnect, lock
-/// hand-off — can ever carry a stale copy. Starts set: until the app says
-/// otherwise, fail closed.
-static TOR_REQUIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
+/// Compatibility shim over the privacy mode (`privacy.rs`): "Tor required"
+/// is the Tor mode, "not required" the Open one. Kept for the bridge until
+/// Swift speaks in modes.
 pub fn set_tor_required(required: bool) {
-    TOR_REQUIRED.store(required, std::sync::atomic::Ordering::Relaxed);
+    privacy::set_privacy_mode(if required { PrivacyMode::Tor } else { PrivacyMode::Open });
 }
 
 pub fn tor_required() -> bool {
-    TOR_REQUIRED.load(std::sync::atomic::Ordering::Relaxed)
+    privacy::privacy_mode() == PrivacyMode::Tor
 }
 
 impl AO3Client {
     /// The underlying reqwest client of the active transport — the single
-    /// choke point every request passes, and so where the Tor requirement
+    /// choke point every request passes, and so where the privacy policy
     /// is enforced.
     fn http(&self) -> Result<&reqwest::Client, AppError> {
         // The mock archive answers every request before it gets here; a
@@ -155,9 +161,20 @@ impl AO3Client {
             log_info!("network", "Refused request: mock archive is enabled and does not serve this path");
             return Err(AppError::NetworkDisabled);
         }
-        if tor_required() && !self.is_tor() {
-            log_info!("network", "Refused request: Tor is required and not connected");
-            crate::events::emit(crate::events::CoreEvent::NetworkRefused { id: crate::events::current_op() });
+        if let Err(reason) = privacy::gate(self.is_tor()) {
+            match &reason {
+                NetworkRefusal::TorNotConnected => {
+                    log_info!("network", "Refused request: Tor is required and not connected");
+                }
+                NetworkRefusal::VpnNotVerified { status } => {
+                    log_info!("network", "Refused request: VPN not verified ({status:?})");
+                }
+                NetworkRefusal::MockUnserved => {}
+            }
+            crate::events::emit(crate::events::CoreEvent::NetworkRefused {
+                id: crate::events::current_op(),
+                reason,
+            });
             return Err(AppError::NetworkDisabled);
         }
         Ok(match &self.transport {
@@ -354,7 +371,7 @@ impl AO3Client {
         }
         if crate::mock_site::enabled() {
             progress!(crate::events::OpPhase::Connecting, 0, None);
-            let reply = crate::mock_site::respond_get(url, ajax);
+            let reply = crate::mock_site::respond_get(url, ajax, &self.get_session_cookies());
             let len = reply.body.len() as u64;
             if reply.status >= 400 {
                 progress!(crate::events::OpPhase::Failed, 0, None);
@@ -471,6 +488,12 @@ impl AO3Client {
             // Phase 2: Read body in chunks with idle timeout per chunk
             let total_bytes = response.content_length();
             progress!(crate::events::OpPhase::Downloading, 0, total_bytes);
+            if total_bytes.is_some_and(|n| n > MAX_PAGE_BYTES) {
+                progress!(crate::events::OpPhase::Failed, 0, total_bytes);
+                let detail = format!("response too large: {} bytes declared (cap {MAX_PAGE_BYTES})", total_bytes.unwrap_or(0));
+                audit.record(code, 0, Some(detail.clone()));
+                return Err(AppError::Http { kind: FailureKind::Malformed, detail });
+            }
 
             let mut bytes_received: u64 = 0;
             let mut body_bytes = Vec::new();
@@ -494,6 +517,12 @@ impl AO3Client {
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(chunk))) => {
                         bytes_received += chunk.len() as u64;
+                        if bytes_received > MAX_PAGE_BYTES {
+                            progress!(crate::events::OpPhase::Failed, bytes_received, total_bytes);
+                            let detail = format!("response too large: over {MAX_PAGE_BYTES} bytes");
+                            audit.record(code, bytes_received, Some(detail.clone()));
+                            return Err(AppError::Http { kind: FailureKind::Malformed, detail });
+                        }
                         body_bytes.extend_from_slice(&chunk);
                         progress!(crate::events::OpPhase::Downloading, bytes_received, total_bytes);
                     }

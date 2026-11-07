@@ -272,7 +272,7 @@ private struct ProtectLibraryForm: View {
     @State private var password = ""
     @State private var confirmPassword = ""
     @State private var error: String?
-    @State private var useTor = UserDefaults.standard.bool(forKey: "useTorByDefault")
+    @State private var useTor = PrivacyModeSetting.current == .tor
 
     private var subtitle: String {
         switch source {
@@ -307,7 +307,7 @@ private struct ProtectLibraryForm: View {
             .padding(.top, 16)
             .padding(.horizontal, 32)
             .onChange(of: useTor) { _, newValue in
-                UserDefaults.standard.set(newValue, forKey: "useTorByDefault")
+                PrivacyModeSetting.current = newValue ? .tor : .open
             }
 
             VStack(spacing: 12) {

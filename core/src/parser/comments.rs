@@ -201,13 +201,19 @@ fn find_comment_mut(comments: &mut [Comment], id: u64) -> Option<&mut Comment> {
 }
 
 fn build_comment_tree(flat: Vec<(Comment, Option<u64>)>) -> Vec<Comment> {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
-    let ids: Vec<u64> = flat.iter().map(|(c, _)| c.id).collect();
+    let mut ids: HashSet<u64> = HashSet::with_capacity(flat.len());
     let mut comments_map: HashMap<u64, Comment> = HashMap::new();
     let mut parent_map: Vec<(u64, Option<u64>)> = Vec::new();
 
     for (c, parent_id) in flat {
+        // The same comment can appear twice on one page (a thread shown
+        // both inline and under "show replies"); keep the first, so the
+        // map and the order list agree and the take below can't miss.
+        if !ids.insert(c.id) {
+            continue;
+        }
         parent_map.push((c.id, parent_id));
         comments_map.insert(c.id, c);
     }
@@ -217,7 +223,7 @@ fn build_comment_tree(flat: Vec<(Comment, Option<u64>)>) -> Vec<Comment> {
     let mut top_level = Vec::new();
 
     for &(id, parent_id) in parent_map.iter().rev() {
-        let mut comment = comments_map.remove(&id).unwrap();
+        let Some(mut comment) = comments_map.remove(&id) else { continue };
         if let Some(children) = children_map.remove(&id) {
             comment.replies = children;
             comment.replies.reverse();

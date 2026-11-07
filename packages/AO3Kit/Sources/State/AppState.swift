@@ -54,6 +54,11 @@ final class AppState {
     var downloadedWorkIDs: Set<String> = []
     var history: [String] = []
     var progressMap: [String: ReadingProgress] = [:]
+    /// The works in `progressMap` — Currently Reading's membership, kept
+    /// apart from the positions so a position tick (every debounced scroll
+    /// while reading) doesn't invalidate the list and the sidebar count.
+    /// Maintained wherever `progressMap` is written.
+    var readingIDs: Set<String> = []
     /// works.last_read_dt per work ("YYYY-MM-DD HH:MM:SS" UTC, sortable) —
     /// stamped on every chapter open; Currently Reading sorts by it.
     var lastReadMap: [String: String] = [:]
@@ -452,6 +457,7 @@ final class AppState {
         for p in progressEntries {
             progressMap[String(p.workId)] = ReadingProgress(chapter: Int(p.chapter), pos: Int(p.position), chapterLen: Int(p.chapterLen))
         }
+        readingIDs = Set(progressMap.keys)
 
         // Last-read datetimes (Currently Reading sort)
         lastReadMap = Dictionary(uniqueKeysWithValues:
@@ -596,7 +602,7 @@ final class AppState {
             case .WrongPassword:
                 return "Wrong password."
             case .NetworkDisabled:
-                return "Tor isn’t connected, so nothing was sent."
+                return PrivacyModeSetting.current.refusalMessage
             }
         }
         return error.localizedDescription

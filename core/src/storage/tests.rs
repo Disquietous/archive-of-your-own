@@ -2067,8 +2067,13 @@ fn test_migration_v25_to_v26() {
     }
 
     let db = Storage::open(&path_str, "").unwrap();
-    assert_eq!(db.schema_version().unwrap(), 26);
     assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+    // v27 rode along: the work_id indexes on the join tables.
+    for idx in ["idx_work_authors_work", "idx_history_work", "idx_reading_list_items_work"] {
+        let n: u32 = db.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1", [idx], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "{idx} missing after migration");
+    }
 
     // The snapshot was filed under Backups/ beside the library.
     let backups: Vec<String> = std::fs::read_dir(dir.join("Backups")).unwrap()
@@ -3534,4 +3539,24 @@ fn migrate_real_library_copy() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn chapter_char_len_is_stored_and_backfilled() {
+    let db = Storage::open_in_memory("").unwrap();
+    let id = db.save_work(&sample_work(7)).unwrap();
+    let chapter = sample_chapter(1);
+    db.save_chapter(id, &chapter).unwrap();
+    let expected = library::content_char_len(&chapter.content);
+    assert!(expected > 0);
+    assert_eq!(db.chapter_char_len(id, 1), expected);
+    // A row from before v28 has no length; the first read measures and stores it.
+    db.conn.execute("UPDATE chapters SET char_len = NULL WHERE work_id = ?1", [id as i64]).unwrap();
+    assert_eq!(db.chapter_char_len(id, 1), expected);
+    let stored: Option<i64> = db.conn
+        .query_row("SELECT char_len FROM chapters WHERE work_id = ?1 AND number = 1", [id as i64], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, Some(expected as i64));
+    assert_eq!(db.chapter_char_len(id, 2), 0);
+    assert_eq!(db.get_chapter_titles(id).unwrap(), vec!["Chapter 1".to_string()]);
 }

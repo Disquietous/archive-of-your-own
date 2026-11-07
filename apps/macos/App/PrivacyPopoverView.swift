@@ -59,17 +59,18 @@ struct PrivacyPopoverView: View {
                     .fill(theme.sage.opacity(0.15))
                     .frame(width: 34, height: 34)
                     .overlay {
-                        Image(systemName: connected ? "checkmark.shield" : "shield")
+                        Image(systemName: protected ? "checkmark.shield" : privacyStatus.icon)
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(connected ? theme.sage : theme.ink3)
+                            .foregroundStyle(protected ? theme.sage : theme.ink3)
                     }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(connected ? "Connected through Tor" : "Not connected")
+                    Text(privacyStatus.title)
                         .font(Font(MacFont.ui(14, weight: .bold)))
                         .foregroundStyle(theme.ink)
                     Text(connectionSubtitle)
                         .font(Font(MacFont.ui(11.5)))
                         .foregroundStyle(theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.bottom, connected ? 0 : 10)
@@ -99,31 +100,45 @@ struct PrivacyPopoverView: View {
                 .padding(.vertical, 10)
             }
 
-            Button {
-                if connected {
-                    dismiss()
-                    appState.newTorIdentity()
-                } else {
-                    Task { await appState.connectTorNow() }
+            switch privacyStatus {
+            case .tor:
+                connectionButton(connected ? "New Identity" : "Connect") {
+                    if connected {
+                        dismiss()
+                        appState.newTorIdentity()
+                    } else {
+                        Task { await appState.connectTorNow() }
+                    }
                 }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(connected ? "New Identity" : "Connect")
-                        .font(Font(MacFont.ui(13, weight: .bold)))
+            case .vpn:
+                connectionButton("Check VPN") {
+                    appState.bridge.refreshVpnStatus()
                 }
-                .foregroundStyle(theme.ink)
-                .frame(maxWidth: .infinity, minHeight: 34)
-                .background(theme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+            case .open:
+                EmptyView()
             }
-            .buttonStyle(.plain)
         }
     }
 
+    private func connectionButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(label)
+                    .font(Font(MacFont.ui(13, weight: .bold)))
+            }
+            .foregroundStyle(theme.ink)
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background(theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+
     private var connectionSubtitle: String {
+        guard case .tor = privacyStatus else { return privacyStatus.subtitle }
         if connected { return "3-hop circuit · new identity available" }
         if appState.isTestingCircuit { return "Testing circuit \(appState.circuitAttempt)…" }
         if appState.isResolvingCloudflare { return "Resolving challenge…" }
@@ -181,7 +196,7 @@ struct PrivacyPopoverView: View {
                 .kerning(0.6)
                 .foregroundStyle(theme.ink3)
             if appState.bridge.networkBlocked {
-                Text("Connect to Tor to sign in.")
+                Text("\(privacyStatus.connectHint) to sign in.")
                     .font(Font(MacFont.ui(12)))
                     .foregroundStyle(theme.ink3)
             } else {
@@ -215,9 +230,9 @@ struct PrivacyPopoverView: View {
                     .foregroundStyle(theme.ink)
             }
             if appState.bridge.networkBlocked {
-                // Same invariant as sign-in: with Tor required, credentials
-                // never travel before a circuit is up.
-                Text("Connect to Tor above to sign back in.")
+                // Same invariant as sign-in: credentials never travel
+                // before the connection is protected.
+                Text("\(privacyStatus.connectHint) to sign back in.")
                     .font(Font(MacFont.ui(12)))
                     .foregroundStyle(theme.ink3)
             } else {
@@ -259,7 +274,21 @@ struct PrivacyPopoverView: View {
         VStack(spacing: 0) {
             toggleRow("Hide explicit content", isOn: $model.hideExplicit)
             divider
-            toggleRow("New circuit on launch", isOn: $theme.useTorByDefault)
+            HStack(spacing: 12) {
+                Text("Privacy: \(theme.privacyMode.title)")
+                    .font(Font(MacFont.ui(13, weight: .medium)))
+                    .foregroundStyle(theme.ink)
+                Spacer()
+                Button("Change…") {
+                    dismiss()
+                    model.settingsTabRequest = "Privacy"
+                    model.goSection(.settings)
+                }
+                .buttonStyle(.plain)
+                .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                .foregroundStyle(theme.accent)
+            }
+            .padding(.vertical, 9)
         }
     }
 
@@ -298,7 +327,16 @@ struct PrivacyPopoverView: View {
         }
     }
 
+    /// Tor is connected (the hops and New Identity exist only then).
     private var connected: Bool {
         appState.torStatus.isConnected
+    }
+
+    private var privacyStatus: PrivacyStatus {
+        appState.bridge.privacyStatus
+    }
+
+    private var protected: Bool {
+        privacyStatus.isProtected
     }
 }

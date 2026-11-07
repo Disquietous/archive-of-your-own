@@ -159,19 +159,67 @@ extension ListPaneViewController {
         // table is mid-tiling), and the sizing cell computes identical layout.
         let work = works[row]
         let width = max(320, tableView.bounds.width)
+        let isNew = model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id)
+        let isRemoved = appState.goneWorkIDs.contains(work.id)
+        let finished = appState.finishedWorkIDs.contains(work.id)
+        let summaryExpanded = expandedSummaries.contains(work.id)
+        let tagsExpanded = expandedTags.contains(work.id)
+        // Measuring is a full cell configure (TextKit layout of the summary
+        // and tags), and a reload asks for every row's height. Keyed on
+        // everything the height depends on, so a changed work, flag, density
+        // or text scale measures again and nothing else does.
+        if rowHeightCacheWidth != width {
+            rowHeightCache.removeAll(keepingCapacity: true)
+            rowHeightCacheWidth = width
+        }
+        let key = rowHeightKey(for: work, isNew: isNew, isRemoved: isRemoved, finished: finished,
+                               summaryExpanded: summaryExpanded, tagsExpanded: tagsExpanded)
+        if let cached = rowHeightCache[key] { return cached }
         sizingCell.configure(with: work,
                              progress: model.appState.progress(for: work),
                              downloaded: appState.downloadedWorkIDs.contains(work.id),
                              selected: false,
-                             isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
-                             isRemoved: appState.goneWorkIDs.contains(work.id),
-                             finished: appState.finishedWorkIDs.contains(work.id),
-                             summaryExpanded: expandedSummaries.contains(work.id),
-                             tagsExpanded: expandedTags.contains(work.id),
+                             isNew: isNew,
+                             isRemoved: isRemoved,
+                             finished: finished,
+                             summaryExpanded: summaryExpanded,
+                             tagsExpanded: tagsExpanded,
                              availableTextWidth: max(100, width - 45))
         sizingCell.frame = NSRect(x: 0, y: 0, width: width, height: 10_000)
         sizingCell.layoutSubtreeIfNeeded()
-        return max(52, sizingCell.fittingSize.height)
+        let height = max(52, sizingCell.fittingSize.height)
+        if rowHeightCache.count > 4096 { rowHeightCache.removeAll(keepingCapacity: true) }
+        rowHeightCache[key] = height
+        return height
+    }
+
+    /// Everything `WorkRowCellView.configure` lays text out from. Not the
+    /// whole `Work` hash: that would walk cached chapter content per row.
+    private func rowHeightKey(for work: Work, isNew: Bool, isRemoved: Bool, finished: Bool,
+                              summaryExpanded: Bool, tagsExpanded: Bool) -> Int {
+        var h = Hasher()
+        h.combine(work.id)
+        h.combine(work.title)
+        h.combine(work.author)
+        h.combine(work.fandomList)
+        h.combine(work.summary)
+        h.combine(work.tags)
+        h.combine(work.rating)
+        h.combine(work.published)
+        h.combine(work.updated)
+        h.combine(work.chapterCount)
+        h.combine(work.totalChapters)
+        h.combine(work.complete)
+        h.combine(work.words)
+        h.combine(work.kudos)
+        h.combine(isNew)
+        h.combine(isRemoved)
+        h.combine(finished)
+        h.combine(summaryExpanded)
+        h.combine(tagsExpanded)
+        h.combine(theme.density.rawValue)
+        h.combine(MacFont.scale)
+        return h.finalize()
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {

@@ -66,10 +66,14 @@ struct SettingsView: View {
     var mockArchiveGroup: some View {
         settingsGroup(title: "Mock Archive") {
             ToggleRowView(isOn: Binding(
-                get: { theme.mockArchive },
+                get: { theme.mockArchive || MockLaunch.isActive },
                 set: { theme.mockArchive = $0 }
             )) {
                 settingsLabel(icon: "shippingbox", title: "Answer requests from the mock archive")
+            }
+            .disabled(MockLaunch.isActive)
+            if MockLaunch.isActive {
+                settingsCaption("On for this session: launched with --mock-archive, using its own library.")
             }
             settingsCaption("""
                 A synthetic archive built into the core stands in for AO3: browse, search, works, comments, \
@@ -77,6 +81,24 @@ struct SettingsView: View {
                 subscriptions all work and round-trip. Nothing is sent to AO3 while this is on, and Tor is not \
                 needed. Fetched works enter the library like real ones, so use a test library.
                 """)
+
+            divider
+
+            let notes = state.bridge.app?.mockSiteSnapshotNotes() ?? []
+            VStack(alignment: .leading, spacing: 8) {
+                settingsLabel(icon: "clock.arrow.2.circlepath", title: "Catalog snapshot")
+                SegmentedControlView(
+                    selection: Binding(
+                        get: { theme.mockArchiveSnapshot },
+                        set: { theme.mockArchiveSnapshot = $0 }),
+                    items: notes.indices.map { (key: $0, label: "\($0)") }
+                )
+                if theme.mockArchiveSnapshot < notes.count {
+                    settingsCaption(notes[theme.mockArchiveSnapshot])
+                }
+                settingsCaption("Advance the snapshot, then run a What's New check: each step changes the catalog the way the archive would over a few weeks.")
+            }
+            .padding(.vertical, 4)
         }
     }
 

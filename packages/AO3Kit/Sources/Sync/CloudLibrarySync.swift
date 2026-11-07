@@ -130,6 +130,11 @@ final class CloudLibrarySync {
     /// Bind to the app state (idempotent) and start if the user has sync on.
     func attach(_ state: AppState) {
         appState = state
+        if MockLaunch.isActive {
+            // A mock session must never push its library to iCloud.
+            status = .unavailable("Sync is off in mock-archive mode.")
+            return
+        }
         if deviceName.isEmpty { deviceName = Self.defaultDeviceName() }
         let bridge = state.bridge
         NSLog("[sync] attach: initialized=%d", bridge.isInitialized ? 1 : 0)
@@ -146,6 +151,10 @@ final class CloudLibrarySync {
     /// Turn sync on or off for this device. Enabling on a device that finds
     /// no key in iCloud Keychain and no cloud copy mints the shared key.
     func setEnabled(_ on: Bool) {
+        guard !MockLaunch.isActive else {
+            status = .unavailable("Sync is off in mock-archive mode.")
+            return
+        }
         guard let bridge = appState?.bridge, bridge.isInitialized else {
             NSLog("[sync] setEnabled(%d) skipped: appState=%d", on ? 1 : 0, appState != nil ? 1 : 0)
             return

@@ -371,18 +371,25 @@ impl Storage {
             // search form's default state runs it with no criteria.
             self.get_all_works()?
         } else {
+            // Match on the cached entity and hydrate only the survivors:
+            // hydrating is a summary clone plus the tag-name vectors, and
+            // this runs per keystroke over the whole library. Fandoms,
+            // characters and relationships are tags on the entity, so one
+            // pass over its tag refs covers all four name lists.
             let contains = |s: &str| s.to_ascii_lowercase().contains(&needle);
-            self.get_all_works()?
+            self.works_cache
+                .all()
                 .into_iter()
-                .filter(|w| {
+                .filter(|e| {
+                    let w = &e.summary;
                     contains(&w.title)
                         || w.authors.iter().any(|a| contains(a))
                         || contains(&w.summary)
-                        || w.fandoms.iter().any(|t| contains(t))
-                        || w.characters.iter().any(|t| contains(t))
-                        || w.relationships.iter().any(|t| contains(t))
-                        || w.tags.iter().any(|t| contains(t))
+                        || e.tags.iter().any(|t| {
+                            self.tag_cache.get(t.tag_id).is_some_and(|tag| contains(&tag.name[..]))
+                        })
                 })
+                .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
                 .collect()
         };
         out.sort_by(|a, b| {
@@ -693,18 +700,20 @@ impl Storage {
     /// stub) keeps its comment-fetch stamp.
     pub fn save_chapter(&self, work_id: u64, chapter: &Chapter) -> Result<(), AppError> {
         let content_json = serde_json::to_string(&chapter.content).map_err(map_json)?;
+        let char_len = super::library::content_char_len(&chapter.content) as i64;
         self.conn
             .execute(
                 "INSERT INTO chapters
                     (work_id, number, chapter_id, title, content_json,
-                     notes_before, notes_after)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     notes_before, notes_after, char_len)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT (work_id, number) DO UPDATE SET
                      chapter_id = excluded.chapter_id,
                      title = excluded.title,
                      content_json = excluded.content_json,
                      notes_before = excluded.notes_before,
-                     notes_after = excluded.notes_after",
+                     notes_after = excluded.notes_after,
+                     char_len = excluded.char_len",
                 params![
                     work_id as i64,
                     chapter.number as i64,
@@ -713,6 +722,7 @@ impl Storage {
                     content_json,
                     chapter.notes_before,
                     chapter.notes_after,
+                    char_len,
                 ],
             )
             .map_err(map_sql)?;
@@ -896,7 +906,8 @@ impl Storage {
             [],
         ).map_err(map_sql)?;
         self.conn.execute(
-            &format!("UPDATE chapters SET content_json = '[]', notes_before = NULL, notes_after = NULL
+            &format!("UPDATE chapters SET content_json = '[]', notes_before = NULL, notes_after = NULL,
+                             char_len = 0
                       WHERE content_json != '[]' AND {NOT_RETAINED}"),
             [],
         ).map_err(map_sql)?;

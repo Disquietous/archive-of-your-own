@@ -11,6 +11,10 @@ struct PrivacySettingsPane: View {
     @State private var showPasswordSheet = false
     @State private var showRemoveConfirm = false
     @State private var chapterCleanupRan = false
+    @State private var confirmOpen = false
+    @State private var confirmVpnOptional = false
+    @State private var vpnLabel = "NordVPN"
+    @State private var vpnError: String?
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
@@ -86,30 +90,36 @@ struct PrivacySettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            SettingsGroup(theme: theme, label: "Tor") {
-                SettingsCard(theme: theme) {
-                    SettingsToggleRow(theme: theme, label: "Connect via Tor on launch",
-                                      sublabel: "Require a circuit before any network request",
-                                      isOn: $theme.useTorByDefault)
-                    theme.line.frame(height: 1)
-                    SettingsInfoRow(theme: theme, label: "Status", value: appState.torStatus.displayText)
+            SettingsGroup(theme: theme, label: "Privacy") {
+                HStack(spacing: 3) {
+                    privacyModeButton(mode: .tor)
+                    privacyModeButton(mode: .vpn)
+                    privacyModeButton(mode: .open)
                 }
-                Button {
-                    Task { await appState.connectTor() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text(appState.torStatus.isConnected ? "New circuit" : "Connect")
-                            .font(Font(MacFont.ui(13.5, weight: .bold)))
-                    }
-                    .foregroundStyle(theme.ink)
-                    .frame(maxWidth: .infinity, minHeight: 38)
-                    .background(theme.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+                .padding(3)
+                .background(theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                Text(privacyModeCaption)
+                    .font(Font(MacFont.ui(11.5)))
+                    .foregroundStyle(theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+                switch theme.privacyMode {
+                case .tor: torCard
+                case .vpn: vpnCard
+                case .open: EmptyView()
                 }
-                .buttonStyle(.plain)
+            }
+            .alert("Turn off protection?", isPresented: $confirmOpen) {
+                Button("Turn Off", role: .destructive) { applyMode(.open) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("AO3, its edge network, and whoever runs your network will see your address directly. Everything stored on this Mac stays encrypted.")
+            }
+            .alert("Send without the VPN?", isPresented: $confirmVpnOptional) {
+                Button("Allow", role: .destructive) { theme.vpnRequired = false }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Requests will go out even when your VPN is off or unrecognised. The status is still shown, but nothing is blocked.")
             }
 
             SettingsGroup(theme: theme, label: "Storage") {
@@ -183,6 +193,162 @@ struct PrivacySettingsPane: View {
                 .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Privacy mode
+
+    private func privacyModeButton(mode: PrivacyModeSetting) -> some View {
+        let on = theme.privacyMode == mode
+        return Button {
+            selectMode(mode)
+        } label: {
+            Text(mode.title)
+                .font(Font(MacFont.ui(12.5, weight: .semibold)))
+                .foregroundStyle(on ? theme.ink : theme.ink3)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(on ? theme.surface : .clear)
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The trust statement for each mode: what protects you and who you
+    /// are trusting. Deliberately even-handed between Tor and a VPN.
+    private var privacyModeCaption: String {
+        switch theme.privacyMode {
+        case .tor:
+            return "Your traffic passes through three relays run by volunteers. No single relay sees both who you are and what you read, but the relays are run by strangers: the first sees your address, the last sees that someone is reading AO3. Slower, and AO3’s edge sometimes challenges it."
+        case .vpn:
+            return "All your traffic goes through one company you pay. It sees your address and that you read AO3; the protection is its no-logs promise and audits. Fast, and rarely challenged. This app checks the VPN before every request. Turn on the kill switch in your VPN app too, so nothing on this Mac sends traffic in the moment the VPN drops."
+        case .open:
+            return "AO3, its edge network, and whoever runs your network see your address directly. Everything stored on this Mac is still encrypted."
+        }
+    }
+
+    private func selectMode(_ mode: PrivacyModeSetting) {
+        guard mode != theme.privacyMode else { return }
+        if mode == .open {
+            confirmOpen = true
+        } else {
+            applyMode(mode)
+        }
+    }
+
+    /// Leaving Tor mode drops the Tor transport, so requests in the new
+    /// mode really do go out directly rather than riding the old circuit.
+    private func applyMode(_ mode: PrivacyModeSetting) {
+        let leavingTor = theme.privacyMode == .tor && mode != .tor
+        theme.privacyMode = mode
+        vpnError = nil
+        if leavingTor && appState.torStatus.isConnected {
+            Task { await appState.bridge.disconnectTor() }
+        }
+        if mode == .vpn {
+            appState.bridge.refreshVpnStatus()
+        }
+    }
+
+    private var torCard: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            SettingsCard(theme: theme) {
+                SettingsInfoRow(theme: theme, label: "Status", value: appState.torStatus.displayText)
+            }
+            Button {
+                Task { await appState.connectTor() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(appState.torStatus.isConnected ? "New circuit" : "Connect")
+                        .font(Font(MacFont.ui(13.5, weight: .bold)))
+                }
+                .foregroundStyle(theme.ink)
+                .frame(maxWidth: .infinity, minHeight: 38)
+                .background(theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var vpnCard: some View {
+        let status = appState.bridge.privacyStatus
+        let fingerprint = appState.bridge.vpnFingerprint
+        return VStack(alignment: .leading, spacing: 9) {
+            SettingsCard(theme: theme) {
+                if let fingerprint {
+                    SettingsInfoRow(theme: theme, label: "Registered",
+                                    value: "\(fingerprint.label) · \(fingerprint.tunnelKind) tunnel")
+                    theme.line.frame(height: 1)
+                    SettingsInfoRow(theme: theme, label: "Status",
+                                    value: status.titleWithCheck(at: appState.bridge.vpnCheckedAt))
+                    theme.line.frame(height: 1)
+                    SettingsToggleRow(theme: theme, label: "Block requests when my VPN is off",
+                                      sublabel: "Off: requests go out anyway; the status is still shown",
+                                      isOn: vpnRequiredBinding)
+                } else {
+                    HStack(spacing: 12) {
+                        Text("Name")
+                            .font(Font(MacFont.ui(13.5, weight: .medium)))
+                            .foregroundStyle(theme.ink)
+                        TextField("NordVPN", text: $vpnLabel)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .padding(.vertical, 9)
+                }
+            }
+            if let fingerprint {
+                HStack(spacing: 8) {
+                    ghostButton("Check Now", tint: theme.ink) {
+                        appState.bridge.refreshVpnStatus()
+                    }
+                    ghostButton("Update", tint: theme.ink) {
+                        registerVPN(label: fingerprint.label)
+                    }
+                    ghostButton("Forget", tint: Color(hex: "CE514D")) {
+                        appState.bridge.forgetVPN()
+                        vpnError = nil
+                    }
+                }
+            } else {
+                ghostButton("Register Current VPN", tint: theme.ink) {
+                    registerVPN(label: vpnLabel)
+                }
+            }
+            if let vpnError {
+                Text(vpnError)
+                    .font(Font(MacFont.ui(11.5, weight: .medium)))
+                    .foregroundStyle(Color(hex: "CE514D"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(fingerprint == nil
+                 ? "Connect the VPN first, then register it. The app remembers how the tunnel looks (its resolvers and address range), never the interface name, and checks for it before every request."
+                 : status.subtitle)
+                .font(Font(MacFont.ui(11.5)))
+                .foregroundStyle(theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Switching the block off is confirmed; switching it on is immediate.
+    private var vpnRequiredBinding: Binding<Bool> {
+        Binding(
+            get: { theme.vpnRequired },
+            set: { on in
+                if on { theme.vpnRequired = true } else { confirmVpnOptional = true }
+            }
+        )
+    }
+
+    private func registerVPN(label: String) {
+        do {
+            _ = try appState.bridge.registerVPN(label: label)
+            vpnError = nil
+        } catch {
+            vpnError = AppState.readableError(error)
+        }
     }
 
     private func ghostButton(_ label: String, tint: Color, action: @escaping () -> Void) -> some View {

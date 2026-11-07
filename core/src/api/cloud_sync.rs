@@ -155,11 +155,18 @@ fn backups_dir_in(state_dir: &Path) -> PathBuf {
     state_dir.join(BACKUPS_DIR)
 }
 
-/// The sidecar as written, or defaults when absent. Never mints.
-fn read_sync_state(state_dir: &Path) -> SyncState {
-    match std::fs::read(sidecar_path(state_dir)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => SyncState::default(),
+/// The sidecar as written, or defaults when absent. Never mints. A file
+/// that exists but won't parse is an error, not defaults: defaults have
+/// no device id, a fresh one would be minted, and this device would then
+/// see its own iCloud copy as foreign and offer to overwrite its library.
+fn read_sync_state(state_dir: &Path) -> Result<SyncState, AO3Error> {
+    let path = sidecar_path(state_dir);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| storage_err(format!(
+            "the sync state file is unreadable ({e}); sync is paused until it is repaired or removed: {}",
+            path.display()
+        ))),
+        Err(_) => Ok(SyncState::default()),
     }
 }
 
@@ -259,7 +266,7 @@ impl AO3App {
 
     /// Load the sidecar, minting a device id on first use.
     fn sync_state(&self, storage: &Storage) -> Result<SyncState, AO3Error> {
-        let mut state = read_sync_state(self.state_path());
+        let mut state = read_sync_state(self.state_path())?;
         if state.device_id.is_empty() {
             state.device_id = storage.random_hex(16).map_err(AO3Error::from)?;
             self.write_sync_state(&state)?;
@@ -358,7 +365,7 @@ pub fn library_bootstrap_from_cloud(
     std::fs::rename(&staged, &db_path).map_err(|e| io_err("move iCloud copy into place", e))?;
     library_file::remove_file_set(&staged);
 
-    let mut state = read_sync_state(&state_dir);
+    let mut state = read_sync_state(&state_dir)?;
     if state.device_id.is_empty() {
         let conn = library_file::open_closed(&db_path, &passphrase).map_err(AO3Error::from)?;
         state.device_id = random_hex_from(&conn)?;
@@ -398,7 +405,7 @@ pub fn library_bootstrap_from_backup(db_path: String, id: String, passphrase: St
         library_file::remove_file_set(&incoming);
         return Err(io_err("move backup copy into place", e));
     }
-    let mut state = read_sync_state(&state_dir);
+    let mut state = read_sync_state(&state_dir)?;
     if sidecar_path(&state_dir).exists() {
         state.last_pushed_generation = 0;
         state.last_push_at = 0;
@@ -411,8 +418,9 @@ pub fn library_bootstrap_from_backup(db_path: String, id: String, passphrase: St
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`. The
-// export and adopt calls hold the storage lock for the whole file copy;
-// the transport calls them off the main thread.
+// adopt call holds the storage lock for the whole file swap; the export
+// takes the lock only to move the sync mark and copies the file on a
+// connection of its own. The transport calls both off the main thread.
 #[uniffi::export]
 impl AO3App {
     pub fn cloud_sync_status(&self) -> Result<UCloudSyncStatus, AO3Error> {
@@ -469,11 +477,22 @@ impl AO3App {
     /// pushed until `cloud_sync_mark_pushed` — a failed upload must not
     /// claim ownership.
     pub fn cloud_sync_export(&self, staging_path: String, cloud_key: String, device_name: String) -> Result<UCloudExport, AO3Error> {
-        let mut s = self.storage.blocking_lock();
-        let mut state = self.sync_state(&s)?;
-        // Writes up to here are in this copy; any after it count again.
-        // The storage lock is held throughout, so nothing lands between.
-        self.note_unsynced_changes(&mut s, &mut state)?;
+        let (db_path, passphrase, state) = {
+            let mut s = self.storage.blocking_lock();
+            let mut state = self.sync_state(&s)?;
+            self.note_unsynced_changes(&mut s, &mut state)?;
+            // The mark moves before the copy is taken, and the copy is a
+            // WAL snapshot on its own connection: a write that lands while
+            // the file is being copied is counted again (one spare push at
+            // worst), never missed. Taking the mark after the copy, under
+            // the lock, was exact — and stalled every library access for
+            // as long as the copy took.
+            s.set_sync_mark();
+            let db_path = s.db_path()
+                .ok_or_else(|| storage_err("an in-memory library can't be exported"))?
+                .to_string();
+            (db_path, s.passphrase().to_string(), state)
+        };
         let generation = state.known_cloud_generation.max(state.last_pushed_generation) + 1;
         let written_at = now_ms();
         let gen_s = generation.to_string();
@@ -485,10 +504,9 @@ impl AO3App {
             (format!("{EMBED_PREFIX}written_at"), at_s),
         ];
         let embed_refs: Vec<(&str, &str)> = embed.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let db_size = s
-            .export_copy(Path::new(&staging_path), &cloud_key, &embed_refs)
-            .map_err(AO3Error::from)?;
-        s.set_sync_mark();
+        let db_size = library_file::export_copy_of(
+            Path::new(&db_path), &passphrase, Path::new(&staging_path), &cloud_key, &embed_refs,
+        ).map_err(AO3Error::from)?;
         let manifest = UCloudManifest {
             format: MANIFEST_FORMAT,
             device_id: state.device_id,
@@ -535,6 +553,12 @@ impl AO3App {
         let (id, backup_path) = self.new_backup_slot("Before using the iCloud copy", "")?;
         if let Err(e) = s.replace_with(&staged, &backup_path) {
             let _ = std::fs::remove_file(self.backups_dir().join(format!("{id}.json")));
+            // The staged copy was re-keyed to the local passphrase above;
+            // put it back under the cloud key so the next attempt's check
+            // can still read it instead of failing on the key.
+            if let Err(back) = library_file::rekey_file(&staged, s.passphrase(), &cloud_key) {
+                log_info!("sync", "could not restore the staged copy's key after a failed adopt: {back}");
+            }
             return Err(AO3Error::from(e));
         }
         self.library_searches.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -672,7 +696,7 @@ mod bootstrap_tests {
         let store = Storage::open(db_path.to_str().unwrap(), "local-pass").unwrap();
         assert_eq!(store.get_state("who").unwrap().as_deref(), Some("cloud"));
         drop(store);
-        let state = read_sync_state(&dir);
+        let state = read_sync_state(&dir).unwrap();
         assert!(state.enabled);
         assert!(!state.device_id.is_empty());
         assert_eq!(state.last_pushed_generation, 7);
@@ -739,7 +763,7 @@ mod bootstrap_tests {
         assert_eq!(store.get_state("who").unwrap().as_deref(), Some("backup"));
         drop(store);
         assert!(backup_db.exists(), "the backup itself stays");
-        let state = read_sync_state(&dir);
+        let state = read_sync_state(&dir).unwrap();
         assert_eq!(state.device_id, "dev");
         assert!(state.enabled);
         assert_eq!(state.last_pushed_generation, 0, "restored library is a new lineage");
@@ -753,5 +777,32 @@ mod bootstrap_tests {
         assert_eq!(m.device_name, "Phone");
         assert_eq!(m.generation, 2);
         assert!(cloud_manifest_parse("{".into()).is_err());
+    }
+
+    #[test]
+    fn corrupt_sidecar_is_an_error_not_a_fresh_device() {
+        let dir = fresh_dir("sidecar");
+        std::fs::write(sidecar_path(&dir), b"{not json").unwrap();
+        let err = read_sync_state(&dir).unwrap_err();
+        assert!(format!("{err:?}").contains("sync state file"), "{err:?}");
+        std::fs::remove_file(sidecar_path(&dir)).unwrap();
+        assert!(read_sync_state(&dir).unwrap().device_id.is_empty());
+    }
+
+    #[test]
+    fn backups_are_capped_at_the_newest() {
+        let dir = fresh_dir("prune");
+        let backups = backups_dir_in(&dir);
+        std::fs::create_dir_all(&backups).unwrap();
+        for id in 1000..1000 + library_file::MAX_BACKUPS as i64 + 3 {
+            std::fs::write(backups.join(format!("{id}.db")), b"x").unwrap();
+            std::fs::write(backups.join(format!("{id}.json")), b"{}").unwrap();
+        }
+        let (_, slot) = library_file::new_backup_slot(&dir, "test", "").unwrap();
+        std::fs::write(&slot, b"x").unwrap();
+        let listed = list_backups_in(&dir);
+        assert_eq!(listed.len(), library_file::MAX_BACKUPS);
+        assert!(listed.iter().all(|b| b.id != "1000" && b.id != "1001" && b.id != "1002"), "oldest pruned");
+        assert!(backups.join(format!("{}.db", 1000 + library_file::MAX_BACKUPS as i64 + 2)).exists());
     }
 }

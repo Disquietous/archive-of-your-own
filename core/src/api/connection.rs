@@ -277,6 +277,76 @@ impl AO3App {
         crate::client::set_tor_required(required);
     }
 
+    // -- Privacy policy ----------------------------------------------------
+    //
+    // The rule every request passes: nothing goes to AO3 unprotected unless
+    // the user chose Open. Tor is the app's own tunnel; Vpn is the user's,
+    // verified by local inspection (`client::vpn`) before every request.
+    // Process-wide, pushed by the app at launch and on every change.
+
+    pub fn set_privacy_mode(&self, mode: crate::client::PrivacyMode) {
+        crate::client::privacy::set_privacy_mode(mode);
+    }
+
+    pub fn privacy_mode(&self) -> crate::client::PrivacyMode {
+        crate::client::privacy::privacy_mode()
+    }
+
+    /// Whether VPN mode refuses requests while the VPN is not verified.
+    /// Off: VPN mode sends like Open and the status is informational.
+    pub fn set_vpn_required(&self, required: bool) {
+        crate::client::privacy::set_vpn_required(required);
+    }
+
+    pub fn vpn_required(&self) -> bool {
+        crate::client::privacy::vpn_required()
+    }
+
+    /// Install the fingerprint the app persisted (device-local, outside the
+    /// synced library), as `vpn_fingerprint_json` produced it. None clears.
+    pub fn set_vpn_fingerprint_json(&self, json: Option<String>) -> Result<(), AO3Error> {
+        let fp = match json {
+            Some(j) => Some(serde_json::from_str(&j).map_err(|e| AO3Error::Network {
+                message: format!("Saved VPN details could not be read: {e}"),
+            })?),
+            None => None,
+        };
+        crate::client::privacy::set_vpn_fingerprint(fp);
+        Ok(())
+    }
+
+    pub fn vpn_fingerprint(&self) -> Option<crate::client::VpnFingerprint> {
+        crate::client::privacy::vpn_fingerprint()
+    }
+
+    pub fn vpn_fingerprint_json(&self) -> Option<String> {
+        crate::client::privacy::vpn_fingerprint().and_then(|fp| serde_json::to_string(&fp).ok())
+    }
+
+    /// "Register this VPN": capture the network as it is now, with the VPN
+    /// connected, and make it the registered fingerprint. Fails if the
+    /// default route is not a tunnel, so nothing is ever registered from an
+    /// unprotected connection.
+    pub fn register_vpn(&self, label: String) -> Result<crate::client::VpnFingerprint, AO3Error> {
+        let fp = crate::client::privacy::register_vpn(&label)?;
+        self.network_path_changed();
+        Ok(fp)
+    }
+
+    /// The registered VPN's state right now.
+    pub fn vpn_status(&self) -> crate::client::VpnStatus {
+        crate::client::privacy::vpn_status()
+    }
+
+    /// The system's network path changed (the app's path monitor fired):
+    /// re-verify the VPN and tell observers if its state moved.
+    pub fn network_path_changed(&self) {
+        let (status, changed) = crate::client::privacy::refresh_vpn_status();
+        if changed {
+            crate::events::emit(crate::events::CoreEvent::VpnStatusChanged { status });
+        }
+    }
+
     /// Answer every request from the built-in synthetic archive instead of
     /// AO3 — a testing tool for when the archive is unreachable. While on,
     /// nothing is sent to the network at all (a request the mock has no
@@ -290,6 +360,36 @@ impl AO3App {
 
     pub fn mock_site_enabled(&self) -> bool {
         crate::mock_site::enabled()
+    }
+
+    /// Whether every library SQL statement is profiled into the debug log
+    /// (tag "sql"). On by default; a diagnostics preference, process-wide.
+    pub fn set_sql_logging(&self, enabled: bool) {
+        crate::set_sql_logging(enabled);
+    }
+
+    pub fn sql_logging_enabled(&self) -> bool {
+        crate::sql_logging_enabled()
+    }
+
+    /// Move the mock archive along its timeline. Snapshot 0 is the
+    /// baseline; each later one changes the catalog (chapters added, a
+    /// work removed or returned, a new work, date drift) so update
+    /// detection has something to find. Clamped to the last snapshot;
+    /// the session's login and actions are kept.
+    pub fn set_mock_site_snapshot(&self, snapshot: u32) {
+        crate::mock_site::data::set_snapshot(snapshot);
+        log_info!("mock", "Mock archive snapshot {} — {}", crate::mock_site::data::snapshot(),
+                  crate::mock_site::data::SNAPSHOT_NOTES[crate::mock_site::data::snapshot() as usize]);
+    }
+
+    pub fn mock_site_snapshot(&self) -> u32 {
+        crate::mock_site::data::snapshot()
+    }
+
+    /// One line per snapshot describing what changed, index = snapshot.
+    pub fn mock_site_snapshot_notes(&self) -> Vec<String> {
+        crate::mock_site::data::SNAPSHOT_NOTES.iter().map(|s| s.to_string()).collect()
     }
 
     pub async fn new_circuit(&self) -> Result<(), AO3Error> {

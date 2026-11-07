@@ -340,7 +340,7 @@ extension ListPaneViewController {
     }
 
     private func subtitleForNetworkList(count: Int, loading: Bool) -> String {
-        if appState.bridge.networkBlocked { return "Tor required — not connected" }
+        if appState.bridge.networkBlocked { return appState.bridge.privacyStatus.title }
         if loading && count == 0 { return "Loading…" }
         if let error = appState.searchError, count == 0 { return error }
         return "\(count) works"
@@ -350,9 +350,10 @@ extension ListPaneViewController {
                                 emptyIcon: String, emptyTitle: String, emptyMessage: String) -> AnyView? {
         guard works.isEmpty else { return nil }
         if appState.bridge.networkBlocked {
+            let status = appState.bridge.privacyStatus
             return AnyView(EmptyStateMac(theme: theme, icon: "shield.lefthalf.filled",
-                                         title: "Waiting for Tor",
-                                         message: "Tor is required in your settings but not connected. Connect from the sidebar's privacy pill."))
+                                         title: status.title,
+                                         message: status.subtitle + " Open the sidebar's privacy pill for details."))
         }
         if loading {
             return AnyView(LoadingStateMac(theme: theme, message: loadingMessage,
