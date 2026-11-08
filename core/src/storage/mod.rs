@@ -4,7 +4,7 @@
 //     #[error("Storage error: {0}")]
 //     StorageError(String),
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use crate::error::AppError;
 use crate::models::Rating;
@@ -28,6 +28,8 @@ pub use fields_cache::FieldEntity;
 mod series_cache;
 mod state_cache;
 mod tag_cache;
+mod users;
+pub use users::{UserProperty, UserRecord};
 mod users_cache;
 mod works;
 mod works_cache;
@@ -85,7 +87,7 @@ pub struct Storage {
     /// The collections (+ join tables) mirror — same contract
     /// (see collections_cache.rs). Tag names hydrate from `tag_cache`.
     collections_cache: CollectionsCache,
-    /// The ao3_users mirror — same contract (see users_cache.rs).
+    /// The users + user_source_properties mirror — same contract (see users_cache.rs).
     users_cache: UsersCache,
     /// The series mirror — same contract (see series_cache.rs).
     series_cache: SeriesCache,
@@ -312,7 +314,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 28;
+    pub(crate) const SCHEMA_VERSION: u32 = 31;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -354,6 +356,11 @@ impl Storage {
                 version = next;
                 continue;
             }
+            if next == 31 {
+                self.run_v31()?;
+                version = next;
+                continue;
+            }
             let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
             let step = match next {
                 2 => self.migrate_v2(),
@@ -387,6 +394,8 @@ impl Storage {
                 26 => unreachable!("v26 runs through run_v26"),
                 27 => self.migrate_v27_work_indexes(),
                 28 => self.migrate_v28_chapter_char_len(),
+                29 => self.migrate_v29_comment_rating(),
+                30 => self.migrate_v30_user_extra(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -412,6 +421,23 @@ impl Storage {
             self.migrate_v26().map_err(|e| migration_failed(26, e))?;
             tx.pragma_update(None, PRAGMA_USER_VERSION, 26).map_err(map_sql)?;
             tx.commit().map_err(|e| migration_failed(26, e))
+        })();
+        let fk = self.conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql);
+        result.and(fk)
+    }
+
+    /// v31 rebuilds the users tables (design/users-model-plan.md): like
+    /// v26 it needs the foreign-key pragma off — `comments.author_id`
+    /// cascades on delete, and dropping the old table would otherwise
+    /// delete every comment — and a snapshot of the library first.
+    fn run_v31(&self) -> Result<(), AppError> {
+        self.snapshot_before_migration(31)?;
+        self.conn.pragma_update(None, "foreign_keys", "OFF").map_err(map_sql)?;
+        let result = (|| -> Result<(), AppError> {
+            let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+            self.migrate_v31_users().map_err(|e| migration_failed(31, e))?;
+            tx.pragma_update(None, PRAGMA_USER_VERSION, 31).map_err(map_sql)?;
+            tx.commit().map_err(|e| migration_failed(31, e))
         })();
         let fk = self.conn.pragma_update(None, "foreign_keys", "ON").map_err(map_sql);
         result.and(fk)
@@ -704,6 +730,305 @@ impl Storage {
         if has == 0 {
             self.conn
                 .execute("ALTER TABLE chapters ADD COLUMN char_len INTEGER", [])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    /// v29 — `comments.rating`: the stars a review carries on a rated
+    /// source (multi-source Area 12). NULL for plain comments.
+    /// v31 (design/users-model-plan.md): `ao3_users` becomes `users`
+    /// (identity only: source, source id, name, timestamps) plus
+    /// `user_source_properties` (everything else, under the source's own
+    /// property names, filed in the `fields` registry with entity "user");
+    /// `work_authors` and `series_authors` link works and series to user
+    /// rows by id. Row ids are preserved, so comments.author_id and the
+    /// author follows keep pointing at the same people.
+    fn migrate_v31_users(&self) -> Result<(), AppError> {
+        let c = &self.conn;
+        // Each step guards on the schema's shape, so a library partly in
+        // the v31 shape (a resumed migration, or a test that rewinds the
+        // version over a current schema) rebuilds only what is missing.
+        // fields: add the entity dimension (rebuild — the unique key changes).
+        if !self.column_exists("fields", "entity")? {
+        c.execute_batch(
+            "CREATE TABLE fields_v31 (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                source        TEXT NOT NULL,
+                entity        TEXT NOT NULL DEFAULT 'work' CHECK (entity IN ('work', 'user')),
+                key           TEXT NOT NULL,
+                label         TEXT NOT NULL,
+                value_type    TEXT NOT NULL CHECK (value_type IN ('num', 'text')),
+                display_order INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (source, entity, key)
+             );
+             INSERT INTO fields_v31 (id, source, entity, key, label, value_type, display_order)
+                 SELECT id, source, 'work', key, label, value_type, display_order FROM fields;
+             DROP TABLE fields;
+             ALTER TABLE fields_v31 RENAME TO fields;",
+        ).map_err(|e| AppError::StorageError(format!("v31 fields rebuild: {e}")))?;
+        }
+
+        // Two test-only shapes can carry both tables: a re-run over a
+        // current schema recreates an empty `ao3_users` on the way back up
+        // (the stray is dropped), and a legacy fixture laid over a current
+        // schema leaves an empty v31 `users` beside a populated `ao3_users`
+        // (the legacy table is the authority and the v31 tables are
+        // rebuilt). A real library only ever has one of them.
+        let legacy = self.table_exists("ao3_users")?;
+        let modern = self.column_exists("users", "source_id")?;
+        let legacy_rows: i64 = if legacy {
+            c.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).map_err(map_sql)?
+        } else { 0 };
+        if legacy && modern && legacy_rows == 0 {
+            c.execute_batch("DROP TABLE ao3_users;")
+                .map_err(|e| AppError::StorageError(format!("v31 stray ao3_users: {e}")))?;
+        } else if legacy {
+        if modern {
+            c.execute_batch(
+                "DROP TRIGGER IF EXISTS follows_cascade_user;
+                 DROP TABLE IF EXISTS user_source_properties;
+                 DROP TABLE users;",
+            ).map_err(|e| AppError::StorageError(format!("v31 stale users tables: {e}")))?;
+        }
+        // users: identity rows, same ids as ao3_users. The rename first
+        // carries every reference (comments FK, follow triggers) over to
+        // the new name; the rebuild then narrows the columns.
+        c.execute_batch(
+            "ALTER TABLE ao3_users RENAME TO users;
+             CREATE TABLE users_v31 (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                source     TEXT NOT NULL,
+                source_id  TEXT NOT NULL COLLATE NOCASE,
+                username   TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (source, source_id)
+             );
+             INSERT INTO users_v31 (id, source, source_id, username, created_at, updated_at)
+                 SELECT id, source, external_id, username, updated_at, updated_at FROM users;
+             CREATE TABLE user_source_properties (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                field_id       INTEGER NOT NULL REFERENCES fields(id) ON DELETE CASCADE,
+                property_name  TEXT NOT NULL,
+                property_value TEXT NOT NULL,
+                created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (user_id, field_id)
+             );
+             CREATE INDEX idx_user_props_user ON user_source_properties (user_id);",
+        ).map_err(|e| AppError::StorageError(format!("v31 users copy: {e}")))?;
+
+        // Old columns → properties under each source's own names. The
+        // registry rows come first so every property has its field.
+        let props: [(&str, &str, &str, &str); 18] = [
+            // (old column expression, ao3 name, label, type)
+            ("url", "profile_url", "Profile", "text"),
+            ("avatar_url", "avatar_url", "Icon", "text"),
+            ("numeric_id", "numeric_id", "User id", "text"),
+            ("joined", "joined", "Joined", "text"),
+            ("location", "location", "Location", "text"),
+            ("birthday", "birthday", "Birthday", "text"),
+            ("CASE WHEN pseuds_json = '[]' THEN '' ELSE pseuds_json END", "pseuds", "Pseuds", "text"),
+            ("CASE WHEN bio_json = '[]' THEN '' ELSE bio_json END", "bio", "Bio", "text"),
+            ("CASE WHEN works_count = 0 THEN '' ELSE CAST(works_count AS TEXT) END", "works", "Works", "num"),
+            ("CASE WHEN series_count = 0 THEN '' ELSE CAST(series_count AS TEXT) END", "series", "Series", "num"),
+            ("CASE WHEN bookmarks_count = 0 THEN '' ELSE CAST(bookmarks_count AS TEXT) END", "bookmarks", "Bookmarks", "num"),
+            ("CASE WHEN collections_count = 0 THEN '' ELSE CAST(collections_count AS TEXT) END", "collections", "Collections", "num"),
+            ("CASE WHEN gifts_count = 0 THEN '' ELSE CAST(gifts_count AS TEXT) END", "gifts", "Gifts", "num"),
+            ("CASE WHEN is_blocked = 0 THEN '' ELSE '1' END", "blocked", "Blocked", "text"),
+            ("block_ao3_id", "block_record_id", "block_record_id", "text"),
+            ("CASE WHEN is_muted = 0 THEN '' ELSE '1' END", "muted", "Muted", "text"),
+            ("mute_ao3_id", "mute_record_id", "mute_record_id", "text"),
+            ("profile_fetched_at", "profile_fetched_at", "profile_fetched_at", "text"),
+        ];
+        // A profile count of zero was "unknown" before v30 for a never-
+        // fetched row and a real zero after a fetch; only fetched rows keep
+        // their zeros as values.
+        for (expr, name, label, value_type) in props {
+            let fetched_only = matches!(name, "works" | "series" | "bookmarks" | "collections" | "gifts");
+            let expr = if fetched_only {
+                expr.replace("THEN '' ELSE", "AND profile_fetched_at = '' THEN '' ELSE")
+            } else { expr.to_string() };
+            c.execute(
+                "INSERT OR IGNORE INTO fields (source, entity, key, label, value_type, display_order)
+                 VALUES ('ao3', 'user', ?1, ?2, ?3, 0)",
+                params![name, label, value_type],
+            ).map_err(map_sql)?;
+            c.execute(
+                &format!(
+                    "INSERT INTO user_source_properties (user_id, field_id, property_name, property_value, created_at, updated_at)
+                     SELECT u.id, f.id, ?1, {expr}, u.updated_at, u.updated_at
+                     FROM users u JOIN fields f ON f.source = u.source AND f.entity = 'user' AND f.key = ?1
+                     WHERE u.source = 'ao3' AND ({expr}) <> ''"
+                ),
+                params![name],
+            ).map_err(map_sql)?;
+        }
+        // Second-source rows (ScribbleHub authors recorded by the
+        // uncommitted 9a build) carry the same columns; their names differ.
+        for (expr, name, label, value_type) in [
+            ("url", "profile_url", "Profile", "text"),
+            ("avatar_url", "avatar", "Avatar", "text"),
+            ("joined", "joined", "Joined", "text"),
+            ("location", "location", "Location", "text"),
+            ("CASE WHEN bio_json = '[]' THEN '' ELSE bio_json END", "about", "About", "text"),
+            ("CASE WHEN works_count = 0 THEN '' ELSE CAST(works_count AS TEXT) END", "series", "Series", "num"),
+            ("profile_fetched_at", "profile_fetched_at", "profile_fetched_at", "text"),
+        ] {
+            c.execute(
+                "INSERT OR IGNORE INTO fields (source, entity, key, label, value_type, display_order)
+                 SELECT DISTINCT source, 'user', ?1, ?2, ?3, 0 FROM users WHERE source <> 'ao3'",
+                params![name, label, value_type],
+            ).map_err(map_sql)?;
+            c.execute(
+                &format!(
+                    "INSERT INTO user_source_properties (user_id, field_id, property_name, property_value, created_at, updated_at)
+                     SELECT u.id, f.id, ?1, {expr}, u.updated_at, u.updated_at
+                     FROM users u JOIN fields f ON f.source = u.source AND f.entity = 'user' AND f.key = ?1
+                     WHERE u.source <> 'ao3' AND ({expr}) <> ''"
+                ),
+                params![name],
+            ).map_err(map_sql)?;
+        }
+
+        // Swap in the narrow identity table. The triggers that name the
+        // table go first (a trigger naming a missing table fails the
+        // schema re-parse the rename performs) and come back after.
+        c.execute_batch(
+            "DROP TRIGGER IF EXISTS follows_target_exists_ins;
+             DROP TRIGGER IF EXISTS crawl_stamps_target_exists_ins;
+             DROP TRIGGER IF EXISTS follows_cascade_user;
+             DROP TABLE users;
+             ALTER TABLE users_v31 RENAME TO users;
+             CREATE INDEX idx_users_username ON users (username COLLATE NOCASE);
+             CREATE TRIGGER follows_target_exists_ins BEFORE INSERT ON follows BEGIN
+                SELECT RAISE(ABORT, 'follow target missing') WHERE NOT EXISTS (
+                    SELECT 1 FROM works  WHERE NEW.kind = 'work'   AND id = NEW.target_id
+                    UNION ALL
+                    SELECT 1 FROM series WHERE NEW.kind = 'series' AND id = NEW.target_id
+                    UNION ALL
+                    SELECT 1 FROM users  WHERE NEW.kind = 'author' AND id = NEW.target_id
+                    UNION ALL
+                    SELECT 1 FROM tags   WHERE NEW.kind = 'fandom' AND id = NEW.target_id);
+             END;
+             CREATE TRIGGER crawl_stamps_target_exists_ins BEFORE INSERT ON crawl_stamps BEGIN
+                SELECT RAISE(ABORT, 'crawl stamp target missing') WHERE NOT EXISTS (
+                    SELECT 1 FROM series WHERE NEW.kind = 'series' AND id = NEW.target_id
+                    UNION ALL
+                    SELECT 1 FROM users  WHERE NEW.kind = 'author' AND id = NEW.target_id);
+             END;
+             CREATE TRIGGER follows_cascade_user AFTER DELETE ON users BEGIN
+                DELETE FROM follows WHERE kind = 'author' AND target_id = OLD.id;
+                DELETE FROM crawl_stamps WHERE kind = 'author' AND target_id = OLD.id;
+             END;",
+        ).map_err(|e| AppError::StorageError(format!("v31 identity swap: {e}")))?;
+        }
+
+
+        if !self.column_exists("work_authors", "user_id")? {
+        // Authorship links by user row. AO3 bylines resolve to account rows
+        // (created when the name was never recorded); another source's
+        // links are rebuilt on the next fetch of the work.
+        c.execute_batch(
+            "DROP TABLE IF EXISTS work_authors_v31;
+             DROP TABLE IF EXISTS series_authors;
+             CREATE TABLE work_authors_v31 (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id    INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                position   INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (work_id, user_id)
+             );
+             CREATE TABLE series_authors (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_id  INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                position   INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (series_id, user_id)
+             );",
+        ).map_err(|e| AppError::StorageError(format!("v31 author link tables: {e}")))?;
+        self.v31_link_ao3_authors("works", "work_authors_v31", "work_id")?;
+        self.v31_link_ao3_authors("series", "series_authors", "series_id")?;
+        c.execute_batch(
+            "DROP TABLE work_authors;
+             ALTER TABLE work_authors_v31 RENAME TO work_authors;
+             CREATE INDEX idx_work_authors_work ON work_authors (work_id);
+             CREATE INDEX idx_work_authors_user ON work_authors (user_id);
+             CREATE INDEX idx_series_authors_series ON series_authors (series_id);
+             CREATE INDEX idx_series_authors_user ON series_authors (user_id);",
+        ).map_err(|e| AppError::StorageError(format!("v31 author link indexes: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    /// v31 helper: for every AO3 row of `owner_table`, link each byline in
+    /// `authors_json` to its AO3 account row (created when unknown).
+    fn v31_link_ao3_authors(&self, owner_table: &str, link_table: &str, owner_col: &str) -> Result<(), AppError> {
+        let rows: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT id, authors_json FROM {owner_table} WHERE source = 'ao3'")).map_err(map_sql)?;
+            let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(map_sql)?;
+            it.filter_map(Result::ok).collect()
+        };
+        let now = crate::timefmt::now_utc_datetime();
+        let mut find = self.conn.prepare(
+            "SELECT id FROM users WHERE source = 'ao3' AND source_id = ?1").map_err(map_sql)?;
+        let mut create = self.conn.prepare(
+            "INSERT INTO users (source, source_id, username, created_at, updated_at) VALUES ('ao3', ?1, ?1, ?2, ?2)")
+            .map_err(map_sql)?;
+        let mut link = self.conn.prepare(&format!(
+            "INSERT OR IGNORE INTO {link_table} ({owner_col}, user_id, position, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)")).map_err(map_sql)?;
+        for (owner, authors_json) in rows {
+            let authors: Vec<String> = serde_json::from_str(&authors_json).unwrap_or_default();
+            for (i, byline) in authors.iter().enumerate() {
+                let (account, _) = crate::models::split_author_byline(byline);
+                if account.is_empty() { continue }
+                let id: i64 = match find.query_row(params![account], |r| r.get(0)) {
+                    Ok(id) => id,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        create.execute(params![account, now]).map_err(map_sql)?;
+                        self.conn.last_insert_rowid()
+                    }
+                    Err(e) => return Err(map_sql(e)),
+                };
+                link.execute(params![owner, id, i as i64, now]).map_err(map_sql)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// v30: an interim column the 9a build added to ao3_users; kept so a
+    /// library that ran that build walks the same ladder. v31 replaces the
+    /// table.
+    fn migrate_v30_user_extra(&self) -> Result<(), AppError> {
+        let has: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ao3_users') WHERE name = 'extra_json'",
+            [], |r| r.get(0),
+        ).map_err(map_sql)?;
+        if has == 0 {
+            self.conn
+                .execute("ALTER TABLE ao3_users ADD COLUMN extra_json TEXT NOT NULL DEFAULT '[]'", [])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
+    fn migrate_v29_comment_rating(&self) -> Result<(), AppError> {
+        let has: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('comments') WHERE name = 'rating'",
+            [], |r| r.get(0),
+        ).map_err(map_sql)?;
+        if has == 0 {
+            self.conn
+                .execute("ALTER TABLE comments ADD COLUMN rating INTEGER", [])
                 .map_err(map_sql)?;
         }
         Ok(())

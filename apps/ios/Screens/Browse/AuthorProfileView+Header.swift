@@ -106,7 +106,9 @@ extension AuthorProfileView {
                 Spacer()
 
                 // Followed / Subscribed — following needs no account.
-                FollowBellMenu(target: .author(username), glyphSize: 16, hitSize: 36)
+                if let target = follows.ao3AuthorTarget(username, ensure: true) {
+                    FollowBellMenu(target: target, glyphSize: 16, hitSize: 36)
+                }
                 if state.ao3Username != nil {
                     moderationMenu
                 }

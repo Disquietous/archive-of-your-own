@@ -193,7 +193,7 @@ extension AppState {
         var totalPages: UInt32 = page
         while true {
             if page == 1 {
-                status("Fetching works from AO3…")
+                status("Fetching works…")
             } else {
                 status("Fetching page \(page) of \(totalPages) · \(all.count) works so far…")
             }

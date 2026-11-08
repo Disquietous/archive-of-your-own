@@ -120,7 +120,10 @@ extension ReadPaneViewController {
     /// Links, sign-in and toolbar state for the Discussion panel.
     func configureDiscussion() {
         discussion.actions = DiscussionActions(
-            openAuthor: { [weak self] name in self?.model.openAuthorProfile(name) },
+            openAuthor: { [weak self] name in
+                guard let self else { return }
+                model.openCommentAuthor(name, onWorkID: model.selectedWorkID)
+            },
             openURL: { [weak self] url in
                 guard let self else { return }
                 if model.openAO3URL(url.absoluteString) != nil {

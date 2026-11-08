@@ -173,4 +173,25 @@ extension RustBridge {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchChapters(workId: workId, opId: opID)
     }
+
+    /// The chapter being opened (1-based), the way its source serves it:
+    /// the whole work in one fetch, or the table of contents and then that
+    /// one chapter page. Returns the full chapter list, the requested one
+    /// filled in.
+    func fetchChapter(_ workId: UInt64, number: UInt32, opID: UInt64? = nil) async throws -> [UChapter] {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchChapter(workId: workId, number: number, opId: opID)
+    }
+
+    /// Which source, if any, recognises a link (any source, not only AO3).
+    func resolveLink(_ link: String) -> UResolvedLink? {
+        app?.resolveLink(link: link)
+    }
+
+    /// Bring a work into the library from any link a source recognises;
+    /// returns the saved work (its id is the library row id).
+    func importWorkFromLink(_ link: String, opID: UInt64? = nil) async throws -> UWorkSummary {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.importWorkFromLink(link: link, opId: opID)
+    }
 }

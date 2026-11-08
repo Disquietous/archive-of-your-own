@@ -274,6 +274,14 @@ async fn perform_remedy(
             rotate(client).await;
         }
         Remedy::RotateAndReclear => {
+            // Off Tor there is no exit to rotate away from: the check is
+            // the user's to pass, in a web view the platform shows. A
+            // dismissed check ends the operation — retrying would only
+            // show it again.
+            if !client.read().await.is_tor() {
+                events::set_operation_step(id, RecoveryStep::EarningClearance);
+                return earn_site_clearance(client, storage, id).await;
+            }
             events::set_operation_step(id, RecoveryStep::RotatingCircuit);
             rotate(client).await;
             events::set_operation_step(id, RecoveryStep::EarningClearance);
@@ -471,6 +479,44 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
     }
 }
 
+/// The site challenge noted for operation `id` (see
+/// `client::clearance::note_challenge`), passed by the user through the
+/// platform's web view; the clearance is applied to the live client and
+/// persisted so it outlives this transport and this launch. False when
+/// there is nothing to pass, no platform UI, or the user dismissed it.
+async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Storage>>, id: OpId) -> bool {
+    use crate::client::clearance;
+    let Some((source, url)) = clearance::take_challenge(id) else {
+        log_info!("recovery", "403 without a challenge note — nothing to clear");
+        return false;
+    };
+    let Some(origin) = clearance::origin_of(&url) else { return false };
+    if !clearance::mark_cleared(id) {
+        log_info!("recovery", "{source} challenged again after a passed check — clearance not accepted");
+        return false;
+    }
+    let Some(capability) = capabilities::get() else {
+        log_info!("recovery", "no PlatformCapabilities registered — skipping site clearance");
+        return false;
+    };
+    match capability.earn_site_clearance(source.clone(), url).await {
+        Ok(earned) => {
+            let saved = clearance::SavedClearance { origin, clearance: earned };
+            {
+                let s = storage.lock().await;
+                clearance::save(&s, &source, &saved);
+            }
+            clearance::apply(&*client.read().await, &source, &saved);
+            log_info!("recovery", "site clearance for {source}: {} cookies", saved.clearance.cookies.len());
+            true
+        }
+        Err(e) => {
+            log_info!("recovery", "site clearance for {source} not earned: {e}");
+            false
+        }
+    }
+}
+
 /// Mirrors `AO3App::restore_session_cookies`'s lookup, through the async
 /// mutex — that method is a `blocking_lock()` export reachable only from
 /// Swift's thread (see the lock discipline invariant in `api/mod.rs`) and
@@ -482,10 +528,13 @@ async fn restore_persisted_cookies(client: &Arc<RwLock<AO3Client>>, storage: &Ar
         Ok(Some(account)) if !account.cookies.is_empty() => Some(account.cookies),
         _ => None,
     };
+    let clearances = crate::client::clearance::load(&s);
     drop(s);
+    let c = client.read().await;
     if let Some(cookies) = cookies {
-        client.read().await.set_session_cookies(&cookies);
+        c.set_session_cookies(&cookies);
     }
+    crate::client::clearance::restore_all(&clearances, &c);
 }
 
 #[cfg(test)]

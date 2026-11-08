@@ -341,8 +341,7 @@ impl Storage {
                 fragments.push(format!(
                     "(instr(ao3_lower(works.title), ?) > 0
       OR instr(ao3_lower(works.summary), ?) > 0
-      OR EXISTS (SELECT 1 FROM work_authors a
-                  WHERE a.work_id = works.id AND instr(ao3_lower(a.author), ?) > 0){tag_arm})"
+      OR instr(ao3_lower(works.authors_json), ?) > 0{tag_arm})"
                 ));
                 for _ in 0..3 {
                     params.push(Value::Text(needle.clone()));
@@ -353,11 +352,7 @@ impl Storage {
                 params.push(Value::Text(needle.clone()));
             }
             Predicate::CreatorContains(needle) => {
-                fragments.push(
-                    "EXISTS (SELECT 1 FROM work_authors a
-                      WHERE a.work_id = works.id AND instr(ao3_lower(a.author), ?) > 0)"
-                        .into(),
-                );
+                fragments.push("instr(ao3_lower(works.authors_json), ?) > 0".into());
                 params.push(Value::Text(needle.clone()));
             }
             Predicate::TagNameContains { tag_type, needle } => {

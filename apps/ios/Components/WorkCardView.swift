@@ -170,8 +170,8 @@ struct WorkCardView: View {
                     .foregroundStyle(theme.ink2)
                     .lineLimit(1)
             }
-            if showsFollowBell, follows != nil, !work.author.isEmpty {
-                FollowBellMenu(target: .author(work.author), glyphSize: 11, hitSize: 22)
+            if showsFollowBell, follows != nil, let target = FollowModel.Target.author(for: work) {
+                FollowBellMenu(target: target, glyphSize: 11, hitSize: 22)
             }
         }
     }

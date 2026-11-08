@@ -55,11 +55,14 @@ impl AO3App {
     pub fn restore_session_cookies(&self) -> Result<bool, AO3Error> {
         let storage = self.storage.blocking_lock();
         log_db("migrate_legacy_credentials", storage.migrate_legacy_credentials());
+        let client = self.client.blocking_read();
+        // Site clearances (passed human checks) ride along with the
+        // session: both live in the jar the transport was just built with.
+        crate::client::clearance::restore_all(&crate::client::clearance::load(&storage), &client);
 
         if let Ok(Some(account)) = storage.get_active_account() {
             if !account.cookies.is_empty() {
                 log_info!("cookies"," Restoring from account: {} chars, logged in={}", account.cookies.len(), account.logged_in());
-                let client = self.client.blocking_read();
                 client.set_session_cookies(&account.cookies);
                 return Ok(true);
             }

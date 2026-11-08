@@ -1,5 +1,30 @@
 use super::*;
 
+/// A work from a source other than AO3 gets its discussion (reviews, or a
+/// chapter's comments) through that source's adapter; the AO3 paths stay
+/// as they are until the AO3 adapter move. None = this is an AO3 work.
+async fn fetch_discussion_elsewhere(
+    storage: &Arc<Mutex<Storage>>,
+    registry: &crate::source::SourceRegistry,
+    work_id: u64,
+    chapter: Option<u64>,
+    page: u32,
+) -> Result<Option<UCommentsPage>, AO3Error> {
+    let (source, external) = { let s = storage.lock().await; source_for_work(&s, registry, work_id)? };
+    if source.id() == SOURCE_AO3 {
+        return Ok(None);
+    }
+    let cp = source.fetch_discussion(&external, chapter, page).await.map_err(AO3Error::from)?;
+    let s = storage.lock().await;
+    save_comments(&s, work_id, chapter.unwrap_or(0), &cp.comments, chapter.is_none());
+    let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
+    Ok(Some(UCommentsPage {
+        comments_json: serde_json::to_string(&json_comments).unwrap_or("[]".to_string()),
+        current_page: cp.current_page,
+        total_pages: cp.total_pages,
+    }))
+}
+
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
@@ -87,7 +112,11 @@ impl AO3App {
     }
 
     pub async fn fetch_chapter_comments(&self, work_id: u64, chapter_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
+            if let Some(page) = fetch_discussion_elsewhere(&storage, &registry, work_id, Some(chapter_id), page).await? {
+                return Ok(page);
+            }
             let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
@@ -105,7 +134,11 @@ impl AO3App {
     }
 
     pub async fn fetch_work_comments(&self, work_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
+            if let Some(page) = fetch_discussion_elsewhere(&storage, &registry, work_id, None, page).await? {
+                return Ok(page);
+            }
             let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
             let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
                 move |client| async move {
@@ -317,7 +350,7 @@ impl AO3App {
                     Err(_) => continue,
                 };
                 let s = storage.lock().await;
-                log_db("upsert_ao3_user", s.upsert_ao3_user(&profile));
+                log_db("record_user", s.record_user(&profile));
             }
 
             let s = storage.lock().await;
@@ -334,41 +367,24 @@ impl AO3App {
 
     // -- User profiles (subscribe / block / mute) --
 
-    /// The locally cached profile for a user — instant, DB-only. None when
-    /// no profile fetch has ever been recorded for them.
+    /// The locally cached profile for an AO3 user by name — instant,
+    /// DB-only. None when no profile fetch has ever been recorded. (iOS
+    /// compatibility; the id-keyed `get_user` is the general path.)
     pub fn get_cached_user_profile(&self, username: String) -> Result<Option<UUserProfile>, AO3Error> {
         let (username, _) = split_author_byline(&username);
         let s = self.storage.blocking_lock();
-        Ok(s.get_user_profile(&username).map_err(AO3Error::from)?.map(UUserProfile::from))
+        Ok(s.get_ao3_user_record(&username)
+            .filter(|u| u.property(crate::user_fields::PROFILE_FETCHED_AT).is_some())
+            .map(|u| UUserProfile::from(super::users::user_dto(&s, &u))))
     }
 
-    /// Fetch a user's profile from AO3, cache it, and mirror the live
-    /// subscription state into the signed-in account's subscriptions (only
-    /// when the session was signed in — a logged-out page carries no
-    /// signal). Never touches follows.
+    /// Fetch an AO3 user's profile by name and cache it (iOS
+    /// compatibility; see `fetch_user`).
     pub async fn fetch_user_profile(&self, username: String) -> Result<UUserProfile, AO3Error> {
-        self.run_on_runtime(move |client, storage| async move {
-            let (username, _) = split_author_byline(&username);
-            let profile = with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
-                move |client| {
-                    let username = username.clone();
-                    async move {
-                        client.read().await.fetch_user_profile_full(&username).await.map_err(AO3Error::from)
-                    }
-                }).await?;
-            let s = storage.lock().await;
-            log_db("upsert_user_profile", s.upsert_user_profile(&profile));
-            // Subscription data only — never follows.
-            if let (true, Some(account)) = (profile.viewer_signed_in, s.subscription_account()) {
-                if profile.subscribed {
-                    log_db("add_subscription", s.add_subscription(account.id, "author", &profile.username,
-                        &profile.username, profile.subscription_ao3_id.as_deref()));
-                } else {
-                    log_db("remove_subscription", s.remove_subscription(account.id, "author", &profile.username));
-                }
-            }
-            Ok(UUserProfile::from(profile))
-        }).await
+        let (username, _) = split_author_byline(&username);
+        let id = { self.storage.lock().await.ensure_ao3_user_row(&username).map_err(AO3Error::from)? }
+            .ok_or_else(|| AO3Error::NotFound { message: format!("no user named {username}") })?;
+        self.fetch_user(id as u64).await.map(UUserProfile::from)
     }
 
     /// One page of a user's public bookmarks (/users/{name}/bookmarks).
@@ -598,7 +614,7 @@ impl AO3App {
                     // this user's avatar URL — record it so future lookups
                     // skip the profile request.
                     let s = storage.lock().await;
-                    log_db("upsert_ao3_user", s.upsert_ao3_user(&profile));
+                    log_db("record_user", s.record_user(&profile));
                     url
                 }
             };

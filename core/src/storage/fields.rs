@@ -28,7 +28,14 @@ impl Storage {
         if value_type != "num" && value_type != "text" {
             return Err(AppError::StorageError(format!("field value type must be num or text, not {value_type}")));
         }
-        self.fields_cache.ensure(&self.conn, source, key, label, value_type, display_order)
+        self.fields_cache.ensure(&self.conn, source, "work", key, label, value_type, display_order)
+    }
+
+    /// Register a user property under the registry (entity "user"); the
+    /// label and type come from the source's vocabulary (`user_fields`).
+    pub fn ensure_user_field(&self, source: &str, name: &str) -> Result<i64, AppError> {
+        let (label, value_type) = crate::user_fields::registry_entry(source, name);
+        self.fields_cache.ensure(&self.conn, source, "user", name, &label, value_type, 0)
     }
 
     pub fn get_field(&self, id: i64) -> Option<Arc<FieldEntity>> {
@@ -36,12 +43,12 @@ impl Storage {
     }
 
     pub fn field_id(&self, source: &str, key: &str) -> Option<i64> {
-        self.fields_cache.id_of(source, key)
+        self.fields_cache.id_of(source, "work", key)
     }
 
-    /// A source's fields in display order.
+    /// A source's work-stat fields in display order.
     pub fn fields_for_source(&self, source: &str) -> Vec<Arc<FieldEntity>> {
-        self.fields_cache.for_source(source)
+        self.fields_cache.for_source(source, "work")
     }
 
     /// Replace a work's stats with `stats` (one value per field; a field

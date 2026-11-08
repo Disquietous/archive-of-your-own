@@ -236,15 +236,18 @@ extension ListPaneViewController {
     private func renderAuthors(section: MacAppModel.Section) {
         // Drill-in: the author's profile replaces the list — their
         // works/bookmarks/collections render in the reading pane.
-        if let author = model.author.username {
-            toolbar.configure(title: appState.userProfile(author)?.username ?? author,
-                              sub: appState.isLoadingUserProfile(author)
-                                  ? "Fetching profile from AO3…" : "Author profile")
+        if let userID = model.author.userID {
+            let name = appState.user(userID)?.username ?? model.author.username ?? ""
+            toolbar.configure(title: name,
+                              sub: appState.isLoadingUser(userID)
+                                  ? "Fetching profile from \(appState.userSourceName(userID))…" : "Author profile")
             toolbar.setLeading([authorBackButton()])
-            toolbar.setTrailing([authorAO3Button(username: author),
-                                 authorProfileRefreshButton(username: author),
-                                 authorFollowButton(username: author)])
-            showAuthorProfileContent(username: author, activePane: model.author.pane)
+            var trailing: [NSView] = [authorSiteButton(userID: userID), authorProfileRefreshButton(userID: userID)]
+            if let username = model.author.username {
+                trailing.append(authorFollowButton(userID: userID, username: username))
+            }
+            toolbar.setTrailing(trailing)
+            showAuthorProfileContent(userID: userID, activePane: model.author.pane)
             return
         }
         let count = model.follows.follows(of: .author).count + model.follows.follows(of: .work).count

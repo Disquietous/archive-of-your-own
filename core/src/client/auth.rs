@@ -1,8 +1,8 @@
 use crate::error::AppError;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, FailureKind};
-use super::audit::{ActiveRequestGuard, AuditCtx, redact_payload};
+use super::{AO3Client, BASE_URL, FailureKind, SiteHooks};
+use super::audit::{AuditCtx, redact_payload};
 use super::helpers::{comment_post_succeeded, urlencoded};
 
 impl AO3Client {
@@ -10,7 +10,7 @@ impl AO3Client {
     /// Returns true on success, false on failure.
     pub async fn login(&self, username: &str, password: &str) -> Result<bool, AppError> {
         if crate::mock_site::enabled() {
-            let audit = AuditCtx::new("POST", &format!("{BASE_URL}/users/login"), None);
+            let audit = AuditCtx::new(self.source(), "POST", &format!("{BASE_URL}/users/login"), None);
             let cookies = crate::mock_site::login(username, password);
             let ok = cookies.is_some();
             if let Some(c) = cookies {
@@ -38,58 +38,19 @@ impl AO3Client {
         }?;
 
         // Step 2: POST login form
-        self.enforce_rate_limit().await;
-
-        let client = self.http()?;
-
-        let timeout = self.request_timeout();
-
-        let params = [
-            ("authenticity_token", token.as_str()),
-            ("user[login]", username),
-            ("user[password]", password),
-            ("user[remember_me]", "1"),
-            ("commit", "Log In"),
+        let params = vec![
+            ("authenticity_token".to_string(), token),
+            ("user[login]".to_string(), username.to_string()),
+            ("user[password]".to_string(), password.to_string()),
+            ("user[remember_me]".to_string(), "1".to_string()),
+            ("commit".to_string(), "Log In".to_string()),
         ];
-
         let login_url = format!("{BASE_URL}/users/login");
-        let _active = ActiveRequestGuard::new("POST", &login_url, timeout.as_secs());
-        let audit = AuditCtx::new("POST", &login_url, Some(redact_payload(&params)));
-
-        let result = tokio::time::timeout(timeout, async {
-            let resp = client.post(&login_url)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-
-            let status = resp.status().as_u16();
-
-            // Check for a login cookie in response headers
-            let has_cred_cookie = resp.headers().get_all("set-cookie")
-                .iter()
-                .any(|v| super::has_login_cookie(v.to_str().unwrap_or("")));
-
-            let final_url = resp.url().to_string();
-            let body = resp.text().await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-
-            Ok::<(bool, String, String, u16, usize), AppError>((has_cred_cookie, final_url, body, status, 0))
-        }).await;
-
-        let (has_cred_cookie, final_url, body, status, _) = match result {
-            // The whole round trip (connect through body) shares one
-            // deadline, so a manual timeout here can't prove whether AO3
-            // ever saw the request — treat it like a dead circuit.
-            Err(_) => {
-                audit.record(0, 0, Some("timeout".to_string()));
-                return Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() });
-            }
-            Ok(Err(e)) => { audit.record(0, 0, Some(format!("{e}"))); return Err(e); }
-            Ok(Ok(v)) => v,
-        };
-        audit.record(status, body.len() as u64, None);
-        let _body = body;
+        let out = self.transport().post_form(&login_url, &params, &[], &|_, _| true, self).await?;
+        // A login cookie in the response headers proves it; so does landing
+        // anywhere but the login page.
+        let has_cred_cookie = out.set_cookies.iter().any(|v| super::has_login_cookie(v));
+        let final_url = out.final_url;
 
         let logged_in = has_cred_cookie || !final_url.contains("/users/login");
 
@@ -181,7 +142,7 @@ impl AO3Client {
     /// POST pre-assembled form params (token already included).
     pub(super) async fn post_form_raw(&self, url: &str, form_params: Vec<(String, String)>) -> Result<String, AppError> {
         if crate::mock_site::enabled() {
-            let audit = AuditCtx::new("POST", url, Some(redact_payload(
+            let audit = AuditCtx::new(self.source(), "POST", url, Some(redact_payload(
                 &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
             let reply = crate::mock_site::respond_post(url, &form_params, &self.get_session_cookies());
             if reply.status >= 400 {
@@ -192,47 +153,15 @@ impl AO3Client {
             audit.record(reply.status, reply.body.len() as u64, None);
             return Ok(reply.body);
         }
-
-        self.enforce_rate_limit().await;
-
-        let client = self.http()?;
-
-        let timeout = self.request_timeout();
-
-        let _active = ActiveRequestGuard::new("POST", url, timeout.as_secs());
-        let audit = AuditCtx::new("POST", url, Some(redact_payload(
-            &form_params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
-
-        let result = tokio::time::timeout(timeout, async {
-            let resp = client.post(url)
-                .form(&form_params)
-                .send()
-                .await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-            let status = resp.status().as_u16();
-            let body = resp.text().await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-            Ok::<(u16, String), AppError>((status, body))
-        }).await;
-
-        match result {
-            // See the comment on login()'s equivalent branch: one deadline
-            // covers the whole round trip, so this is treated as connect-class.
-            Err(_) => {
-                audit.record(0, 0, Some("timeout".to_string()));
-                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
-            }
-            Ok(Err(e)) => { audit.record(0, 0, Some(format!("{e}"))); Err(e) }
-            Ok(Ok((status, body))) if status >= 400 => {
-                // A non-success POST response (e.g. a Cloudflare 525 error
-                // page) must not be mistaken for a successful post whose
-                // content just doesn't match what the caller expected.
-                let detail = format!("HTTP {status} for {url}");
-                audit.record(status, body.len() as u64, Some(detail.clone()));
-                Err(AppError::Http { kind: FailureKind::from_status(status, None), detail })
-            }
-            Ok(Ok((status, body))) => { audit.record(status, body.len() as u64, None); Ok(body) }
+        let out = self.transport().post_form(url, &form_params, &[], &|status, _| status < 400, self).await?;
+        if out.status >= 400 {
+            // A non-success POST response (e.g. a Cloudflare 525 error
+            // page) must not be mistaken for a successful post whose
+            // content just doesn't match what the caller expected.
+            let detail = format!("HTTP {} for {url}", out.status);
+            return Err(AppError::Http { kind: FailureKind::from_status(out.status, None), detail });
         }
+        Ok(out.body)
     }
 
     /// Leave kudos on a work using the cached CSRF token — no preparatory
@@ -276,73 +205,40 @@ impl AO3Client {
     }
 
     async fn post_kudos_raw(&self, work_id: u64, token: &str, work_url: &str) -> Result<(u16, String), AppError> {
+        let kudos_url = format!("{BASE_URL}/kudos");
+        let accepted = |status: u16, body: &str| status < 300 || body.contains("already left kudos");
         if crate::mock_site::enabled() {
-            let audit = AuditCtx::new("POST", &format!("{BASE_URL}/kudos"), None);
+            let audit = AuditCtx::new(self.source(), "POST", &kudos_url, None);
             let (status, body) = crate::mock_site::kudos(work_id, &self.get_session_cookies());
-            let accepted = status < 300 || body.contains("already left kudos");
-            audit.record(status, body.len() as u64, if accepted { None } else { Some(format!("HTTP {status}")) });
+            audit.record(status, body.len() as u64,
+                         if accepted(status, &body) { None } else { Some(format!("HTTP {status}")) });
             return Ok((status, body));
         }
-        let _active = ActiveRequestGuard::new("POST", &format!("{BASE_URL}/kudos"), self.request_timeout().as_secs());
-        self.enforce_rate_limit().await;
-
-        let client = self.http()?;
-        let timeout = self.request_timeout();
-
-        let id_string = work_id.to_string();
-        let params = [
-            ("authenticity_token", token),
-            ("kudo[commentable_id]", id_string.as_str()),
-            ("kudo[commentable_type]", "Work"),
+        let params = vec![
+            ("authenticity_token".to_string(), token.to_string()),
+            ("kudo[commentable_id]".to_string(), work_id.to_string()),
+            ("kudo[commentable_type]".to_string(), "Work".to_string()),
         ];
-        let kudos_url = format!("{BASE_URL}/kudos");
-        let audit = AuditCtx::new("POST", &kudos_url, Some(redact_payload(&params)));
-
-        let result = tokio::time::timeout(timeout, async {
-            let resp = client.post(&kudos_url)
-                // Match the site's own AJAX submission: JSON responses, and a
-                // 422 (not a redirect chain) for "already left kudos".
-                .header("X-Requested-With", "XMLHttpRequest")
-                .header("Accept", "application/json, text/javascript, */*; q=0.01")
-                .header("Referer", work_url)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-            let status = resp.status().as_u16();
-            let body = resp.text().await
-                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
-            Ok::<(u16, String), AppError>((status, body))
-        }).await;
-
-        match result {
-            Err(_) => {
-                audit.record(0, 0, Some("timeout".to_string()));
-                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
-            }
-            Ok(Err(e)) => {
-                audit.record(0, 0, Some(format!("{e}")));
-                Err(e)
-            }
-            Ok(Ok((status, body))) => {
-                let accepted = status < 300 || body.contains("already left kudos");
-                audit.record(status, body.len() as u64,
-                             if accepted { None } else { Some(format!("HTTP {status}")) });
-                Ok((status, body))
-            }
-        }
+        // Match the site's own AJAX submission: JSON responses, and a 422
+        // (not a redirect chain) for "already left kudos".
+        let headers = [
+            ("X-Requested-With", "XMLHttpRequest"),
+            ("Accept", "application/json, text/javascript, */*; q=0.01"),
+            ("Referer", work_url),
+        ];
+        let out = self.transport().post_form(&kudos_url, &params, &headers, &accepted, self).await?;
+        Ok((out.status, out.body))
     }
 
     /// A user's profile page as an AO3User record (avatar URL included when
     /// the page has one). One request.
     pub async fn fetch_user_profile(&self, username: &str) -> Result<crate::models::AO3User, AppError> {
         let html = self.fetch(&format!("{BASE_URL}/users/{}/profile", urlencoded(username))).await?;
-        Ok(crate::models::AO3User {
-            id: username.to_string(),
-            username: username.to_string(),
-            profile_url: Some(format!("{BASE_URL}/users/{username}")),
-            avatar_url: parser::extract_user_icon_url(&html),
-        })
+        Ok(crate::models::AO3User::ao3(
+            username, username,
+            Some(format!("{BASE_URL}/users/{username}")),
+            parser::extract_user_icon_url(&html),
+        ))
     }
 
     /// AO3's JSON autocomplete for canonical tag names — fired ONLY on an

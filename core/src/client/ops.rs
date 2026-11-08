@@ -2,9 +2,9 @@ use crate::error::AppError;
 use crate::models::*;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, FailureKind};
+use super::{AO3Client, BASE_URL, SiteHooks};
 use super::audit::{ActiveRequestGuard, AuditCtx};
-use super::helpers::{ao3_tag_encode, extract_bookmark_id_from_response, sniff_image_kind,
+use super::helpers::{ao3_tag_encode, extract_bookmark_id_from_response,
                      sub_id_from_action, urlencoded};
 
 impl AO3Client {
@@ -269,104 +269,21 @@ impl AO3Client {
     }
 
     pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, AppError> {
-        let _active = ActiveRequestGuard::new("GET (image)", url, self.request_timeout().as_secs());
-        // Every terminal outcome lands in the request log, like page fetches.
-        let audit = AuditCtx::new("GET (image)", url, None);
-
-        if crate::mock_site::enabled() {
-            let bytes = crate::mock_site::image(url);
-            audit.record(200, bytes.len() as u64, None);
-            return Ok(bytes);
-        }
-
-        self.enforce_rate_limit().await;
-        let client = self.http()?;
-        let timeout = self.request_timeout();
-
         // Resolve the full URL for relative paths
         let full_url = if url.starts_with('/') {
             format!("{BASE_URL}{url}")
         } else {
             url.to_string()
         };
-
-        log_info!("image", "Fetching {}", full_url);
-        // Image-appropriate headers (override the client's document-navigation
-        // defaults): a CDN seeing Accept: text/html on an image URL may serve
-        // its HTML viewer/block page instead of the bytes.
-        let request = client.get(&full_url)
-            .header("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5")
-            .header("Sec-Fetch-Dest", "image")
-            .header("Sec-Fetch-Mode", "no-cors")
-            .header("Sec-Fetch-Site", "cross-site");
-        let response = match tokio::time::timeout(timeout, request.send()).await {
-            Err(_) => {
-                log_error!("image", "Timeout connecting to {}", full_url);
-                audit.record(0, 0, Some("timeout".to_string()));
-                return Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() });
-            }
-            Ok(Err(e)) => {
-                log_error!("image", "Error fetching {}: {}", full_url, e);
-                audit.record(0, 0, Some(format!("{e}")));
-                return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") });
-            }
-            Ok(Ok(r)) => r,
-        };
-
-        let status = response.status();
-        let content_type = response.headers().get("content-type")
-            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
-        let content_encoding = response.headers().get("content-encoding")
-            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
-        let content_length = response.headers().get("content-length")
-            .and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
-        log_info!("image", "HTTP {} type={} encoding={} length={} for {}",
-                  status.as_u16(), content_type, content_encoding, content_length, full_url);
-
-        if !status.is_success() {
-            let detail = format!("HTTP {status}");
-            audit.record(status.as_u16(), 0, Some(detail.clone()));
-            return Err(AppError::Http { kind: FailureKind::from_status(status.as_u16(), None), detail });
+        if crate::mock_site::enabled() {
+            // Every terminal outcome lands in the request log, like page fetches.
+            let _active = ActiveRequestGuard::new("GET (image)", &full_url, self.request_timeout().as_secs());
+            let audit = AuditCtx::new(self.source(), "GET (image)", &full_url, None);
+            let bytes = crate::mock_site::image(url);
+            audit.record(200, bytes.len() as u64, None);
+            return Ok(bytes);
         }
-        if response.content_length().is_some_and(|n| n > super::MAX_IMAGE_BYTES) {
-            let detail = format!("image too large: {} bytes declared (cap {})", response.content_length().unwrap_or(0), super::MAX_IMAGE_BYTES);
-            audit.record(status.as_u16(), 0, Some(detail.clone()));
-            return Err(AppError::Http { kind: FailureKind::Malformed, detail });
-        }
-
-        let bytes = match tokio::time::timeout(timeout, response.bytes()).await {
-            Err(_) => {
-                log_error!("image", "Timeout reading body of {}", full_url);
-                audit.record(status.as_u16(), 0, Some("body timeout".to_string()));
-                // Headers already arrived — the request reached the origin.
-                return Err(AppError::Http { kind: FailureKind::ResponseTimeout, detail: "timeout".to_string() });
-            }
-            Ok(Err(e)) => {
-                log_error!("image", "Failed reading body of {}: {}", full_url, e);
-                let detail = format!("{e}");
-                audit.record(status.as_u16(), 0, Some(detail.clone()));
-                return Err(AppError::Http { kind: FailureKind::from_transport(&e), detail });
-            }
-            Ok(Ok(b)) => b,
-        };
-        if bytes.len() as u64 > super::MAX_IMAGE_BYTES {
-            let detail = format!("image too large: {} bytes (cap {})", bytes.len(), super::MAX_IMAGE_BYTES);
-            audit.record(status.as_u16(), bytes.len() as u64, Some(detail.clone()));
-            return Err(AppError::Http { kind: FailureKind::Malformed, detail });
-        }
-
-        let kind = sniff_image_kind(&bytes);
-        log_info!("image", "Downloaded {} bytes ({}) from {}", bytes.len(), kind, full_url);
-        if kind == "not-an-image" {
-            // The body isn't any known image format — log what the host
-            // actually sent so decode failures are diagnosable.
-            let snippet: String = String::from_utf8_lossy(&bytes[..bytes.len().min(300)])
-                .chars().filter(|c| !c.is_control()).collect();
-            log_error!("image", "Body of {} is not a recognized image (type={} encoding={}): {}",
-                       full_url, content_type, content_encoding, snippet);
-        }
-        audit.record(status.as_u16(), bytes.len() as u64, None);
-        Ok(bytes.to_vec())
+        self.transport().get_bytes(&full_url, self).await
     }
 
     /// Post a reply under a comment. On success returns the comment trees
@@ -608,7 +525,7 @@ impl AO3Client {
     /// page fetch also refreshes the cached CSRF token, so a follow-up
     /// direct POST from the profile screen never needs a second fetch.
     pub async fn fetch_user_profile_full(&self, username: &str)
-        -> Result<crate::models::UserProfile, AppError> {
+        -> Result<crate::models::AO3ProfilePage, AppError> {
         let html = self.fetch(&format!("{BASE_URL}/users/{}/profile", urlencoded(username))).await?;
         parser::parse_user_profile(&html)
     }
@@ -644,13 +561,9 @@ impl AO3Client {
         let mut known_record = record_id.map(str::to_string);
         let mut verified_state: Option<(bool, Option<String>)> = None;
         if token.is_none() || (!on && known_record.is_none()) {
-            let profile = self.fetch_user_profile_full(target).await?;
+            let page = self.fetch_user_profile_full(target).await?;
             token = self.cached_csrf_token();
-            let (state, rid) = if kind == "blocked" {
-                (profile.blocked, profile.block_ao3_id)
-            } else {
-                (profile.muted, profile.mute_ao3_id)
-            };
+            let (state, rid) = moderation_state(&page.profile, kind);
             if state == on {
                 return Ok((state, rid));
             }
@@ -705,12 +618,8 @@ impl AO3Client {
                     // record id (the next profile fetch will backfill it).
                     return Ok((true, None));
                 }
-                let profile = self.fetch_user_profile_full(target).await?;
-                let (state, rid) = if kind == "blocked" {
-                    (profile.blocked, profile.block_ao3_id)
-                } else {
-                    (profile.muted, profile.mute_ao3_id)
-                };
+                let page = self.fetch_user_profile_full(target).await?;
+                let (state, rid) = moderation_state(&page.profile, kind);
                 if state == on { Ok((state, rid)) }
                 else { Err(AppError::NetworkError(format!("{kind} did not stick for {target}"))) }
             }
@@ -777,4 +686,15 @@ impl AO3Client {
         let (works, has_next, total, _) = parser::parse_work_listing_page(&html)?;
         Ok((works, has_next, total))
     }
+}
+
+/// Block/mute state as the profile page reported it: the flag property
+/// and AO3's record id for the undo POST.
+fn moderation_state(profile: &crate::models::SourceUserProfile, kind: &str) -> (bool, Option<String>) {
+    let (flag, record) = if kind == "blocked" {
+        ("blocked", crate::user_fields::AO3_BLOCK_RECORD)
+    } else {
+        ("muted", crate::user_fields::AO3_MUTE_RECORD)
+    };
+    (profile.property(flag).is_some(), profile.property(record).map(str::to_string))
 }

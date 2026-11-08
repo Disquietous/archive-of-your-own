@@ -239,15 +239,17 @@ extension ReadPaneViewController {
     func authorSubscribeButton(username: String) -> ToolButton {
         let button = authorSubscribeBtn ?? ToolButton(theme: theme, symbol: "bell",
                                                       tooltip: "Follow") { [weak self] in
-            guard let self, let user = drillInAuthorUsername, let anchor = authorSubscribeBtn else { return }
-            FollowBellMenu.show(for: .author(user), follows: model.follows, from: anchor)
+            guard let self, let user = drillInAuthorUsername, let anchor = authorSubscribeBtn,
+                  let target = model.follows.ao3AuthorTarget(user, ensure: true) else { return }
+            FollowBellMenu.show(for: target, follows: model.follows, from: anchor)
         }
         authorSubscribeBtn = button
-        let shaded = model.follows.isShaded(.author(username))
+        let target = model.follows.ao3AuthorTarget(username, ensure: false)
+        let shaded = target.map { model.follows.isShaded($0) } ?? false
         button.setSymbol(shaded ? "bell.fill" : "bell")
         button.tintOverride = shaded ? theme.nsAccent : nil
         button.toolTip = "Followed / Subscribed — choose how to track \(username)"
-        button.isEnabled = !model.follows.isBusy(.author(username))
+        button.isEnabled = !(target.map { model.follows.isBusy($0) } ?? false)
         return button
     }
 

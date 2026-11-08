@@ -94,7 +94,7 @@ extension AppDelegate {
     private func makeGoMenuItem() -> NSMenuItem {
         let goMenuItem = NSMenuItem()
         let goMenu = NSMenu(title: "Go")
-        let openURL = NSMenuItem(title: "Open AO3 URL…", action: #selector(promptOpenAO3URL), keyEquivalent: "l")
+        let openURL = NSMenuItem(title: "Open URL…", action: #selector(promptOpenAO3URL), keyEquivalent: "l")
         openURL.target = self
         goMenu.addItem(openURL)
         goMenu.addItem(.separator())

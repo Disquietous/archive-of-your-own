@@ -250,6 +250,7 @@ impl AO3App {
 
     pub async fn check_next_follow(&self) -> Result<Option<UFollowCheckResult>, AO3Error> {
         let census_cycle_used = self.census_cycle_used.clone();
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
             // The follow this call popped. Its `last_checked_at` is stamped
             // after the check whatever the outcome — success, 404, other
@@ -290,13 +291,21 @@ impl AO3App {
                 let sub_name = item["name"].as_str().unwrap_or("").to_string();
                 let is_census = item["census"].as_bool().unwrap_or(false);
                 checked = Some(target);
-                // What AO3 is asked for: the username or the AO3 number.
-                let Some(ao3_id) = ao3_follow_id(&s, target) else {
-                    return Ok(Some(UFollowCheckResult {
+                // What AO3 is asked for: the username or the AO3 number. An
+                // author at another source has none; their adapter lists
+                // their works instead.
+                let sourced_author = match target {
+                    FollowTarget::Author(id) => s.get_user(id).filter(|u| u.source != SOURCE_AO3),
+                    _ => None,
+                };
+                let ao3_id = match (ao3_follow_id(&s, target), &sourced_author) {
+                    (Some(id), _) => id,
+                    (None, Some(_)) => String::new(),
+                    (None, None) => return Ok(Some(UFollowCheckResult {
                         kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
                         remaining: queue.len() as u32,
                         error: Some("Not an AO3 target".to_string()),
-                    }));
+                    })),
                 };
 
                 // Persist updated queue before the fetch (so a crash mid-fetch
@@ -327,7 +336,9 @@ impl AO3App {
                 // Build URL
                 let base = crate::client::BASE_URL;
                 let census_page = census_state.as_ref().map(|c| c.next_page);
-                let url = match (sub_type.as_str(), census_page) {
+                let url = if let Some(user) = &sourced_author {
+                    user.field(crate::user_fields::UserField::ProfileUrl).unwrap_or("").to_string()
+                } else { match (sub_type.as_str(), census_page) {
                     ("author", None) => format!("{base}/users/{ao3_id}/works"),
                     ("author", Some(p)) => format!("{base}/users/{ao3_id}/works?page={p}"),
                     ("series", None) => format!("{base}/series/{ao3_id}"),
@@ -337,7 +348,11 @@ impl AO3App {
                         kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
                         error: Some("Unknown subscription type".to_string()),
                     })),
-                };
+                } };
+
+                /// What a check fetched: AO3's page, or another source's
+                /// listing of the author's works (already parsed).
+                enum Fetched { Html(String), Listed(Vec<crate::source::ListedWork>) }
 
                 // Fetch through the recovery engine (Idempotent — a plain GET):
                 // a transient failure already gets rotated-and-retried in Rust
@@ -345,25 +360,45 @@ impl AO3App {
                 // classified (never string-matched) to decide whether it's
                 // still worth requeuing for the next census cycle.
                 let url_for_fetch = url.clone();
-                let fetch_result = with_recovery(
-                    client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
-                    move |client| {
-                        let url = url_for_fetch.clone();
-                        async move {
-                            // Inside the attempt closure so retries pace too —
-                            // not just the first request for each item.
-                            tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
-                            let c = client.read().await;
-                            let timeout = c.timeout_for_url(&url);
-                            c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
-                        }
-                    }).await;
-                let html = match fetch_result {
-                    Ok(h) => {
+                let fetch_result: Result<Fetched, AO3Error> = if let Some(user) = &sourced_author {
+                    let Some(source) = registry.by_id(&user.source) else {
+                        return Ok(Some(UFollowCheckResult {
+                            kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
+                            error: Some(format!("no source {}", user.source)),
+                        }));
+                    };
+                    check_reachable(&source)?;
+                    let external = user.external_ref();
+                    with_recovery(
+                        client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
+                        move |_client| {
+                            let (source, external) = (source.clone(), external.clone());
+                            async move {
+                                tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
+                                source.fetch_author_works(&external, 1).await.map_err(AO3Error::from)
+                            }
+                        }).await.map(|page| Fetched::Listed(page.works))
+                } else {
+                    with_recovery(
+                        client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
+                        move |client| {
+                            let url = url_for_fetch.clone();
+                            async move {
+                                // Inside the attempt closure so retries pace too —
+                                // not just the first request for each item.
+                                tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
+                                let c = client.read().await;
+                                let timeout = c.timeout_for_url(&url);
+                                c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
+                            }
+                        }).await.map(Fetched::Html)
+                };
+                let fetched = match fetch_result {
+                    Ok(f) => {
                         // A successful fetch ends any not-found streak.
                         let s = storage.lock().await;
                         log_db("reset_follow_status", s.reset_follow_status(target));
-                        h
+                        f
                     }
                     Err(e) => {
                         let msg = format!("{e}");
@@ -410,8 +445,17 @@ impl AO3App {
                     }
                 };
 
+                let (html, sourced_listed) = match fetched {
+                    Fetched::Html(h) => (h, None),
+                    Fetched::Listed(w) => (String::new(), Some(w)),
+                };
+
                 // Parse works and extract the newest date
-                let (newest_date, parsed_works) = match sub_type.as_str() {
+                let (newest_date, parsed_works) = if let Some(listed) = &sourced_listed {
+                    let works: Vec<WorkSummary> = listed.iter().map(|l| l.summary.clone()).collect();
+                    let date = works.iter().map(|w| w.date_updated.as_str()).max().unwrap_or("").to_string();
+                    (date, works)
+                } else { match sub_type.as_str() {
                     "author" | "series" => {
                         // Both author pages and series pages use li.work.blurb.
                         // A parse error (schema canary) must abort the check:
@@ -446,7 +490,7 @@ impl AO3App {
                         }
                     }
                     _ => (String::new(), vec![]),
-                };
+                } };
 
                 let s = storage.lock().await;
 
@@ -515,6 +559,19 @@ impl AO3App {
                 // Membership (author byline / series part) rides on the saved
                 // works themselves — nothing to record per subscription.
                 let all_ids = save_works(&s, &parsed_works);
+                // A listing from another source carries each work's figures
+                // and its authors as users; land them beside the works.
+                if let Some(listed) = &sourced_listed {
+                    for lw in listed {
+                        let Some(id) = s.resolve_work(&lw.summary.source, &lw.summary.external_id) else { continue };
+                        if !lw.authors.is_empty() {
+                            if let Ok(ids) = s.record_users(&lw.authors) {
+                                log_db("link_work_authors", s.link_work_authors(id, &ids));
+                            }
+                        }
+                        save_source_stats(&s, id, &lw.summary.source, &lw.stats);
+                    }
+                }
                 if changed {
                     log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &updated_ids)));
                 }

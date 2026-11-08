@@ -116,6 +116,8 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         // on the work page (storage merges them in on save).
         series,
         fetched_at: String::new(),
+    
+        author_ids: Vec::new(),
     })
 }
 
@@ -486,6 +488,8 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
             complete: false,
             series: Vec::new(),
             fetched_at: String::new(),
+        
+            author_ids: Vec::new(),
         })
     } else {
         parse_single_blurb(blurb).ok()

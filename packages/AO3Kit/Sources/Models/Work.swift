@@ -38,6 +38,11 @@ struct Work: Identifiable, Hashable {
     /// without one). The only thing "open on site" and "copy link" use —
     /// `id` is the library's row id, never a site identifier.
     var url: String = ""
+    /// The work's source id ("ao3", "scribblehub"); "" for sample data.
+    var source: String = ""
+    /// The users row behind each byline (0 = not linked yet). The one
+    /// identity an author is opened with; `author` is display text.
+    var authorIDs: [UInt64] = []
 
     /// The membership to follow at end-of-work — first series that has a
     /// next work.

@@ -318,12 +318,7 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         format!("guest:{:x}", simple_hash(&username))
     };
 
-    let author = AO3User {
-        id: user_id,
-        username,
-        profile_url,
-        avatar_url,
-    };
+    let author = AO3User::ao3(&user_id, &username, profile_url, avatar_url);
 
     let posted_at = div.select(&sel("span.posted")).next()
         .map(|d| parse_composite_datetime(&d))
@@ -390,7 +385,7 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
     };
 
     Some((Comment { id, author, posted_at, content, replies: Vec::new(),
-                    chapter_label, chapter_id, notice, more_replies: 0 }, parent_comment_id))
+                    chapter_label, chapter_id, notice, more_replies: 0, rating: None }, parent_comment_id))
 }
 
 fn parse_comment_pagination(doc: &Html, pagination_sel: &Selector) -> (u32, u32) {

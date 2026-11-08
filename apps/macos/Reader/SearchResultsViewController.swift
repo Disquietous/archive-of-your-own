@@ -179,7 +179,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                 else { return }
                 cell.setSelected(works[row].id == model.selectedWorkID)
                 cell.setBookmarked(bookmarked.contains(works[row].id))
-                cell.setFollowShaded(model.follows.isShaded(.author(works[row].author)))
+                cell.setFollowShaded(model.isAuthorBellShaded(for: works[row]))
             }
         }
         renderedWorkIDs = ids
@@ -348,7 +348,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
-                       followShaded: model.follows.isShaded(.author(work.author)),
+                       followShaded: model.isAuthorBellShaded(for: work),
                        finished: appState.finishedWorkIDs.contains(work.id),
                        summaryExpanded: true,
                        tagsExpanded: expandedTags.contains(work.id),
@@ -360,11 +360,11 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
             self?.appState.toggleBookmark(work.id)
         }
         cell.onAuthorClick = { [weak self] in
-            self?.model.openAuthorProfile(work.author)
+            self?.model.openAuthorProfile(of: work)
         }
         cell.onFollowBell = { [weak self] bell in
             guard let self else { return }
-            FollowBellMenu.show(for: .author(work.author), follows: model.follows, from: bell)
+            model.showAuthorBellMenu(for: work, from: bell)
         }
     }
 

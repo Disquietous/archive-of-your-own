@@ -110,7 +110,7 @@ struct AuthorsScreen: View {
                 .submitLabel(.done)
                 .onSubmit {
                     let name = newAuthor.trimmingCharacters(in: .whitespaces)
-                    if !name.isEmpty { follows.follow(.author(name)) }
+                    if !name.isEmpty, let target = follows.ao3AuthorTarget(name, ensure: true) { follows.follow(target) }
                     newAuthor = ""
                     lists.showFollowAuthorField = false
                 }

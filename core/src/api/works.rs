@@ -85,8 +85,101 @@ pub(super) async fn fetch_image_cached(
     Ok((bytes, true))
 }
 
-#[uniffi::export]
+/// Fetch a work through its source and land it: summary, series, chapters,
+/// source stats and the reacted-by list, atomically. Shared by the
+/// row-id fetch and the link import.
+pub(super) async fn fetch_and_save_work(
+    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    registry: Arc<crate::source::SourceRegistry>,
+    work_id: u64,
+    op_id: Option<u64>,
+) -> Result<UWorkSummary, AO3Error> {
+    let (source, external, known) = {
+        let s = storage.lock().await;
+        let (source, external) = source_for_work(&s, &registry, work_id)?;
+        // What the library holds already (a listing blurb, a previous
+        // fetch) — a figure the work page lacks need not be re-fetched.
+        (source, external, s.get_work(work_id).ok().flatten().filter(|w| !w.title.is_empty()))
+    };
+    let plan = source.clone();
+    let fetched = super::with_recovery_as(
+        client, storage.clone(),
+        op_id.unwrap_or_else(crate::events::next_op_id),
+        OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
+        move |_client| {
+            let (source, external, known) = (source.clone(), external.clone(), known.clone());
+            async move { source.fetch_work(&external, known.as_ref()).await.map_err(AO3Error::from) }
+        }).await;
+    let crate::source::FetchedWork { mut summary, chapters, stats, reacted_by, authors } =
+        note_work_presence(&storage, work_id, fetched).await?;
+    let s = storage.lock().await;
+    // Work + series + chapters + stats land atomically.
+    let tx = s.begin_tx().map_err(AO3Error::from)?;
+    let saved = s.save_work(&summary).map_err(AO3Error::from)?;
+    // A second source's authors arrive as users by key; AO3 bylines were
+    // linked inside save_work.
+    if !authors.is_empty() {
+        match s.record_users(&authors) {
+            Ok(ids) => { log_db("link_work_authors", s.link_work_authors(saved, &ids)); }
+            Err(e) => { log_error!("db", "record_users failed: {e}"); }
+        }
+    }
+    log_db("set_work_series", s.set_work_series(saved, &summary.series));
+    record_kudos_if_listed(&s, saved, &reacted_by);
+    land_chapters(&s, &plan, saved, &chapters);
+    save_source_stats(&s, saved, &summary.source, &stats);
+    log_db("commit work save", tx.commit());
+    summary.id = saved;
+    // The saved record carries the resolved series rows.
+    Ok(UWorkSummary::from(s.get_work(saved).ok().flatten().unwrap_or(summary)))
+}
 
+/// Save what a work fetch returned for its chapters: full rows for a
+/// source that serves the whole work, stub rows (id + title, text kept
+/// if already fetched) for one that serves a page per chapter.
+fn land_chapters(s: &Storage, source: &Arc<dyn crate::source::Source>, work_id: u64, chapters: &[crate::models::Chapter]) {
+    if source.fetches_chapters_individually() {
+        for ch in chapters { log_db("save_chapter_stub", s.save_chapter_stub(work_id, ch)); }
+    } else {
+        for ch in chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
+    }
+}
+
+/// The whole work's chapters in one fetch, saved and returned — the plan
+/// for sources that serve a work as one page (AO3).
+async fn fetch_all_chapters(
+    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    source: Arc<dyn crate::source::Source>,
+    external: ExternalRef,
+    work_id: u64,
+    op_id: Option<u64>,
+) -> Result<Vec<UChapter>, AO3Error> {
+    let plan = source.clone();
+    let fetched = super::with_recovery_as(
+        client.clone(), storage.clone(),
+        op_id.unwrap_or_else(crate::events::next_op_id),
+        OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
+        move |_client| {
+            let (source, external) = (source.clone(), external.clone());
+            async move { source.fetch_work(&external, None).await.map_err(AO3Error::from) }
+        }).await;
+    let fetched = note_work_presence(&storage, work_id, fetched).await?;
+    let c = client.read().await;
+    let s = storage.lock().await;
+    record_kudos_if_listed(&s, work_id, &fetched.reacted_by);
+    let tx = s.begin_tx().map_err(AO3Error::from)?;
+    land_chapters(&s, &plan, work_id, &fetched.chapters);
+    log_db("commit chapters", tx.commit());
+    // Content pages carry the posting credentials (CSRF token, pseud) —
+    // persist what the fetch harvested so later kudos/comment POSTs
+    // need no preparatory request.
+    persist_posting_credentials(&c, &s);
+    Ok(fetched.chapters.into_iter().map(UChapter::from).collect())
+}
+
+#[uniffi::export]
 impl AO3App {
     pub async fn fetch_search_form(&self) -> Result<Vec<UFormField>, AO3Error> {
         self.run_on_runtime(|client, storage| async move {
@@ -535,27 +628,9 @@ impl AO3App {
     /// fetch to the requesting view per the request-tracking standard;
     /// None = untracked (the core assigns an internal id).
     pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
-            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
-            let fetched = super::with_recovery_as(
-                client, storage.clone(),
-                op_id.unwrap_or_else(crate::events::next_op_id),
-                OpKind::Fetch { label: "work".to_string() }, RetrySafety::Idempotent,
-                move |client| async move {
-                    client.read().await.get_work(number).await.map_err(AO3Error::from)
-                }).await;
-            let (mut summary, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
-            let s = storage.lock().await;
-            // Work + series + chapters land atomically.
-            let tx = s.begin_tx().map_err(AO3Error::from)?;
-            let saved = s.save_work(&summary).map_err(AO3Error::from)?;
-            log_db("set_work_series", s.set_work_series(saved, &summary.series));
-            record_kudos_if_listed(&s, saved, &kudos_names);
-            for ch in &chapters { log_db("save_chapter", s.save_chapter(saved, ch)); }
-            log_db("commit work save", tx.commit());
-            summary.id = saved;
-            // The saved record carries the resolved series rows.
-            Ok(UWorkSummary::from(s.get_work(saved).ok().flatten().unwrap_or(summary)))
+            fetch_and_save_work(client, storage, registry, work_id, op_id).await
         }).await
     }
 
@@ -563,29 +638,54 @@ impl AO3App {
         self.fetch_work_full(work_id, op_id).await
     }
 
-    /// `op_id`: request-tracking standard (see `fetch_work_full`).
+    /// Every chapter of the work in one fetch. For a source that serves a
+    /// page per chapter this returns stubs (titles, no text); readers use
+    /// `fetch_chapter`. `op_id`: request-tracking standard (see
+    /// `fetch_work_full`).
     pub async fn fetch_chapters(&self, work_id: u64, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
-            let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
+            let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
+            fetch_all_chapters(client, storage, source, external, work_id, op_id).await
+        }).await
+    }
+
+    /// The chapter the reader is opening, by number. A source that serves
+    /// the whole work as one page fetches everything (as `fetch_chapters`
+    /// does); a source with a page per chapter fetches the table of
+    /// contents first when the work has no chapter rows yet, then that
+    /// one chapter. Returns the work's full chapter list with the
+    /// requested one filled in. `op_id`: request-tracking standard.
+    pub async fn fetch_chapter(&self, work_id: u64, number: u32, op_id: Option<u64>) -> Result<Vec<UChapter>, AO3Error> {
+        let registry = self.sources.clone();
+        self.run_on_runtime_for(op_id, move |client, storage| async move {
+            let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
+            if !source.fetches_chapters_individually() {
+                return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
+            }
+            let existing = { let s = storage.lock().await; s.get_chapter(work_id, number).map_err(AO3Error::from)? };
+            let stub = match existing.filter(|c| c.id.is_some()) {
+                Some(c) => c,
+                None => {
+                    // No TOC yet (or a chapter past the one we know): the
+                    // work fetch lands the stubs.
+                    fetch_and_save_work(client.clone(), storage.clone(), registry.clone(), work_id, op_id).await?;
+                    let s = storage.lock().await;
+                    s.get_chapter(work_id, number).map_err(AO3Error::from)?
+                        .ok_or_else(|| AO3Error::NotFound { message: format!("work {work_id} has no chapter {number}") })?
+                }
+            };
             let fetched = super::with_recovery_as(
-                client.clone(), storage.clone(),
+                client, storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
-                OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
-                move |client| async move {
-                    client.read().await.get_work(number).await.map_err(AO3Error::from)
-                }).await;
-            let (_, chapters, kudos_names) = note_work_presence(&storage, work_id, fetched).await?;
-            let c = client.read().await;
+                OpKind::Fetch { label: "chapter".to_string() }, RetrySafety::Idempotent,
+                move |_client| {
+                    let (source, external, stub) = (source.clone(), external.clone(), stub.clone());
+                    async move { source.fetch_chapter(&external, &stub).await.map_err(AO3Error::from) }
+                }).await?;
             let s = storage.lock().await;
-            record_kudos_if_listed(&s, work_id, &kudos_names);
-            let tx = s.begin_tx().map_err(AO3Error::from)?;
-            for ch in &chapters { log_db("save_chapter", s.save_chapter(work_id, ch)); }
-            log_db("commit chapters", tx.commit());
-            // Content pages carry the posting credentials (CSRF token, pseud) —
-            // persist what the fetch harvested so later kudos/comment POSTs
-            // need no preparatory request.
-            persist_posting_credentials(&c, &s);
-            Ok(chapters.into_iter().map(UChapter::from).collect())
+            log_db("save_chapter", s.save_chapter(work_id, &fetched));
+            Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
         }).await
     }
 

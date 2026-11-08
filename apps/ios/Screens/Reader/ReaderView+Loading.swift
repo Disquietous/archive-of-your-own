@@ -33,9 +33,12 @@ extension ReaderView {
             // Request-tracking standard: the minted id rides on every request
             // of this fetch, retries included, so the banner and per-op
             // cancel address exactly this reader's operation.
+            // By chapter: a source with a page per chapter fetches only
+            // the one being opened.
+            let number = UInt32(chapterIndex + 1)
             let chapters = try await state.chapterFetchOp.run(state.bridge) { opID in
                 try await state.retryOnTimeout(task: chapterTask, using: state.bridge) {
-                    try await self.state.bridge.fetchChapters(workId, opID: opID)
+                    try await self.state.bridge.fetchChapter(workId, number: number, opID: opID)
                 }
             }
             state.fetchedChapters[workID] = chapters

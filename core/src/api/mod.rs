@@ -34,8 +34,10 @@ mod prefs;
 mod records;
 mod recovery;
 mod social;
+mod sources;
 mod cloud_sync;
 mod upkeep;
+mod users;
 mod whats_new;
 mod works;
 
@@ -132,6 +134,10 @@ pub struct AO3App {
     /// search produced, held so pages hydrate by slicing instead of
     /// re-querying. Session state — never persisted, fresh per instance.
     library_searches: std::sync::Mutex<works::LibrarySearchCache>,
+    /// Every source the app can read from (multi-source plan Area 4):
+    /// AO3 behind the contract, plus the rated mock. Shared across
+    /// lock/unlock like the client it wraps.
+    sources: Arc<crate::source::SourceRegistry>,
 }
 
 impl AO3App {
@@ -143,9 +149,13 @@ impl AO3App {
             let (target, _) = split_author_byline(&target);
             let (current, record_id) = {
                 let s = storage.lock().await;
-                s.get_user_profile(&target).ok().flatten()
-                    .map(|p| if kind == "blocked" { (p.blocked, p.block_ao3_id) }
-                             else { (p.muted, p.mute_ao3_id) })
+                let (flag, record) = if kind == "blocked" {
+                    (crate::user_fields::UserField::Blocked, crate::user_fields::AO3_BLOCK_RECORD)
+                } else {
+                    (crate::user_fields::UserField::Muted, crate::user_fields::AO3_MUTE_RECORD)
+                };
+                s.get_ao3_user_record(&target)
+                    .map(|u| (u.field(flag).is_some(), u.property(record).map(str::to_string)))
                     .unwrap_or((false, None))
             };
             let want = !current;
@@ -216,7 +226,8 @@ impl AO3App {
             // Saved summaries carry their row ids; a summary that failed
             // to save is dropped rather than returned without an id.
             let works: Vec<UWorkSummary> = works.into_iter()
-                .filter_map(|w| s.resolve_work(&w.source, &w.external_id).map(|id| WorkSummary { id, ..w }))
+                .filter_map(|w| s.resolve_work(&w.source, &w.external_id)
+                    .map(|id| s.get_work(id).ok().flatten().unwrap_or(WorkSummary { id, ..w })))
                 .map(UWorkSummary::from)
                 .collect();
             debug_assert!(works.len() <= ids.len() + works.len());
@@ -342,11 +353,10 @@ impl AO3App {
     fn flush_request_log(&self) {
         let records = crate::client::drain_request_records();
         if records.is_empty() { return; }
-        // Every request today is for AO3 — the one source with a transport.
         let tuples: Vec<_> = records.into_iter().map(|r| (
             r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
             r.request_bytes, r.response_bytes, r.error, r.payload, r.transport,
-            SOURCE_AO3.to_string(),
+            r.source,
         )).collect();
         if let Ok(storage) = self.storage.try_lock() {
             let cap = upkeep::request_log_row_cap(&storage);
@@ -354,7 +364,7 @@ impl AO3App {
         } else {
             for t in tuples.into_iter().rev() {
                 crate::client::push_request_record(crate::client::RequestRecord {
-                    started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
+                    source: t.10, started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
                     duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
                     error: t.7, payload: t.8, transport: t.9,
                 });

@@ -47,14 +47,16 @@ extension ReaderViewController {
             }
         }
 
-        // Fetch over the network (Tor-gated inside retryOnTimeout).
+        // Fetch over the network (privacy-gated inside retryOnTimeout). By
+        // chapter: a source with a page per chapter fetches only this one.
         isLoading = true
         loadError = nil
         renderChapter()
+        let number = UInt32(chapterIndex + 1)
         do {
             let fetched = try await session.chapterFetchOp.run(appState.bridge) { opID in
                 try await appState.retryOnTimeout(task: chapterTask, using: appState.bridge) {
-                    try await self.appState.bridge.fetchChapters(workId, opID: opID)
+                    try await self.appState.bridge.fetchChapter(workId, number: number, opID: opID)
                 }
             }
             appState.fetchedChapters[work.id] = fetched

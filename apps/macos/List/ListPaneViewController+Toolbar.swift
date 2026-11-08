@@ -22,42 +22,47 @@ extension ListPaneViewController {
         return button
     }
 
-    /// Author view: refetch the user's profile from AO3. This is the only
-    /// path that refreshes a cached profile — cached copies are otherwise
-    /// served forever.
-    func authorProfileRefreshButton(username: String) -> ToolButton {
+    /// Author view: refetch the user's profile from their source. This is
+    /// the only path that refreshes a cached profile — cached copies are
+    /// otherwise served forever.
+    func authorProfileRefreshButton(userID: UInt64) -> ToolButton {
         let button = authorProfileRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                           tooltip: "Refresh profile from AO3") { [weak self] in
-            guard let self, let user = model.author.username else { return }
-            Task { @MainActor in await self.appState.loadUserProfile(user, forceRefresh: true) }
+                                                           tooltip: "Refresh profile") { [weak self] in
+            guard let self, let id = model.author.userID else { return }
+            Task { @MainActor in await self.appState.loadUser(id, forceRefresh: true) }
         }
         authorProfileRefreshBtn = button
-        button.isEnabled = !appState.isLoadingUserProfile(username)
+        button.toolTip = "Refresh profile from \(appState.userSourceName(userID))"
+        button.isEnabled = !appState.isLoadingUser(userID)
         return button
     }
 
-    /// Author view: open the user's AO3 profile in the configured link app.
-    func authorAO3Button(username: String) -> LabelToolButton {
+    /// Author view: open the user's profile page at their source in the
+    /// configured link app.
+    func authorSiteButton(userID: UInt64) -> LabelToolButton {
         let button = authorAO3Btn ?? LabelToolButton(theme: theme) { [weak self] in
-            guard let self, let user = model.author.username,
-                  let url = ExternalLinkOpener.ao3UserURL(user) else { return }
+            guard let self, let id = model.author.userID,
+                  let raw = appState.user(id)?.profileUrl, let url = URL(string: raw) else { return }
             ExternalLinkOpener.open(url, bridge: appState.bridge)
         }
         authorAO3Btn = button
-        button.configure(title: "Ao3", symbol: "arrow.up.right",
-                         tooltip: "Open \(username)'s profile on AO3 in your browser")
+        let site = appState.userSourceName(userID)
+        let name = appState.user(userID)?.username ?? ""
+        button.configure(title: appState.userSource(userID) == "ao3" ? "Ao3" : "Site", symbol: "arrow.up.right",
+                         tooltip: "Open \(name)'s profile on \(site) in your browser")
         return button
     }
 
     /// Author view: the author's follow bell — opens the Followed /
     /// Subscribed menu (the author card's AO3 subscription lives here too).
-    func authorFollowButton(username: String) -> ToolButton {
+    func authorFollowButton(userID: UInt64, username: String) -> ToolButton {
         let button = authorFollowBtn ?? ToolButton(theme: theme, symbol: "bell", tooltip: "Follow") { [weak self] in
-            guard let self, let user = model.author.username, let anchor = authorFollowBtn else { return }
-            FollowBellMenu.show(for: .author(user), follows: model.follows, from: anchor)
+            guard let self, let id = model.author.userID, let anchor = authorFollowBtn else { return }
+            let name = model.author.username ?? ""
+            FollowBellMenu.show(for: .author(id: id, name: name), follows: model.follows, from: anchor)
         }
         authorFollowBtn = button
-        let shaded = model.follows.isShaded(.author(username))
+        let shaded = model.follows.isShaded(.author(id: userID, name: username))
         button.setSymbol(shaded ? "bell.fill" : "bell")
         button.tintOverride = shaded ? theme.nsAccent : nil
         button.toolTip = "Followed / Subscribed — choose how to track \(username)"

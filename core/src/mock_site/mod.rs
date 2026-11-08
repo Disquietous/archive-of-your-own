@@ -726,8 +726,8 @@ mod tests {
         assert_eq!(parser::parse_comments(&thread).comments[0].id, first);
 
         let profile = parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap();
-        assert_eq!(profile.username, "Marrow_and_Moss");
-        assert_eq!(profile.works_count, 3);
+        assert_eq!(profile.profile.username, "Marrow_and_Moss");
+        assert_eq!(profile.profile.property("works"), Some("3"));
         assert!(!profile.viewer_signed_in);
 
         let cols = parser::parse_collections_page(&get("/collections?page=1")).unwrap();
@@ -812,13 +812,13 @@ mod tests {
 
         // Block, then unblock, through the profile links and index.
         let p = parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap();
-        assert!(p.viewer_signed_in && !p.blocked);
+        assert!(p.viewer_signed_in && p.profile.property("blocked").is_none());
         let r = respond_post(&format!("{}/users/tester/blocked/users", crate::client::BASE_URL),
                              &[("blocked_id".into(), "Marrow_and_Moss".into())], "");
         let list = parser::parse_moderation_list(&r.body, "confirm_unblock");
         assert_eq!(list.len(), 1);
         let rid = list[0].1.clone().unwrap();
-        assert!(parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap().blocked);
+        assert!(parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap().profile.property("blocked").is_some());
         let r = respond_post(&format!("{}/users/tester/blocked/users/{rid}", crate::client::BASE_URL),
                              &[("_method".into(), "delete".into())], "");
         assert!(parser::parse_moderation_list(&r.body, "confirm_unblock").is_empty());

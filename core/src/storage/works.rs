@@ -74,9 +74,13 @@ impl Storage {
             )?;
             // Seeing a work's details anywhere feeds the autocomplete tag cache.
             let _ = self.harvest_work_tags(work);
-            // Author bylines are user sightings: "Pseud (account)" teaches
-            // the account row a pseud it hadn't recorded.
-            self.record_author_bylines(&work.authors)?;
+            // AO3 bylines name AO3 accounts (unique within AO3): record the
+            // sightings and link the work to them. Any other source's
+            // authors are users the fetch delivers by key; the caller links
+            // them with `link_work_authors` once recorded.
+            if work.source == crate::models::SOURCE_AO3 {
+                self.link_ao3_bylines(id, &work.authors)?;
+            }
             Ok(id)
         })
     }
@@ -212,7 +216,12 @@ impl Storage {
     /// (source, external_id); returns the row id.
     pub fn save_series(&self, series: &SeriesSummary) -> Result<u64, AppError> {
         self.with_savepoint(Savepoint::SaveSeries, || {
-            self.series_cache.save(&self.conn, series, &crate::timefmt::now_utc_datetime())
+            let id = self.series_cache.save(&self.conn, series, &crate::timefmt::now_utc_datetime())?;
+            if series.source == crate::models::SOURCE_AO3 {
+                let ids = self.record_author_bylines(&series.authors)?;
+                self.link_series_authors(id, &ids)?;
+            }
+            Ok(id)
         })
     }
 
@@ -240,13 +249,6 @@ impl Storage {
         let gone = self.ao3_bookmarks.purge_target(BookmarkTarget::Series(id));
         self.collections_cache.purge_bookmarks(&gone);
         Ok(())
-    }
-
-    /// An avatar URL already harvested for this username (from cached
-    /// comments/inbox data) — saves the profile-page request entirely.
-    /// Answered from the users cache.
-    pub fn get_known_avatar_url(&self, username: &str) -> Result<Option<String>, AppError> {
-        Ok(self.users_cache.known_avatar_url(username))
     }
 
     // -------------------------------------------------------------------
@@ -662,20 +664,20 @@ impl Storage {
     /// a work bylined "Pseud (account)" belongs to the account, so an
     /// author's list includes works posted under any of their pseuds —
     /// the same set AO3 shows on /users/{account}/works.
+    /// The works linked to a users row, newest update first.
+    pub fn get_works_by_user(&self, user_id: i64) -> Result<Vec<WorkSummary>, AppError> {
+        Ok(self.work_ids_by_user(user_id).into_iter()
+            .filter_map(|id| self.get_work(id).ok().flatten())
+            .collect())
+    }
+
+    /// An AO3 author's works by name (AO3 names are unique within AO3):
+    /// the account row's links. Unknown name → empty.
     pub fn get_works_by_author(&self, username: &str) -> Result<Vec<WorkSummary>, AppError> {
-        let account = self.users_cache
-            .resolve(username)
-            .map(|e| e.username.clone())
-            .unwrap_or_else(|| crate::models::split_author_byline(username).0);
-        let mut works: Vec<WorkSummary> = self.works_cache
-            .all()
-            .into_iter()
-            .filter(|e| e.summary.authors.iter()
-                .any(|a| crate::models::split_author_byline(a).0.eq_ignore_ascii_case(&account)))
-            .map(|e| self.works_cache.hydrate(&e, &self.tag_cache))
-            .collect();
-        works.sort_by(|a, b| b.date_updated.cmp(&a.date_updated));
-        Ok(works)
+        match self.ao3_user_row_id(username) {
+            Some(id) => self.get_works_by_user(id),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Delete a work. Every dependent row — chapters, progress, history,
@@ -726,6 +728,34 @@ impl Storage {
                 ],
             )
             .map_err(map_sql)?;
+        Ok(())
+    }
+
+    /// A chapter known from a table of contents (a per-chapter source):
+    /// ensure its row with id and title, never touching text already
+    /// fetched — unless a different chapter now sits at this number, in
+    /// which case the stale text goes and the row is a stub again.
+    pub fn save_chapter_stub(&self, work_id: u64, chapter: &Chapter) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT INTO chapters (work_id, number, chapter_id, title, content_json)
+             VALUES (?1, ?2, ?3, ?4, '[]')
+             ON CONFLICT (work_id, number) DO UPDATE SET
+                 content_json = CASE WHEN excluded.chapter_id IS NOT NULL
+                                      AND chapters.chapter_id IS NOT NULL
+                                      AND chapters.chapter_id <> excluded.chapter_id
+                                     THEN '[]' ELSE chapters.content_json END,
+                 char_len = CASE WHEN excluded.chapter_id IS NOT NULL
+                                  AND chapters.chapter_id IS NOT NULL
+                                  AND chapters.chapter_id <> excluded.chapter_id
+                                 THEN 0 ELSE chapters.char_len END,
+                 notes_after = CASE WHEN excluded.chapter_id IS NOT NULL
+                                     AND chapters.chapter_id IS NOT NULL
+                                     AND chapters.chapter_id <> excluded.chapter_id
+                                    THEN NULL ELSE chapters.notes_after END,
+                 chapter_id = COALESCE(excluded.chapter_id, chapters.chapter_id),
+                 title = COALESCE(excluded.title, chapters.title)",
+            params![work_id as i64, chapter.number as i64, chapter.id.map(|id| id as i64), chapter.title],
+        ).map_err(map_sql)?;
         Ok(())
     }
 
@@ -981,6 +1011,8 @@ impl Storage {
             complete: complete != 0,
             series,
             fetched_at,
+        
+            author_ids: Vec::new(),
         })
     }
 

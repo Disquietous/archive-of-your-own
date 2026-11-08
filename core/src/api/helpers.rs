@@ -31,6 +31,53 @@ pub(super) fn record_kudos_if_listed(s: &crate::storage::Storage, work_id: u64, 
     }
 }
 
+/// The source and external identity of a work row, for dispatch. Errors
+/// for an unknown row or a source the registry lacks. Refuses, with the
+/// reason, a source the current privacy mode cannot reach (a site that
+/// blocks Tor while the app is in Tor mode).
+pub(super) fn source_for_work(s: &Storage, registry: &crate::source::SourceRegistry, work_id: u64)
+    -> Result<(Arc<dyn crate::source::Source>, ExternalRef), AO3Error>
+{
+    let Some(external) = s.work_ref(work_id) else {
+        return Err(AO3Error::NotFound { message: format!("no work with id {work_id}") });
+    };
+    let Some(source) = registry.by_id(&external.source) else {
+        return Err(AO3Error::NotFound { message: format!("work {work_id} is from an unknown source {}", external.source) });
+    };
+    check_reachable(&source)?;
+    Ok((source, external))
+}
+
+/// Tor mode cannot reach a source that blocks Tor exits: say so instead
+/// of trying (nothing would be sent anyway; the gate refuses direct sends
+/// in Tor mode).
+pub(super) fn check_reachable(source: &Arc<dyn crate::source::Source>) -> Result<(), AO3Error> {
+    let caps = source.capabilities();
+    if crate::client::privacy::privacy_mode() == crate::client::PrivacyMode::Tor && !caps.reach.tor {
+        return Err(AO3Error::Network {
+            message: format!("{} blocks Tor. Switch to My VPN in Settings › Privacy to read it.", caps.name),
+        });
+    }
+    Ok(())
+}
+
+/// Persist a source's stats on a work: register each field on first
+/// sight, then replace the work's values (absent = NULL, never zero).
+pub(super) fn save_source_stats(s: &Storage, work_row: u64, source: &str, stats: &[crate::source::SourceStat]) {
+    if stats.is_empty() && s.fields_for_source(source).is_empty() { return }
+    let mut rows = Vec::with_capacity(stats.len());
+    for stat in stats {
+        let value_type = if stat.num.is_some() { "num" } else { "text" };
+        match s.ensure_field(source, &stat.key, &stat.label, value_type, stat.order) {
+            Ok(field_id) => rows.push(crate::storage::WorkStat {
+                field_id, num_value: stat.num, text_value: stat.text.clone(),
+            }),
+            Err(e) => { log_error!("db", "ensure_field {}:{} failed: {e}", source, stat.key); }
+        }
+    }
+    log_db("set_work_stats", s.set_work_stats(work_row, &rows));
+}
+
 /// The AO3 identity of a work row — what a fetch or a site URL needs.
 /// Errors for an unknown row, or one from another source (there are none
 /// yet; the AO3 client cannot fetch them).
@@ -64,7 +111,9 @@ pub(super) fn ao3_series_number(s: &Storage, series_id: u64) -> Result<u64, AO3E
 /// fetched) or a target from another source.
 pub(super) fn ao3_follow_id(s: &Storage, target: FollowTarget) -> Option<String> {
     match target {
-        FollowTarget::Author(_) => Some(s.follow_bridge_id(target)).filter(|u| !u.is_empty()),
+        FollowTarget::Author(id) => s.get_user(id)
+            .filter(|u| u.source == SOURCE_AO3)
+            .map(|u| u.username),
         FollowTarget::Work(id) => s.work_ref(id)
             .filter(|r| r.source == SOURCE_AO3)
             .map(|r| r.external_id),

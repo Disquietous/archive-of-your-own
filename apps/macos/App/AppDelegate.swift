@@ -25,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MacFont.scale = CGFloat(theme.uiFontScale)
         buildMainMenu()
+        // A site's human check (ScribbleHub behind Cloudflare, off Tor) is
+        // passed by the user in a sheet; the core asks for it mid-request.
+        RecoveryCapabilities.siteChallengeHandler = { source, url in
+            try await ChallengeSheetController.present(source: source, url: url)
+        }
         ReaderPosLog.sink = { [weak appState] message in
             appState?.bridge.writeLog(level: "DEBUG", tag: "readerpos", message: message)
         }
@@ -464,8 +469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func promptOpenAO3URL() {
         let alert = NSAlert()
-        alert.messageText = "Open AO3 URL"
-        alert.informativeText = "Paste an archiveofourown.org link. \(AO3Link.supportedSummary)"
+        alert.messageText = "Open URL"
+        alert.informativeText = "Paste an AO3 link (\(AO3Link.supportedSummary.lowercased())) or a ScribbleHub series or chapter link to import that story."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
         field.placeholderString = "https://archiveofourown.org/works/…"
         alert.accessoryView = field

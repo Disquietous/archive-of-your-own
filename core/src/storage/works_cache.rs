@@ -30,6 +30,9 @@ pub(super) struct WorkTagRef {
 pub(super) struct WorkEntity {
     pub summary: WorkSummary,
     pub tags: Vec<WorkTagRef>,
+    /// `work_authors` rows for this work, in byline position order — the
+    /// in-memory replacement for the works↔users join.
+    pub author_ids: Vec<i64>,
     pub detail_viewed_at: String,
     pub last_read_dt: String,
     pub last_chapter_read: u32,
@@ -55,8 +58,9 @@ impl WorkEntity {
 }
 
 /// The works table's in-memory mirror and single write authority (the
-/// `work_tags` and `work_authors` index tables ride along — they are
-/// derived from the same save).
+/// `work_tags` index table rides along — it is derived from the same
+/// save; `work_authors` links are written by Storage once the authors'
+/// user rows exist).
 ///
 /// Every post-open INSERT/UPDATE/DELETE against those tables lives in this
 /// module, and each one mutates the map and the database in the same call —
@@ -106,6 +110,7 @@ impl WorksCache {
                     Ok(WorkEntity {
                         summary,
                         tags: Vec::new(),
+                        author_ids: Vec::new(),
                         detail_viewed_at,
                         last_read_dt,
                         last_chapter_read: last_chapter_read as u32,
@@ -135,6 +140,20 @@ impl WorksCache {
                 let (work_id, tag_id, tag_type) = row.map_err(map_sql)?;
                 if let Some(entity) = entities.get_mut(&(work_id as u64)) {
                     entity.tags.push(WorkTagRef { tag_id, tag_type });
+                }
+            }
+        }
+        {
+            let mut stmt = conn
+                .prepare("SELECT work_id, user_id FROM work_authors ORDER BY work_id, position, id")
+                .map_err(map_sql)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .map_err(map_sql)?;
+            for row in rows {
+                let (work_id, user_id) = row.map_err(map_sql)?;
+                if let Some(entity) = entities.get_mut(&(work_id as u64)) {
+                    entity.author_ids.push(user_id);
                 }
             }
         }
@@ -173,6 +192,7 @@ impl WorksCache {
     /// the tag cache — the in-memory replacement for the works↔tags join.
     pub(super) fn hydrate(&self, entity: &WorkEntity, tags: &TagCache) -> WorkSummary {
         let mut summary = entity.summary.clone();
+        summary.author_ids = entity.author_ids.clone();
         for tag_ref in &entity.tags {
             let Some(tag) = tags.get(tag_ref.tag_id) else { continue };
             let name = tag.name.to_string();
@@ -196,6 +216,11 @@ impl WorksCache {
             mutate(&mut entity);
             map.insert(id, Arc::new(entity));
         }
+    }
+
+    /// Mirror a rewrite of the work's `work_authors` links.
+    pub(super) fn set_author_ids(&self, work_id: u64, ids: &[i64]) {
+        self.update_entity(work_id, |e| e.author_ids = ids.to_vec());
     }
 
     fn insert_entity(&self, entity: WorkEntity) {
@@ -276,7 +301,6 @@ impl WorksCache {
             Some(id) => id,
             None => conn.last_insert_rowid() as u64,
         };
-        self.replace_work_authors(conn, id, &work.authors)?;
         let tag_refs = self.replace_work_tag_rows(conn, tags, id, work)?;
 
         let mut summary = work.clone();
@@ -298,6 +322,9 @@ impl WorksCache {
         let entity = WorkEntity {
             summary,
             tags: tag_refs,
+            // Links are rewritten by Storage after the save; until then
+            // the previous links stand.
+            author_ids: old.as_ref().map(|o| o.author_ids.clone()).unwrap_or_default(),
             detail_viewed_at: old.as_ref().map(|o| o.detail_viewed_at.clone()).unwrap_or_default(),
             last_read_dt: old.as_ref().map(|o| o.last_read_dt.clone()).unwrap_or_default(),
             last_chapter_read: old.as_ref().map(|o| o.last_chapter_read).unwrap_or(0),
@@ -341,6 +368,7 @@ impl WorksCache {
         self.insert_entity(WorkEntity {
             summary,
             tags: Vec::new(),
+            author_ids: Vec::new(),
             detail_viewed_at: String::new(),
             last_read_dt: String::new(),
             last_chapter_read: 0,
@@ -385,21 +413,6 @@ impl WorksCache {
             }
         }
         Ok(refs)
-    }
-
-    /// Rewrite the author-index rows for one work.
-    fn replace_work_authors(&self, conn: &Connection, work_id: u64, authors: &[String])
-        -> Result<(), AppError>
-    {
-        conn.execute("DELETE FROM work_authors WHERE work_id = ?1", params![work_id as i64])
-            .map_err(map_sql)?;
-        let mut stmt = conn
-            .prepare_cached("INSERT OR IGNORE INTO work_authors (work_id, author) VALUES (?1, ?2)")
-            .map_err(map_sql)?;
-        for author in authors {
-            stmt.execute(params![work_id as i64, author]).map_err(map_sql)?;
-        }
-        Ok(())
     }
 
     /// Persist series memberships (already resolved to series row ids).
@@ -551,5 +564,6 @@ fn stub_summary() -> WorkSummary {
         complete: false,
         series: Vec::new(),
         fetched_at: String::new(),
+        author_ids: Vec::new(),
     }
 }

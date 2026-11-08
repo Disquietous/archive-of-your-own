@@ -241,6 +241,10 @@ final class RustBridge {
         return .other(Self.describeOpenError(error))
     }
 
+    /// The message inside a Rust error, without the Swift enum wrapper —
+    /// for alerts that show a failure to the user.
+    static func errorMessage(_ error: Error) -> String { describeOpenError(error) }
+
     /// The message inside the Rust error, without the Swift enum wrapper.
     private static func describeOpenError(_ error: Error) -> String {
         if let e = error as? Ao3Error {

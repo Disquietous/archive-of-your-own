@@ -343,7 +343,9 @@ struct SearchResultsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            FollowBellMenu(target: .author(username), glyphSize: 14, weight: .medium, hitSize: 32)
+            if let target = follows.ao3AuthorTarget(username, ensure: true) {
+                FollowBellMenu(target: target, glyphSize: 14, weight: .medium, hitSize: 32)
+            }
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(theme.ink3)

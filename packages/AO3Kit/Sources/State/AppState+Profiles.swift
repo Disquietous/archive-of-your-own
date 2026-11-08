@@ -36,6 +36,92 @@ extension AppState {
         userProfiles[Self.profileKey(username)]
     }
 
+    // MARK: - Users by row id
+
+    func user(_ id: UInt64) -> UUser? { users[id] }
+    func userError(_ id: UInt64) -> String? { userErrors[id] }
+    func isLoadingUser(_ id: UInt64) -> Bool { userLoading.contains(id) }
+
+    /// The user's source id, from the loaded record or the library row.
+    func userSource(_ id: UInt64) -> String {
+        if let u = users[id] { return u.source }
+        if let u = bridge.getUser(id) { users[id] = u; return u.source }
+        return "ao3"
+    }
+
+    /// What the user's source offers; nil only for an unknown source id.
+    func userCapabilities(_ id: UInt64) -> SourceCapabilities? {
+        bridge.sourceCapabilities(userSource(id))
+    }
+
+    /// Display name of the user's source ("Archive of Our Own").
+    func userSourceName(_ id: UInt64) -> String {
+        userCapabilities(id)?.name ?? "AO3"
+    }
+
+    /// The users row for an AO3 username (created when never seen).
+    func userID(forAO3Username username: String) -> UInt64? {
+        bridge.userID(forAO3Username: Self.canonicalAuthorUsername(username))
+    }
+
+    /// Load a user by id. Cache-forever: a cached copy (session or DB) is
+    /// served as-is; only `forceRefresh` fetches when one exists.
+    func loadUser(_ id: UInt64, forceRefresh: Bool = false) async {
+        guard !userLoading.contains(id) else { return }
+        userLoading.insert(id)
+        defer { userLoading.remove(id) }
+        if users[id]?.profileFetchedAt == nil, let cached = bridge.getUser(id) {
+            users[id] = cached
+        }
+        if !forceRefresh, users[id]?.profileFetchedAt != nil {
+            userErrors[id] = nil
+            return
+        }
+        do {
+            users[id] = try await bridge.fetchUser(id)
+            userErrors[id] = nil
+            // An AO3 fetch mirrors live subscription state into the
+            // signed-in account's subscriptions (never follows).
+            subscriptions = bridge.getPersistedSubscriptions()
+        } catch {
+            userErrors[id] = Self.readableError(error)
+            NSLog("[user] fetch for %llu failed: %@", id, "\(error)")
+        }
+    }
+
+    /// A user's avatar by row id: AO3 users through the cached avatar path
+    /// (one scrape at most), any other source from the profile's URL.
+    /// Failures are remembered for the session.
+    func loadUserAvatar(_ id: UInt64) {
+        guard userAvatars[id] == nil, !userAvatarFetches.contains(id) else { return }
+        let user = users[id] ?? bridge.getUser(id)
+        guard let user else { return }
+        if user.source == "ao3" {
+            loadAuthorAvatar(user.username, urlHint: user.avatarUrl)
+            if let data = authorAvatars[user.username] { userAvatars[id] = data }
+            return
+        }
+        guard let url = user.avatarUrl else { return }
+        userAvatarFetches.insert(id)
+        Task { @MainActor in
+            if let data = try? await bridge.fetchImage(url: url) { userAvatars[id] = data }
+        }
+    }
+
+    /// Avatar bytes for a users row, from either session cache.
+    func userAvatar(_ id: UInt64) -> Data? {
+        if let data = userAvatars[id] { return data }
+        guard let name = users[id]?.username else { return nil }
+        return authorAvatars[name]
+    }
+
+    /// Re-read a user's row after an AO3-side change (block, mute).
+    private func refreshUserRow(forAO3Username username: String) {
+        if let id = bridge.userID(forAO3Username: username), let u = bridge.getUser(id) {
+            users[id] = u
+        }
+    }
+
     func userProfileError(_ username: String) -> String? {
         userProfileErrors[Self.profileKey(username)]
     }
@@ -110,6 +196,7 @@ extension AppState {
                     p.blocked = newState
                     userProfiles[username.lowercased()] = p
                 }
+                refreshUserRow(forAO3Username: username)
             }
             userProfileToggling.remove(key)
         }
@@ -127,6 +214,7 @@ extension AppState {
                     p.muted = newState
                     userProfiles[username.lowercased()] = p
                 }
+                refreshUserRow(forAO3Username: username)
             }
             userProfileToggling.remove(key)
         }

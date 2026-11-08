@@ -6,6 +6,8 @@
 /// paths and drained to the encrypted database by the app layer.
 #[derive(Debug, Clone)]
 pub struct RequestRecord {
+    /// The source the request was for ("ao3").
+    pub source: String,
     pub started_at_ms: u64,
     pub method: String,
     pub url: String,
@@ -48,6 +50,7 @@ pub fn drain_request_records() -> Vec<RequestRecord> {
 /// construction, records the terminal outcome (transparent retries collapse
 /// into the final row). Every fetch/POST path logs through this.
 pub(super) struct AuditCtx {
+    source: &'static str,
     started_at_ms: u64,
     start: std::time::Instant,
     method: String,
@@ -59,8 +62,9 @@ pub(super) struct AuditCtx {
 impl AuditCtx {
     /// `payload` is the redacted POST body; None for GETs. Request size is
     /// approximated as URL + payload + a typical header block.
-    pub(super) fn new(method: &str, url: &str, payload: Option<String>) -> Self {
+    pub(super) fn new(source: &'static str, method: &str, url: &str, payload: Option<String>) -> Self {
         AuditCtx {
+            source,
             started_at_ms: now_ms(),
             start: std::time::Instant::now(),
             method: method.to_string(),
@@ -72,6 +76,7 @@ impl AuditCtx {
 
     pub(super) fn record(&self, status: u16, response_bytes: u64, error: Option<String>) {
         push_request_record(RequestRecord {
+            source: self.source.to_string(),
             started_at_ms: self.started_at_ms,
             method: self.method.clone(),
             url: self.url.clone(),

@@ -144,6 +144,9 @@ pub struct UWorkSummary {
     pub url: String,
     pub title: String,
     pub authors: Vec<String>,
+    /// The users row behind each byline, parallel to `authors` (0 when
+    /// not linked yet) — the identity the UI opens an author with.
+    pub author_ids: Vec<u64>,
     pub fandoms: Vec<String>,
     pub rating: String,
     pub warnings: Vec<String>,
@@ -180,6 +183,7 @@ impl From<WorkSummary> for UWorkSummary {
             url: w.url,
             title: w.title,
             authors: w.authors,
+            author_ids: w.author_ids.iter().map(|id| (*id).max(0) as u64).collect(),
             fandoms: w.fandoms,
             rating: format!("{:?}", w.rating),
             warnings: w.warnings.iter().map(|w| format!("{:?}", w)).collect(),
@@ -528,6 +532,8 @@ pub struct CommentJson {
     pub chapter_label: String,
     /// AO3's message for a bodiless comment (deleted/hidden); empty otherwise.
     pub notice: String,
+    /// Stars on a review from a rated source; None for a plain comment.
+    pub rating: Option<u8>,
     /// Replies cut off behind AO3's "N more comments in this thread" link.
     pub more_replies: u32,
 }
@@ -539,6 +545,7 @@ impl From<Comment> for CommentJson {
             chapter_label: c.chapter_label.unwrap_or_default(),
             notice: c.notice.unwrap_or_default(),
             more_replies: c.more_replies,
+            rating: c.rating,
             id: c.id,
             author_id: c.author.id,
             author_name: c.author.username,
@@ -777,9 +784,11 @@ pub struct USubscription {
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UFollow {
     pub kind: String,
-    /// author: AO3 username; work/series: the row id; fandom: tag name.
+    /// author/work/series: the row id (users, works, series); fandom: tag name.
     pub target_id: String,
     pub name: String,
+    /// The target's source ("ao3", "scribblehub"); "" for fandoms.
+    pub source: String,
     pub added_at: String,
     /// When this follow's own What's New check last ran, whatever its
     /// outcome. None = never.
@@ -795,6 +804,7 @@ impl From<crate::storage::FollowRow> for UFollow {
             kind: r.target.kind().to_string(),
             target_id: r.bridge_id,
             name: r.name,
+            source: String::new(),
             added_at: r.added_at,
             last_checked_at: r.last_checked_at,
             status: r.status,
@@ -833,18 +843,118 @@ impl From<crate::models::Subscription> for USubscription {
     }
 }
 
+/// A person at a source, as the UI sees them: identity plus the app's
+/// global attributes, each present only when the source reports it. No
+/// source-specific property name ever crosses here (`user_fields`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UUser {
+    /// Row id — the one identity the UI holds for a person.
+    pub id: u64,
+    pub source: String,
+    /// The person's key at the source (AO3 username, ScribbleHub profile id).
+    pub source_id: String,
+    pub username: String,
+    pub profile_url: Option<String>,
+    pub avatar_url: Option<String>,
+    /// Self-description as a serialized ContentBlock tree.
+    pub info_json: Option<String>,
+    pub joined: Option<String>,
+    pub location: Option<String>,
+    pub birthday: Option<String>,
+    /// Published things: AO3 works, ScribbleHub series.
+    pub works: Option<u64>,
+    pub series: Option<u64>,
+    pub bookmarks: Option<u64>,
+    pub collections: Option<u64>,
+    pub gifts: Option<u64>,
+    pub followers: Option<u64>,
+    pub following: Option<u64>,
+    pub readers: Option<u64>,
+    pub words: Option<u64>,
+    pub views: Option<u64>,
+    pub reviews: Option<u64>,
+    pub comments: Option<u64>,
+    pub last_active: Option<String>,
+    /// The signed-in viewer's relation to this user (AO3 account features).
+    pub blocked: bool,
+    pub muted: bool,
+    pub subscribed: bool,
+    /// Other names the account posts under (AO3 pseuds).
+    pub pseuds: Vec<String>,
+    /// The source's numeric id when it differs from the key.
+    pub numeric_id: Option<String>,
+    /// When the profile page was last fetched; None when never.
+    pub profile_fetched_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl UUser {
+    pub(crate) fn from_record(u: &crate::storage::UserRecord, subscribed: bool) -> UUser {
+        use crate::user_fields::UserField as F;
+        let text = |f: F| u.field(f).map(str::to_string);
+        let num = |f: F| u.field(f).and_then(|v| v.replace(',', "").parse::<f64>().ok()).map(|n| n.round() as u64);
+        let flag = |f: F| u.field(f).is_some_and(|v| v != "0");
+        UUser {
+            id: u.id as u64,
+            source: u.source.clone(),
+            source_id: u.source_id.clone(),
+            username: u.username.clone(),
+            profile_url: text(F::ProfileUrl),
+            avatar_url: text(F::AvatarUrl),
+            info_json: text(F::Info),
+            joined: text(F::Joined),
+            location: text(F::Location),
+            birthday: text(F::Birthday),
+            works: num(F::Works),
+            series: num(F::Series),
+            bookmarks: num(F::Bookmarks),
+            collections: num(F::Collections),
+            gifts: num(F::Gifts),
+            followers: num(F::Followers),
+            following: num(F::Following),
+            readers: num(F::Readers),
+            words: num(F::Words),
+            views: num(F::Views),
+            reviews: num(F::Reviews),
+            comments: num(F::Comments),
+            last_active: text(F::LastActive),
+            blocked: flag(F::Blocked),
+            muted: flag(F::Muted),
+            subscribed,
+            pseuds: u.field(F::Pseuds).and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default(),
+            numeric_id: text(F::NumericId),
+            profile_fetched_at: u.property(crate::user_fields::PROFILE_FETCHED_AT).map(str::to_string),
+            created_at: u.created_at.clone(),
+            updated_at: u.updated_at.clone(),
+        }
+    }
+}
+
+/// One hit of a source's user search: enough to show and to follow
+/// (via `ensure_user`); not yet a library row.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UUserHit {
+    pub source: String,
+    pub source_id: String,
+    pub username: String,
+    pub profile_url: String,
+    pub avatar_url: String,
+}
+
+/// The pre-v30 profile record, kept for the iOS UI until it moves to
+/// `UUser` (macOS first). Built from the same row.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UUserProfile {
+    pub source: String,
+    pub url: String,
     pub username: String,
-    /// AO3's numeric user id — needed for the direct subscribe POST.
     pub numeric_id: Option<String>,
     pub avatar_url: Option<String>,
     pub pseuds: Vec<String>,
     pub joined: String,
     pub location: String,
     pub birthday: String,
-    /// Bio as a serialized ContentBlock tree (same JSON encoding as
-    /// comment content) — "[]" when the profile has none.
     pub bio_json: String,
     pub works_count: u32,
     pub series_count: u32,
@@ -854,31 +964,31 @@ pub struct UUserProfile {
     pub subscribed: bool,
     pub blocked: bool,
     pub muted: bool,
-    /// When this profile was last fetched from AO3; empty for a profile
-    /// that just arrived off the network.
     pub fetched_at: String,
 }
 
-impl From<crate::models::UserProfile> for UUserProfile {
-    fn from(p: crate::models::UserProfile) -> Self {
+impl From<UUser> for UUserProfile {
+    fn from(u: UUser) -> Self {
         UUserProfile {
-            username: p.username,
-            numeric_id: p.numeric_id,
-            avatar_url: p.avatar_url,
-            pseuds: p.pseuds,
-            joined: p.joined,
-            location: p.location,
-            birthday: p.birthday,
-            bio_json: serde_json::to_string(&p.bio).unwrap_or_else(|_| "[]".to_string()),
-            works_count: p.works_count,
-            series_count: p.series_count,
-            bookmarks_count: p.bookmarks_count,
-            collections_count: p.collections_count,
-            gifts_count: p.gifts_count,
-            subscribed: p.subscribed,
-            blocked: p.blocked,
-            muted: p.muted,
-            fetched_at: p.fetched_at,
+            source: u.source,
+            url: u.profile_url.unwrap_or_default(),
+            username: u.username,
+            numeric_id: u.numeric_id,
+            avatar_url: u.avatar_url,
+            pseuds: u.pseuds,
+            joined: u.joined.unwrap_or_default(),
+            location: u.location.unwrap_or_default(),
+            birthday: u.birthday.unwrap_or_default(),
+            bio_json: u.info_json.unwrap_or_else(|| "[]".to_string()),
+            works_count: u.works.unwrap_or(0) as u32,
+            series_count: u.series.unwrap_or(0) as u32,
+            bookmarks_count: u.bookmarks.unwrap_or(0) as u32,
+            collections_count: u.collections.unwrap_or(0) as u32,
+            gifts_count: u.gifts.unwrap_or(0) as u32,
+            subscribed: u.subscribed,
+            blocked: u.blocked,
+            muted: u.muted,
+            fetched_at: u.profile_fetched_at.unwrap_or_default(),
         }
     }
 }

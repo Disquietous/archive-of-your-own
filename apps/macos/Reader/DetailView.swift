@@ -29,7 +29,7 @@ struct DetailView: View {
                     .padding(.bottom, 10)
                 HStack(spacing: 8) {
                     Button {
-                        model.openAuthorProfile(work.author)
+                        model.openAuthorProfile(of: work)
                     } label: {
                         (Text("by ").foregroundStyle(theme.ink2)
                             + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))

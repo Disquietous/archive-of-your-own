@@ -667,25 +667,34 @@ mod comment_tests {
     fn test_parse_user_profile_fixture() {
         let html = fs::read_to_string("tests/fixtures/user_profile.html")
             .expect("Failed to read user profile fixture");
-        let p = parse_user_profile(&html).expect("profile parses");
+        let page = parse_user_profile(&html).expect("profile parses");
+        let p = &page.profile;
 
+        assert_eq!(p.source, "ao3");
+        assert_eq!(p.source_id, "MockAuthor");
         assert_eq!(p.username, "MockAuthor");
-        assert_eq!(p.numeric_id.as_deref(), Some("12345678"));
-        assert_eq!(p.pseuds, vec!["MockAuthor".to_string()]);
-        assert_eq!(p.joined, "2020-01-15");
-        assert!(p.location.is_empty());
-        assert!(p.bio.is_empty());
-        assert_eq!(p.works_count, 2);
-        assert_eq!(p.series_count, 1);
-        assert_eq!(p.bookmarks_count, 0);
-        assert_eq!(p.collections_count, 0);
-        assert_eq!(p.gifts_count, 0);
-        assert!(p.viewer_signed_in);
-        assert!(!p.subscribed);
-        assert!(p.subscription_ao3_id.is_none());
-        assert!(!p.blocked);
-        assert!(!p.muted);
-        assert!(p.avatar_url.is_some());
+        assert_eq!(p.property("numeric_id"), Some("12345678"));
+        assert_eq!(p.property("pseuds"), Some(r#"["MockAuthor"]"#));
+        assert_eq!(p.property("joined"), Some("2020-01-15"));
+        assert_eq!(p.property("location"), None);
+        assert_eq!(p.property("bio"), None);
+        assert_eq!(p.property("works"), Some("2"));
+        assert_eq!(p.property("series"), Some("1"));
+        assert_eq!(p.property("bookmarks"), Some("0"), "a shown zero is a value");
+        assert_eq!(p.property("collections"), Some("0"));
+        assert_eq!(p.property("gifts"), Some("0"));
+        assert!(page.viewer_signed_in);
+        assert!(!page.subscribed);
+        assert!(page.subscription_ao3_id.is_none());
+        assert_eq!(p.property("blocked"), None);
+        assert_eq!(p.property("muted"), None);
+        assert!(p.property("avatar_url").is_some());
+        assert_eq!(p.property("profile_url"), Some("https://archiveofourown.org/users/MockAuthor"));
+        // Every emitted name is in AO3's vocabulary or a flow-only record.
+        for (name, _) in &p.properties {
+            assert!(crate::user_fields::field_of("ao3", name).is_some()
+                || matches!(name.as_str(), "block_record_id" | "mute_record_id"), "{name}");
+        }
     }
 
     #[test]
@@ -720,20 +729,22 @@ mod comment_tests {
             <blockquote class="userstuff"><p>Hello <em>there</em>.</p></blockquote>
           </div>
         </div></body></html>"#;
-        let p = parse_user_profile(html).expect("profile parses");
+        let page = parse_user_profile(html).expect("profile parses");
+        let p = &page.profile;
 
         assert_eq!(p.username, "SomeAuthor");
-        assert_eq!(p.numeric_id.as_deref(), Some("424242"));
-        assert_eq!(p.pseuds, vec!["SomeAuthor".to_string(), "AltPseud".to_string()]);
-        assert_eq!(p.joined, "2015-01-02");
-        assert_eq!(p.location, "The Library");
-        assert_eq!(p.bio.len(), 1);
-        assert!(p.subscribed);
-        assert_eq!(p.subscription_ao3_id.as_deref(), Some("456"));
-        assert!(p.blocked);
-        assert_eq!(p.block_ao3_id.as_deref(), Some("77"));
-        assert!(p.muted);
-        assert_eq!(p.mute_ao3_id.as_deref(), Some("88"));
+        assert_eq!(p.property("numeric_id"), Some("424242"));
+        assert_eq!(p.property("pseuds"), Some(r#"["SomeAuthor","AltPseud"]"#));
+        assert_eq!(p.property("joined"), Some("2015-01-02"));
+        assert_eq!(p.property("location"), Some("The Library"));
+        let bio: Vec<crate::models::ContentBlock> = serde_json::from_str(p.property("bio").unwrap()).unwrap();
+        assert_eq!(bio.len(), 1);
+        assert!(page.subscribed);
+        assert_eq!(page.subscription_ao3_id.as_deref(), Some("456"));
+        assert_eq!(p.property("blocked"), Some("1"));
+        assert_eq!(p.property("block_record_id"), Some("77"));
+        assert_eq!(p.property("muted"), Some("1"));
+        assert_eq!(p.property("mute_record_id"), Some("88"));
     }
 
     #[test]
@@ -1036,4 +1047,17 @@ mod comment_tests {
         assert!(deleted.content.is_empty());
         assert_eq!(deleted.notice.as_deref(), Some("(Previous comment deleted.)"));
     }
+}
+
+#[test]
+fn html_to_blocks_resolves_relative_urls_against_the_page() {
+    let html = r#"<p>See <a href="/chapter/2">next</a> and <a href="https://other.example/x">out</a>.</p>
+                  <img src="../img/cover.png" alt="cover">"#;
+    let blocks = html_to_blocks(html, "https://rated.mock/story/1/chapter/1");
+    let ContentBlock::Paragraph { text } = &blocks[0] else { panic!("paragraph first, got {blocks:?}") };
+    let hrefs: Vec<&str> = text.iter().filter_map(|i| match i {
+        InlineContent::Link { href, .. } => Some(href.as_str()), _ => None }).collect();
+    assert_eq!(hrefs, vec!["https://rated.mock/chapter/2", "https://other.example/x"]);
+    let ContentBlock::Image { src, .. } = &blocks[1] else { panic!("image second, got {blocks:?}") };
+    assert_eq!(src, "https://rated.mock/story/1/img/cover.png");
 }

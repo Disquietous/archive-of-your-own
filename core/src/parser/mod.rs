@@ -20,6 +20,66 @@ mod tests;
 /// A compiled selector. Parsing one is far costlier than the match it
 /// drives and the listing parsers call this per blurb, so each distinct
 /// selector string is compiled once per thread and cloned out.
+/// Any HTML fragment as the ContentBlock tree, for every source (Area
+/// 3.4). Relative links and image sources are resolved against
+/// `base_url`, so an adapter hands in the page's own URL and the reader
+/// gets absolute targets.
+pub fn html_to_blocks(html: &str, base_url: &str) -> Vec<crate::models::ContentBlock> {
+    let base = base_url.parse::<url::Url>().ok();
+    CONTENT_BASE.with(|slot| *slot.borrow_mut() = base.clone());
+    let frag = Html::parse_fragment(html);
+    let mut blocks = parse_element_children(&frag.root_element());
+    CONTENT_BASE.with(|slot| *slot.borrow_mut() = None);
+    if let Some(base) = base {
+        resolve_block_urls(&mut blocks, &base);
+    }
+    blocks
+}
+
+thread_local! {
+    /// The page URL `html_to_blocks` is converting for, so image sources
+    /// resolve against it instead of AO3's host. None on the AO3 paths.
+    static CONTENT_BASE: std::cell::RefCell<Option<url::Url>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn content_base() -> Option<url::Url> {
+    CONTENT_BASE.with(|slot| slot.borrow().clone())
+}
+
+fn resolve_block_urls(blocks: &mut [crate::models::ContentBlock], base: &url::Url) {
+    use crate::models::ContentBlock;
+    for block in blocks {
+        match block {
+            ContentBlock::Paragraph { text } => resolve_inline_urls(text, base),
+            ContentBlock::Blockquote { blocks } => resolve_block_urls(blocks, base),
+            ContentBlock::List { items, .. } => {
+                for item in items { resolve_block_urls(item, base); }
+            }
+            ContentBlock::Image { src, .. } => {
+                if let Ok(abs) = base.join(src) { *src = abs.to_string(); }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn resolve_inline_urls(inlines: &mut [crate::models::InlineContent], base: &url::Url) {
+    use crate::models::InlineContent;
+    for inline in inlines {
+        match inline {
+            InlineContent::Link { href, content } => {
+                if let Ok(abs) = base.join(href) { *href = abs.to_string(); }
+                resolve_inline_urls(content, base);
+            }
+            InlineContent::Bold { content } | InlineContent::Italic { content }
+            | InlineContent::Strikethrough { content } | InlineContent::Superscript { content } => {
+                resolve_inline_urls(content, base);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn sel(s: &str) -> Selector {
     thread_local! {
         static CACHE: std::cell::RefCell<std::collections::HashMap<String, Selector>> =

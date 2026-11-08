@@ -62,7 +62,7 @@ extension ListPaneViewController {
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        kudosGiven: appState.kudosGivenWorkIDs.contains(work.id),
-                       followShaded: model.follows.isShaded(.author(work.author)),
+                       followShaded: model.isAuthorBellShaded(for: work),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        isRemoved: appState.goneWorkIDs.contains(work.id),
                        finished: appState.finishedWorkIDs.contains(work.id),
@@ -79,11 +79,11 @@ extension ListPaneViewController {
             self?.appState.toggleBookmark(work.id)
         }
         cell.onAuthorClick = { [weak self] in
-            self?.model.openAuthorProfile(work.author)
+            self?.model.openAuthorProfile(of: work)
         }
         cell.onFollowBell = { [weak self] bell in
             guard let self else { return }
-            FollowBellMenu.show(for: .author(work.author), follows: model.follows, from: bell)
+            model.showAuthorBellMenu(for: work, from: bell)
         }
         return cell
     }

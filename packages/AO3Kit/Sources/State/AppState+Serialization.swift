@@ -40,7 +40,9 @@ extension AppState {
                 )
             },
             fetchedAt: s.fetchedAt,
-            url: s.url
+            url: s.url,
+            source: s.source,
+            authorIDs: s.authorIds
         )
     }
 

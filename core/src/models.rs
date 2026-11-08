@@ -179,6 +179,11 @@ pub struct WorkSummary {
     pub url: String,
     pub title: String,
     pub authors: Vec<String>,
+    /// The `users` row behind each byline, in the same order (0 when the
+    /// library has not linked that author yet). Filled by storage; never
+    /// parsed, never persisted in the summary itself.
+    #[serde(default)]
+    pub author_ids: Vec<i64>,
     pub fandoms: Vec<String>,
     pub rating: Rating,
     pub warnings: Vec<Warning>,
@@ -554,49 +559,57 @@ pub struct Subscription {
     pub url: String,
 }
 
+/// A sighting of a user at a source: who, and where their profile is.
+/// `id` is the user's key at the source — the AO3 username (or a
+/// `guest:` id for logged-out commenters), a ScribbleHub profile id.
+/// Never a library identity; storage resolves it to a `users` row.
 #[derive(Debug, Clone)]
 pub struct AO3User {
+    pub source: String,
     pub id: String,
     pub username: String,
     pub profile_url: Option<String>,
     pub avatar_url: Option<String>,
 }
 
-/// A user's full profile page (/users/{username}/profile): identity and
-/// bio, sidebar counts, and — when the viewer is signed in — the live
-/// subscribe/block/mute state with AO3's record ids for direct undo POSTs.
-#[derive(Debug, Clone)]
-pub struct UserProfile {
+impl AO3User {
+    pub fn ao3(id: &str, username: &str, profile_url: Option<String>, avatar_url: Option<String>) -> AO3User {
+        AO3User { source: SOURCE_AO3.to_string(), id: id.to_string(), username: username.to_string(), profile_url, avatar_url }
+    }
+}
+
+/// A user's profile as a source reports it: the sighting plus every
+/// property the page shows, under the source's own names (see
+/// `user_fields` for the names each source uses and what they map to).
+#[derive(Debug, Clone, Default)]
+pub struct SourceUserProfile {
+    pub source: String,
+    pub source_id: String,
     pub username: String,
-    /// AO3's numeric user id — the subscribe form's subscribable_id, or the
-    /// "My user ID is" meta row when no form renders (logged out).
-    pub numeric_id: Option<String>,
-    pub avatar_url: Option<String>,
-    pub pseuds: Vec<String>,
-    pub joined: String,
-    pub location: String,
-    pub birthday: String,
-    pub bio: Vec<ContentBlock>,
-    pub works_count: u32,
-    pub series_count: u32,
-    pub bookmarks_count: u32,
-    pub collections_count: u32,
-    pub gifts_count: u32,
+    pub properties: Vec<(String, String)>,
+}
+
+impl SourceUserProfile {
+    pub fn property(&self, name: &str) -> Option<&str> {
+        self.properties.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+}
+
+/// AO3's profile page also tells a signed-in viewer their own relation
+/// to the user; that is subscription state, not a user property.
+#[derive(Debug, Clone, Default)]
+pub struct AO3ProfilePage {
+    pub profile: SourceUserProfile,
     /// Whether the page rendered a subscribe form — i.e. the viewer was
-    /// signed in. When false the subscribe/block/mute fields carry no
-    /// signal and must not overwrite locally known state.
+    /// signed in. When false the subscribe field carries no signal.
     pub viewer_signed_in: bool,
     pub subscribed: bool,
     pub subscription_ao3_id: Option<String>,
-    pub blocked: bool,
-    pub block_ao3_id: Option<String>,
-    pub muted: bool,
-    pub mute_ao3_id: Option<String>,
-    /// When this profile was last fetched from AO3 (set by storage on
-    /// cached reads; empty on a fresh network parse).
-    pub fetched_at: String,
 }
 
+/// A user's full profile page (/users/{username}/profile): identity and
+/// bio, sidebar counts, and — when the viewer is signed in — the live
+/// subscribe/block/mute state with AO3's record ids for direct undo POSTs.
 #[derive(Debug, Clone)]
 pub struct Comment {
     pub id: u64,
@@ -617,6 +630,9 @@ pub struct Comment {
     /// Replies AO3 left off this page behind an "N more comments in this
     /// thread" link (fetched on demand via the comment's thread page).
     pub more_replies: u32,
+    /// The stars a review carries on a rated source (Area 12); None for
+    /// a plain comment.
+    pub rating: Option<u8>,
 }
 
 #[derive(Debug, Clone)]

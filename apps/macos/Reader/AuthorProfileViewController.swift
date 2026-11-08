@@ -9,6 +9,10 @@ import AppKit
 final class AuthorProfileViewController: NSViewController {
     private let theme: AppTheme
     private let appState: AppState
+    /// The users row shown; 0 when none.
+    private var userID: UInt64 = 0
+    /// Display name (an AO3 account name for AO3 users, which block,
+    /// mute and the avatar path still key by).
     private var username = ""
     /// The list the reading pane is showing — its button gets the accent.
     private var activePane: MacAppModel.AuthorPane = .works
@@ -37,9 +41,9 @@ final class AuthorProfileViewController: NSViewController {
 
     /// Set by the hosting pane: swap the reading pane to one of the user's
     /// lists (works / bookmarks / collections).
-    var onOpenList: ((String, MacAppModel.AuthorPane) -> Void)?
+    var onOpenList: ((UInt64, MacAppModel.AuthorPane) -> Void)?
 
-    private var loadedAvatarFor: String?
+    private var loadedAvatarFor: UInt64?
     private var renderedBioKey: String?
 
     init(theme: AppTheme, appState: AppState) {
@@ -201,34 +205,43 @@ final class AuthorProfileViewController: NSViewController {
 
     /// Point the pane at an author. Kicks the cached-then-network profile
     /// load; re-invocation with the same author is free.
-    func configure(username: String, activePane: MacAppModel.AuthorPane) {
+    func configure(userID: UInt64, activePane: MacAppModel.AuthorPane) {
         self.activePane = activePane
-        let canonical = AppState.canonicalAuthorUsername(username)
-        if self.username != canonical {
-            self.username = canonical
+        if self.userID != userID {
+            self.userID = userID
+            username = appState.user(userID)?.username ?? appState.bridge.getUser(userID)?.username ?? ""
             renderedBioKey = nil
             avatarView.image = nil
+            loadedAvatarFor = nil
             Task { @MainActor in
-                await appState.loadUserProfile(canonical)
+                await appState.loadUser(userID)
             }
         }
         render()
     }
 
     /// The avatar only when images load automatically; off clears it.
-    /// Runs from render, so flipping the setting applies live.
-    private func syncAvatar() {
+    /// Runs from render, so flipping the setting applies live. AO3
+    /// avatars go through the cached avatar path (which may scrape the
+    /// profile once); any other source's come from the profile's URL.
+    private func syncAvatar(_ user: UUser?) {
         guard theme.imageAutoLoad else {
             avatarView.image = nil
             loadedAvatarFor = nil
             return
         }
-        let canonical = username
-        guard loadedAvatarFor != canonical else { return }
-        loadedAvatarFor = canonical
+        let id = userID
+        guard loadedAvatarFor != id else { return }
+        let isAO3 = appState.userSource(id) == "ao3"
+        guard isAO3 || user?.avatarUrl != nil else { return }
+        loadedAvatarFor = id
+        let name = username
+        let url = user?.avatarUrl
         Task { @MainActor in
-            if let data = try? await appState.bridge.fetchAuthorAvatar(canonical),
-               let image = NSImage(data: data), self.username == canonical, theme.imageAutoLoad {
+            let data: Data? = isAO3
+                ? try? await appState.bridge.fetchAuthorAvatar(name, urlHint: url)
+                : try? await appState.bridge.fetchImage(url: url ?? "")
+            if let data, let image = NSImage(data: data), self.userID == id, theme.imageAutoLoad {
                 avatarView.image = image
             }
         }
@@ -238,22 +251,27 @@ final class AuthorProfileViewController: NSViewController {
 
     private func render() {
         view.layer?.backgroundColor = theme.nsBg.cgColor
-        guard !username.isEmpty else { return }
-        syncAvatar()
-
-        let profile = appState.userProfile(username)
+        guard userID != 0 else { return }
+        let user = appState.user(userID)
+        if let user, username != user.username { username = user.username }
+        syncAvatar(user)
+        let caps = appState.userCapabilities(userID)
+        let isAO3 = appState.userSource(userID) == "ao3"
+        // A row is a sighting until its profile page has been fetched.
+        let profile = user.flatMap { $0.profileFetchedAt == nil ? nil : $0 }
 
         nameLabel.font = MacFont.serif(24, weight: .semibold)
         nameLabel.textColor = theme.nsInk
-        nameLabel.stringValue = profile?.username ?? username
+        nameLabel.stringValue = user?.username ?? username
 
         metaLabel.font = MacFont.ui(12)
         metaLabel.textColor = theme.nsInk3
         var metaParts: [String] = []
         if let profile {
-            if !profile.joined.isEmpty { metaParts.append("Joined \(profile.joined)") }
-            if !profile.location.isEmpty { metaParts.append(profile.location) }
-            if let id = profile.numericId, !id.isEmpty { metaParts.append("User #\(id)") }
+            if let joined = profile.joined { metaParts.append("Joined \(joined)") }
+            if let location = profile.location { metaParts.append(location) }
+            if let active = profile.lastActive { metaParts.append("Active \(active)") }
+            if isAO3, let id = profile.numericId { metaParts.append("User #\(id)") }
         }
         metaLabel.stringValue = metaParts.joined(separator: " · ")
         metaLabel.isHidden = metaParts.isEmpty
@@ -270,26 +288,32 @@ final class AuthorProfileViewController: NSViewController {
         statsLabel.font = MacFont.ui(12.5, weight: .medium)
         statsLabel.textColor = theme.nsInk2
         if let profile {
-            statsLabel.stringValue = [
-                ("Works", profile.worksCount),
-                ("Series", profile.seriesCount),
-                ("Bookmarks", profile.bookmarksCount),
-                ("Collections", profile.collectionsCount),
-                ("Gifts", profile.giftsCount),
-            ].map { "\($0.0) \($0.1)" }.joined(separator: "   ·   ")
-            statsLabel.isHidden = false
+            // The app's own vocabulary; a source shows the figures it has.
+            let figures: [(String, UInt64?)] = [
+                ("Works", profile.works), ("Series", profile.series), ("Bookmarks", profile.bookmarks),
+                ("Collections", profile.collections), ("Gifts", profile.gifts),
+                ("Followers", profile.followers), ("Following", profile.following), ("Readers", profile.readers),
+                ("Words", profile.words), ("Views", profile.views), ("Reviews", profile.reviews),
+                ("Comments", profile.comments),
+            ]
+            let shown = figures.compactMap { label, value in value.map { "\(label) \(Fmt.k(Int($0)))" } }
+            statsLabel.stringValue = shown.joined(separator: "   ·   ")
+            statsLabel.isHidden = shown.isEmpty
         } else {
             statsLabel.isHidden = true
         }
+        // Lists the source keeps: AO3 bookmarks and collections only.
+        bookmarksButton.isHidden = !(caps?.remoteBookmarks ?? isAO3)
+        collectionsButton.isHidden = !(caps?.collections ?? isAO3)
 
         statusLabel.font = MacFont.ui(12)
-        let loading = appState.isLoadingUserProfile(username)
+        let loading = appState.isLoadingUser(userID)
         if loading, profile == nil {
             spinner.startAnimation(nil)
             statusLabel.textColor = theme.nsInk3
-            statusLabel.stringValue = "Fetching profile from AO3…"
+            statusLabel.stringValue = "Fetching profile from \(appState.userSourceName(userID))…"
             statusLabel.isHidden = false
-        } else if let error = appState.userProfileError(username), profile == nil {
+        } else if let error = appState.userError(userID), profile == nil {
             spinner.stopAnimation(nil)
             statusLabel.textColor = theme.nsInk3
             statusLabel.stringValue = "Couldn’t load profile: \(error)"
@@ -297,15 +321,15 @@ final class AuthorProfileViewController: NSViewController {
         } else {
             spinner.stopAnimation(nil)
             var flags: [String] = []
-            if profile?.blocked == true { flags.append("Blocked") }
-            if profile?.muted == true { flags.append("Muted") }
+            if user?.blocked == true { flags.append("Blocked") }
+            if user?.muted == true { flags.append("Muted") }
             statusLabel.textColor = theme.nsAccent
             statusLabel.stringValue = flags.joined(separator: " · ")
             statusLabel.isHidden = flags.isEmpty
         }
 
         renderBio(profile)
-        renderActions(profile)
+        renderActions(user, isAO3: isAO3)
 
         // The list the reading pane is showing gets a filled accent bezel.
         let panes: [(NSButton, MacAppModel.AuthorPane)] =
@@ -317,9 +341,10 @@ final class AuthorProfileViewController: NSViewController {
         }
     }
 
-    private func renderBio(_ profile: UUserProfile?) {
-        let blocks = profile.map { ParsedContentBlock.fromJSON($0.bioJson) } ?? []
-        let key = "\(username):\(profile?.bioJson.hashValue ?? 0):\(theme.fontSize):\(theme.readingFont.fontName)"
+    private func renderBio(_ profile: UUser?) {
+        let info = profile?.infoJson ?? "[]"
+        let blocks = ParsedContentBlock.fromJSON(info)
+        let key = "\(userID):\(info.hashValue):\(theme.fontSize):\(theme.readingFont.fontName)"
         if blocks.isEmpty {
             bioView.isHidden = true
             renderedBioKey = key
@@ -333,37 +358,38 @@ final class AuthorProfileViewController: NSViewController {
         bioView.invalidateIntrinsicContentSize()
     }
 
-    private func renderActions(_ profile: UUserProfile?) {
-        let signedIn = appState.ao3Username != nil
+    private func renderActions(_ user: UUser?, isAO3: Bool) {
+        // Block and mute are AO3 account actions on AO3 users.
+        let signedIn = appState.ao3Username != nil && isAO3
         actionsRow.isHidden = !signedIn
         actionsSeparator.isHidden = !signedIn
         actionErrorLabel.isHidden = true
         guard signedIn else { return }
 
         // Block/mute need the live state before they can flip it.
-        let haveState = profile != nil
-        blockButton.title = profile?.blocked == true ? "Unblock" : "Block…"
+        let haveState = user?.profileFetchedAt != nil
+        blockButton.title = user?.blocked == true ? "Unblock" : "Block…"
         blockButton.isEnabled = haveState && !appState.isUserActionBusy("block", username)
-        muteButton.title = profile?.muted == true ? "Unmute" : "Mute…"
+        muteButton.title = user?.muted == true ? "Unmute" : "Mute…"
         muteButton.isEnabled = haveState && !appState.isUserActionBusy("mute", username)
     }
 
     // MARK: - Actions
 
     @objc private func worksTapped() {
-        onOpenList?(username, .works)
+        onOpenList?(userID, .works)
     }
 
     @objc private func bookmarksTapped() {
-        onOpenList?(username, .bookmarks)
+        onOpenList?(userID, .bookmarks)
     }
 
     @objc private func collectionsTapped() {
-        onOpenList?(username, .collections)
+        onOpenList?(userID, .collections)
     }
 
     @objc private func blockTapped() {
-        if appState.userProfile(username)?.blocked == true {
+        if appState.user(userID)?.blocked == true {
             appState.toggleAuthorBlock(username)
         } else {
             confirmModeration(
@@ -377,7 +403,7 @@ final class AuthorProfileViewController: NSViewController {
     }
 
     @objc private func muteTapped() {
-        if appState.userProfile(username)?.muted == true {
+        if appState.user(userID)?.muted == true {
             appState.toggleAuthorMute(username)
         } else {
             confirmModeration(

@@ -25,11 +25,32 @@ final class RecoveryObserver: CoreObserver, @unchecked Sendable {
 /// this is the automatic, mid-request path the engine calls without any
 /// user-visible flow of its own.
 final class RecoveryCapabilities: PlatformCapabilities, @unchecked Sendable {
+    /// The platform's UI for a site's human check (off Tor): shows the page
+    /// at `url` in a web view, returns the cookies the check set with the
+    /// web view's User-Agent, or throws when the user dismisses it. Set by
+    /// the app at launch; a platform without one leaves it nil and the
+    /// challenged request fails as before.
+    static var siteChallengeHandler: (@MainActor @Sendable (_ source: String, _ url: URL) async throws -> SiteClearance)?
+
     func earnCloudflareClearance(socksPort: UInt16) async throws -> [String] {
         let resolver = await CloudflareResolver()
         do {
             let resolved = try await resolver.resolve(socksPort: socksPort)
             return resolved.cookies
+        } catch {
+            throw CapabilityError.Failed(message: "\(error)")
+        }
+    }
+
+    func earnSiteClearance(source: String, url: String) async throws -> SiteClearance {
+        guard let handler = Self.siteChallengeHandler else {
+            throw CapabilityError.Failed(message: "no challenge UI on this platform")
+        }
+        guard let pageURL = URL(string: url) else {
+            throw CapabilityError.Failed(message: "challenge URL is not a URL: \(url)")
+        }
+        do {
+            return try await handler(source, pageURL)
         } catch {
             throw CapabilityError.Failed(message: "\(error)")
         }

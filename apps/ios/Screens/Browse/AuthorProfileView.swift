@@ -9,6 +9,7 @@ struct AuthorProfileView: View {
     @Environment(AppState.self) var state
     @Environment(NavigationState.self) var nav
     @Environment(AuthorProfileModel.self) var author
+    @Environment(FollowModel.self) var follows
 
     let username: String
     /// Pane to land on (an opened link to a user's bookmarks, say); nil =

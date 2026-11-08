@@ -2,6 +2,7 @@
 mod arti_trace;
 pub mod error;
 pub mod models;
+pub mod user_fields;
 pub mod storage;
 pub mod timefmt;
 
@@ -178,6 +179,7 @@ macro_rules! log_error {
 pub mod parser;
 pub mod mock_site;
 pub mod client;
+pub mod source;
 pub mod events;
 pub mod api;
 pub mod epub;

@@ -172,7 +172,7 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                 guard let self,
                       let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? BookmarkRowCellView
                 else { return }
-                cell.updateFollowBells { self.model.follows.isShaded(.author($0)) }
+                cell.updateFollowBells { self.model.follows.ao3AuthorTarget($0, ensure: false).map { self.model.follows.isShaded($0) } ?? false }
             }
         }
         renderedHitIDs = ids
@@ -208,8 +208,10 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
                        workTagsExpanded: expandedWorkTags.contains(key),
                        bookmarkerTagsExpanded: expandedBookmarkerTags.contains(key),
                        availableTextWidth: max(100, tableWidth - 45),
-                       followShaded: { [weak self] in
-                           self?.model.follows.isShaded(.author($0)) ?? false
+                       followShaded: { [weak self] name in
+                           guard let follows = self?.model.follows,
+                                 let target = follows.ao3AuthorTarget(name, ensure: false) else { return false }
+                           return follows.isShaded(target)
                        })
         cell.onToggleWorkTags = { [weak self] in
             self?.toggleTags(key: key, in: \.expandedWorkTags)
@@ -222,7 +224,8 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         }
         cell.onFollowBell = { [weak self] author, bell in
             guard let self else { return }
-            FollowBellMenu.show(for: .author(author), follows: model.follows, from: bell)
+            guard let target = model.follows.ao3AuthorTarget(author, ensure: true) else { return }
+            FollowBellMenu.show(for: target, follows: model.follows, from: bell)
         }
     }
 

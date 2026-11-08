@@ -108,21 +108,26 @@ extension ReadPaneViewController {
     }
 
     private func renderAuthorPane(requestOverlayOpID: inout UInt64?) -> Bool {
-        guard model.section == .authors, let author = model.author.username,
+        guard model.section == .authors, let userID = model.author.userID,
               model.selectedWork == nil else { return false }
+        let author = model.author.username ?? ""
         switch model.author.pane {
         case .works:
+            let canCrawl = appState.userCapabilities(userID)?.authorListings ?? true
             let sub = model.author.isLoadingWorks
-                ? (model.author.worksFetchStatus ?? "Fetching works from AO3…")
-                : storedWorksSubtitle(count: model.filteredAuthorWorks.count,
-                                      crawledAt: model.author.worksCrawledAt)
+                ? (model.author.worksFetchStatus ?? "Fetching works from \(appState.userSourceName(userID))…")
+                : canCrawl
+                    ? storedWorksSubtitle(count: model.filteredAuthorWorks.count,
+                                          crawledAt: model.author.worksCrawledAt)
+                    : "\(model.filteredAuthorWorks.count) works in your library"
             toolbar.configure(title: "Works", sub: sub)
             requestOverlayOpID = model.author.worksRefreshOp.opID
             toolbar.setLeading([])
-            toolbar.setTrailing([markAllReadButton(works: model.filteredAuthorWorks),
-                                 sortFilterMenu.makeButton(for: .authors),
-                                 worksFilterButton(for: .authors),
-                                 refreshWorksButton(forAuthor: true)])
+            var trailing: [NSView] = [markAllReadButton(works: model.filteredAuthorWorks),
+                                      sortFilterMenu.makeButton(for: .authors),
+                                      worksFilterButton(for: .authors)]
+            if canCrawl { trailing.append(refreshWorksButton(forAuthor: true)) }
+            toolbar.setTrailing(trailing)
             show(mode: .subscriptionWorks(author))
         case .bookmarks:
             let count = model.author.bookmarks.count
@@ -303,7 +308,7 @@ extension ReadPaneViewController {
         let reading = model.readerOpen
         let cameFromResults = model.section == .search
             || (model.section == .subscriptions && model.subscriptionWorks.title != nil)
-            || (model.section == .authors && model.author.username != nil)
+            || (model.section == .authors && model.author.userID != nil)
             || (model.section == .fandoms && model.fandomWorksTag != nil)
         toolbar.configure(title: reading ? work.title : "Details",
                           sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)

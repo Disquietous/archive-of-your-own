@@ -37,11 +37,11 @@ impl Storage {
     // -------------------------------------------------------------------
 
     /// The identifier the bridge shows for a follow target: row id as text
-    /// for works and series, username for authors, tag name for fandoms.
+    /// for works, series and authors (the users row), tag name for fandoms.
     pub fn follow_bridge_id(&self, target: FollowTarget) -> String {
         match target {
             FollowTarget::Work(id) | FollowTarget::Series(id) => id.to_string(),
-            FollowTarget::Author(id) => self.user_name_for_row(id).unwrap_or_default(),
+            FollowTarget::Author(id) => id.to_string(),
             FollowTarget::Fandom(id) => self.tag_cache.get(id).map(|t| t.name.to_string()).unwrap_or_default(),
         }
     }
@@ -54,7 +54,12 @@ impl Storage {
         match kind {
             "work" => id.parse().ok().filter(|id| self.works_cache.get(*id).is_some()).map(FollowTarget::Work),
             "series" => id.parse().ok().filter(|id| self.series_cache.get(*id).is_some()).map(FollowTarget::Series),
-            "author" => self.user_row_id(&split_author_byline(id).0).map(FollowTarget::Author),
+            // A users row id; an AO3 account name is still accepted from
+            // AO3-keyed surfaces (subscriptions, the legacy follow import).
+            "author" => match id.parse::<i64>() {
+                Ok(row) => self.users_cache.get(row).map(|_| FollowTarget::Author(row)),
+                Err(_) => self.ao3_user_row_id(&split_author_byline(id).0).map(FollowTarget::Author),
+            },
             "fandom" => self.tag_cache.get_by_name(id).map(|t| FollowTarget::Fandom(t.id)),
             _ => None,
         }
@@ -66,7 +71,8 @@ impl Storage {
     pub fn ensure_follow_target(&self, kind: &str, bridge_id: &str) -> Result<Option<FollowTarget>, AppError> {
         let id = bridge_id.trim();
         match kind {
-            "author" => Ok(self.ensure_user_row(&split_author_byline(id).0)?.map(FollowTarget::Author)),
+            "author" if id.parse::<i64>().is_ok() => Ok(self.follow_target(kind, id)),
+            "author" => Ok(self.ensure_ao3_user_row(&split_author_byline(id).0)?.map(FollowTarget::Author)),
             "fandom" if !id.is_empty() => {
                 let tag = self.tag_cache.resolve(&self.conn, id, TAG_TYPE_FANDOM)?;
                 Ok(Some(FollowTarget::Fandom(tag.id)))
@@ -220,7 +226,7 @@ impl Storage {
             .into_iter()
             .filter(|(sub_type, sub_id, _, _)| {
                 let target = match sub_type.as_str() {
-                    "author" => self.user_row_id(sub_id).map(FollowTarget::Author),
+                    "author" => self.ao3_user_row_id(sub_id).map(FollowTarget::Author),
                     "work" => self.resolve_work(crate::models::SOURCE_AO3, sub_id).map(FollowTarget::Work),
                     "series" => self.resolve_series(crate::models::SOURCE_AO3, sub_id).map(FollowTarget::Series),
                     _ => None,

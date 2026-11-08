@@ -76,7 +76,7 @@ extension ListPaneViewController {
                 cell.setNew(unseen.contains(works[row].id))
                 cell.setRemoved(gone.contains(works[row].id))
                 cell.setFinished(finished.contains(works[row].id))
-                cell.setFollowShaded(model.follows.isShaded(.author(works[row].author)))
+                cell.setFollowShaded(model.isAuthorBellShaded(for: works[row]))
             }
         }
         renderedWorkIDs = ids
@@ -236,15 +236,15 @@ extension ListPaneViewController {
     /// shows their works / bookmarks / collections beside it). The AppKit
     /// controller is kept for the pane's lifetime and re-pointed; its view
     /// rides the variantHost slot so every other content path tears it down.
-    func showAuthorProfileContent(username: String, activePane: MacAppModel.AuthorPane) {
+    func showAuthorProfileContent(userID: UInt64, activePane: MacAppModel.AuthorPane) {
         chipsHost?.removeFromSuperview()
         scrollView.removeFromSuperview()
         overlayHost?.removeFromSuperview()
         overlayHost = nil
         let controller = authorProfileController ?? {
             let controller = AuthorProfileViewController(theme: theme, appState: appState)
-            controller.onOpenList = { [weak self] username, pane in
-                self?.model.showAuthorPane(username, pane)
+            controller.onOpenList = { [weak self] userID, pane in
+                self?.model.showAuthorPane(userID: userID, pane)
             }
             addChild(controller)
             return controller
@@ -256,7 +256,7 @@ extension ListPaneViewController {
             controller.view.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
             variantHost = controller.view
         }
-        controller.configure(username: username, activePane: activePane)
+        controller.configure(userID: userID, activePane: activePane)
     }
 
     func showVariant(_ content: some View, section: MacAppModel.Section) {

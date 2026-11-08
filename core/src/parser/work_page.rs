@@ -80,6 +80,8 @@ fn work_page(doc: &Html, id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppErro
         complete,
         series,
         fetched_at: String::new(),
+    
+        author_ids: Vec::new(),
     };
 
     Ok((summary_obj, chapters))
@@ -456,6 +458,11 @@ fn image_block(img: &ElementRef) -> Option<ContentBlock> {
     let raw = img.value().attr("src")?.trim();
     let src = if raw.starts_with("https://") || raw.starts_with("http://") {
         raw.to_string()
+    } else if raw.starts_with("data:") || raw.is_empty() {
+        return None;
+    } else if let Some(base) = super::content_base() {
+        // Another source's page: resolve against it (see `html_to_blocks`).
+        base.join(raw).ok()?.to_string()
     } else if let Some(rest) = raw.strip_prefix("//") {
         format!("https://{rest}")
     } else if raw.starts_with('/') {

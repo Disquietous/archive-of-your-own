@@ -97,6 +97,82 @@ extension RustBridge {
 
     // MARK: - User profiles (subscribe / block / mute)
 
+    // MARK: - Users by row id (design/users-model-plan.md)
+
+    /// A user from the library, by row id. DB-only.
+    func getUser(_ id: UInt64) -> UUser? {
+        app?.getUser(userId: id)
+    }
+
+    /// Fetch a user's profile from their source and cache it.
+    func fetchUser(_ id: UInt64) async throws -> UUser {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchUser(userId: id)
+    }
+
+    /// Works in the library by this user, newest update first.
+    func getWorksByUser(_ id: UInt64) -> [UWorkSummary] {
+        guard let app else { return [] }
+        return (try? app.getWorksByUser(userId: id)) ?? []
+    }
+
+    /// One page of a user's works at their source.
+    func fetchUserWorks(_ id: UInt64, page: UInt32, opID: UInt64? = nil) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.fetchUserWorks(userId: id, page: page, opId: opID)
+    }
+
+    /// The users row for an AO3 username the library already knows; nil
+    /// when never seen. Never creates a row — safe in a render pass.
+    func lookupAO3UserID(_ username: String) -> UInt64? {
+        app?.lookupAo3UserId(username: username)
+    }
+
+    /// Which source recognises a profile link, and the user key it names.
+    func resolveUserLink(_ link: String) -> UResolvedLink? {
+        app?.resolveUserLink(link: link)
+    }
+
+    /// Users at a source whose names match, as that source ranks them.
+    /// Empty for a source without user search.
+    func searchUsers(source: String, query: String) async throws -> [UUserHit] {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.searchUsers(source: source, query: query)
+    }
+
+    /// The users row for a source key (created when never seen).
+    func ensureUser(source: String, sourceID: String, url: String, username: String) -> UInt64? {
+        guard let app else { return nil }
+        return try? app.ensureUser(source: source, sourceId: sourceID, url: url, username: username)
+    }
+
+    /// The users row for an AO3 username (created when never seen) — how
+    /// AO3-keyed surfaces (follows, subscriptions, pasted links, comment
+    /// bylines) reach the id-keyed author screens.
+    func userID(forAO3Username username: String) -> UInt64? {
+        guard let app else { return nil }
+        return (try? app.userIdForAo3Username(username: username)) ?? nil
+    }
+
+    /// Every source the app knows, in display order (fetched once).
+    func listSources() -> [SourceCapabilities] {
+        if let cached = Self.allSources { return cached }
+        let all = app?.listSources() ?? []
+        if !all.isEmpty { Self.allSources = all; for s in all { Self.capabilitiesByID[s.id] = s } }
+        return all
+    }
+    private static var allSources: [SourceCapabilities]?
+
+    /// What a source offers, fetched once per source id and kept; nil for
+    /// an unknown id.
+    func sourceCapabilities(_ sourceID: String) -> SourceCapabilities? {
+        if let cached = Self.capabilitiesByID[sourceID] { return cached }
+        guard let caps = app?.sourceCapabilities(sourceId: sourceID) else { return nil }
+        Self.capabilitiesByID[sourceID] = caps
+        return caps
+    }
+    private static var capabilitiesByID: [String: SourceCapabilities] = [:]
+
     /// The locally cached profile for a user — instant, DB-only.
     func getCachedUserProfile(username: String) -> UUserProfile? {
         guard let app else { return nil }

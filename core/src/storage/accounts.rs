@@ -1,9 +1,8 @@
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::AppError;
-use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, UserProfile, SOURCE_AO3};
+use crate::models::{split_author_byline, AO3User, Comment, ContentBlock, SOURCE_AO3};
 
-use super::consts::*;
 
 pub type NotificationRow = (i64, String, u64, String, String, String, String, bool);
 pub type LogRow = (i64, String, String, String, String);
@@ -33,13 +32,6 @@ impl AccountRow {
 }
 
 impl Storage {
-    /// Whether the app has an ao3_users row for this name — account
-    /// username, "Pseud (account)" byline, or a recorded pseud. Answered
-    /// from the users cache.
-    pub fn has_ao3_user_with_username(&self, username: &str) -> Result<bool, AppError> {
-        Ok(self.users_cache.has_user(username))
-    }
-
     // -------------------------------------------------------------------
     // App state (key-value)
     // -------------------------------------------------------------------
@@ -629,106 +621,14 @@ impl Storage {
         ).optional().map_err(map_sql)
     }
 
-    /// Record a sighting of an AO3 user. `user.username` is the byline as
-    /// AO3 rendered it — "Pseud (account)" folds into the account's single
-    /// row and teaches it the pseud. Write-through via the users cache.
-    pub fn upsert_ao3_user(&self, user: &AO3User) -> Result<(), AppError> {
-        self.users_cache.record(&self.conn, user, &crate::timefmt::now_utc_datetime())
-            .map(|_| ())
-    }
-
-    /// Record author bylines seen on AO3 data (work blurbs, bookmarks,
-    /// series pages): ensures each account row and learns any pseud.
-    pub fn record_author_bylines(&self, bylines: &[String]) -> Result<(), AppError> {
-        let now = crate::timefmt::now_utc_datetime();
-        for b in bylines {
-            self.users_cache.record_byline(&self.conn, b, &now)?;
-        }
-        Ok(())
-    }
-
-    /// The users row id for any name form (account username, byline, or
-    /// recorded pseud), creating the account row when it has never been
-    /// seen. Follows and crawl stamps point at this.
-    pub fn ensure_user_row(&self, name: &str) -> Result<Option<i64>, AppError> {
-        Ok(self.users_cache
-            .record_byline(&self.conn, name, &crate::timefmt::now_utc_datetime())?
-            .map(|e| e.id))
-    }
-
-    /// The users row id for a name the library already knows; None when
-    /// never seen.
-    pub fn user_row_id(&self, name: &str) -> Option<i64> {
-        self.users_cache.resolve(name).map(|e| e.id)
-    }
-
-    /// The account username behind a users row id.
-    pub fn user_name_for_row(&self, id: i64) -> Option<String> {
-        self.users_cache.get(id).map(|e| e.username.clone())
-    }
-
-    /// The account for any name form (account username, byline, pseud,
-    /// guest id). Answered from the users cache — no SQL.
-    pub fn get_ao3_user(&self, name: &str) -> Result<Option<AO3User>, AppError> {
-        Ok(self.users_cache.resolve(name).map(|e| e.to_ao3_user()))
-    }
-
-    /// Library-scope user search: every AO3 account the app has cached
-    /// (from works, comments, profiles, subscriptions) whose username or
-    /// any pseud matches. Prefix matches rank first. Answered from the
-    /// users cache; `limit` of 0 means no limit.
-    pub fn search_ao3_usernames(&self, term: &str, limit: u32) -> Result<Vec<String>, AppError> {
-        let limit = if limit == 0 { usize::MAX } else { limit as usize };
-        Ok(self.users_cache.search_usernames(term, limit))
-    }
-
-    /// Persist a fetched profile onto the account's row, creating it when
-    /// the user has never been seen.
-    pub fn upsert_user_profile(&self, p: &UserProfile) -> Result<(), AppError> {
-        self.users_cache.update_profile(&self.conn, p, &crate::timefmt::now_utc_datetime())
-    }
-
-    /// The cached profile for a name (account username, byline, or pseud),
-    /// with the signed-in account's subscription state joined in from the
-    /// local subscriptions table. None when the account has never had a profile fetch recorded.
-    pub fn get_user_profile(&self, username: &str) -> Result<Option<UserProfile>, AppError> {
-        let Some(entity) = self.users_cache
-            .resolve(username)
-            .filter(|e| !e.profile_fetched_at.is_empty())
-        else { return Ok(None) };
-        let mut profile = entity.to_profile();
-        if let Some(account) = self.subscription_account() {
-            profile.subscribed = self.has_subscription(account.id, SUB_TYPE_AUTHOR, &profile.username)?;
-            profile.subscription_ao3_id =
-                self.get_subscription_ao3_id(account.id, SUB_TYPE_AUTHOR, &profile.username)?;
-        }
-        Ok(Some(profile))
-    }
-
-    /// Record block state locally (mirrors an AO3-side change). Creates the
-    /// account row when needed so state is never dropped.
-    pub fn set_user_block_state(&self, username: &str, blocked: bool,
-                                ao3_id: Option<&str>) -> Result<(), AppError> {
-        self.users_cache.set_block_state(&self.conn, username, blocked,
-                                         ao3_id.unwrap_or(""),
-                                         &crate::timefmt::now_utc_datetime())
-    }
-
-    /// Record mute state locally (mirrors an AO3-side change).
-    pub fn set_user_mute_state(&self, username: &str, muted: bool,
-                               ao3_id: Option<&str>) -> Result<(), AppError> {
-        self.users_cache.set_mute_state(&self.conn, username, muted,
-                                        ao3_id.unwrap_or(""),
-                                        &crate::timefmt::now_utc_datetime())
-    }
-
     fn save_comment_recursive(&self, work_id: u64, chapter_id: u64, parent_row: Option<i64>,
                               comment: &Comment) -> Result<(), AppError> {
         // The author row is the account; which of its pseuds posted the
         // comment rides on the comment row so the byline can be rebuilt.
-        let author = self.users_cache.record(
-            &self.conn, &comment.author, &crate::timefmt::now_utc_datetime())?;
-        let pseud = if author.is_guest() { String::new() } else {
+        let author_id = self.record_user(&comment.author)?;
+        let author = self.users_cache.get(author_id)
+            .ok_or_else(|| AppError::StorageError(format!("users row {author_id} vanished")))?;
+        let pseud = if author.is_guest() || author.source != SOURCE_AO3 { String::new() } else {
             split_author_byline(&comment.author.username).1.unwrap_or_default()
         };
 
@@ -736,10 +636,13 @@ impl Storage {
         // their thread's chapter. A known id is never overwritten with 0.
         let chapter_id = if chapter_id > 0 { chapter_id } else { comment.chapter_id.unwrap_or(0) };
         let content_json = serde_json::to_string(&comment.content).map_err(map_json)?;
+        // Comments belong to their work's source; a second source's
+        // reviews must never be filed under AO3.
+        let source = self.work_ref(work_id).map(|r| r.source).unwrap_or_else(|| SOURCE_AO3.to_string());
         self.conn.execute(
             "INSERT INTO comments (source, external_id, work_id, chapter_id, parent_id, author_id, author_pseud,
-                                   posted_at, content_json, chapter_label, notice, more_replies)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                                   posted_at, content_json, chapter_label, notice, more_replies, rating)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT (source, external_id) DO UPDATE SET
                  work_id = excluded.work_id,
                  chapter_id = CASE WHEN excluded.chapter_id > 0 THEN excluded.chapter_id ELSE comments.chapter_id END,
@@ -752,9 +655,10 @@ impl Storage {
                                       ELSE comments.chapter_label END,
                  notice = excluded.notice,
                  more_replies = excluded.more_replies,
+                 rating = excluded.rating,
                  cached_at = datetime('now')",
             params![
-                SOURCE_AO3,
+                source,
                 comment.id.to_string(),
                 work_id as i64,
                 chapter_id as i64,
@@ -766,6 +670,7 @@ impl Storage {
                 comment.chapter_label.as_deref().unwrap_or(""),
                 comment.notice.as_deref().unwrap_or(""),
                 comment.more_replies,
+                comment.rating.map(|r| r as i64),
             ],
         ).map_err(map_sql)?;
         let row_id = self.comment_row_id(comment.id)?;
@@ -786,16 +691,17 @@ impl Storage {
         };
         let sql = format!(
             "SELECT c.id, c.external_id, c.posted_at, c.content_json, c.parent_id, c.author_id,
-                    c.author_pseud, c.chapter_label, c.notice, c.more_replies, c.chapter_id
+                    c.author_pseud, c.chapter_label, c.notice, c.more_replies, c.chapter_id, c.rating
              FROM comments c WHERE {} ORDER BY CAST(c.external_id AS INTEGER)",
             where_clause
         );
         let mut stmt = self.conn.prepare(&sql).map_err(map_sql)?;
-        type Row = (i64, String, String, String, Option<i64>, i64, String, String, String, u32, i64);
+        type Row = (i64, String, String, String, Option<i64>, i64, String, String, String, u32, i64, Option<i64>);
         let rows: Vec<Row> = stmt
             .query_map(params![param_val], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?))
+                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?,
+                    row.get(11)?))
             })
             .map_err(map_sql)?
             .filter_map(|r| r.ok())
@@ -805,7 +711,7 @@ impl Storage {
         // pseud the comment was posted under.
         let mut all: Vec<(i64, Comment, Option<i64>)> = rows.into_iter().map(
             |(row_id, external_id, posted_at, content_json, parent_row, author_row, author_pseud,
-              chapter_label, notice, more_replies, chapter_id)| {
+              chapter_label, notice, more_replies, chapter_id, rating)| {
             let content: Vec<ContentBlock> = serde_json::from_str(&content_json).unwrap_or_default();
             let author = match self.users_cache.get(author_row) {
                 Some(e) => {
@@ -815,12 +721,7 @@ impl Storage {
                     }
                     u
                 }
-                None => AO3User {
-                    id: String::new(),
-                    username: "Anonymous".to_string(),
-                    profile_url: None,
-                    avatar_url: None,
-                },
+                None => AO3User::ao3("", "Anonymous", None, None),
             };
             let c = Comment {
                 id: external_id.parse::<u64>().unwrap_or(0),
@@ -832,6 +733,7 @@ impl Storage {
                 chapter_id: Some(chapter_id as u64).filter(|&id| id > 0),
                 notice: Some(notice).filter(|s| !s.is_empty()),
                 more_replies,
+                rating: rating.map(|r| r as u8),
             };
             (row_id, c, parent_row)
         }).collect();

@@ -16,8 +16,14 @@ final class AuthorProfileModel {
 
     enum Pane { case works, bookmarks, collections }
 
-    /// The open author (AO3 username); nil when no profile is showing.
+    /// The open author's users row; nil when no profile is showing. The
+    /// one identity the screens work from.
+    var userID: UInt64?
+    /// The open author's display name (an AO3 account name for AO3 users,
+    /// which the AO3-only lists and follows still key by).
     var username: String?
+    /// Whether the open author is an AO3 account.
+    var isAO3: Bool { userID.map { appState.userSource($0) == "ao3" } ?? true }
     var works: [Work] = []
     /// Last completed full crawl for this author (epoch-seconds string).
     var worksCrawledAt: String?
@@ -58,27 +64,40 @@ final class AuthorProfileModel {
     var isLoadingCollections = false
     var collectionsError: String?
 
-    var isOpen: Bool { username != nil }
+    var isOpen: Bool { userID != nil }
 
-    /// Open the profile on an author. Works never fetch here — a complete,
+    /// Open the profile on an AO3 author by name (iOS, follows, pasted
+    /// links): resolves the users row and opens it.
+    @discardableResult
+    func open(_ username: String) -> Bool {
+        guard let id = appState.userID(forAO3Username: username) else { return false }
+        return open(userID: id)
+    }
+
+    /// Open the profile on a user. Works never fetch here — a complete,
     /// current list comes from `refreshWorks()`. Returns whether the author
     /// changed (the caller drops its list filters then).
     @discardableResult
-    func open(_ username: String) -> Bool {
+    func open(userID id: UInt64) -> Bool {
         cancelWorksRefresh()
-        let changed = self.username != username
+        let changed = self.userID != id
         if changed {
             worksCrawlStop = nil
             resetPanes()
             paneAutoSelect = true
         }
+        self.userID = id
+        let record = appState.user(id) ?? appState.bridge.getUser(id)
+        if let record { appState.users[id] = record }
+        let username = record?.username ?? ""
         self.username = username
         worksError = nil
         worksFetchStatus = nil
         isLoadingWorks = false
 
-        worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
-        let cached = appState.bridge.getWorksByAuthor(username: username)
+        // Crawl stamps are follow-target bookkeeping, which is AO3-keyed.
+        worksCrawledAt = isAO3 ? appState.bridge.getWorksCrawledAt(kind: "author", targetId: username) : nil
+        let cached = appState.bridge.getWorksByUser(id)
         let works = cached.map(AppState.workFromSummary)
         appState.adoptFetchedWorks(works)
         self.works = works
@@ -91,8 +110,12 @@ final class AuthorProfileModel {
         // The profile feeds the author card and, once its counts are known,
         // picks which list opens first.
         Task { @MainActor in
-            await appState.loadUserProfile(username)
-            applyDefaultPane(username)
+            await appState.loadUser(id)
+            if let username = self.username {
+                // The iOS screens still read the name-keyed cache.
+                await appState.loadUserProfile(username)
+            }
+            applyDefaultPane(id)
         }
         return changed
     }
@@ -100,7 +123,11 @@ final class AuthorProfileModel {
     /// Fetch the author's complete works list — every page on AO3.
     /// `resume` picks a stopped crawl up at the page it stopped on.
     func refreshWorks(resume: Bool = false) {
-        guard let username, !isLoadingWorks else { return }
+        guard let userID, let username, !isLoadingWorks else { return }
+        // The crawl is an author-listing fetch; a source without listings
+        // shows the works the library has discovered instead.
+        guard appState.userCapabilities(userID)?.authorListings ?? true else { return }
+        let isAO3 = self.isAO3
         let stop = resume ? worksCrawlStop : nil
         let seed = stop == nil ? [] : works
         worksCrawlStop = nil
@@ -117,35 +144,37 @@ final class AuthorProfileModel {
                 let all = try await worksRefreshOp.run(appState.bridge) { opID in
                     try await appState.crawlAllWorks(
                         fetchPage: { [appState] in
-                            try await appState.bridge.fetchAuthorWorks(username: username, page: $0, opID: opID)
+                            try await appState.bridge.fetchUserWorks(userID, page: $0, opID: opID)
                         },
                         task: task,
                         startPage: stop?.nextPage ?? 1, seed: seed,
                         status: { [weak self] in self?.worksFetchStatus = $0 },
                         partial: { [weak self] works in
-                            guard let self, self.username == username else { return }
+                            guard let self, self.userID == userID else { return }
                             self.works = works
                         },
                         pageDone: { lastPage = ($0, $1) })
                 }
-                if self.username == username && !task.isCancelled {
-                    appState.bridge.completeWorksCrawl(kind: "author", targetId: username,
-                                                       workIds: all.compactMap { UInt64($0.id) })
-                    worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
+                if self.userID == userID && !task.isCancelled {
+                    if isAO3 {
+                        appState.bridge.completeWorksCrawl(kind: "author", targetId: username,
+                                                           workIds: all.compactMap { UInt64($0.id) })
+                        worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)
+                    }
                     appState.mergeCachedWorks(all)
                     // Show the cache union, not just the crawl result: works
-                    // that disappeared from AO3 stay on the author's list.
-                    let cached = appState.bridge.getWorksByAuthor(username: username)
+                    // that disappeared from the site stay on the author's list.
+                    let cached = appState.bridge.getWorksByUser(userID)
                     let works = cached.map(AppState.workFromSummary)
                     appState.adoptFetchedWorks(works)
                     self.works = works.isEmpty ? all : works
                 }
             } catch {
-                if !task.isCancelled && !error.isCancellation, self.username == username {
+                if !task.isCancelled && !error.isCancellation, self.userID == userID {
                     worksError = error.localizedDescription
                 }
             }
-            if self.username == username {
+            if self.userID == userID {
                 isLoadingWorks = false
                 worksFetchStatus = nil
                 if task.isCancelled || worksError != nil, let last = lastPage, last.page < last.total {
@@ -167,6 +196,7 @@ final class AuthorProfileModel {
 
     func close() {
         cancelWorksRefresh()
+        userID = nil
         username = nil
         works = []
         worksError = nil
@@ -213,14 +243,14 @@ final class AuthorProfileModel {
     /// The default list for a freshly opened author: the first of works /
     /// bookmarks / collections whose profile count is non-zero. No-op once
     /// the user has picked a list themselves.
-    private func applyDefaultPane(_ username: String) {
-        guard paneAutoSelect, self.username == username,
-              let profile = appState.userProfile(username) else { return }
+    private func applyDefaultPane(_ id: UInt64) {
+        guard paneAutoSelect, self.userID == id, let username,
+              let user = appState.user(id), user.profileFetchedAt != nil else { return }
         paneAutoSelect = false
-        guard profile.worksCount == 0 else { return } // already on .works
-        if profile.bookmarksCount > 0 {
+        guard (user.works ?? 0) == 0 else { return } // already on .works
+        if (user.bookmarks ?? 0) > 0 {
             pane = .bookmarks
-        } else if profile.collectionsCount > 0 {
+        } else if (user.collections ?? 0) > 0 {
             pane = .collections
         }
         loadPaneContent(pane, username: username)

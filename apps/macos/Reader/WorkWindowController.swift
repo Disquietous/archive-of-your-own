@@ -186,7 +186,8 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
     private func configureDiscussion() {
         discussion.actions = DiscussionActions(
             openAuthor: { [weak self] name in
-                self?.model.openAuthorProfile(name)
+                guard let self else { return }
+                model.openCommentAuthor(name, onWorkID: session.workID)
                 Self.mainWindow?.makeKeyAndOrderFront(nil)
             },
             openURL: { [weak self] url in

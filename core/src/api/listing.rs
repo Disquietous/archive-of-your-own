@@ -221,6 +221,7 @@ mod tests {
             complete,
             series: vec![],
             fetched_at: String::new(),
+            author_ids: Vec::new(),
         }
     }
 

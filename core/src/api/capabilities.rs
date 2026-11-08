@@ -32,6 +32,14 @@ pub enum CapabilityError {
 #[async_trait::async_trait]
 pub trait PlatformCapabilities: Send + Sync {
     async fn earn_cloudflare_clearance(&self, socks_port: u16) -> Result<Vec<String>, CapabilityError>;
+
+    /// Off Tor, a site's human check is the user's to pass: show `url` in
+    /// a web view on the system connection (the same path the app's own
+    /// direct requests take), wait for the site's clearance cookie, and
+    /// return every cookie it set with the web view's User-Agent. Fails
+    /// when the user dismisses the check or the platform has no UI for it.
+    async fn earn_site_clearance(&self, source: String, url: String)
+        -> Result<crate::client::SiteClearance, CapabilityError>;
 }
 
 static CAPABILITIES: OnceLock<Mutex<Option<Arc<dyn PlatformCapabilities>>>> = OnceLock::new();

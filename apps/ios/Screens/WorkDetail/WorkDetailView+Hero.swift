@@ -59,8 +59,8 @@ extension WorkDetailView {
             .disabled(!canOpen)
             .accessibilityLabel("View \(work.author)’s profile")
 
-            if canOpen {
-                FollowBellMenu(target: .author(work.author), weight: .medium)
+            if canOpen, let target = FollowModel.Target.author(for: work) {
+                FollowBellMenu(target: target, weight: .medium)
             }
         }
     }

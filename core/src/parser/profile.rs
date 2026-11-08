@@ -118,7 +118,7 @@ fn path_record_id(href: &str, strip_tail: &str) -> Option<String> {
 
 /// Parse a user's profile page: identity, pseuds, join date, sidebar
 /// counts, bio, and — when signed in — live subscribe/block/mute state.
-pub fn parse_user_profile(html: &str) -> Result<UserProfile, AppError> {
+pub fn parse_user_profile(html: &str) -> Result<AO3ProfilePage, AppError> {
     let doc = Html::parse_document(html);
 
     let username = doc.select(&sel("div.primary.header h2.heading")).next()
@@ -172,8 +172,6 @@ pub fn parse_user_profile(html: &str) -> Result<UserProfile, AppError> {
         let segment = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
         counts.insert(segment.to_string(), n);
     }
-    let count = |key: &str| counts.get(key).copied().unwrap_or(0);
-
     // Bio (when present) as a ContentBlock tree — no HTML escapes the parser.
     let bio = doc.select(&sel("div.bio blockquote.userstuff")).next()
         .map(|el| parse_element_children(&el))
@@ -217,28 +215,38 @@ pub fn parse_user_profile(html: &str) -> Result<UserProfile, AppError> {
         }
     }
 
-    Ok(UserProfile {
-        username,
-        numeric_id,
-        avatar_url: extract_user_icon_url(html),
-        pseuds,
-        joined,
-        location,
-        birthday,
-        bio,
-        works_count: count("works"),
-        series_count: count("series"),
-        bookmarks_count: count("bookmarks"),
-        collections_count: count("collections"),
-        gifts_count: count("gifts"),
+    // Everything beyond identity is a source property under AO3's own
+    // names (`user_fields::AO3`); counts are present only when the sidebar
+    // showed them, booleans only when true.
+    let mut properties: Vec<(String, String)> = vec![
+        ("profile_url".into(), crate::parser::ao3_user_url(&username)),
+    ];
+    let mut put = |name: &str, value: String| { if !value.is_empty() { properties.push((name.into(), value)); } };
+    put("avatar_url", extract_user_icon_url(html).unwrap_or_default());
+    put("numeric_id", numeric_id.unwrap_or_default());
+    put("joined", joined);
+    put("location", location);
+    put("birthday", birthday);
+    if !pseuds.is_empty() { put("pseuds", serde_json::to_string(&pseuds).unwrap_or_default()); }
+    if !bio.is_empty() { put("bio", serde_json::to_string(&bio).unwrap_or_default()); }
+    for key in ["works", "series", "bookmarks", "collections", "gifts"] {
+        if let Some(n) = counts.get(key) { put(key, n.to_string()); }
+    }
+    if blocked { put("blocked", "1".into()); }
+    put(crate::user_fields::AO3_BLOCK_RECORD, block_ao3_id.unwrap_or_default());
+    if muted { put("muted", "1".into()); }
+    put(crate::user_fields::AO3_MUTE_RECORD, mute_ao3_id.unwrap_or_default());
+
+    Ok(AO3ProfilePage {
+        profile: SourceUserProfile {
+            source: crate::models::SOURCE_AO3.to_string(),
+            source_id: username.clone(),
+            username,
+            properties,
+        },
         viewer_signed_in,
         subscribed,
         subscription_ao3_id,
-        blocked,
-        block_ao3_id,
-        muted,
-        mute_ao3_id,
-        fetched_at: String::new(),
     })
 }
 

@@ -338,7 +338,16 @@ final class AppState {
     /// Same, for the detail pane's kudos POST.
     let kudosOp = TrackedOperation()
 
-    /// Fetched profiles keyed by lowercased username.
+    /// Users by row id — the identity every author screen works from.
+    var users: [UInt64: UUser] = [:]
+    /// Session cache of avatar bytes by users row.
+    var userAvatars: [UInt64: Data] = [:]
+    var userAvatarFetches: Set<UInt64> = []
+    var userLoading: Set<UInt64> = []
+    var userErrors: [UInt64: String] = [:]
+
+    /// Fetched profiles keyed by lowercased username (iOS, until it moves
+    /// to `users`).
     var userProfiles: [String: UUserProfile] = [:]
     /// Usernames with a profile fetch in flight.
     var userProfileLoading: Set<String> = []

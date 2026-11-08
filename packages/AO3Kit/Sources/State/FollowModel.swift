@@ -30,9 +30,10 @@ final class FollowModel {
     /// A bell's target: what it follows, keyed the way the core keys it.
     struct Target: Hashable {
         let kind: Kind
-        /// author: AO3 username (a "Pseud (user)" byline is reduced to the
-        /// user); work/series: the library row id (what `Work.id` and
-        /// `SeriesInfo.seriesID` hold); fandom: tag name.
+        /// author/work/series: the library row id (users, works, series —
+        /// what `Work.authorIDs`, `Work.id` and `SeriesInfo.seriesID`
+        /// hold); fandom: tag name. Never a display name: two people with
+        /// one name at two sources are two targets.
         let id: String
         /// Display name — byline, work title, series name, fandom.
         let name: String
@@ -40,17 +41,49 @@ final class FollowModel {
         init(kind: Kind, id: String, name: String? = nil) {
             self.kind = kind
             let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.id = kind == .author ? AppState.canonicalAuthorUsername(trimmed) : trimmed
+            self.id = trimmed
             let display = (name ?? trimmed).trimmingCharacters(in: .whitespacesAndNewlines)
             self.name = display.isEmpty ? self.id : display
         }
 
-        /// An author bell for a byline ("Pseud (user)" or a bare username).
-        static func author(_ byline: String) -> Target {
-            Target(kind: .author, id: byline, name: byline)
+        /// An author bell for a users row.
+        static func author(id: UInt64, name: String) -> Target {
+            Target(kind: .author, id: String(id), name: name)
         }
 
+        /// The author bell target for a work: its first linked author's
+        /// users row. nil for a work the library has not linked yet.
+        static func author(for work: Work) -> Target? {
+            guard let id = work.authorIDs.first, id != 0 else { return nil }
+            return .author(id: id, name: work.author)
+        }
+
+        /// The users row behind an author target.
+        var userID: UInt64? { kind == .author ? UInt64(id) : nil }
+
         var key: String { "\(kind.rawValue):\(id.lowercased())" }
+    }
+
+    /// The author target for an AO3 byline ("Pseud (user)" or a bare
+    /// username) — the surfaces that only know a name: subscriptions,
+    /// pasted links, bookmark bylines, collection maintainers. `ensure`
+    /// creates the users row when the library has never seen the name
+    /// (a click); a render pass passes false and gets nil for an unknown
+    /// name, so drawing a bell never writes a row.
+    func ao3AuthorTarget(_ byline: String, ensure: Bool) -> Target? {
+        let id = ensure
+            ? appState.userID(forAO3Username: byline)
+            : appState.bridge.lookupAO3UserID(byline)
+        return id.map { Target.author(id: $0, name: byline) }
+    }
+
+    /// The AO3 account name behind an author target, for the AO3-keyed
+    /// subscription records; nil for another source's user.
+    func ao3Username(of target: Target) -> String? {
+        guard let id = target.userID else { return nil }
+        let user = appState.user(id) ?? appState.bridge.getUser(id)
+        guard let user, user.source == "ao3" else { return nil }
+        return user.username
     }
 
     struct BellState: Equatable {
@@ -109,10 +142,25 @@ final class FollowModel {
     /// The signed-in account's AO3 subscription (false when signed out).
     func isSubscribed(_ target: Target) -> Bool {
         guard target.kind.isSubscribable else { return false }
+        // Subscriptions are AO3 records keyed by AO3 id: the username for
+        // authors, the row id (AO3 number for AO3 rows) for works/series.
+        let subID: String
+        if target.kind == .author {
+            guard let name = ao3Username(of: target) else { return false }
+            subID = name
+        } else {
+            subID = target.id
+        }
         return appState.subscriptions.contains {
             $0.subType.lowercased() == target.kind.rawValue
-                && $0.id.caseInsensitiveCompare(target.id) == .orderedSame
+                && $0.id.caseInsensitiveCompare(subID) == .orderedSame
         }
+    }
+
+    /// Whether AO3 can subscribe to this target at all (an AO3 kind and,
+    /// for authors, an AO3 account).
+    func isAO3Target(_ target: Target) -> Bool {
+        target.kind == .author ? ao3Username(of: target) != nil : true
     }
 
     func state(_ target: Target) -> BellState {
@@ -129,7 +177,7 @@ final class FollowModel {
     /// The Subscribed item is available: an AO3 account is signed in and
     /// AO3 can subscribe to this kind.
     func canSubscribe(_ target: Target) -> Bool {
-        target.kind.isSubscribable && appState.ao3Username != nil
+        target.kind.isSubscribable && appState.ao3Username != nil && isAO3Target(target)
     }
 
     /// When this follow's own What's New check last ran.

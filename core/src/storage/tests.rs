@@ -1,8 +1,7 @@
 use super::*;
 use crate::models::{
     AO3User, BookmarkTarget, Chapter, ContentBlock, ExternalRef, FollowTarget, InlineContent,
-    LocalSearchCriteria, Rating, SeriesMembership, UserProfile, Warning, WorkSummary, SOURCE_AO3,
-};
+    LocalSearchCriteria, Rating, SeriesMembership, Warning, WorkSummary, SOURCE_AO3, SourceUserProfile};
 
 /// A synthetic AO3 work with AO3 number `n`. Its `id` is 0 — the row id is
 /// what `save_work` returns. A fresh database allocates row ids 1, 2, 3…
@@ -37,6 +36,7 @@ fn sample_work(n: u64) -> WorkSummary {
         complete: false,
         series: vec![],
         fetched_at: String::new(),
+        author_ids: Vec::new(),
     }
 }
 
@@ -94,6 +94,69 @@ fn fandom(db: &Storage, name: &str) -> FollowTarget {
 /// An account row for `username`, created if needed.
 fn account(db: &Storage, username: &str) -> i64 {
     db.create_account(username, "cookie").unwrap()
+}
+
+
+/// People are rows keyed by (source, source id); a display name shared
+/// across sources never merges them. Works link to their authors' rows,
+/// so the same name on an AO3 work and a ScribbleHub story opens two
+/// different people.
+#[test]
+fn test_users_are_source_keyed_not_name_keyed() {
+    let db = open_test_db();
+    // An AO3 byline row and a ScribbleHub author with the same name.
+    let ao3_ids = db.record_author_bylines(&["quill_and_tide".to_string()]).unwrap();
+    let sh = AO3User { source: "scribblehub".into(), id: "51230".into(), username: "quill_and_tide".into(),
+        profile_url: Some("https://www.scribblehub.com/profile/51230/quill_and_tide/".into()), avatar_url: None };
+    let sh_id = db.record_user(&sh).unwrap();
+    assert_ne!(ao3_ids[0], sh_id);
+    assert_eq!(db.get_user(sh_id).unwrap().source, "scribblehub");
+    assert_eq!(db.get_user(ao3_ids[0]).unwrap().source, "ao3");
+    assert_eq!(db.get_user_by_key("scribblehub", "51230").map(|u| u.id), Some(sh_id));
+    assert_eq!(db.ao3_user_row_id("Quill_And_Tide"), Some(ao3_ids[0]), "AO3 names resolve within AO3, NOCASE");
+
+    // An AO3 work links through its bylines on save; a ScribbleHub work is
+    // linked by the caller once its authors are recorded.
+    let ao3_work = sample_work(1);
+    let w1 = db.save_work(&WorkSummary { authors: vec!["quill_and_tide".into()], ..ao3_work }).unwrap();
+    let mut sh_work = sample_work(700_412);
+    sh_work.source = "scribblehub".into();
+    sh_work.url = "https://www.scribblehub.com/series/700412/the-lighthouse-ledger/".into();
+    sh_work.authors = vec!["quill_and_tide".into()];
+    let w2 = db.save_work(&sh_work).unwrap();
+    assert!(db.work_author_ids(w2).is_empty(), "no name-based linking for a second source");
+    db.link_work_authors(w2, &[sh_id]).unwrap();
+    assert_eq!(db.work_author_ids(w1), vec![ao3_ids[0]]);
+    assert_eq!(db.work_author_ids(w2), vec![sh_id]);
+    // The summary the bridge hands out carries the same links.
+    assert_eq!(db.get_work(w1).unwrap().unwrap().author_ids, vec![ao3_ids[0]]);
+    assert_eq!(db.get_work(w2).unwrap().unwrap().author_ids, vec![sh_id]);
+    assert_eq!(db.get_works_by_user(sh_id).unwrap().iter().map(|w| w.id).collect::<Vec<_>>(), vec![w2]);
+    assert_eq!(db.get_works_by_user(ao3_ids[0]).unwrap().iter().map(|w| w.id).collect::<Vec<_>>(), vec![w1]);
+
+    // A profile lands on the sourced row under the source's own names;
+    // the same value again does not touch updated_at.
+    let profile = SourceUserProfile {
+        source: "scribblehub".into(), source_id: "51230".into(), username: "quill_and_tide".into(),
+        properties: vec![("followers".into(), "48".into()), ("series".into(), "3".into())],
+    };
+    assert_eq!(db.upsert_user_profile(&profile).unwrap(), sh_id);
+    let got = db.get_user(sh_id).unwrap();
+    assert_eq!(got.property("followers"), Some("48"));
+    assert_eq!(got.field(crate::user_fields::UserField::Works), Some("3"));
+    assert!(got.property(crate::user_fields::PROFILE_FETCHED_AT).is_some());
+    let stamp = got.properties.iter().find(|p| p.name == "followers").unwrap().updated_at.clone();
+    db.set_user_properties(sh_id, &[("followers".into(), "48".into())]).unwrap();
+    assert_eq!(db.get_user(sh_id).unwrap().properties.iter().find(|p| p.name == "followers").unwrap().updated_at, stamp);
+    let rows: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM user_source_properties p JOIN users u ON u.id = p.user_id WHERE u.source = 'scribblehub'",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 4, "profile_url, followers, series, profile_fetched_at");
+    // Every property has its registry row under entity 'user'.
+    let unfiled: i64 = db.conn.query_row(
+        "SELECT COUNT(*) FROM user_source_properties p LEFT JOIN fields f ON f.id = p.field_id
+         WHERE f.id IS NULL OR f.entity <> 'user'", [], |r| r.get(0)).unwrap();
+    assert_eq!(unfiled, 0);
 }
 
 #[test]
@@ -536,12 +599,8 @@ fn test_has_ao3_user_with_username() {
 
     assert!(!db.has_ao3_user_with_username("astolat").unwrap());
 
-    db.upsert_ao3_user(&AO3User {
-        id: "astolat".into(),
-        username: "astolat".into(),
-        profile_url: Some("https://archiveofourown.org/users/astolat".into()),
-        avatar_url: None,
-    }).unwrap();
+    db.record_user(&AO3User::ao3("astolat", "astolat",
+        Some("https://archiveofourown.org/users/astolat".into()), None)).unwrap();
 
     assert!(db.has_ao3_user_with_username("astolat").unwrap());
     // Username match is case-insensitive
@@ -551,78 +610,60 @@ fn test_has_ao3_user_with_username() {
 
 #[test]
 fn test_user_profile_round_trip() {
+    use crate::user_fields::{UserField as F, AO3_MUTE_RECORD, AO3_BLOCK_RECORD, PROFILE_FETCHED_AT};
     let db = open_test_db();
 
-    assert!(db.get_user_profile("writer").unwrap().is_none());
+    assert!(db.get_ao3_user_record("writer").is_none());
 
-    let profile = UserProfile {
-        username: "Writer".into(),
-        numeric_id: Some("424242".into()),
-        avatar_url: Some("https://example.org/icon.png".into()),
-        pseuds: vec!["Writer".into(), "AltPseud".into()],
-        joined: "2015-01-02".into(),
-        location: "The Library".into(),
-        birthday: String::new(),
-        bio: vec![ContentBlock::Paragraph {
-            text: vec![InlineContent::Text { value: "Hello.".into() }],
-        }],
-        works_count: 12,
-        series_count: 3,
-        bookmarks_count: 40,
-        collections_count: 1,
-        gifts_count: 2,
-        viewer_signed_in: true,
-        subscribed: true, // network-side state; not persisted here
-        subscription_ao3_id: Some("999".into()),
-        blocked: false,
-        block_ao3_id: None,
-        muted: true,
-        mute_ao3_id: Some("88".into()),
-        fetched_at: String::new(),
+    let bio = vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: "Hello.".into() }] }];
+    let profile = SourceUserProfile {
+        source: crate::models::SOURCE_AO3.to_string(), source_id: "Writer".into(), username: "Writer".into(),
+        properties: vec![
+            ("numeric_id".into(), "424242".into()),
+            ("avatar_url".into(), "https://example.org/icon.png".into()),
+            ("pseuds".into(), serde_json::to_string(&["Writer", "AltPseud"]).unwrap()),
+            ("joined".into(), "2015-01-02".into()),
+            ("location".into(), "The Library".into()),
+            ("bio".into(), serde_json::to_string(&bio).unwrap()),
+            ("works".into(), "12".into()), ("series".into(), "3".into()), ("bookmarks".into(), "40".into()),
+            ("collections".into(), "1".into()), ("gifts".into(), "2".into()),
+            ("muted".into(), "1".into()), (AO3_MUTE_RECORD.into(), "88".into()),
+        ],
     };
-    db.upsert_user_profile(&profile).unwrap();
+    let id = db.upsert_user_profile(&profile).unwrap();
 
-    // Case-insensitive lookup; subscription state joins from the
-    // subscriptions table, not the profile columns.
-    let got = db.get_user_profile("writer").unwrap().expect("cached profile");
+    // Case-insensitive lookup within AO3; the pseud resolves to the account.
+    let got = db.get_ao3_user_record("writer").expect("cached profile");
+    assert_eq!(got.id, id);
     assert_eq!(got.username, "Writer");
-    assert_eq!(got.numeric_id.as_deref(), Some("424242"));
-    assert_eq!(got.pseuds, vec!["Writer".to_string(), "AltPseud".to_string()]);
-    assert_eq!(got.joined, "2015-01-02");
-    assert_eq!(got.location, "The Library");
-    assert_eq!(got.bio.len(), 1);
-    assert_eq!(got.works_count, 12);
-    assert_eq!(got.gifts_count, 2);
-    assert!(!got.subscribed);
-    assert!(got.muted);
-    assert_eq!(got.mute_ao3_id.as_deref(), Some("88"));
-    assert!(!got.fetched_at.is_empty());
-
-    // Only the signed-in account's subscription counts.
-    let other = account(&db, "other");
-    db.add_subscription(other, "author", "Writer", "Writer", Some("777")).unwrap();
-    assert!(!db.get_user_profile("Writer").unwrap().unwrap().subscribed);
-    let me = account(&db, "me");
-    db.set_active_account(me).unwrap();
-    db.add_subscription(me, "author", "Writer", "Writer", Some("777")).unwrap();
-    let got = db.get_user_profile("Writer").unwrap().unwrap();
-    assert!(got.subscribed);
-    assert_eq!(got.subscription_ao3_id.as_deref(), Some("777"));
+    assert_eq!(got.field(F::NumericId), Some("424242"));
+    assert_eq!(got.field(F::Joined), Some("2015-01-02"));
+    assert_eq!(got.field(F::Location), Some("The Library"));
+    assert_eq!(got.field(F::Works), Some("12"));
+    assert_eq!(got.field(F::Gifts), Some("2"));
+    assert!(got.field(F::Muted).is_some());
+    assert_eq!(got.property(AO3_MUTE_RECORD), Some("88"));
+    assert!(got.property(PROFILE_FETCHED_AT).is_some());
+    assert_eq!(got.field(F::ProfileUrl), Some("https://archiveofourown.org/users/Writer"));
+    assert_eq!(db.get_ao3_user_record("AltPseud").map(|u| u.id), Some(id));
+    let parsed: Vec<ContentBlock> = serde_json::from_str(got.field(F::Info).unwrap()).unwrap();
+    assert_eq!(parsed.len(), 1);
 
     // Block/mute state updates stick, and clear cleanly.
     db.set_user_block_state("Writer", true, Some("55")).unwrap();
-    let got = db.get_user_profile("Writer").unwrap().unwrap();
-    assert!(got.blocked);
-    assert_eq!(got.block_ao3_id.as_deref(), Some("55"));
+    let got = db.get_ao3_user_record("Writer").unwrap();
+    assert!(got.field(F::Blocked).is_some());
+    assert_eq!(got.property(AO3_BLOCK_RECORD), Some("55"));
     db.set_user_mute_state("Writer", false, None).unwrap();
-    let got = db.get_user_profile("Writer").unwrap().unwrap();
-    assert!(!got.muted);
-    assert!(got.mute_ao3_id.is_none());
+    let got = db.get_ao3_user_record("Writer").unwrap();
+    assert!(got.field(F::Muted).is_none());
+    assert!(got.property(AO3_MUTE_RECORD).is_none());
 
-    // Block state for a never-seen user creates the row, but no
-    // profile fetch is faked — get_user_profile stays None.
+    // Block state for a never-seen user creates the row, but no profile
+    // fetch is faked.
     db.set_user_block_state("stranger", true, None).unwrap();
-    assert!(db.get_user_profile("stranger").unwrap().is_none());
+    let stranger = db.get_ao3_user_record("stranger").unwrap();
+    assert!(stranger.property(PROFILE_FETCHED_AT).is_none());
     assert!(db.has_ao3_user_with_username("stranger").unwrap());
 }
 
@@ -694,7 +735,8 @@ fn test_follow_not_found_status() {
     assert_eq!(targets, vec![kept]);
     let row = &db.get_follows(Some("author")).unwrap()[0];
     assert_eq!(row.status, -1);
-    assert_eq!((row.target, row.bridge_id.as_str()), (gone, "Gone"));
+    let FollowTarget::Author(gone_row) = gone else { panic!("author target") };
+    assert_eq!((row.target, row.bridge_id.as_str()), (gone, gone_row.to_string().as_str()));
 
     // Limit 0 = never exclude.
     for n in 1..=10 {
@@ -715,14 +757,14 @@ fn test_check_targets_and_crawl_stamps() {
     // Fandoms are followed but never checked; sorted by name, ignoring case.
     let targets: Vec<String> = db.get_check_targets().unwrap().into_iter().map(|t| t.name).collect();
     assert_eq!(targets, vec!["Alpha Series", "beta Work", "zed"]);
-    // Bridge ids: row ids for works and series, the username for authors,
+    // Bridge ids: row ids for works, series and authors (the users row),
     // the tag name for fandoms.
     let bridge: Vec<(String, String)> = db.get_follows(None).unwrap().into_iter()
         .map(|f| (f.target.kind().to_string(), f.bridge_id)).collect();
     assert_eq!(bridge, vec![
         ("fandom".to_string(), "Some Fandom".to_string()),
         ("work".to_string(), w10.to_string()),
-        ("author".to_string(), "zed".to_string()),
+        ("author".to_string(), db.ao3_user_row_id("zed").unwrap().to_string()),
         ("series".to_string(), s5.to_string()),
     ]);
     for (kind, id) in &bridge {
@@ -798,10 +840,7 @@ fn test_library_scoped_searches() {
     assert!(creators.iter().any(|(_, t)| t == "creator"));
 
     // Users come from the harvested ao3_users rows.
-    db.upsert_ao3_user(&crate::models::AO3User {
-        id: "someuser".into(), username: "someuser".into(),
-        profile_url: None, avatar_url: None,
-    }).unwrap();
+    db.record_user(&crate::models::AO3User::ao3("someuser", "someuser", None, None)).unwrap();
     assert_eq!(db.search_ao3_usernames("some", 10).unwrap(), vec!["someuser".to_string()]);
     assert!(db.search_ao3_usernames("other", 10).unwrap().is_empty());
 }
@@ -1531,7 +1570,10 @@ fn test_follows() {
     let fandoms: Vec<String> = db.get_follows(Some("fandom")).unwrap().into_iter().map(|f| f.bridge_id).collect();
     assert_eq!(fandoms, vec!["Fandom A", "Fandom B"]);
     let writer = &db.get_follows(Some("author")).unwrap()[0];
-    assert_eq!((writer.bridge_id.as_str(), writer.name.as_str()), ("writer_one", "Pen (writer_one)"));
+    let writer_row = db.ao3_user_row_id("writer_one").unwrap().to_string();
+    assert_eq!((writer.bridge_id.as_str(), writer.name.as_str()), (writer_row.as_str(), "Pen (writer_one)"));
+    // The bridge id is the users row; an AO3 name still resolves the target.
+    assert_eq!(db.follow_target("author", &writer_row), db.follow_target("author", "writer_one"));
     assert_eq!(db.get_follows(None).unwrap().len(), 3);
     assert!(db.remove_follow(fa).unwrap());
     assert!(!db.remove_follow(fa).unwrap());
@@ -1586,10 +1628,12 @@ fn test_migration_v20_to_v21_follows() {
     // AO3 numbers, so the bridge ids are those numbers.
     let follows: Vec<(String, String, String)> = db.get_follows(None).unwrap().into_iter()
         .map(|f| (f.target.kind().to_string(), f.bridge_id, f.name)).collect();
+    let writer_row = db.ao3_user_row_id("writer_one").unwrap().to_string();
+    let bare_row = db.ao3_user_row_id("bare_user").unwrap().to_string();
     assert_eq!(follows, vec![
         ("fandom".to_string(), "Fandom A".to_string(), "Fandom A".to_string()),
-        ("author".to_string(), "Writer_One".to_string(), "Pen (Writer_One)".to_string()),
-        ("author".to_string(), "bare_user".to_string(), "bare_user".to_string()),
+        ("author".to_string(), writer_row, "Pen (Writer_One)".to_string()),
+        ("author".to_string(), bare_row, "bare_user".to_string()),
         ("work".to_string(), "100".to_string(), "Subscribed Fic".to_string()),
         ("series".to_string(), "200".to_string(), "Subscribed Series".to_string()),
     ]);
@@ -1661,7 +1705,7 @@ fn test_get_works_by_author_includes_pseud_bylines() {
     // save_work taught the users cache the pseud, so the bare pseud
     // resolves to the account too.
     assert_eq!(db.get_works_by_author("PenName").unwrap().len(), 2);
-    assert!(db.get_user_profile("writer").unwrap().is_none());
+    assert!(db.get_ao3_user_record("writer").unwrap().property(crate::user_fields::PROFILE_FETCHED_AT).is_none());
     assert_eq!(db.get_ao3_user("PenName").unwrap().map(|u| u.username), Some("writer".to_string()));
     assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
 }
@@ -1811,14 +1855,17 @@ fn test_migration_v1_to_v2() {
     assert_eq!(db.get_works_by_author("writer_two").unwrap().len(), 1);
     // v12: the pseud-keyed row folded into the account row — pseud learned,
     // avatar kept, comment re-pointed with the posting pseud preserved.
+    // v31 adds a row for writer_two, the byline the author links needed.
     let non_guest: i64 = db.conn.query_row(
-        "SELECT COUNT(*) FROM ao3_users WHERE external_id NOT LIKE 'guest:%'", [], |r| r.get(0)).unwrap();
-    assert_eq!(non_guest, 1);
-    let folded = db.users_cache.resolve("writer_one").expect("profile row kept");
-    assert!(!folded.profile_fetched_at.is_empty());
-    assert_eq!(folded.numeric_id, "11");
-    assert_eq!(folded.avatar_url, "http://a/pen.png");
-    assert_eq!(folded.pseuds(), vec!["writer_one".to_string(), "PenOne".to_string()]);
+        "SELECT COUNT(*) FROM users WHERE source_id NOT LIKE 'guest:%'", [], |r| r.get(0)).unwrap();
+    assert_eq!(non_guest, 2);
+    assert!(!db.work_author_ids(db.get_works_by_author("writer_two").unwrap()[0].id).is_empty());
+    let folded = db.get_ao3_user_record("writer_one").expect("profile row kept");
+    assert!(folded.property(crate::user_fields::PROFILE_FETCHED_AT).is_some());
+    assert_eq!(folded.field(crate::user_fields::UserField::NumericId), Some("11"));
+    assert_eq!(folded.field(crate::user_fields::UserField::AvatarUrl), Some("http://a/pen.png"));
+    let pseuds: Vec<String> = serde_json::from_str(folded.field(crate::user_fields::UserField::Pseuds).unwrap()).unwrap();
+    assert_eq!(pseuds, vec!["writer_one".to_string(), "PenOne".to_string()]);
     assert_eq!(db.get_ao3_user("PenOne").unwrap().map(|u| u.id), Some("writer_one".to_string()));
     let comments = db.get_comments(7, 0).unwrap();
     let by_pen = comments.iter().find(|c| c.id == 1).unwrap();
@@ -2080,10 +2127,14 @@ fn test_migration_v25_to_v26() {
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
     assert!(backups.iter().any(|n| n.ends_with(".db")), "backups = {backups:?}");
     assert!(backups.iter().any(|n| n.ends_with(".json")), "backups = {backups:?}");
-    let snapshot = backups.iter().find(|n| n.ends_with(".db")).unwrap();
-    let snap = rusqlite::Connection::open(dir.join("Backups").join(snapshot)).unwrap();
-    assert_eq!(library_file::user_version(&snap).unwrap(), 25, "the snapshot is the pre-v26 library");
-    drop(snap);
+    // v26 and v31 each snapshot the library before rebuilding; the v26
+    // one is the pre-v26 library.
+    let versions: Vec<u32> = backups.iter().filter(|n| n.ends_with(".db")).map(|snapshot| {
+        let snap = rusqlite::Connection::open(dir.join("Backups").join(snapshot)).unwrap();
+        library_file::user_version(&snap).unwrap()
+    }).collect();
+    assert!(versions.contains(&25), "a snapshot is the pre-v26 library: {versions:?}");
+    assert!(versions.contains(&30), "a snapshot is the pre-v31 library: {versions:?}");
     let violations: i64 = db.conn.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
     assert_eq!(violations, 0);
@@ -2118,8 +2169,9 @@ fn test_migration_v25_to_v26() {
     assert_eq!(db.get_series(502).unwrap().unwrap().name, "Unknown Series");
     let follows: Vec<(String, String, String)> = db.get_follows(None).unwrap().into_iter()
         .map(|f| (f.target.kind().to_string(), f.bridge_id, f.name)).collect();
+    let writer_row = db.ao3_user_row_id("writer_one").unwrap().to_string();
     assert_eq!(follows, vec![
-        ("author".into(), "writer_one".into(), "Pen (writer_one)".into()),
+        ("author".into(), writer_row, "Pen (writer_one)".into()),
         ("work".into(), "1000".into(), "Work One".into()),
         ("work".into(), "8000".into(), "Followed Elsewhere".into()),
         ("series".into(), "502".into(), "Unknown Series".into()),
@@ -2636,7 +2688,8 @@ fn cache_owned_tables_have_no_stray_writers() {
         "INTO collection_tags", "DELETE FROM collection_tags",
         "INTO collection_works", "DELETE FROM collection_works",
         "INTO collection_bookmarks", "DELETE FROM collection_bookmarks",
-        "INTO ao3_users", "UPDATE ao3_users", "DELETE FROM ao3_users",
+        "INTO users", "UPDATE users", "DELETE FROM users",
+        "INTO user_source_properties", "UPDATE user_source_properties", "DELETE FROM user_source_properties",
         "INTO series", "UPDATE series", "DELETE FROM series",
         "INTO app_bookmarks", "UPDATE app_bookmarks", "DELETE FROM app_bookmarks",
         "INTO ao3_bookmarks", "UPDATE ao3_bookmarks", "DELETE FROM ao3_bookmarks",
@@ -2664,6 +2717,17 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "INSERT INTO ao3_users (id, username, profile_url, avatar_url, updated_at, numeric_id, joined,"), // v12 account fold
         ("mod.rs", "DELETE FROM ao3_users WHERE id = ?1 AND id <> ?2 /* v12 fold */"), // v12 account fold
         ("mod.rs", "UPDATE app_state SET value = '[]' WHERE key = 'subscription_check_queue';"), // v21 queue reset (runs before caches load)
+        ("mod.rs", "INSERT INTO users_v31 (id, source, source_id, username, created_at, updated_at)"), // v31 rebuild
+        ("mod.rs", "INSERT INTO user_source_properties (user_id, field_id, property_name, property_value, created_at, updated_at)"), // v31 rebuild
+        ("mod.rs", "INSERT INTO users (source, source_id, username, created_at, updated_at) VALUES ('ao3', ?1, ?1, ?2, ?2)"), // v31 author linking
+        ("mod.rs", "INSERT INTO fields_v31 (id, source, entity, key, label, value_type, display_order)"), // v31 rebuild
+        ("mod.rs", "INSERT OR IGNORE INTO fields (source, entity, key, label, value_type, display_order)"), // v31 registry seed
+        ("mod.rs", "SELECT DISTINCT source, 'user', ?1, ?2, ?3, 0 FROM users WHERE source <> 'ao3'"), // v31 registry seed
+        ("mod.rs", "DELETE FROM follows WHERE kind = 'author' AND target_id = OLD.id;"), // v31 cascade trigger
+        ("mod.rs", "DELETE FROM crawl_stamps WHERE kind = 'author' AND target_id = OLD.id;"), // v31 cascade trigger
+        ("users_cache.rs", "INSERT INTO users (source, source_id, username, created_at, updated_at)"), // the cache's own write
+        ("users_cache.rs", "INSERT INTO user_source_properties"), // the cache's own write
+        ("users_cache.rs", "DELETE FROM user_source_properties WHERE user_id = ?1 AND property_name = ?2"), // the cache's own write
     ];
     for (file, src) in sources {
         for (lineno, line) in src.lines().enumerate() {
@@ -2895,53 +2959,45 @@ fn collections_cache_links_and_purge() {
 
 #[test]
 fn users_cache_profile_round_trip_no_sql_reads() {
+    use crate::user_fields::{UserField as F, PROFILE_FETCHED_AT};
     let db = open_test_db();
-    db.upsert_ao3_user(&AO3User {
-        id: "reader_x".into(), username: "Reader_X".into(),
-        profile_url: None, avatar_url: Some("http://a/av.png".into()),
-    }).unwrap();
+    db.record_user(&AO3User::ao3("reader_x", "Reader_X", None, Some("http://a/av.png".into()))).unwrap();
     // NOCASE lookups and avatar reuse, from the map.
     assert!(db.has_ao3_user_with_username("reader_x").unwrap());
-    assert_eq!(db.get_known_avatar_url("READER_X").unwrap(),
-               Some("http://a/av.png".into()));
+    assert_eq!(db.get_known_avatar_url("READER_X").unwrap(), Some("http://a/av.png".into()));
     assert_eq!(db.search_ao3_usernames("read", 10).unwrap(), vec!["Reader_X".to_string()]);
 
     // A blank incoming avatar never wipes the harvested one.
-    db.upsert_ao3_user(&AO3User {
-        id: "reader_x".into(), username: "Reader_X".into(),
-        profile_url: Some("http://a/u".into()), avatar_url: None,
-    }).unwrap();
-    assert_eq!(db.get_known_avatar_url("reader_x").unwrap(),
-               Some("http://a/av.png".into()));
+    db.record_user(&AO3User::ao3("reader_x", "Reader_X", Some("http://a/u".into()), None)).unwrap();
+    assert_eq!(db.get_known_avatar_url("reader_x").unwrap(), Some("http://a/av.png".into()));
 
-    assert!(db.get_user_profile("Reader_X").unwrap().is_none());
-    let profile = UserProfile {
-        username: "Reader_X".into(), numeric_id: Some("42".into()),
-        avatar_url: Some("http://a/av.png".into()),
-        pseuds: vec!["RX".into()], joined: "2020-01-01".into(),
-        location: "Nowhere".into(), birthday: String::new(),
-        bio: Vec::new(), works_count: 3, series_count: 1,
-        bookmarks_count: 7, collections_count: 0, gifts_count: 2,
-        blocked: false, block_ao3_id: None, muted: false, mute_ao3_id: None,
-        viewer_signed_in: false, subscribed: false, subscription_ao3_id: None,
-        fetched_at: String::new(),
+    assert!(db.get_ao3_user_record("Reader_X").unwrap().property(PROFILE_FETCHED_AT).is_none());
+    let profile = SourceUserProfile {
+        source: crate::models::SOURCE_AO3.to_string(), source_id: "Reader_X".into(), username: "Reader_X".into(),
+        properties: vec![
+            ("numeric_id".into(), "42".into()), ("avatar_url".into(), "http://a/av.png".into()),
+            ("pseuds".into(), r#"["RX"]"#.into()), ("joined".into(), "2020-01-01".into()),
+            ("location".into(), "Nowhere".into()), ("works".into(), "3".into()), ("series".into(), "1".into()),
+            ("bookmarks".into(), "7".into()), ("gifts".into(), "2".into()),
+        ],
     };
-    db.upsert_user_profile(&profile).unwrap();
-    let got = db.get_user_profile("reader_x").unwrap().unwrap();
-    assert_eq!(got.numeric_id.as_deref(), Some("42"));
-    assert_eq!(got.works_count, 3);
-    assert_eq!(got.pseuds, vec!["RX".to_string()]);
-    assert!(!got.fetched_at.is_empty());
+    let id = db.upsert_user_profile(&profile).unwrap();
+    let got = db.get_ao3_user_record("reader_x").unwrap();
+    assert_eq!(got.field(F::NumericId), Some("42"));
+    assert_eq!(got.field(F::Works), Some("3"));
+    assert_eq!(got.field(F::Pseuds), Some(r#"["RX"]"#));
+    let fetched = got.property(PROFILE_FETCHED_AT).unwrap().to_string();
     let row_fetched: String = db.conn.query_row(
-        "SELECT profile_fetched_at FROM ao3_users WHERE external_id = 'reader_x' COLLATE NOCASE",
-        [], |r| r.get(0)).unwrap();
-    assert_eq!(got.fetched_at, row_fetched);
+        "SELECT property_value FROM user_source_properties WHERE user_id = ?1 AND property_name = 'profile_fetched_at'",
+        [id], |r| r.get(0)).unwrap();
+    assert_eq!(fetched, row_fetched);
 
     db.set_user_block_state("READER_X", true, Some("b1")).unwrap();
-    assert!(db.get_user_profile("reader_x").unwrap().unwrap().blocked);
-    let blocked: i64 = db.conn.query_row(
-        "SELECT is_blocked FROM ao3_users WHERE external_id = 'reader_x' COLLATE NOCASE", [], |r| r.get(0)).unwrap();
-    assert_eq!(blocked, 1);
+    assert!(db.get_ao3_user_record("reader_x").unwrap().field(F::Blocked).is_some());
+    let blocked: String = db.conn.query_row(
+        "SELECT property_value FROM user_source_properties WHERE user_id = ?1 AND property_name = 'blocked'",
+        [id], |r| r.get(0)).unwrap();
+    assert_eq!(blocked, "1");
 }
 
 // ===========================================================================
@@ -2950,15 +3006,16 @@ fn users_cache_profile_round_trip_no_sql_reads() {
 
 #[test]
 fn users_cache_learns_pseuds_from_sightings_and_keys_by_account() {
+    use crate::user_fields::UserField as F;
     let db = open_test_db();
+    let pseuds_of = |name: &str| -> String {
+        db.get_ao3_user_record(name).unwrap().field(F::Pseuds).unwrap_or("[]").to_string()
+    };
     // A comment author posting from a pseud: the row is the account, the
     // pseud is recorded on it, and every name form resolves to it.
-    db.upsert_ao3_user(&AO3User {
-        id: "ambirch".into(), username: "AshWrecksEverything (ambirch)".into(),
-        profile_url: Some("https://archiveofourown.org/users/ambirch/pseuds/AshWrecksEverything".into()),
-        avatar_url: None,
-    }).unwrap();
-    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).unwrap();
+    db.record_user(&AO3User::ao3("ambirch", "AshWrecksEverything (ambirch)",
+        Some("https://archiveofourown.org/users/ambirch/pseuds/AshWrecksEverything".into()), None)).unwrap();
+    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 1);
     for name in ["ambirch", "AMBIRCH", "AshWrecksEverything", "AshWrecksEverything (ambirch)"] {
         let u = db.get_ao3_user(name).unwrap().unwrap_or_else(|| panic!("{name} resolves"));
@@ -2966,44 +3023,40 @@ fn users_cache_learns_pseuds_from_sightings_and_keys_by_account() {
         assert_eq!(u.username, "ambirch");
         assert!(db.has_ao3_user_with_username(name).unwrap());
     }
-    let pseuds_json: String = db.conn.query_row(
-        "SELECT pseuds_json FROM ao3_users WHERE external_id = 'ambirch'", [], |r| r.get(0)).unwrap();
-    assert_eq!(pseuds_json, r#"["AshWrecksEverything"]"#);
+    assert_eq!(pseuds_of("ambirch"), r#"["AshWrecksEverything"]"#);
 
     // A work byline teaches a second pseud; a repeat sighting is a no-op.
     let mut w = sample_work(1);
     w.authors = vec!["OtherPen (ambirch)".into(), "someone_else".into()];
     db.save_work(&w).unwrap();
     db.save_work(&w).unwrap();
-    let pseuds_json: String = db.conn.query_row(
-        "SELECT pseuds_json FROM ao3_users WHERE external_id = 'ambirch'", [], |r| r.get(0)).unwrap();
-    assert_eq!(pseuds_json, r#"["AshWrecksEverything","OtherPen"]"#);
+    assert_eq!(pseuds_of("ambirch"), r#"["AshWrecksEverything","OtherPen"]"#);
     assert!(db.has_ao3_user_with_username("someone_else").unwrap());
     assert_eq!(db.get_works_by_author("OtherPen").unwrap().len(), 1);
+    let ambirch = db.ao3_user_row_id("ambirch").unwrap();
+    let other = db.ao3_user_row_id("someone_else").unwrap();
+    assert_eq!(db.work_author_ids(1), vec![ambirch, other], "linked in byline order");
 
     // The profile page's pseud list merges with sightings — nothing lost.
-    let profile = UserProfile {
-        username: "ambirch".into(), numeric_id: Some("7".into()), avatar_url: None,
-        pseuds: vec!["ambirch".into(), "AshWrecksEverything".into()],
-        joined: String::new(), location: String::new(), birthday: String::new(),
-        bio: Vec::new(), works_count: 17, series_count: 0, bookmarks_count: 0,
-        collections_count: 0, gifts_count: 0, blocked: false, block_ao3_id: None,
-        muted: false, mute_ao3_id: None, viewer_signed_in: false, subscribed: false,
-        subscription_ao3_id: None, fetched_at: String::new(),
+    let profile = SourceUserProfile {
+        source: crate::models::SOURCE_AO3.to_string(), source_id: "ambirch".into(), username: "ambirch".into(),
+        properties: vec![
+            ("numeric_id".into(), "7".into()),
+            ("pseuds".into(), r#"["ambirch","AshWrecksEverything"]"#.into()),
+            ("works".into(), "17".into()),
+        ],
     };
     db.upsert_user_profile(&profile).unwrap();
-    let got = db.get_user_profile("OtherPen").unwrap().expect("pseud resolves to the profile");
+    let got = db.get_ao3_user_record("OtherPen").expect("pseud resolves to the profile");
     assert_eq!(got.username, "ambirch");
-    assert_eq!(got.pseuds, vec!["ambirch".to_string(), "AshWrecksEverything".into(), "OtherPen".into()]);
-    assert_eq!(got.works_count, 17);
+    assert_eq!(got.field(F::Pseuds), Some(r#"["ambirch","AshWrecksEverything","OtherPen"]"#));
+    assert_eq!(got.field(F::Works), Some("17"));
 
     // Search matches pseuds and returns the account.
     assert_eq!(db.search_ao3_usernames("ashwrecks", 10).unwrap(), vec!["ambirch".to_string()]);
 
     // A pseud never shadows a real account of the same name.
-    db.upsert_ao3_user(&AO3User {
-        id: "OtherPen".into(), username: "OtherPen".into(), profile_url: None, avatar_url: None,
-    }).unwrap();
+    db.record_user(&AO3User::ao3("OtherPen", "OtherPen", None, None)).unwrap();
     assert_eq!(db.get_ao3_user("OtherPen").unwrap().unwrap().id, "OtherPen");
     assert_eq!(db.get_ao3_user("OtherPen (ambirch)").unwrap().unwrap().id, "ambirch");
 }
@@ -3012,23 +3065,22 @@ fn users_cache_learns_pseuds_from_sightings_and_keys_by_account() {
 fn users_cache_matches_rows_after_each_mutation() {
     let db = open_test_db();
     let check = |name: &str| {
-        let e = db.users_cache.resolve(name).expect("cached");
-        let (username, avatar, pseuds, blocked, muted, fetched): (String, String, String, i64, i64, String) =
-            db.conn.query_row(
-                "SELECT username, avatar_url, pseuds_json, is_blocked, is_muted, profile_fetched_at
-                 FROM ao3_users WHERE id = ?1", [e.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap();
-        assert_eq!(db.users_cache.get(e.id).map(|x| x.external_id.clone()), Some(e.external_id.clone()));
+        let e = db.get_ao3_user_record(name).expect("cached");
+        let (source_id, username, updated): (String, String, String) = db.conn.query_row(
+            "SELECT source_id, username, updated_at FROM users WHERE id = ?1", [e.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!(e.source_id, source_id);
         assert_eq!(e.username, username);
-        assert_eq!(e.avatar_url, avatar);
-        assert_eq!(e.pseuds_json, pseuds);
-        assert_eq!(e.is_blocked as i64, blocked);
-        assert_eq!(e.is_muted as i64, muted);
-        assert_eq!(e.profile_fetched_at, fetched);
+        assert_eq!(e.updated_at, updated);
+        let mut stmt = db.conn.prepare(
+            "SELECT property_name, property_value, updated_at FROM user_source_properties WHERE user_id = ?1 ORDER BY property_name").unwrap();
+        let rows: Vec<(String, String, String)> = stmt.query_map([e.id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap()
+            .map(Result::unwrap).collect();
+        let cached: Vec<(String, String, String)> = e.properties.iter()
+            .map(|p| (p.name.clone(), p.value.clone(), p.updated_at.clone())).collect();
+        assert_eq!(cached, rows, "{name}: cache and table agree");
     };
-    db.upsert_ao3_user(&AO3User {
-        id: "w".into(), username: "Pen (w)".into(), profile_url: None,
-        avatar_url: Some("http://a/w.png".into()),
-    }).unwrap();
+    db.record_user(&AO3User::ao3("w", "Pen (w)", None, Some("http://a/w.png".into()))).unwrap();
     check("w");
     db.record_author_bylines(&["Quill (w)".into()]).unwrap();
     check("Quill");
@@ -3036,27 +3088,22 @@ fn users_cache_matches_rows_after_each_mutation() {
     check("w");
     db.set_user_mute_state("w", true, None).unwrap();
     check("w");
-    let profile = UserProfile {
-        username: "w".into(), numeric_id: None, avatar_url: None, pseuds: vec!["w".into()],
-        joined: String::new(), location: String::new(), birthday: String::new(),
-        bio: Vec::new(), works_count: 1, series_count: 0, bookmarks_count: 0,
-        collections_count: 0, gifts_count: 0, blocked: true, block_ao3_id: Some("b9".into()),
-        muted: true, mute_ao3_id: None, viewer_signed_in: false, subscribed: false,
-        subscription_ao3_id: None, fetched_at: String::new(),
+    let profile = SourceUserProfile {
+        source: crate::models::SOURCE_AO3.to_string(), source_id: "w".into(), username: "w".into(),
+        properties: vec![("pseuds".into(), r#"["w"]"#.into()), ("works".into(), "1".into()),
+                         ("blocked".into(), "1".into()), (crate::user_fields::AO3_BLOCK_RECORD.into(), "b9".into()),
+                         ("muted".into(), "1".into())],
     };
     db.upsert_user_profile(&profile).unwrap();
     check("Pen");
     // Guests keep their synthetic id and display name.
-    db.upsert_ao3_user(&AO3User {
-        id: "guest:abc".into(), username: "A Guest (Guest)".into(),
-        profile_url: None, avatar_url: None,
-    }).unwrap();
-    let g = db.users_cache.resolve("guest:abc").unwrap();
+    db.record_user(&AO3User::ao3("guest:abc", "A Guest (Guest)", None, None)).unwrap();
+    let g = db.get_ao3_user_record("guest:abc").unwrap();
     assert_eq!(g.username, "A Guest (Guest)");
-    assert!(g.pseuds().is_empty());
+    assert!(g.field(crate::user_fields::UserField::Pseuds).is_none());
     check("guest:abc");
-    // One row per account: the whole table is the three identities above.
-    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_users", [], |r| r.get(0)).unwrap();
+    // One row per account: the whole table is the two identities above.
+    let rows: i64 = db.conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).unwrap();
     assert_eq!(rows, 2);
 }
 
@@ -3064,13 +3111,11 @@ fn users_cache_matches_rows_after_each_mutation() {
 fn test_save_comment_in_place_keeps_thread_context() {
     use crate::models::Comment;
     let db = open_test_db();
-    let user = |name: &str| AO3User {
-        id: name.to_string(), username: name.to_string(), profile_url: None, avatar_url: None,
-    };
+    let user = |name: &str| AO3User::ao3(name, name, None, None);
     let comment = |id: u64, who: &str, replies: Vec<Comment>| Comment {
         id, author: user(who), posted_at: "1 Jan 2026".into(),
         content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
-        replies, chapter_label: None, chapter_id: None, notice: None, more_replies: 0,
+        replies, chapter_label: None, chapter_id: None, notice: None, more_replies: 0, rating: None,
     };
     // Comments cache under a work row (a stub is enough).
     assert!(db.save_comment(7, 70, &comment(10, "ann", vec![])).is_err());
@@ -3404,7 +3449,7 @@ fn test_comment_extras_round_trip_through_cache() {
     let db = open_test_db();
     let c = Comment {
         id: 42,
-        author: AO3User { id: "ann".into(), username: "ann".into(), profile_url: None, avatar_url: None },
+        author: AO3User::ao3("ann", "ann", None, None),
         posted_at: "1 Jan 2026".into(),
         content: vec![],
         replies: vec![],
@@ -3412,6 +3457,7 @@ fn test_comment_extras_round_trip_through_cache() {
         chapter_id: None,
         notice: Some("(Previous comment deleted.)".into()),
         more_replies: 3,
+        rating: None,
     };
     let w = db.save_work(&sample_work(9)).unwrap();
     db.save_comment(w, 0, &c).unwrap();
@@ -3473,11 +3519,11 @@ fn test_whole_work_comments_land_on_their_chapter() {
     let db = open_test_db();
     let comment = |id: u64, chapter_id: Option<u64>, replies: Vec<Comment>| Comment {
         id,
-        author: AO3User { id: "ann".into(), username: "ann".into(), profile_url: None, avatar_url: None },
+        author: AO3User::ao3("ann", "ann", None, None),
         posted_at: "1 Jan 2026".into(),
         content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: format!("c{id}") }] }],
         replies, chapter_label: chapter_id.map(|_| "on Chapter 2".into()), chapter_id,
-        notice: None, more_replies: 0,
+        notice: None, more_replies: 0, rating: None,
     };
     db.save_work(&sample_work(1)).unwrap();
     // From the whole-work list: the root names chapter 902; its reply
@@ -3559,4 +3605,45 @@ fn chapter_char_len_is_stored_and_backfilled() {
     assert_eq!(stored, Some(expected as i64));
     assert_eq!(db.chapter_char_len(id, 2), 0);
     assert_eq!(db.get_chapter_titles(id).unwrap(), vec!["Chapter 1".to_string()]);
+}
+
+/// A work from a rated source lands with its stats in the registry and
+/// its reviews filed under its own source, stars intact (Area 12).
+#[test]
+fn rated_source_work_keeps_stats_and_review_stars() {
+    use crate::models::Comment;
+    let db = open_test_db();
+    let mut work = sample_work(31);
+    work.source = "mockrated".to_string();
+    work.url = "https://rated.mock/story/31".to_string();
+    work.kudos = None;
+    let row = db.save_work(&work).unwrap();
+
+    let rating = db.ensure_field("mockrated", "rating", "Rating", "num", 1).unwrap();
+    let count = db.ensure_field("mockrated", "rating_count", "Ratings", "num", 2).unwrap();
+    db.set_work_stats(row, &[
+        WorkStat { field_id: rating, num_value: Some(4.6), text_value: None },
+        WorkStat { field_id: count, num_value: Some(312.0), text_value: None },
+    ]).unwrap();
+    let stats = db.get_work_stats(row).unwrap();
+    assert_eq!(stats.len(), 2);
+    assert_eq!(db.get_field(rating).unwrap().label, "Rating");
+    assert_eq!(stats.iter().find(|s| s.field_id == rating).unwrap().num_value, Some(4.6));
+
+    let review = Comment {
+        id: 90_310_001,
+        author: AO3User { source: "scribblehub".into(), id: "guest:driftwoodreader".into(), username: "driftwoodreader".into(),
+                          profile_url: None, avatar_url: None },
+        posted_at: "2026-10-02".into(),
+        content: vec![ContentBlock::Paragraph { text: vec![InlineContent::Text { value: "Read it in one sitting.".into() }] }],
+        replies: vec![], chapter_label: None, chapter_id: None, notice: None, more_replies: 0,
+        rating: Some(5),
+    };
+    db.save_comment(row, 0, &review).unwrap();
+    let back = db.get_comments(row, 0).unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].rating, Some(5));
+    let source: String = db.conn.query_row(
+        "SELECT source FROM comments WHERE external_id = '90310001'", [], |r| r.get(0)).unwrap();
+    assert_eq!(source, "mockrated", "a review is filed under its work's source, never AO3");
 }

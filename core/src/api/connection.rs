@@ -42,8 +42,10 @@ impl AO3App {
         // the app from, so this is the only safe place to do it once.
         crate::events::init(&runtime.handle().clone());
 
+        let client = Arc::new(tokio::sync::RwLock::new(client));
         let app = AO3App {
-            client: Arc::new(tokio::sync::RwLock::new(client)),
+            sources: Arc::new(super::sources::registry(client.clone())),
+            client,
             storage,
             state_dir,
             timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(30)),
@@ -83,6 +85,7 @@ impl AO3App {
         // handle when `previous` (or its ancestor) was constructed.
         let app = AO3App {
             client: previous.client.clone(),
+            sources: previous.sources.clone(),
             storage: Arc::new(Mutex::new(storage)),
             state_dir,
             timeout_secs: previous.timeout_secs.clone(),

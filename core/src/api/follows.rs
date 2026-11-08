@@ -22,10 +22,20 @@ const SUBSCRIBABLE_KINDS: [&str; 3] = ["author", "work", "series"];
 /// the account username; everything else is the trimmed id/name.
 pub(super) fn canonical_target(kind: &str, target: &str) -> String {
     let t = target.trim();
-    if kind == "author" {
+    if kind == "author" && t.parse::<i64>().is_err() {
         split_author_byline(t).0
     } else {
         t.to_string()
+    }
+}
+
+/// The source a follow target belongs to, for the list's labels.
+fn follow_source(s: &Storage, target: FollowTarget) -> String {
+    match target {
+        FollowTarget::Author(id) => s.get_user(id).map(|u| u.source).unwrap_or_default(),
+        FollowTarget::Work(id) => s.work_ref(id).map(|r| r.source).unwrap_or_default(),
+        FollowTarget::Series(id) => s.get_series(id).ok().flatten().map(|r| r.source).unwrap_or_default(),
+        FollowTarget::Fandom(_) => String::new(),
     }
 }
 
@@ -45,7 +55,10 @@ impl AO3App {
     pub fn get_follows(&self, kind: Option<String>) -> Result<Vec<UFollow>, AO3Error> {
         let s = self.storage.blocking_lock();
         Ok(s.get_follows(kind.as_deref()).map_err(AO3Error::from)?
-            .into_iter().map(UFollow::from).collect())
+            .into_iter().map(|row| {
+                let source = follow_source(&s, row.target);
+                UFollow { source, ..UFollow::from(row) }
+            }).collect())
     }
 
     /// Followed / subscribed state for one target's bell.
@@ -270,7 +283,7 @@ async fn set_subscription_remote(
         let s = storage.lock().await;
         (s.get_subscription_ao3_id(account.id, &kind, &target).unwrap_or(None),
          if kind == "author" {
-             s.get_user_profile(&target).ok().flatten().and_then(|p| p.numeric_id)
+             s.get_ao3_user_record(&target).and_then(|u| u.field(crate::user_fields::UserField::NumericId).map(str::to_string))
          } else {
              None
          })

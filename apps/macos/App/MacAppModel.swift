@@ -205,18 +205,43 @@ final class MacAppModel {
         works(for: .readingLists)
     }
 
-    /// Route an archiveofourown.org link (⌘L, or a URL dropped on a
-    /// window) to the matching screen. Returns nil when it opened, else the
-    /// message to show — the link isn't AO3, or isn't a page the app has a
-    /// view for.
+    /// Route a link (⌘L, or a URL dropped on a window) to the matching
+    /// screen. AO3 links open their page; a link any other source
+    /// recognises (a ScribbleHub series or chapter) imports that work into
+    /// the library and opens its detail. Returns nil when it opened, else
+    /// the message to show — no source knows the link, or it's an AO3 page
+    /// the app has no view for.
     @discardableResult
     func openAO3URL(_ raw: String) -> String? {
         switch AO3Link.classify(raw) {
+        case .failure(.notAO3):
+            guard appState.bridge.resolveLink(raw) != nil else {
+                return AO3Link.Rejection.notAO3.message
+            }
+            importWork(fromLink: raw)
+            return nil
         case .failure(let rejection):
             return rejection.message
         case .success(let link):
             open(link)
             return nil
+        }
+    }
+
+    /// Fetch a second-source work by its link and show it. The import
+    /// saves the work (and its chapter list) before returning, so the
+    /// detail opens from the local copy; a failure is reported the way an
+    /// unopenable link is.
+    private func importWork(fromLink raw: String) {
+        Task { @MainActor in
+            do {
+                let summary = try await appState.bridge.importWorkFromLink(raw)
+                openWorkByID(String(summary.id))
+            } catch {
+                if !error.isCancellation {
+                    AppDelegate.presentLinkFailure(RustBridge.errorMessage(error))
+                }
+            }
         }
     }
 

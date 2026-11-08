@@ -65,8 +65,9 @@ extension AppState {
     /// The AO3 subscription for an author changed — keep a cached profile's
     /// subscribed flag in step.
     func noteAuthorSubscription(_ target: FollowModel.Target, subscribed: Bool) {
-        guard target.kind == .author else { return }
-        let key = target.id.lowercased()
+        guard target.kind == .author, let id = target.userID else { return }
+        if var u = users[id] { u.subscribed = subscribed; users[id] = u }
+        let key = (users[id]?.username ?? target.name).lowercased()
         if var p = userProfiles[key], p.subscribed != subscribed {
             p.subscribed = subscribed
             userProfiles[key] = p

@@ -16,10 +16,25 @@ struct AuthorFollowBell: View {
     var size: CGFloat = 12
 
     var body: some View {
-        let target = FollowModel.Target.author(author)
-        FollowBell(theme: theme, follows: model.follows, target: target,
-                   shaded: model.follows.isShaded(target), size: size)
+        // Maintainers are AO3 names; the row is resolved on click, never
+        // created by drawing the bell.
+        if let target = model.follows.ao3AuthorTarget(author, ensure: false) {
+            FollowBell(theme: theme, follows: model.follows, target: target,
+                       shaded: model.follows.isShaded(target), size: size)
+                .frame(width: size + 8, height: size + 8)
+        } else {
+            Button {
+                guard let target = model.follows.ao3AuthorTarget(author, ensure: true) else { return }
+                _ = target
+            } label: {
+                Image(systemName: "bell")
+                    .font(.system(size: size - 1, weight: .medium))
+                    .foregroundStyle(theme.ink3)
+            }
+            .buttonStyle(.plain)
             .frame(width: size + 8, height: size + 8)
+            .help("Follow \(author)")
+        }
     }
 }
 
