@@ -69,11 +69,11 @@ pub struct ChapterPage {
     pub comment_pages: u32,
 }
 
-fn sel(s: &str) -> Selector {
+pub(super) fn sel(s: &str) -> Selector {
     Selector::parse(s).expect("static selector")
 }
 
-fn text(el: &ElementRef) -> String {
+pub(super) fn text(el: &ElementRef) -> String {
     el.text().collect::<Vec<_>>().join("").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -81,7 +81,7 @@ fn first_text(root: &ElementRef, selector: &str) -> Option<String> {
     root.select(&sel(selector)).next().map(|e| text(&e)).filter(|t| !t.is_empty())
 }
 
-fn attr<'a>(el: &ElementRef<'a>, name: &str) -> Option<&'a str> {
+pub(super) fn attr<'a>(el: &ElementRef<'a>, name: &str) -> Option<&'a str> {
     el.value().attr(name).map(str::trim).filter(|v| !v.is_empty())
 }
 
@@ -131,16 +131,17 @@ pub(super) fn pagination_items(html: &str, id: &str) -> u32 {
     digits.parse().unwrap_or(1).max(1)
 }
 
-/// A commenter as the page shows them: profile id is the stable key.
-/// Users of a second source have no account row of their own yet, so the
-/// id is a namespaced guest id (never collides with an AO3 account).
+/// A commenter as the page shows them: the profile id is the stable key,
+/// the same one a story's author or a search hit carries, so one person
+/// is one users row however they were first seen. Only a commenter with
+/// no profile link gets a namespaced guest id.
 fn user_from_link(link: Option<ElementRef>, avatar: Option<String>) -> AO3User {
     let (name, url) = match link {
         Some(a) => (text(&a), attr(&a, "href").map(|h| absolute(h))),
         None => ("Anonymous".to_string(), None),
     };
     let id = url.as_deref().and_then(|u| id_after(u, "/profile/"))
-        .map(|n| format!("guest:{SOURCE_ID}:{n}"))
+        .map(|n| n.to_string())
         .unwrap_or_else(|| format!("guest:{SOURCE_ID}:{}", name.to_ascii_lowercase()));
     AO3User { source: SOURCE_ID.to_string(), id, username: name, profile_url: url, avatar_url: avatar }
 }
@@ -506,6 +507,20 @@ pub fn parse_stats_page(html: &str) -> StatsPage {
 /// "Completed" marker among them) and the blurb with its hidden
 /// "more>>" tail. The pager is `#pagination-profile-series`.
 pub fn parse_profile_series(html: &str) -> ListingPage {
+    parse_series_boxes(html, "pagination-profile-series")
+}
+
+/// A Series Finder results page (`/series-finder/?sf=1&…&pg=N`): the
+/// same series boxes as a profile's list, paged by the finder's own
+/// pager widget.
+pub fn parse_finder_results(html: &str) -> ListingPage {
+    parse_series_boxes(html, "pagination-profile-recent")
+}
+
+/// Series boxes (`div.search_main_box`) wherever the site lists series;
+/// `pager_id` names the pagination widget whose item count is the page
+/// total.
+fn parse_series_boxes(html: &str, pager_id: &str) -> ListingPage {
     let doc = Html::parse_fragment(html);
     let mut works = Vec::new();
     for item in doc.select(&sel("div.search_main_box")) {
@@ -525,6 +540,7 @@ pub fn parse_profile_series(html: &str) -> ListingPage {
 
         let mut views = None; let mut favorites = None; let mut readers = None; let mut reviews = None;
         let mut chapters = None; let mut words = None; let mut updated = String::new();
+        let mut per_week = None;
         for stat in item.select(&sel("div.search_stats span.nl_stat")) {
             let label = stat.text().collect::<String>();
             let label = label.trim();
@@ -540,6 +556,7 @@ pub fn parse_profile_series(html: &str) -> ListingPage {
                 "readers" => readers = n,
                 "reviews" => reviews = n,
                 "words" => words = n,
+                "chapters/week" => per_week = value.parse::<f64>().ok(),
                 _ => {}
             }
         }
@@ -616,13 +633,14 @@ pub fn parse_profile_series(html: &str) -> ListingPage {
         if let Some(n) = favorites { stats.push(SourceStat::num("favorites", "Favorites", n as f64, 4)); }
         if let Some(n) = readers { stats.push(SourceStat::num("readers", "Readers", n as f64, 5)); }
         if let Some(n) = reviews { stats.push(SourceStat::num("reviews", "Reviews", n as f64, 8)); }
+        if let Some(n) = per_week { stats.push(SourceStat::num("release_rate", "Chapters/Week", n, 7)); }
         if complete {
             stats.push(SourceStat { key: "status".into(), label: "Status".into(), num: None, text: Some("Completed".into()), order: 6 });
         }
         works.push(ListedWork { summary, stats, authors: author_user.into_iter().collect() });
     }
-    let total_pages = pagination_items(html, "pagination-profile-series");
-    ListingPage { works, has_next: false, total_pages }
+    let total_pages = pagination_items(html, pager_id);
+    ListingPage { works, has_next: false, total_pages, total_works: None }
 }
 
 /// The live search's users-mode reply: `li.sh-ri` items, each an anchor
@@ -633,19 +651,18 @@ pub fn parse_profile_series(html: &str) -> ListingPage {
 pub fn parse_user_search(html: &str) -> Vec<AO3User> {
     let doc = Html::parse_fragment(html);
     let mut out = Vec::new();
-    for item in doc.select(&sel("li.sh-ri, .sh-ri")) {
+    for item in doc.select(&sel("li.sh-ri")) {
         let Some(link) = item.select(&sel("a[href*='/profile/']")).next() else { continue };
         let url = absolute(attr(&link, "href").unwrap_or(""));
         let Some(id) = id_after(&url, "/profile/") else { continue };
-        let avatar = item.select(&sel("img")).next().and_then(|i| attr(&i, "src").map(str::to_string));
-        // The name: a dedicated element when the widget has one, else the
-        // anchor's own text before any secondary line.
-        let name = first_text(&item, ".sh-ri-name, .name, b, strong")
-            .or_else(|| {
-                let t = link.text().map(str::trim).filter(|t| !t.is_empty()).next().map(str::to_string);
-                t
-            })
-            .unwrap_or_default();
+        let avatar = item.select(&sel("img.sh-ava, img")).next().and_then(|i| attr(&i, "src").map(str::to_string));
+        // The name is `.sh-t`, with the matched letters wrapped in a
+        // `<mark>` — so it is the element's whole text, not its first
+        // text node. `.sh-m` beside it is the role ("Reader", "Author").
+        let name = item.select(&sel(".sh-t")).next()
+            .map(|n| n.text().collect::<String>())
+            .unwrap_or_else(|| link.text().collect::<String>());
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
         if name.is_empty() { continue }
         if out.iter().any(|u: &AO3User| u.id == id.to_string()) { continue }
         out.push(AO3User { source: SOURCE_ID.to_string(), id: id.to_string(), username: name, profile_url: Some(url), avatar_url: avatar });
@@ -782,7 +799,7 @@ mod tests {
         assert_eq!(r.id, 880001);
         assert_eq!(r.rating, Some(5));
         assert_eq!(r.author.username, "harbourmoth");
-        assert_eq!(r.author.id, "guest:scribblehub:61001");
+        assert_eq!(r.author.id, "61001", "a commenter with a profile keys like an author");
         assert_eq!(r.author.profile_url.as_deref(), Some("https://www.scribblehub.com/profile/61001/harbourmoth/"));
         assert_eq!(r.posted_at, "Oct 20, 2026");
         assert_eq!(r.chapter_label.as_deref(), Some("chapter 4: the keeper before"));
@@ -865,7 +882,7 @@ mod tests {
         assert!(!first.summary.summary.contains("more>>") && !first.summary.summary.contains("<<less"));
         assert_eq!(first.authors[0].id, "51230");
         let keys: Vec<&str> = first.stats.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, ["rating", "views", "favorites", "readers", "reviews"]);
+        assert_eq!(keys, ["rating", "views", "favorites", "readers", "reviews", "release_rate"]);
         assert_eq!(first.stats[0].num, Some(4.4));
         assert_eq!(first.stats[1].num, Some(12_400.0));
         let second = &page.works[1];
@@ -881,13 +898,16 @@ mod tests {
     #[test]
     fn user_search_results() {
         let hits = parse_user_search(&fixture("scribblehub_user_search.html"));
-        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].source, "scribblehub");
         assert_eq!(hits[0].id, "51230");
-        assert_eq!(hits[0].username, "quill_and_tide");
-        assert_eq!(hits[0].profile_url.as_deref(), Some("https://www.scribblehub.com/profile/51230/quill_and_tide/"));
-        assert_eq!(hits[0].avatar_url.as_deref(), Some("https://cdn.scribblehub.com/avatar/l/1/ava_51230_1700000000.jpg"));
+        assert_eq!(hits[0].username, "quill");
+        assert_eq!(hits[0].profile_url.as_deref(), Some("https://www.scribblehub.com/profile/51230/quill/"));
+        assert_eq!(hits[0].avatar_url.as_deref(), Some("https://cdn.scribblehub.com/default/avatarnew.png"));
+        // Highlight marks split the name across text nodes.
         assert_eq!(hits[1].username, "Quillon Reads");
+        assert_eq!(hits[2].username, "inkquill");
+        assert_eq!(hits[2].avatar_url.as_deref(), Some("https://cdn.scribblehub.com/avatar/l/1/ava_51232_1700000001.jpg"));
         assert!(parse_user_search("0").is_empty());
     }
 
@@ -937,3 +957,4 @@ mod tests {
         assert_eq!(pagination_items("x", "pagination-mesh"), 1);
     }
 }
+

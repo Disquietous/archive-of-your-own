@@ -16,6 +16,9 @@ struct TagTokenField: View {
     let tagType: String
     /// The comma-separated form value AO3 expects.
     @Binding var value: String
+    /// Where the explicit lookup goes: AO3's tag autocomplete by default;
+    /// a source form passes its own (site name, lookup) pair.
+    var remote: (site: String, lookup: (String) async throws -> [String])? = nil
 
     @State private var input = ""
     @State private var localSuggestions: [String] = []
@@ -111,7 +114,7 @@ struct TagTokenField: View {
                 .frame(height: min(CGFloat(localSuggestions.count) * Self.rowHeight, Self.maxListHeight))
             }
             if !remoteSuggestions.isEmpty {
-                suggestionHeader("From AO3")
+                suggestionHeader("From \(remote?.site ?? "AO3")")
                 ForEach(remoteSuggestions, id: \.self) { suggestionRow($0) }
             }
             // The explicit — and only — network trigger.
@@ -125,7 +128,7 @@ struct TagTokenField: View {
                         Image(systemName: "magnifyingglass.circle")
                             .font(.system(size: 11, weight: .medium))
                     }
-                    Text(isLookingUp ? "Searching AO3…" : "Search AO3 for “\(term)”…")
+                    Text(isLookingUp ? "Searching \(remote?.site ?? "AO3")…" : "Search \(remote?.site ?? "AO3") for “\(term)”…")
                         .font(Font(MacFont.ui(11.5, weight: .semibold)))
                     Spacer()
                 }
@@ -198,15 +201,20 @@ struct TagTokenField: View {
         lookupError = nil
         Task { @MainActor in
             do {
-                let names = try await appState.bridge.autocompleteTagsRemote(
-                    tagType: tagType.isEmpty ? "tag" : tagType, term: lookupTerm)
+                let names: [String]
+                if let remote {
+                    names = try await remote.lookup(lookupTerm)
+                } else {
+                    names = try await appState.bridge.autocompleteTagsRemote(
+                        tagType: tagType.isEmpty ? "tag" : tagType, term: lookupTerm)
+                }
                 if names.isEmpty {
-                    lookupError = "No matching tags on AO3."
+                    lookupError = "No matching tags on \(remote?.site ?? "AO3")."
                 } else {
                     remoteSuggestions = names.filter { !tokens.contains($0) && !localSuggestions.contains($0) }
                 }
             } catch {
-                lookupError = "Couldn’t reach the archive."
+                lookupError = "Couldn’t reach \(remote?.site ?? "the archive")."
             }
             isLookingUp = false
         }

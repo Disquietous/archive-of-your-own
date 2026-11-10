@@ -13,6 +13,8 @@
 //! design/scribblehub-adapter-plan.md.
 
 pub mod parse;
+pub mod search;
+pub mod search_tables;
 
 use std::sync::Arc;
 
@@ -59,7 +61,7 @@ impl ScribbleHubSource {
             reaction: ReactionShape::StarRating { max: 5 },
             discussion: DiscussionShape::Reviews,
             chapter_comments: true,
-            search: false,
+            search: true,
             browse: false,
             author_listings: true,
             user_search: true,
@@ -130,6 +132,30 @@ impl ScribbleHubSource {
             return Err(AppError::NetworkError("ScribbleHub is not served by the mock archive".to_string()));
         }
         Ok(())
+    }
+
+    /// The finder's fandom live search (`wi_ajaxsearch_fandom`): the
+    /// fandoms whose names contain `prefix`, as (id, name).
+    async fn fandom_suggestions(&self, prefix: &str) -> Result<Vec<crate::source::search::FieldOption>, AppError> {
+        Self::guard()?;
+        let text = prefix.trim();
+        if text.chars().count() < 2 { return Ok(Vec::new()) }
+        let form = [
+            ("action".to_string(), "wi_ajaxsearch_fandom".to_string()),
+            ("strOne".to_string(), text.to_string()),
+        ];
+        let client = self.client.read().await;
+        let out = client.transport().post_form(
+            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            &|status, _| status < 400, &HOOKS).await?;
+        drop(client);
+        if out.status >= 400 {
+            return Err(AppError::Http {
+                kind: crate::client::FailureKind::from_status(out.status, None),
+                detail: format!("HTTP {} from the fandom search", out.status),
+            });
+        }
+        Ok(search::parse_fandom_suggestions(&out.body))
     }
 
     async fn page(&self, url: &str) -> Result<String, AppError> {
@@ -311,6 +337,40 @@ impl Source for ScribbleHubSource {
     /// `wi_ajaxsearchmain` with `strOne` (the text) and `strType=users`
     /// (from fic_wi_all.js `showSearch`, which also skips queries under two
     /// characters). The reply is an HTML fragment with a trailing "0".
+    fn search_schema(&self) -> Option<crate::source::search::SearchSchema> {
+        Some(search::schema())
+    }
+
+    /// The Series Finder: fandom names resolve to the site's ids first
+    /// (one live-search call each; a name nobody matches is dropped), then
+    /// one GET of the results page.
+    async fn search(&self, query: &crate::source::search::SearchQuery, page: u32) -> Result<ListingPage, AppError> {
+        Self::guard()?;
+        let mut fandom_ids = Vec::new();
+        if let Some(names) = query.text("fandom") {
+            for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                let hits = self.fandom_suggestions(name).await?;
+                if let Some(hit) = hits.iter().find(|h| h.label.eq_ignore_ascii_case(name)).or(hits.first()) {
+                    fandom_ids.push(hit.value.clone());
+                }
+            }
+        }
+        let url = search::finder_url(query, &fandom_ids, page);
+        let html = self.page(&url).await?;
+        let mut listing = parse::parse_finder_results(&html);
+        listing.has_next = page < listing.total_pages;
+        Ok(listing)
+    }
+
+    async fn autocomplete(&self, kind: &crate::source::search::Autocomplete, prefix: &str)
+        -> Result<Vec<crate::source::search::FieldOption>, AppError>
+    {
+        match kind {
+            crate::source::search::Autocomplete::Tag { kind } if kind == "fandom" => self.fandom_suggestions(prefix).await,
+            _ => Err(AppError::NetworkError("ScribbleHub suggests fandoms only".to_string())),
+        }
+    }
+
     async fn search_users(&self, query: &str) -> Result<Vec<crate::models::AO3User>, AppError> {
         Self::guard()?;
         let text = query.trim();

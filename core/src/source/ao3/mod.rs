@@ -13,7 +13,10 @@ use crate::client::AO3Client;
 use crate::error::AppError;
 use crate::models::{CommentsPage, ExternalRef, WorkSummary, SOURCE_AO3};
 
-use super::{DiscussionShape, FetchedWork, ReactionShape, Reachability, Source, SourceCapabilities, Vocabulary};
+use super::search::{SearchQuery, SearchSchema};
+use super::{DiscussionShape, FetchedWork, ListedWork, ListingPage, ReactionShape, Reachability, Source, SourceCapabilities, Vocabulary};
+
+pub mod search;
 
 pub struct AO3Source {
     client: Arc<RwLock<AO3Client>>,
@@ -115,6 +118,21 @@ impl Source for AO3Source {
             Some(chapter_id) => client.fetch_comments_for_chapter(number, chapter_id, page).await,
             None => client.fetch_comments_for_work(number, page).await,
         }
+    }
+
+    fn search_schema(&self) -> Option<SearchSchema> {
+        Some(search::schema())
+    }
+
+    async fn search(&self, query: &SearchQuery, page: u32) -> Result<ListingPage, AppError> {
+        let pairs = search::encode(query);
+        let (works, has_next, total_pages, total_works) = self.client.read().await.search_works_raw(&pairs, page).await?;
+        Ok(ListingPage {
+            works: works.into_iter().map(|summary| ListedWork { summary, stats: Vec::new(), authors: Vec::new() }).collect(),
+            has_next,
+            total_pages,
+            total_works,
+        })
     }
 }
 

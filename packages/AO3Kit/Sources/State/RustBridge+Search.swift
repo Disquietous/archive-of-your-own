@@ -31,6 +31,26 @@ extension RustBridge {
         app?.dropLibrarySearch(handle: handle)
     }
 
+    // MARK: - Schema-driven search (design/source-search-plan.md)
+
+    /// A source's search form: static configuration, no I/O.
+    func searchSchema(source: String, languageCandidates: [String]) -> SearchSchema? {
+        app?.searchSchema(sourceId: source, languageCandidates: languageCandidates)
+    }
+
+    /// One page of a source's results for a schema query.
+    func searchSource(_ query: SearchQuery, page: UInt32 = 1, opID: UInt64? = nil) async throws -> UPagedWorks {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.searchSource(query: query, page: page, opId: opID)
+    }
+
+    /// Remote suggestions for an open-text field — the explicit lookup
+    /// control only, never a keystroke.
+    func searchAutocomplete(source: String, key: String, prefix: String) async throws -> [FieldOption] {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.searchAutocomplete(sourceId: source, key: key, prefix: prefix)
+    }
+
     func searchLibraryTags(_ term: String, limit: UInt32? = nil) -> [UTagHit] {
         (try? app?.searchLibraryTags(term: term, limit: limit)) ?? []
     }

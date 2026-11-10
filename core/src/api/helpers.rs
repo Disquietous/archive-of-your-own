@@ -61,6 +61,30 @@ pub(super) fn check_reachable(source: &Arc<dyn crate::source::Source>) -> Result
     Ok(())
 }
 
+/// Save one page of a source listing (every work, its authors and its
+/// figures) in one transaction and shape it for the bridge.
+pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPage) -> Result<UPagedWorks, AO3Error> {
+    let tx = s.begin_tx().map_err(AO3Error::from)?;
+    let mut works = Vec::with_capacity(listing.works.len());
+    for listed in &listing.works {
+        match s.save_work(&listed.summary) {
+            Ok(id) => {
+                if !listed.authors.is_empty() {
+                    match s.record_users(&listed.authors) {
+                        Ok(ids) => { log_db("link_work_authors", s.link_work_authors(id, &ids)); }
+                        Err(e) => { log_error!("db", "record_users failed: {e}"); }
+                    }
+                }
+                save_source_stats(s, id, &listed.summary.source, &listed.stats);
+                works.push(UWorkSummary::from(WorkSummary { id, ..listed.summary.clone() }));
+            }
+            Err(e) => { log_error!("db", "save_work failed: {e}"); }
+        }
+    }
+    log_db("commit listing save", tx.commit());
+    Ok(UPagedWorks { works, has_next_page: listing.has_next, total_pages: listing.total_pages, total_works: listing.total_works })
+}
+
 /// Persist a source's stats on a work: register each field on first
 /// sight, then replace the work's values (absent = NULL, never zero).
 pub(super) fn save_source_stats(s: &Storage, work_row: u64, source: &str, stats: &[crate::source::SourceStat]) {

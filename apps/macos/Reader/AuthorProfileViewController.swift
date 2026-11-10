@@ -23,6 +23,8 @@ final class AuthorProfileViewController: NSViewController {
 
     private let avatarView = NSImageView()
     private let nameLabel = NSTextField(wrappingLabelWithString: "")
+    private let badgeView = NSImageView()
+    private var badgeWidth: NSLayoutConstraint?
     private let metaLabel = NSTextField(wrappingLabelWithString: "")
     private let pseudsLabel = NSTextField(wrappingLabelWithString: "")
     private let statsLabel = NSTextField(wrappingLabelWithString: "")
@@ -128,7 +130,19 @@ final class AuthorProfileViewController: NSViewController {
             avatarView.heightAnchor.constraint(equalToConstant: 64),
         ])
 
-        let nameStack = NSStackView(views: [nameLabel, metaLabel, pseudsLabel])
+        // Source badge beside the name, sized to the name's cap height.
+        badgeView.translatesAutoresizingMaskIntoConstraints = false
+        badgeView.imageScaling = .scaleProportionallyUpOrDown
+        let badgeHeight: CGFloat = 20
+        badgeView.heightAnchor.constraint(equalToConstant: badgeHeight).isActive = true
+        badgeWidth = badgeView.widthAnchor.constraint(equalToConstant: badgeHeight)
+        badgeWidth?.isActive = true
+        let nameRow = NSStackView(views: [badgeView, nameLabel])
+        nameRow.orientation = .horizontal
+        nameRow.alignment = .centerY
+        nameRow.spacing = 8
+
+        let nameStack = NSStackView(views: [nameRow, metaLabel, pseudsLabel])
         nameStack.orientation = .vertical
         nameStack.alignment = .leading
         nameStack.spacing = 3
@@ -263,6 +277,13 @@ final class AuthorProfileViewController: NSViewController {
         nameLabel.font = MacFont.serif(24, weight: .semibold)
         nameLabel.textColor = theme.nsInk
         nameLabel.stringValue = user?.username ?? username
+        let badge = SourceBadge.image(for: appState.userSource(userID))
+        badgeView.image = badge
+        badgeView.contentTintColor = theme.nsInk2
+        badgeView.isHidden = badge == nil
+        if let size = badge?.size, size.height > 0 {
+            badgeWidth?.constant = 20 * size.width / size.height
+        }
 
         metaLabel.font = MacFont.ui(12)
         metaLabel.textColor = theme.nsInk3
@@ -355,7 +376,7 @@ final class AuthorProfileViewController: NSViewController {
         renderedBioKey = key
         let renderer = ContentBlockRenderer(theme: theme, paragraphStyle: .macReading)
         bioView.textStorage?.setAttributedString(renderer.render(blocks: blocks))
-        bioView.invalidateIntrinsicContentSize()
+        bioView.invalidateMeasuredHeight()
     }
 
     private func renderActions(_ user: UUser?, isAO3: Bool) {

@@ -2725,6 +2725,13 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "SELECT DISTINCT source, 'user', ?1, ?2, ?3, 0 FROM users WHERE source <> 'ao3'"), // v31 registry seed
         ("mod.rs", "DELETE FROM follows WHERE kind = 'author' AND target_id = OLD.id;"), // v31 cascade trigger
         ("mod.rs", "DELETE FROM crawl_stamps WHERE kind = 'author' AND target_id = OLD.id;"), // v31 cascade trigger
+        ("mod.rs", "UPDATE users SET source_id = ?1, updated_at = ?2 WHERE id = ?3 /* v32 rekey */"), // v32 guest fold
+        ("mod.rs", "INSERT OR IGNORE INTO work_authors (work_id, user_id, position, created_at, updated_at)"), // v32 guest fold
+        ("mod.rs", "DELETE FROM work_authors WHERE user_id = {guest};"), // v32 guest fold
+        ("mod.rs", "INSERT OR IGNORE INTO series_authors (series_id, user_id, position, created_at, updated_at)"), // v32 guest fold
+        ("mod.rs", "DELETE FROM series_authors WHERE user_id = {guest};"), // v32 guest fold
+        ("mod.rs", "DELETE FROM user_source_properties WHERE user_id = {guest} /* v32 fold */;"), // v32 guest fold
+        ("mod.rs", "DELETE FROM users WHERE id = {guest} /* v32 fold */;"), // v32 guest fold
         ("users_cache.rs", "INSERT INTO users (source, source_id, username, created_at, updated_at)"), // the cache's own write
         ("users_cache.rs", "INSERT INTO user_source_properties"), // the cache's own write
         ("users_cache.rs", "DELETE FROM user_source_properties WHERE user_id = ?1 AND property_name = ?2"), // the cache's own write
@@ -3610,6 +3617,43 @@ fn chapter_char_len_is_stored_and_backfilled() {
 /// A work from a rated source lands with its stats in the registry and
 /// its reviews filed under its own source, stars intact (Area 12).
 #[test]
+fn extra_predicates_filter_stats_tags_and_dates() {
+    use crate::models::ExtraPredicate;
+    let db = open_test_db();
+    let mut a = sample_work(41);
+    a.source = "rated".to_string();
+    a.url = "https://rated.mock/story/41".to_string();
+    a.fandoms = vec!["Dragons".into()];
+    a.date_updated = "2025-03-01".into();
+    let mut b = sample_work(42);
+    b.source = "rated".to_string();
+    b.url = "https://rated.mock/story/42".to_string();
+    b.fandoms = vec!["Knights".into(), "Dragons".into()];
+    b.date_updated = "2025-06-15".into();
+    let c = sample_work(43); // AO3, no stats
+    let (ra, rb, rc) = (db.save_work(&a).unwrap(), db.save_work(&b).unwrap(), db.save_work(&c).unwrap());
+    let fav = db.ensure_field("rated", "favorites", "Favorites", "num", 1).unwrap();
+    db.set_work_stats(ra, &[WorkStat { field_id: fav, num_value: Some(10.0), text_value: None }]).unwrap();
+    db.set_work_stats(rb, &[WorkStat { field_id: fav, num_value: Some(500.0), text_value: None }]).unwrap();
+
+    let run = |extra: Vec<ExtraPredicate>| {
+        let crit = LocalSearchCriteria { extra, sort_column: "title_to_sort_on".into(), sort_direction: "asc".into(), ..Default::default() };
+        db.search_library_work_ids(&crit).unwrap()
+    };
+    assert_eq!(run(vec![]), vec![ra, rb, rc], "blank criteria match everything");
+    assert_eq!(run(vec![ExtraPredicate::StatRange { source: "rated".into(), key: "favorites".into(), min: Some(100.0), max: None }]), vec![rb]);
+    assert_eq!(run(vec![ExtraPredicate::StatRange { source: "rated".into(), key: "favorites".into(), min: None, max: Some(100.0) }]), vec![ra]);
+    assert!(run(vec![ExtraPredicate::StatRange { source: "rated".into(), key: "nope".into(), min: None, max: None }]).is_empty(), "unknown field matches nothing");
+    assert_eq!(run(vec![ExtraPredicate::TagSet { tag_type: "fandom".into(), include: vec!["dragons".into()], exclude: vec![], all: true }]), vec![ra, rb]);
+    assert_eq!(run(vec![ExtraPredicate::TagSet { tag_type: "fandom".into(), include: vec!["Dragons".into(), "Knights".into()], exclude: vec![], all: true }]), vec![rb]);
+    assert_eq!(run(vec![ExtraPredicate::TagSet { tag_type: "fandom".into(), include: vec!["Dragons".into(), "Knights".into()], exclude: vec![], all: false }]), vec![ra, rb]);
+    assert_eq!(run(vec![ExtraPredicate::TagSet { tag_type: "fandom".into(), include: vec![], exclude: vec!["Knights".into()], all: true }]), vec![ra, rc]);
+    assert_eq!(run(vec![ExtraPredicate::DateBetween { column: "revised_at".into(), from: Some("2025-02-01".into()), to: Some("2025-04-01".into()) }]), vec![ra]);
+    assert_eq!(run(vec![ExtraPredicate::DateBetween { column: "bogus".into(), from: Some("2025-02-01".into()), to: None }]), vec![ra, rb, rc], "unknown date column is dropped, not interpolated");
+    assert_eq!(db.library_languages().unwrap(), vec!["English".to_string()]);
+}
+
+#[test]
 fn rated_source_work_keeps_stats_and_review_stars() {
     use crate::models::Comment;
     let db = open_test_db();
@@ -3646,4 +3690,43 @@ fn rated_source_work_keeps_stats_and_review_stars() {
     let source: String = db.conn.query_row(
         "SELECT source FROM comments WHERE external_id = '90310001'", [], |r| r.get(0)).unwrap();
     assert_eq!(source, "mockrated", "a review is filed under its work's source, never AO3");
+}
+
+/// v32: a second-source commenter minted as `guest:<source>:<id>` folds
+/// into the real `(source, id)` row when one exists, and is rekeyed when
+/// none does; comments, authorship and follows move with it.
+#[test]
+fn v32_folds_profile_keyed_guest_rows() {
+    let db = open_test_db();
+    let now = "2026-11-08 00:00:00";
+    let mut w = sample_work(1);
+    w.source = "scribblehub".to_string();
+    let work_id = db.save_work(&w).unwrap();
+    db.conn.execute_batch(&format!(
+        "INSERT INTO users (id, source, source_id, username, created_at, updated_at) VALUES
+            (901, 'scribblehub', '169109', 'Astrolust', '{now}', '{now}'),
+            (902, 'scribblehub', 'guest:scribblehub:169109', 'Astrolust', '{now}', '{now}'),
+            (903, 'scribblehub', 'guest:scribblehub:777', 'lonely', '{now}', '{now}'),
+            (904, 'scribblehub', 'guest:scribblehub:anon', 'anon', '{now}', '{now}');
+         INSERT INTO work_authors (work_id, user_id, position) VALUES ({work_id}, 901, 0), ({work_id}, 902, 0);
+         INSERT INTO comments (source, external_id, work_id, chapter_id, author_id, posted_at, content_json)
+             VALUES ('scribblehub', 'c1', {work_id}, 0, '902', '', '[]'), ('scribblehub', 'c2', {work_id}, 0, '903', '', '[]');
+         INSERT INTO follows (kind, target_id, name, added_at) VALUES ('author', 902, 'Astrolust', '{now}');"
+    )).unwrap();
+    db.migrate_v32_merge_guest_rows().unwrap();
+    db.users_cache.load(&db.conn).unwrap();
+
+    assert!(db.get_user(902).is_none(), "the guest twin is folded away");
+    assert_eq!(db.get_user_by_key("scribblehub", "169109").map(|u| u.id), Some(901));
+    assert_eq!(db.get_user(903).unwrap().source_id, "777", "a guest with no twin is rekeyed");
+    assert_eq!(db.get_user(904).unwrap().source_id, "guest:scribblehub:anon", "a true guest is untouched");
+    let authors: Vec<i64> = {
+        let mut st = db.conn.prepare("SELECT author_id FROM comments ORDER BY external_id").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    assert_eq!(authors, vec![901, 903]);
+    let wa: i64 = db.conn.query_row("SELECT count(*) FROM work_authors WHERE work_id = ?1", [work_id as i64], |r| r.get(0)).unwrap();
+    assert_eq!(wa, 1, "one authorship row, on the real user");
+    let follow: i64 = db.conn.query_row("SELECT target_id FROM follows WHERE kind = 'author'", [], |r| r.get(0)).unwrap();
+    assert_eq!(follow, 901);
 }

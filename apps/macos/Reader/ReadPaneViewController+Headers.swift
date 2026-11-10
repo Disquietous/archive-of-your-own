@@ -82,7 +82,55 @@ extension ReadPaneViewController {
         return button
     }
 
+    /// A source's sort options (its adapter's declaration), for the sort
+    /// menu over source results.
+    func sourceSortSpec() -> SortSpec? {
+        guard model.search.activeSourceQuery != nil else { return nil }
+        return appState.bridge.searchSchema(source: model.search.sourceTab, languageCandidates: [])?.sort
+    }
+
+    func showSourceSortMenu(from anchor: NSView, spec: SortSpec) {
+        let search = model.search
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let sortHeader = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
+        sortHeader.isEnabled = false
+        menu.addItem(sortHeader)
+        let currentSort = search.activeSourceQuery?.sortColumn ?? spec.defaultColumn
+        for option in spec.columns {
+            let item = NSMenuItem(title: option.label, action: #selector(sourceSortChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = option.value == currentSort ? .on : .off
+            item.representedObject = ["column", option.value]
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let directionHeader = NSMenuItem(title: "Direction", action: nil, keyEquivalent: "")
+        directionHeader.isEnabled = false
+        menu.addItem(directionHeader)
+        let currentDirection = search.activeSourceQuery?.sortDirection ?? spec.defaultDirection
+        for option in spec.directions {
+            let item = NSMenuItem(title: option.label, action: #selector(sourceSortChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = option.value == currentDirection ? .on : .off
+            item.representedObject = ["direction", option.value]
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+    }
+
+    @objc func sourceSortChosen(_ sender: NSMenuItem) {
+        guard let pair = sender.representedObject as? [String], pair.count == 2 else { return }
+        model.search.resortSourceResults(column: pair[0] == "column" ? pair[1] : nil,
+                                         direction: pair[0] == "direction" ? pair[1] : nil,
+                                         appState: appState)
+    }
+
     func showSearchSortMenu(from anchor: NSView) {
+        if case .source = model.search.activeQuery, let spec = sourceSortSpec() {
+            showSourceSortMenu(from: anchor, spec: spec)
+            return
+        }
         guard let sortField = searchSortField() else { return }
         let search = model.search
         let menu = NSMenu()

@@ -31,9 +31,17 @@ struct DetailView: View {
                     Button {
                         model.openAuthorProfile(of: work)
                     } label: {
-                        (Text("by ").foregroundStyle(theme.ink2)
-                            + Text(work.author).foregroundStyle(theme.accent).fontWeight(.semibold))
-                            .font(Font(MacFont.ui(16)))
+                        HStack(spacing: 5) {
+                            Text("by")
+                                .font(Font(MacFont.ui(16)))
+                                .foregroundStyle(theme.ink2)
+                            SourceBadgeView(source: work.source, size: 15)
+                                .foregroundStyle(theme.ink2)
+                            Text(work.author)
+                                .font(Font(MacFont.ui(16)))
+                                .fontWeight(.semibold)
+                                .foregroundStyle(theme.accent)
+                        }
                     }
                     .buttonStyle(.plain)
                     .help("View \(work.author)’s profile")

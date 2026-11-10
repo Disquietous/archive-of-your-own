@@ -133,6 +133,15 @@ extension ReadPaneViewController {
             detailHost = host
             pin(host)
 
+        case .sourceForm:
+            readerController.view.removeFromSuperview()
+            resultsController?.view.removeFromSuperview()
+            emptyHost?.removeFromSuperview()
+            let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
+            host.rootView = AnyView(ScribbleHubSearchFormView(theme: theme, appState: appState, model: model))
+            detailHost = host
+            pin(host)
+
         case .scopeResults:
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()

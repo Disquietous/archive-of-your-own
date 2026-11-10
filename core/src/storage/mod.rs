@@ -4,7 +4,7 @@
 //     #[error("Storage error: {0}")]
 //     StorageError(String),
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::AppError;
 use crate::models::Rating;
@@ -314,7 +314,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 31;
+    pub(crate) const SCHEMA_VERSION: u32 = 32;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -396,6 +396,7 @@ impl Storage {
                 28 => self.migrate_v28_chapter_char_len(),
                 29 => self.migrate_v29_comment_rating(),
                 30 => self.migrate_v30_user_extra(),
+                32 => self.migrate_v32_merge_guest_rows(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1000,6 +1001,66 @@ impl Storage {
                     Err(e) => return Err(map_sql(e)),
                 };
                 link.execute(params![owner, id, i as i64, now]).map_err(map_sql)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// v32: second-source commenters were minted as `guest:<source>:<id>`
+    /// rows even when the page gave their profile id, so a person seen as
+    /// a commenter and as an author had two rows. Fold each such row into
+    /// the real `(source, id)` row — comments, authorship, follows and
+    /// crawl stamps follow it — or, when no real row exists, rekey it.
+    /// Pure guests (no profile id) are untouched.
+    fn migrate_v32_merge_guest_rows(&self) -> Result<(), AppError> {
+        if !self.table_exists("users")? || !self.column_exists("users", "source_id")? {
+            return Ok(());
+        }
+        let now = crate::timefmt::now_utc_datetime();
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, source, substr(source_id, length('guest:' || source || ':') + 1)
+                 FROM users
+                 WHERE source <> 'ao3'
+                   AND source_id LIKE 'guest:' || source || ':%'
+                   AND substr(source_id, length('guest:' || source || ':') + 1) GLOB '[0-9]*'
+                   AND substr(source_id, length('guest:' || source || ':') + 1) NOT GLOB '*[^0-9]*'",
+            ).map_err(map_sql)?;
+            let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(map_sql)?;
+            it.collect::<Result<_, _>>().map_err(map_sql)?
+        };
+        for (guest, source, real_id) in rows {
+            let real: Option<i64> = self.conn.query_row(
+                "SELECT id FROM users WHERE source = ?1 AND source_id = ?2 AND id <> ?3",
+                params![source, real_id, guest], |r| r.get(0),
+            ).optional().map_err(map_sql)?;
+            match real {
+                None => {
+                    self.conn.execute(
+                        "UPDATE users SET source_id = ?1, updated_at = ?2 WHERE id = ?3 /* v32 rekey */",
+                        params![real_id, now, guest],
+                    ).map_err(map_sql)?;
+                }
+                Some(real) => {
+                    self.conn.execute("UPDATE comments SET author_id = ?1 WHERE author_id = ?2",
+                                      params![real, guest]).map_err(map_sql)?;
+                    self.conn.execute_batch(&format!(
+                        "INSERT OR IGNORE INTO work_authors (work_id, user_id, position, created_at, updated_at)
+                             SELECT work_id, {real}, position, created_at, updated_at FROM work_authors WHERE user_id = {guest};
+                         DELETE FROM work_authors WHERE user_id = {guest};
+                         INSERT OR IGNORE INTO series_authors (series_id, user_id, position, created_at, updated_at)
+                             SELECT series_id, {real}, position, created_at, updated_at FROM series_authors WHERE user_id = {guest};
+                         DELETE FROM series_authors WHERE user_id = {guest};
+                         DELETE FROM follows WHERE kind = 'author' AND target_id = {guest}
+                             AND EXISTS (SELECT 1 FROM follows WHERE kind = 'author' AND target_id = {real});
+                         UPDATE follows SET target_id = {real} WHERE kind = 'author' AND target_id = {guest};
+                         DELETE FROM crawl_stamps WHERE kind = 'author' AND target_id = {guest}
+                             AND EXISTS (SELECT 1 FROM crawl_stamps WHERE kind = 'author' AND target_id = {real});
+                         UPDATE crawl_stamps SET target_id = {real} WHERE kind = 'author' AND target_id = {guest};
+                         DELETE FROM user_source_properties WHERE user_id = {guest} /* v32 fold */;
+                         DELETE FROM users WHERE id = {guest} /* v32 fold */;"
+                    )).map_err(map_sql)?;
+                }
             }
         }
         Ok(())

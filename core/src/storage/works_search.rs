@@ -14,7 +14,7 @@ use rusqlite::params;
 use rusqlite::types::Value;
 
 use crate::error::AppError;
-use crate::models::{LocalSearchCriteria, Rating, Warning};
+use crate::models::{ExtraPredicate, LocalSearchCriteria, Rating, Warning};
 
 use super::consts::*;
 use super::{map_sql, rating_to_str, Storage};
@@ -116,6 +116,16 @@ enum Predicate {
     LanguageEquals(String),
     Number { column: &'static str, range: NumRange },
     Revised(DateCmp),
+    /// A registry field's numeric value within bounds (source-specific
+    /// stats). `field_id` resolved up front; None = no such field.
+    StatRange { field_id: Option<i64>, min: Option<f64>, max: Option<f64> },
+    /// Exact tag names of one kind: all/any of `include`, none of
+    /// `exclude`. Names pre-lowered (ASCII).
+    TagSet { tag_type: String, include: Vec<String>, exclude: Vec<String>, all: bool },
+    /// A works date column within [from, to], inclusive, lexical ISO.
+    DateBetween { column: &'static str, from: Option<String>, to: Option<String> },
+    /// A numeric works column within [min, max], inclusive.
+    ColumnRange { column: &'static str, min: Option<f64>, max: Option<f64> },
 }
 
 /// Parse the form into predicates. Blank fields produce none — the blank
@@ -201,6 +211,30 @@ fn parse_criteria(c: &LocalSearchCriteria) -> Vec<Predicate> {
         preds.push(Predicate::Revised(cmp));
     }
     preds
+}
+
+/// Numeric columns the schema translator may name; anything else is
+/// dropped rather than interpolated.
+fn numeric_column(name: &str) -> Option<&'static str> {
+    match name {
+        "chapter_count" => Some("works.chapter_count"),
+        "word_count" => Some("works.word_count"),
+        "hits" => Some("works.hits"),
+        "kudos" => Some("works.kudos"),
+        "comments" => Some("works.comments"),
+        "bookmarks" => Some("works.bookmarks"),
+        _ => None,
+    }
+}
+
+/// Date columns the schema translator may name; anything else is dropped
+/// rather than interpolated.
+fn date_column(name: &str) -> Option<&'static str> {
+    match name {
+        "date_updated" | "revised_at" => Some("works.date_updated"),
+        "date_published" | "created_at" => Some("works.date_published"),
+        _ => None,
+    }
 }
 
 /// Comma-separated name fields: entries AND together; blanks drop out.
@@ -300,12 +334,44 @@ impl Storage {
         Ok(ids)
     }
 
+    /// Every language stored on a cached work, sorted; the library form's
+    /// language choices.
+    pub fn library_languages(&self) -> Result<Vec<String>, AppError> {
+        let mut stmt = self.conn
+            .prepare("SELECT DISTINCT language FROM works WHERE stub = 0 AND language <> '' ORDER BY language COLLATE NOCASE")
+            .map_err(map_sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
     fn compile_search(&self, c: &LocalSearchCriteria)
         -> Result<(String, Vec<Value>), AppError>
     {
         let mut fragments: Vec<String> = Vec::new();
         let mut params: Vec<Value> = Vec::new();
         for pred in parse_criteria(c) {
+            self.compile_predicate(&pred, &mut fragments, &mut params)?;
+        }
+        for extra in &c.extra {
+            let pred = match extra {
+                ExtraPredicate::StatRange { source, key, min, max } => Predicate::StatRange {
+                    field_id: self.field_id(source, key), min: *min, max: *max,
+                },
+                ExtraPredicate::TagSet { tag_type, include, exclude, all } => Predicate::TagSet {
+                    tag_type: tag_type.clone(),
+                    include: include.iter().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).collect(),
+                    exclude: exclude.iter().map(|n| n.trim().to_ascii_lowercase()).filter(|n| !n.is_empty()).collect(),
+                    all: *all,
+                },
+                ExtraPredicate::DateBetween { column, from, to } => match date_column(column) {
+                    Some(column) => Predicate::DateBetween { column, from: from.clone(), to: to.clone() },
+                    None => continue,
+                },
+                ExtraPredicate::ColumnRange { column, min, max } => match numeric_column(column) {
+                    Some(column) => Predicate::ColumnRange { column, min: *min, max: *max },
+                    None => continue,
+                },
+            };
             self.compile_predicate(&pred, &mut fragments, &mut params)?;
         }
         // Stub rows (known by id, never fetched) are not library content.
@@ -415,6 +481,63 @@ impl Storage {
             Predicate::LanguageEquals(lowered) => {
                 fragments.push("lower(works.language) = ?".into());
                 params.push(Value::Text(lowered.clone()));
+            }
+            Predicate::StatRange { field_id, min, max } => {
+                let Some(field_id) = field_id else {
+                    // The registry has never seen the field: no work can
+                    // carry a value for it.
+                    fragments.push("0".into());
+                    return Ok(());
+                };
+                let mut bounds = String::new();
+                if min.is_some() { bounds.push_str(" AND ws.num_value >= ?"); }
+                if max.is_some() { bounds.push_str(" AND ws.num_value <= ?"); }
+                fragments.push(format!(
+                    "EXISTS (SELECT 1 FROM work_stats ws
+                      WHERE ws.work_id = works.id AND ws.field_id = ?{bounds})"
+                ));
+                params.push(Value::Integer(*field_id));
+                if let Some(min) = min { params.push(Value::Real(*min)); }
+                if let Some(max) = max { params.push(Value::Real(*max)); }
+            }
+            Predicate::TagSet { tag_type, include, exclude, all } => {
+                const ONE: &str = "EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
+                      WHERE wt.work_id = works.id AND wt.tag_type = ? AND lower(t.name) = ?)";
+                if !include.is_empty() {
+                    let arms: Vec<&str> = include.iter().map(|_| ONE).collect();
+                    fragments.push(format!("({})", arms.join(if *all { "
+   AND " } else { "
+    OR " })));
+                    for name in include {
+                        params.push(Value::Text(tag_type.clone()));
+                        params.push(Value::Text(name.clone()));
+                    }
+                }
+                for name in exclude {
+                    fragments.push(format!("NOT {ONE}"));
+                    params.push(Value::Text(tag_type.clone()));
+                    params.push(Value::Text(name.clone()));
+                }
+            }
+            Predicate::ColumnRange { column, min, max } => {
+                if let Some(min) = min {
+                    fragments.push(format!("{column} >= ?"));
+                    params.push(Value::Real(*min));
+                }
+                if let Some(max) = max {
+                    fragments.push(format!("{column} <= ?"));
+                    params.push(Value::Real(*max));
+                }
+            }
+            Predicate::DateBetween { column, from, to } => {
+                if let Some(from) = from {
+                    fragments.push(format!("substr({column}, 1, 10) >= ?"));
+                    params.push(Value::Text(from.clone()));
+                }
+                if let Some(to) = to {
+                    fragments.push(format!("substr({column}, 1, 10) <= ?"));
+                    params.push(Value::Text(to.clone()));
+                }
             }
             Predicate::Number { column, range } => {
                 match range {

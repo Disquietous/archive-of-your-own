@@ -455,6 +455,10 @@ final class WorkRowCellView: NSTableCellView {
 
         let author = NSMutableAttributedString(
             string: "by ", attributes: [.font: MacFont.ui(12), .foregroundColor: theme.nsInk3])
+        if let badge = SourceBadge.attachment(for: work.source, font: MacFont.ui(12), color: theme.nsInk3) {
+            author.append(badge)
+            author.append(NSAttributedString(string: " ", attributes: [.font: MacFont.ui(12)]))
+        }
         author.append(NSAttributedString(
             string: work.author, attributes: [.font: MacFont.ui(12, weight: .semibold), .foregroundColor: theme.nsInk2]))
         authorLabel.attributedStringValue = author

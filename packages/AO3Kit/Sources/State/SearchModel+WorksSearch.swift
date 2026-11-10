@@ -32,6 +32,32 @@ extension SearchModel {
         Task { await fetch(page: 1, appState: appState) }
     }
 
+    /// A source search (any non-AO3 source): the platform's own form for
+    /// that source packs its values into a `SearchQuery` by the adapter's
+    /// field keys; the core hands it to the adapter, which builds the
+    /// site request and parses the listing. Results land in the shared
+    /// works results pane, paged through `fetch(page:)`.
+    @MainActor
+    func runSourceSearch(_ query: SearchQuery, appState: AppState) {
+        scopeNotice = nil
+        originScope = scope
+        scope = .works
+        activeSourceQuery = query
+        activeQuery = .source(query)
+        beginNewQuery(appState)
+        Task { await fetch(page: 1, appState: appState) }
+    }
+
+    /// The results header's sort menu for source results: the query
+    /// behind them re-runs with a new sort.
+    @MainActor
+    func resortSourceResults(column: String?, direction: String?, appState: AppState) {
+        guard var query = activeSourceQuery else { return }
+        if let column { query.sortColumn = column }
+        if let direction { query.sortDirection = direction }
+        runSourceSearch(query, appState: appState)
+    }
+
     /// Re-run the current works results with one field changed (the
     /// results header's server-side sort menu). No-op when no works
     /// request has run.
@@ -282,6 +308,10 @@ extension SearchModel {
             case .form(let keys, let values):
                 applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
                     try await appState.bridge.searchWorksRawPaged(keys: keys, values: values, page: page, opID: opID)
+                }, page: page, appState: appState)
+            case .source(let sourceQuery):
+                applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in
+                    try await appState.bridge.searchSource(sourceQuery, page: page, opID: opID)
                 }, page: page, appState: appState)
             case .tag(let tag):
                 applyWorksPage(try await trackedFetch(searchFetchOp, appState) { opID in

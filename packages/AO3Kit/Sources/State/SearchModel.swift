@@ -12,6 +12,16 @@ final class SearchModel {
     var formFields: [UFormField] = []
     var fieldValues: [String: String] = [:]
     var checkboxValues: [String: Set<String>] = [:]
+
+    /// The top-level source tab of the Search section: "ao3" (the archive's
+    /// forms and scopes) or another searchable source id whose own form the
+    /// platform builds (design/source-search-plan.md). Source searches
+    /// travel as a generic `SearchQuery` to one bridge call; the adapter
+    /// builds the site request.
+    var sourceTab = "ao3"
+    /// The query behind the source works results now showing; sort
+    /// re-runs amend this, never the form.
+    var activeSourceQuery: SearchQuery?
     var isLoadingForm = false
     var formError: String?
     var hasSearched = false
@@ -273,6 +283,8 @@ final class SearchModel {
     /// Pagination re-runs whichever is active.
     enum ActiveQuery {
         case form(keys: [String], values: [String])
+        /// A non-AO3 source's search, paged by the adapter.
+        case source(SearchQuery)
         case tag(String)
         case collection(String)
         case collectionBookmarks(String)

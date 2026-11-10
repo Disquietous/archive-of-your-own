@@ -697,6 +697,7 @@ impl From<ULibrarySearchCriteria> for LocalSearchCriteria {
             bookmarks_count: c.bookmarks_count,
             sort_column: c.sort_column,
             sort_direction: c.sort_direction,
+            extra: Vec::new(),
         }
     }
 }

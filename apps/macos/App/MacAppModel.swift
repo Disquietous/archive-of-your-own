@@ -17,6 +17,8 @@ final class MacAppModel {
     let theme: AppTheme
     /// The platform-neutral models (AO3Kit) this window shell composes.
     let search: SearchModel
+    /// The ScribbleHub tab's form state (the Series Finder's fields).
+    let scribbleHubSearch: ScribbleHubSearchModel
     let lists: LibraryListModel
     let follows: FollowModel
     let author: AuthorProfileModel
@@ -66,6 +68,7 @@ final class MacAppModel {
         self.appState = appState
         self.theme = theme
         self.search = SearchModel()
+        self.scribbleHubSearch = ScribbleHubSearchModel()
         self.lists = LibraryListModel(appState: appState)
         self.follows = FollowModel(appState: appState)
         self.author = AuthorProfileModel(appState: appState)

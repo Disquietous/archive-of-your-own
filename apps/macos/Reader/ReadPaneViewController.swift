@@ -52,7 +52,9 @@ final class ReadPaneViewController: NSViewController {
     enum Mode: Equatable {
         case empty, searchForm, searchResults, subscriptionWorks(String), authorBookmarks(String),
              authorCollections(String), detail(String), reading(String, Int), inboxThread(UInt64),
-             settings, scopeForm, scopeResults, collectionSplit
+             settings, scopeForm, scopeResults, collectionSplit,
+             /// A non-AO3 source's own search form (the ScribbleHub tab).
+             sourceForm(String)
     }
 
     var renderedMode: Mode?
@@ -292,6 +294,7 @@ final class ReadPaneViewController: NSViewController {
     var searchGoBtn: ToolButton?
     var reloadCriteriaBtn: ToolButton?
     var scopeTabs: ScopeTabsView?
+    var sourceTabs: SourceTabsView?
     var searchSourceBtn: ToolButton?
     var searchEyeBtn: ToolButton?
     var authorBookmarksMoreBtn: ToolButton?

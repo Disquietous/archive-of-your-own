@@ -179,6 +179,34 @@ async fn fetch_all_chapters(
     Ok(fetched.chapters.into_iter().map(UChapter::from).collect())
 }
 
+/// Pause between consecutive chapter requests when downloading a whole
+/// work from a source that serves one chapter per page.
+const CHAPTER_DOWNLOAD_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One chapter of a per-chapter source, fetched from its stub (id + title
+/// from the table of contents) and saved over it.
+async fn fetch_one_chapter(
+    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    source: Arc<dyn crate::source::Source>,
+    external: ExternalRef,
+    work_id: u64,
+    stub: Chapter,
+    op_id: Option<u64>,
+) -> Result<(), AO3Error> {
+    let fetched = super::with_recovery_as(
+        client, storage.clone(),
+        op_id.unwrap_or_else(crate::events::next_op_id),
+        OpKind::Fetch { label: "chapter".to_string() }, RetrySafety::Idempotent,
+        move |_client| {
+            let (source, external, stub) = (source.clone(), external.clone(), stub.clone());
+            async move { source.fetch_chapter(&external, &stub).await.map_err(AO3Error::from) }
+        }).await?;
+    let s = storage.lock().await;
+    log_db("save_chapter", s.save_chapter(work_id, &fetched));
+    Ok(())
+}
+
 #[uniffi::export]
 impl AO3App {
     pub async fn fetch_search_form(&self) -> Result<Vec<UFormField>, AO3Error> {
@@ -646,7 +674,25 @@ impl AO3App {
         let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
             let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
-            fetch_all_chapters(client, storage, source, external, work_id, op_id).await
+            if !source.fetches_chapters_individually() {
+                return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
+            }
+            // A per-chapter source: the work page lands the table of
+            // contents (stubs keep text already fetched), then every
+            // chapter still without text is fetched in order, one second
+            // apart so the whole-work download stays polite.
+            fetch_and_save_work(client.clone(), storage.clone(), registry.clone(), work_id, op_id).await?;
+            let stubs: Vec<Chapter> = {
+                let s = storage.lock().await;
+                s.get_chapters(work_id).map_err(AO3Error::from)?
+                    .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
+            };
+            for stub in stubs {
+                tokio::time::sleep(CHAPTER_DOWNLOAD_GAP).await;
+                fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
+            }
+            let s = storage.lock().await;
+            Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
         }).await
     }
 
@@ -675,16 +721,8 @@ impl AO3App {
                         .ok_or_else(|| AO3Error::NotFound { message: format!("work {work_id} has no chapter {number}") })?
                 }
             };
-            let fetched = super::with_recovery_as(
-                client, storage.clone(),
-                op_id.unwrap_or_else(crate::events::next_op_id),
-                OpKind::Fetch { label: "chapter".to_string() }, RetrySafety::Idempotent,
-                move |_client| {
-                    let (source, external, stub) = (source.clone(), external.clone(), stub.clone());
-                    async move { source.fetch_chapter(&external, &stub).await.map_err(AO3Error::from) }
-                }).await?;
+            fetch_one_chapter(client, storage.clone(), source, external, work_id, stub, op_id).await?;
             let s = storage.lock().await;
-            log_db("save_chapter", s.save_chapter(work_id, &fetched));
             Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
         }).await
     }

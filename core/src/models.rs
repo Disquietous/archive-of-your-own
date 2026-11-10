@@ -287,6 +287,27 @@ pub struct LocalSearchCriteria {
     pub bookmarks_count: String,
     pub sort_column: String,
     pub sort_direction: String,
+    /// Filters the fixed fields above cannot express: source stats, tag
+    /// kinds beyond AO3's four, date windows. Produced by the schema
+    /// translator (`source::library`), never by the UI.
+    pub extra: Vec<ExtraPredicate>,
+}
+
+/// A library filter beyond the AO3-shaped criteria fields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtraPredicate {
+    /// `work_stats` value of a registry field within [min, max] (either
+    /// bound optional). Limits results to works of `source`.
+    StatRange { source: String, key: String, min: Option<f64>, max: Option<f64> },
+    /// Tags of one kind by exact name (ASCII case-insensitive): every
+    /// `include` when `all`, else any; none of `exclude`.
+    TagSet { tag_type: String, include: Vec<String>, exclude: Vec<String>, all: bool },
+    /// A date column within [from, to] (ISO dates, inclusive, either
+    /// bound optional). `column` is a works date column name.
+    DateBetween { column: String, from: Option<String>, to: Option<String> },
+    /// A numeric works column within [min, max] (either bound optional);
+    /// `column` must be one the compiler whitelists.
+    ColumnRange { column: String, min: Option<f64>, max: Option<f64> },
 }
 
 /// What a bookmark points at, by row id. AO3 also allows external-work

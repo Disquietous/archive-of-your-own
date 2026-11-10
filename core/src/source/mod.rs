@@ -16,6 +16,7 @@
 pub mod ao3;
 pub mod mock_rated;
 pub mod scribblehub;
+pub mod search;
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use async_trait::async_trait;
 
 use crate::error::AppError;
 use crate::models::{Chapter, CommentsPage, ExternalRef, WorkSummary};
+use search::{Autocomplete, FieldOption, SearchQuery, SearchSchema};
 
 /// How a reader reacts to a work on this source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -149,6 +151,8 @@ pub struct ListingPage {
     pub has_next: bool,
     /// Highest page the pager shows (1 = no pager).
     pub total_pages: u32,
+    /// The listing's own result count when the page states one.
+    pub total_works: Option<u32>,
 }
 
 /// The ingest contract (Area 4): read-only. Social writes sit behind
@@ -223,6 +227,27 @@ pub trait Source: Send + Sync {
         let _ = (work, chapter, page);
         Err(AppError::NetworkError(format!("{} has no discussion to fetch", self.capabilities().name)))
     }
+
+    /// The source's search form as static configuration
+    /// (design/source-search-plan.md). None ⇔ `capabilities().search` is
+    /// false. Never fetched: a site form change ships as a new version.
+    fn search_schema(&self) -> Option<SearchSchema> {
+        None
+    }
+
+    /// One page of results for a query built against `search_schema`.
+    /// The adapter encodes its own request and parses its own listing.
+    async fn search(&self, query: &SearchQuery, page: u32) -> Result<ListingPage, AppError> {
+        let _ = (query, page);
+        Err(AppError::NetworkError(format!("{} has no search", self.capabilities().name)))
+    }
+
+    /// Remote suggestions for an open-text field, run only on an explicit
+    /// user action (the local known-tags cache answers keystrokes).
+    async fn autocomplete(&self, kind: &Autocomplete, prefix: &str) -> Result<Vec<FieldOption>, AppError> {
+        let _ = (kind, prefix);
+        Err(AppError::NetworkError(format!("{} has no suggestions", self.capabilities().name)))
+    }
 }
 
 /// Every source the app knows, in display order. Lookups by id and by
@@ -265,6 +290,27 @@ impl SourceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The search capability flag and the schema agree, and every declared
+    /// schema is well-formed. The registry here mirrors `api::sources`.
+    #[tokio::test]
+    async fn search_capability_matches_declared_schema() {
+        // A direct client is a reqwest handle; nothing is sent here.
+        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let sources: Vec<Arc<dyn Source>> = vec![
+            Arc::new(ao3::AO3Source::new(client.clone())),
+            Arc::new(scribblehub::ScribbleHubSource::new(client)),
+            Arc::new(mock_rated::MockRatedSource::new()),
+        ];
+        for s in &sources {
+            let schema = s.search_schema();
+            assert_eq!(s.capabilities().search, schema.is_some(), "{}: search flag vs schema", s.id());
+            if let Some(schema) = schema {
+                assert_eq!(schema.source, s.id());
+                schema.validate().unwrap_or_else(|e| panic!("{}: {e}", s.id()));
+            }
+        }
+    }
 
     #[test]
     fn registry_resolves_by_link_and_id() {

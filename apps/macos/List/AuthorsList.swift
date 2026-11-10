@@ -373,10 +373,14 @@ struct AuthorsList: View {
             HStack(spacing: 12) {
                 avatar(follow)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(displayName(follow))
-                        .font(Font(MacFont.ui(14.5, weight: .semibold)))
-                        .foregroundStyle(theme.ink)
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        SourceBadgeView(source: follow.source)
+                            .foregroundStyle(theme.ink2)
+                        Text(displayName(follow))
+                            .font(Font(MacFont.ui(14.5, weight: .semibold)))
+                            .foregroundStyle(theme.ink)
+                            .lineLimit(1)
+                    }
                     Text(subtitle(follow, target))
                         .font(Font(MacFont.ui(12)))
                         .foregroundStyle(theme.ink3)

@@ -21,6 +21,23 @@ extension ReadPaneViewController {
         return tabs
     }
 
+    /// The top-level source tabs: one per source with the search
+    /// capability, AO3 first. One instance for the pane's lifetime.
+    func sourceTabsView() -> SourceTabsView {
+        let tabs = sourceTabs ?? {
+            let sources = appState.bridge.listSources().filter(\.search)
+            let view = SourceTabsView(theme: theme, sources: sources)
+            view.onSelect = { [weak self] id in
+                guard let self else { return }
+                model.search.sourceTab = id
+                model.search.showingResults = false
+            }
+            return view
+        }()
+        sourceTabs = tabs
+        return tabs
+    }
+
     /// Library/AO3 source toggle: internaldrive = only the app's database,
     /// globe = full search on AO3.
     func searchSourceButton() -> ToolButton {
@@ -101,7 +118,11 @@ extension ReadPaneViewController {
         let button = searchGoBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass",
                                                tooltip: "Search") { [weak self] in
             guard let self else { return }
-            model.search.performScopedSearch(appState)
+            if model.search.sourceTab == "ao3" {
+                model.search.performScopedSearch(appState)
+            } else {
+                model.scribbleHubSearch.run(model.search, appState: appState)
+            }
         }
         searchGoBtn = button
         button.isOn = true

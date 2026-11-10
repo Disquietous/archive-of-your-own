@@ -238,12 +238,16 @@ extension ReadPaneViewController {
             if worksStyle {
                 var trailing: [NSView] = search.hasSearched
                     ? [makePagerHost(), worksFilterButton(for: .search)] : []
-                // Server-side sort — only form queries carry AO3 sort params.
+                // Server-side sort — AO3 form queries carry the scraped
+                // sort params; source queries carry the adapter's sort.
                 if search.hasSearched, case .form = search.activeQuery,
                    searchSortField() != nil {
                     trailing.insert(searchSortButton(), at: 0)
+                } else if search.hasSearched, case .source = search.activeQuery,
+                          sourceSortSpec() != nil {
+                    trailing.insert(searchSortButton(), at: 0)
                 }
-                trailing.append(searchSourceButton())
+                if search.sourceTab == "ao3" { trailing.append(searchSourceButton()) }
                 toolbar.setTrailing(trailing)
                 show(mode: .searchResults)
             } else {
@@ -264,20 +268,29 @@ extension ReadPaneViewController {
                 show(mode: .scopeResults)
             }
         } else {
-            // The scope tabs live where the title would be — only while
-            // the form is showing; results keep a plain header.
-            let tabs = scopeTabsView()
-            tabs.configure(selected: search.scope)
-            toolbar.setAfterTitle([tabs])
+            // The source tabs (AO3, ScribbleHub, …) live where the title
+            // would be, with AO3's scope tabs beside them while its forms
+            // show; results keep a plain header.
+            let sources = sourceTabsView()
+            sources.configure(selected: search.sourceTab)
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
-            if search.scope == .works {
-                toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
-                                     searchEyeButton(), searchSourceButton()])
-                show(mode: .searchForm)
+            if search.sourceTab != "ao3" {
+                toolbar.setAfterTitle(sources.segmentCount > 1 ? [sources] : [])
+                toolbar.setTrailing([searchGoButton(), searchEyeButton()])
+                show(mode: .sourceForm(search.sourceTab))
             } else {
-                toolbar.setTrailing([searchGoButton(), searchSourceButton()])
-                show(mode: .scopeForm)
+                let tabs = scopeTabsView()
+                tabs.configure(selected: search.scope)
+                toolbar.setAfterTitle(sources.segmentCount > 1 ? [sources, tabs] : [tabs])
+                if search.scope == .works {
+                    toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
+                                         searchEyeButton(), searchSourceButton()])
+                    show(mode: .searchForm)
+                } else {
+                    toolbar.setTrailing([searchGoButton(), searchSourceButton()])
+                    show(mode: .scopeForm)
+                }
             }
         }
         return true
