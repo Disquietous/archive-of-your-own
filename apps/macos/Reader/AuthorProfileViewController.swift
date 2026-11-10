@@ -246,13 +246,15 @@ final class AuthorProfileViewController: NSViewController {
         }
         let id = userID
         guard loadedAvatarFor != id else { return }
-        let isAO3 = appState.userSource(id) == "ao3"
-        guard isAO3 || user?.avatarUrl != nil else { return }
+        // A source that keys users by name has the by-name avatar path
+        // (one scrape at most); any other serves the profile's URL.
+        let byName = appState.userControls(id)?.usernameIsKey ?? false
+        guard byName || user?.avatarUrl != nil else { return }
         loadedAvatarFor = id
         let name = username
         let url = user?.avatarUrl
         Task { @MainActor in
-            let data: Data? = isAO3
+            let data: Data? = byName
                 ? try? await appState.bridge.fetchAuthorAvatar(name, urlHint: url)
                 : try? await appState.bridge.fetchImage(url: url ?? "")
             if let data, let image = NSImage(data: data), self.userID == id, theme.imageAutoLoad {
@@ -269,8 +271,7 @@ final class AuthorProfileViewController: NSViewController {
         let user = appState.user(userID)
         if let user, username != user.username { username = user.username }
         syncAvatar(user)
-        let caps = appState.userCapabilities(userID)
-        let isAO3 = appState.userSource(userID) == "ao3"
+        let controls = appState.userControls(userID)
         // A row is a sighting until its profile page has been fetched.
         let profile = user.flatMap { $0.profileFetchedAt == nil ? nil : $0 }
 
@@ -292,7 +293,7 @@ final class AuthorProfileViewController: NSViewController {
             if let joined = profile.joined { metaParts.append("Joined \(joined)") }
             if let location = profile.location { metaParts.append(location) }
             if let active = profile.lastActive { metaParts.append("Active \(active)") }
-            if isAO3, let id = profile.numericId { metaParts.append("User #\(id)") }
+            if controls?.usernameIsKey == true, let id = profile.numericId { metaParts.append("User #\(id)") }
         }
         metaLabel.stringValue = metaParts.joined(separator: " · ")
         metaLabel.isHidden = metaParts.isEmpty
@@ -323,9 +324,10 @@ final class AuthorProfileViewController: NSViewController {
         } else {
             statsLabel.isHidden = true
         }
-        // Lists the source keeps: AO3 bookmarks and collections only.
-        bookmarksButton.isHidden = !(caps?.remoteBookmarks ?? isAO3)
-        collectionsButton.isHidden = !(caps?.collections ?? isAO3)
+        // Lists the source keeps, from its controls.
+        let lists = controls?.lists ?? [.works]
+        bookmarksButton.isHidden = !lists.contains(.bookmarks)
+        collectionsButton.isHidden = !lists.contains(.collections)
 
         statusLabel.font = MacFont.ui(12)
         let loading = appState.isLoadingUser(userID)
@@ -350,7 +352,7 @@ final class AuthorProfileViewController: NSViewController {
         }
 
         renderBio(profile)
-        renderActions(user, isAO3: isAO3)
+        renderActions(user, moderation: controls?.moderation ?? .hidden)
 
         // The list the reading pane is showing gets a filled accent bezel.
         let panes: [(NSButton, MacAppModel.AuthorPane)] =
@@ -379,9 +381,10 @@ final class AuthorProfileViewController: NSViewController {
         bioView.invalidateMeasuredHeight()
     }
 
-    private func renderActions(_ user: UUser?, isAO3: Bool) {
-        // Block and mute are AO3 account actions on AO3 users.
-        let signedIn = appState.ao3Username != nil && isAO3
+    private func renderActions(_ user: UUser?, moderation: Gate) {
+        // Block and mute: the source's account actions, shown only where
+        // the source has them and its account is signed in.
+        let signedIn = moderation == .enabled
         actionsRow.isHidden = !signedIn
         actionsSeparator.isHidden = !signedIn
         actionErrorLabel.isHidden = true

@@ -75,11 +75,18 @@ impl ScribbleHubSource {
             subscriptions: false,
             collections: false,
             inbox: false,
+            user_moderation: false,
+            username_is_key: false,
             vocabulary: Vocabulary {
                 discussion_title: "Reviews".to_string(),
                 reaction_verb: "Rate this story".to_string(),
                 reply_verb: None,
                 rating_label: "Rating".to_string(),
+                site_short: "SH".to_string(),
+                open_on_site: "Open on ScribbleHub".to_string(),
+                copy_link: "Copy ScribbleHub link".to_string(),
+                refresh: "Refresh from ScribbleHub".to_string(),
+                subscribe_verb: None,
             },
         }
     }
@@ -497,6 +504,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_while_the_mock_archive_is_on() {
         let s = source().await;
+        let _g = crate::mock_site::tests::toggle_lock();
         crate::mock_site::set_enabled(true);
         let r = s.fetch_work(&ExternalRef { source: SOURCE_ID.into(), external_id: "1".into(), url: String::new() }, None).await;
         crate::mock_site::set_enabled(false);

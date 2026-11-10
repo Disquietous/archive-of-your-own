@@ -575,7 +575,7 @@ pub fn image(url: &str) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::parser;
 
@@ -588,6 +588,12 @@ mod tests {
     /// The mock is process-wide state; these tests share it, so they run
     /// one at a time, each from a fresh signed-out archive.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Any test elsewhere that switches the mock on or off, or asserts it
+    /// is off, takes this too, so the toggles never interleave.
+    pub(crate) fn toggle_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn setup() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

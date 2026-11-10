@@ -209,9 +209,12 @@ struct WorkCardView: View {
 
     private var statRow: some View {
         HStack(spacing: 10) {
-            // Red, filled heart once the user has left kudos (mac row parity).
-            statItem(icon: kudosGiven ? "heart.fill" : "heart", value: work.kudos.abbreviated,
-                     iconColor: kudosGiven ? Self.kudosRed : nil)
+            // Red, filled heart once the user has left kudos (mac row
+            // parity); only where the source's reaction shape is kudos.
+            if showsKudos {
+                statItem(icon: kudosGiven ? "heart.fill" : "heart", value: work.kudos.abbreviated,
+                         iconColor: kudosGiven ? Self.kudosRed : nil)
+            }
             statItem(icon: "text.word.spacing", value: work.words.abbreviated)
 
             let chapterText = work.totalChapters > 0
@@ -263,6 +266,11 @@ struct WorkCardView: View {
 
     private var kudosGiven: Bool {
         appState.kudosGivenWorkIDs.contains(work.id)
+    }
+
+    private var showsKudos: Bool {
+        if case .kudos = appState.workControls(work.id)?.reaction ?? .kudos(given: false, gate: .enabled) { return true }
+        return false
     }
 
     /// The reader's kudos red (mac `WorkRowCellView` uses the same value).

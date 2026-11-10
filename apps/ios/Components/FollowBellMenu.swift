@@ -37,8 +37,8 @@ struct FollowBellMenu: View {
                 } else {
                     Text("Subscribed")
                 }
-                if !follows.canSubscribe(target) {
-                    Text("Sign in to subscribe on AO3")
+                if let hint = follows.subscribeHint(target) {
+                    Text(hint)
                 }
             }
             .disabled(!follows.canSubscribe(target) || follows.isBusy(target))

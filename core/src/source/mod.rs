@@ -68,6 +68,18 @@ pub struct Vocabulary {
     pub reply_verb: Option<String>,
     /// Label for the site-wide rating stat chip ("Rating").
     pub rating_label: String,
+    /// Short site name for a button caption or badge ("AO3", "SH").
+    pub site_short: String,
+    /// "Open on AO3" — the open-on-site control's label.
+    pub open_on_site: String,
+    /// "Copy AO3 link".
+    pub copy_link: String,
+    /// "Refresh from AO3" — the refresh control's label; the fetch itself
+    /// is dispatched by the row's source, never chosen by the UI.
+    pub refresh: String,
+    /// The subscribe verb ("Subscribe"); None when the source has no
+    /// subscriptions.
+    pub subscribe_verb: Option<String>,
 }
 
 /// Everything a source offers, declared once by its adapter. Gating means
@@ -98,6 +110,12 @@ pub struct SourceCapabilities {
     pub subscriptions: bool,
     pub collections: bool,
     pub inbox: bool,
+    /// The site lets a signed-in account block or mute another user.
+    pub user_moderation: bool,
+    /// A bare username is a user's key at the source (AO3), so a typed
+    /// name reaches a profile and follows key by name. Elsewhere users are
+    /// reached by profile link or the source's user search.
+    pub username_is_key: bool,
     pub vocabulary: Vocabulary,
 }
 
@@ -155,7 +173,110 @@ pub struct ListingPage {
     pub total_works: Option<u32>,
 }
 
-/// The ingest contract (Area 4): read-only. Social writes sit behind
+// ---------------------------------------------------------------------------
+// Controls (design/source-controls-plan.md)
+// ---------------------------------------------------------------------------
+//
+// A control is what the user can do with one row right now. The UI never
+// asks which source a row is from: it asks for the row's controls and draws
+// each one natively. Gating means hidden — a control the source has no
+// shape for is `Hidden`; one that exists but needs a sign-in is `Disabled`
+// with the reason to show.
+
+/// Whether one control is drawn, and whether it can be used.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum Gate {
+    Hidden,
+    Enabled,
+    Disabled { reason: String },
+}
+
+impl Gate {
+    pub fn when(shown: bool, enabled: bool, reason: &str) -> Gate {
+        if !shown { Gate::Hidden } else if enabled { Gate::Enabled } else { Gate::Disabled { reason: reason.to_string() } }
+    }
+    pub fn is_shown(&self) -> bool { !matches!(self, Gate::Hidden) }
+    pub fn is_enabled(&self) -> bool { matches!(self, Gate::Enabled) }
+}
+
+/// What the reader sends when reacting to a work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum Reaction {
+    /// One tap, counted, permanent.
+    Kudos,
+    /// A star value 1..=max.
+    Stars { value: u8 },
+    /// Withdraw the reader's own rating.
+    Clear,
+}
+
+/// What the source answered to a reaction. `accepted` false is the site
+/// refusing (own work, duplicate, signed out), not a transport failure.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReactionOutcome {
+    pub accepted: bool,
+    /// The reader's own rating as the site now holds it; None for kudos.
+    pub value: Option<u8>,
+}
+
+/// The reaction control for one work: its shape, the reader's own state,
+/// and whether it can be used.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ReactionControl {
+    None,
+    Kudos { given: bool, gate: Gate },
+    StarRating { max: u8, mine: Option<u8>, gate: Gate },
+}
+
+/// The lists a user's profile offers to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum UserList {
+    Works,
+    Bookmarks,
+    Collections,
+}
+
+/// Everything the UI draws for one work beyond the app-local controls
+/// (download, reading lists, finished…), resolved from the row, its
+/// source's capabilities and that source's account state. No network.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WorkControls {
+    pub source: String,
+    /// The stored canonical URL; None when the work has none (a local
+    /// file), which hides open-on-site and copy-link.
+    pub site_url: Option<String>,
+    pub reaction: ReactionControl,
+    pub discussion: DiscussionShape,
+    pub chapter_comments: bool,
+    pub subscribe: Gate,
+    pub remote_bookmark: Gate,
+    pub vocabulary: Vocabulary,
+}
+
+/// Same for a user (author or commenter).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct UserControls {
+    pub source: String,
+    pub site_url: Option<String>,
+    pub subscribe: Gate,
+    /// Block and mute, together.
+    pub moderation: Gate,
+    pub lists: Vec<UserList>,
+    pub author_listings: bool,
+    pub username_is_key: bool,
+    pub vocabulary: Vocabulary,
+}
+
+/// Same for a tag on a source.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct TagControls {
+    pub source: String,
+    pub site_url: Option<String>,
+    pub vocabulary: Vocabulary,
+}
+
+/// The ingest contract (Area 4): read-only, plus the one social write
+/// every source shapes the same way (`react`). Other writes sit behind
 /// source-specific interfaces reached by capability.
 #[async_trait]
 pub trait Source: Send + Sync {
@@ -226,6 +347,28 @@ pub trait Source: Send + Sync {
     {
         let _ = (work, chapter, page);
         Err(AppError::NetworkError(format!("{} has no discussion to fetch", self.capabilities().name)))
+    }
+
+    /// Whether the reader can react right now. The adapter decides, not
+    /// the UI: AO3 takes guest kudos, a star rating needs the site's login.
+    fn reaction_gate(&self, signed_in: bool) -> Gate {
+        match self.capabilities().reaction {
+            ReactionShape::None => Gate::Hidden,
+            ReactionShape::Kudos => Gate::Enabled,
+            ReactionShape::StarRating { .. } => Gate::when(true, signed_in, "Sign in to rate"),
+        }
+    }
+
+    /// Send the reader's reaction. Default: the source takes none.
+    async fn react(&self, work: &ExternalRef, reaction: Reaction) -> Result<ReactionOutcome, AppError> {
+        let _ = (work, reaction);
+        Err(AppError::NetworkError(format!("{} takes no reactions", self.capabilities().name)))
+    }
+
+    /// The site page for a tag's works, when the source has tag pages.
+    fn tag_url(&self, tag: &str) -> Option<String> {
+        let _ = tag;
+        None
     }
 
     /// The source's search form as static configuration
@@ -334,5 +477,28 @@ mod tests {
         assert!(!caps.reach.tor && caps.reach.direct);
         assert_eq!(caps.vocabulary.discussion_title, "Reviews");
         assert!(caps.vocabulary.reply_verb.is_none());
+        assert!(caps.vocabulary.subscribe_verb.is_none());
+        assert!(!caps.username_is_key && !caps.user_moderation);
+    }
+
+    #[tokio::test]
+    async fn reaction_gate_follows_the_shape_unless_the_adapter_says_otherwise() {
+        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let ao3 = ao3::AO3Source::new(client.clone());
+        assert_eq!(ao3.reaction_gate(false), Gate::Enabled, "guest kudos");
+        let sh = scribblehub::ScribbleHubSource::new(client);
+        assert_eq!(sh.reaction_gate(false), Gate::Disabled { reason: "Sign in to rate".to_string() });
+        assert_eq!(sh.reaction_gate(true), Gate::Enabled);
+        // The mock has no login and rates anyway, so the control is exercised offline.
+        assert_eq!(mock_rated::MockRatedSource::new().reaction_gate(false), Gate::Enabled);
+    }
+
+    #[tokio::test]
+    async fn ao3_tag_pages_are_built_by_the_adapter() {
+        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let ao3 = ao3::AO3Source::new(client);
+        assert_eq!(ao3.tag_url("Hurt/Comfort").as_deref(), Some("https://archiveofourown.org/tags/Hurt*s*Comfort/works"));
+        assert_eq!(ao3.tag_url("Tom & Jerry").as_deref(), Some("https://archiveofourown.org/tags/Tom%20*a*%20Jerry/works"));
+        assert!(mock_rated::MockRatedSource::new().tag_url("x").is_none());
     }
 }

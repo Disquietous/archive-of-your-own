@@ -1240,4 +1240,33 @@ impl Storage {
         let rows = stmt.query_map([], |row| row.get::<_, i64>(0)).map_err(map_sql)?;
         Ok(rows.filter_map(|r| r.ok()).map(|id| id as u64).collect())
     }
+
+    // -------------------------------------------------------------------
+    // Reactions the reader can set and clear (a star rating)
+    // -------------------------------------------------------------------
+
+    pub fn set_work_reaction(&self, work_id: u64, value: u8) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO work_reactions (work_id, value) VALUES (?1, ?2)",
+            params![work_id as i64, value as i64],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn clear_work_reaction(&self, work_id: u64) -> Result<(), AppError> {
+        self.conn.execute("DELETE FROM work_reactions WHERE work_id = ?1", params![work_id as i64]).map_err(map_sql)?;
+        Ok(())
+    }
+
+    pub fn get_work_reaction(&self, work_id: u64) -> Result<Option<u8>, AppError> {
+        self.conn.query_row("SELECT value FROM work_reactions WHERE work_id = ?1", params![work_id as i64],
+                            |r| r.get::<_, i64>(0)).optional().map_err(map_sql).map(|v| v.map(|v| v as u8))
+    }
+
+    /// Every (work id, value) the reader has set.
+    pub fn get_work_reactions(&self) -> Result<Vec<(u64, u8)>, AppError> {
+        let mut stmt = self.conn.prepare("SELECT work_id, value FROM work_reactions").map_err(map_sql)?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u8))).map_err(map_sql)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
 }

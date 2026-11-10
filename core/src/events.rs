@@ -356,7 +356,7 @@ fn deliver(event: CoreEvent) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -386,6 +386,13 @@ mod tests {
     /// body so each test's install → run → observe → teardown is atomic
     /// with respect to every other test in this module.
     static TEST_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    /// The observer is process-wide: any test elsewhere that emits (the
+    /// recovery engine's) holds this so its events never land in an
+    /// ordering test's recording.
+    pub(crate) async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+        TEST_SERIAL.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    }
 
     /// Each test in this module installs its own observer and (re-)inits
     /// the dispatcher on the current-thread test runtime — `init()` is

@@ -14,7 +14,8 @@ use crate::error::AppError;
 use crate::models::{CommentsPage, ExternalRef, WorkSummary, SOURCE_AO3};
 
 use super::search::{SearchQuery, SearchSchema};
-use super::{DiscussionShape, FetchedWork, ListedWork, ListingPage, ReactionShape, Reachability, Source, SourceCapabilities, Vocabulary};
+use super::{DiscussionShape, FetchedWork, Gate, ListedWork, ListingPage, Reaction, ReactionOutcome, ReactionShape,
+            Reachability, Source, SourceCapabilities, Vocabulary};
 
 pub mod search;
 
@@ -47,11 +48,18 @@ impl AO3Source {
             subscriptions: true,
             collections: true,
             inbox: true,
+            user_moderation: true,
+            username_is_key: true,
             vocabulary: Vocabulary {
                 discussion_title: "Comments".to_string(),
                 reaction_verb: "Leave kudos".to_string(),
                 reply_verb: Some("Reply".to_string()),
                 rating_label: "Rating".to_string(),
+                site_short: "AO3".to_string(),
+                open_on_site: "Open on AO3".to_string(),
+                copy_link: "Copy AO3 link".to_string(),
+                refresh: "Refresh from AO3".to_string(),
+                subscribe_verb: Some("Subscribe".to_string()),
             },
         }
     }
@@ -118,6 +126,38 @@ impl Source for AO3Source {
             Some(chapter_id) => client.fetch_comments_for_chapter(number, chapter_id, page).await,
             None => client.fetch_comments_for_work(number, page).await,
         }
+    }
+
+    /// Kudos are open to guests; the site counts them by IP then.
+    fn reaction_gate(&self, _signed_in: bool) -> Gate {
+        Gate::Enabled
+    }
+
+    /// Kudos only — AO3 has no rating to set or clear. The client answers
+    /// false when the archive refuses (own work, already left).
+    async fn react(&self, work: &ExternalRef, reaction: Reaction) -> Result<ReactionOutcome, AppError> {
+        match reaction {
+            Reaction::Kudos => {
+                let number = Self::number(&work.external_id)?;
+                let accepted = self.client.read().await.leave_kudos(number).await?;
+                Ok(ReactionOutcome { accepted, value: None })
+            }
+            Reaction::Stars { .. } | Reaction::Clear => {
+                Err(AppError::NetworkError("AO3 has kudos, not ratings".to_string()))
+            }
+        }
+    }
+
+    /// `/tags/{tag}/works`, with AO3's own substitutions for the characters
+    /// a tag may carry that a path may not.
+    fn tag_url(&self, tag: &str) -> Option<String> {
+        let substituted = tag.replace('/', "*s*").replace('&', "*a*").replace('.', "*d*");
+        let mut encoded = String::with_capacity(substituted.len());
+        for b in substituted.bytes() {
+            let keep = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'~' | b'*' | b'!' | b'$' | b'\'' | b'(' | b')' | b',' | b';' | b'=' | b':' | b'@');
+            if keep { encoded.push(b as char) } else { encoded.push_str(&format!("%{b:02X}")) }
+        }
+        Some(format!("https://archiveofourown.org/tags/{encoded}/works"))
     }
 
     fn search_schema(&self) -> Option<SearchSchema> {

@@ -34,20 +34,6 @@ enum ExternalLinkOpener {
         bridge.setPref(key: prefKey, value: mode.rawValue)
     }
 
-    // MARK: - AO3 entity URLs
-
-    /// Only for callers that have no record URL yet; records carry `url`.
-    static func ao3WorkURL(_ id: String) -> URL? {
-        URL(string: "https://archiveofourown.org/works/\(id)")
-    }
-
-    static func ao3UserURL(_ username: String) -> URL? {
-        URL(string: "https://archiveofourown.org/users/\(username)")
-    }
-
-    static func ao3CollectionURL(_ name: String) -> URL? {
-        URL(string: "https://archiveofourown.org/collections/\(name)")
-    }
 
     /// AO3's tag-in-URL substitutions (mirrors the core's ao3_tag_encode),
     /// then percent-encoding for whatever remains.

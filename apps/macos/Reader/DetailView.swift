@@ -13,6 +13,10 @@ struct DetailView: View {
     private var currentChapter: Int { appState.progressMap[work.id]?.chapter ?? 1 }
     private var warnOK: Bool { work.warnings.contains("No Archive") }
 
+    /// The row's controls: shapes, gates and words from its source.
+    private var controls: WorkControls? { appState.workControls(work.id) }
+    private var siteShort: String { controls?.vocabulary.siteShort ?? "the site" }
+
     @State private var selectedChapter = 0
     /// Chapter titles for the dropdown — session cache first, then the
     /// copy persisted in the encrypted DB by any earlier fetch.
@@ -51,12 +55,15 @@ struct DetailView: View {
                 if appState.kudosFailedWorkID == work.id {
                     HStack(spacing: 8) {
                         Text(appState.kudosFailedIsRetryable
-                             ? "Couldn’t reach the archive to leave kudos."
-                             : "Couldn’t leave kudos — the archive rejected the request.")
+                             ? "Couldn’t reach \(siteShort) to send your reaction."
+                             : "\(siteShort) rejected the request.")
                             .font(Font(MacFont.ui(12)))
                             .foregroundStyle(Color(hex: "CE514D"))
                         if appState.kudosFailedIsRetryable {
-                            Button("Retry") { appState.giveKudos(work.id) }
+                            Button("Retry") {
+                                if case .starRating = controls?.reaction { appState.rateWork(work.id, stars: appState.workReactions[work.id]) }
+                                else { appState.giveKudos(work.id) }
+                            }
                                 .buttonStyle(.plain)
                                 .font(Font(MacFont.ui(12, weight: .semibold)))
                                 .foregroundStyle(theme.accent)
@@ -151,7 +158,7 @@ struct DetailView: View {
                 pill("Fetched \(fetched)", bg: theme.surface2, fg: theme.ink3)
             }
             if appState.goneWorkIDs.contains(work.id) {
-                pill("No longer on AO3", icon: "archivebox",
+                pill("No longer on \(siteShort)", icon: "archivebox",
                      bg: theme.accent2.opacity(0.13), fg: theme.accent2)
             }
         }
@@ -176,8 +183,14 @@ struct DetailView: View {
         HStack(spacing: 1) {
             statCell(Fmt.k(work.words), "Words")
             statCell("\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")", "Chapters")
-            statCell(Fmt.k(work.kudos), "Kudos")
-            statCell(Fmt.k(work.bookmarks), "Bookmarked")
+            // Kudos is a count only where the source has that shape; a
+            // rated source's figures are registry stats shown as chips.
+            if case .kudos = controls?.reaction ?? .kudos(given: false, gate: .enabled) {
+                statCell(Fmt.k(work.kudos), "Kudos")
+            }
+            if controls?.remoteBookmark != .hidden {
+                statCell(Fmt.k(work.bookmarks), "Bookmarked")
+            }
         }
         .background(theme.line)
         .clipShape(RoundedRectangle(cornerRadius: 14))

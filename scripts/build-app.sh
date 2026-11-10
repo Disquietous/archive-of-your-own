@@ -55,6 +55,9 @@ if [[ ! -f "$ROOT_DIR/Local.xcconfig" ]]; then
     cp "$ROOT_DIR/Local.xcconfig.example" "$ROOT_DIR/Local.xcconfig"
 fi
 
+# Guardrail: no Swift file compares a source id (design/source-controls-plan.md).
+"$SCRIPT_DIR/check-no-source-ids.sh"
+
 # The .xcodeproj is gitignored and regenerated from project.yml.
 if [[ ! -d "$PROJECT" ]] || [[ "$ROOT_DIR/project.yml" -nt "$PROJECT/project.pbxproj" ]]; then
     echo "==> Generating Xcode project..."

@@ -51,6 +51,9 @@ final class AppState {
 
     var bookmarkedSeriesIDs: Set<String> = []
     var kudosGivenWorkIDs: Set<String> = []
+    /// The reader's own star rating per work id, for sources with that
+    /// shape (persisted in Rust beside kudos-given).
+    var workReactions: [String: UInt8] = [:]
     var downloadedWorkIDs: Set<String> = []
     var history: [String] = []
     var progressMap: [String: ReadingProgress] = [:]
@@ -477,6 +480,7 @@ final class AppState {
 
         // Kudos already left on AO3 (permanent — keeps the heart truthful)
         kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
+        workReactions = Dictionary(uniqueKeysWithValues: bridge.getWorkReactions().map { (String($0.key), $0.value) })
 
         // Load reading lists
         refreshReadingLists()

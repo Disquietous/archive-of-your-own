@@ -106,10 +106,13 @@ extension AuthorProfileView {
                 Spacer()
 
                 // Followed / Subscribed — following needs no account.
-                if let target = follows.ao3AuthorTarget(username, ensure: true) {
+                let target = follows.ao3AuthorTarget(username, ensure: true)
+                if let target {
                     FollowBellMenu(target: target, glyphSize: 16, hitSize: 36)
                 }
-                if state.ao3Username != nil {
+                // Block and mute: the source's account actions, shown only
+                // where the source has them and its account is signed in.
+                if target?.userID.flatMap({ state.userControls($0)?.moderation }) == .enabled {
                     moderationMenu
                 }
             }

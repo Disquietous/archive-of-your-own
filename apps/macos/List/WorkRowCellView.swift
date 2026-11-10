@@ -411,12 +411,13 @@ final class WorkRowCellView: NSTableCellView {
     }
 
     func configure(with work: Work, progress: Double, downloaded: Bool, selected: Bool,
-                   bookmarked: Bool = false, kudosGiven: Bool = false,
+                   bookmarked: Bool = false, kudosGiven: Bool = false, showsKudos: Bool = true,
                    followShaded: Bool = false,
                    isNew: Bool = false, isRemoved: Bool = false, finished: Bool = false,
                    summaryExpanded: Bool, tagsExpanded: Bool, availableTextWidth: CGFloat) {
         setBookmarked(bookmarked)
         self.kudosGiven = kudosGiven
+        self.showsKudos = showsKudos
         self.finished = finished
         setNew(isNew)
         setRemoved(isRemoved)
@@ -472,7 +473,8 @@ final class WorkRowCellView: NSTableCellView {
         fullSummaryHeight = heights.full
         summaryHeight.constant = summaryExpanded ? fullSummaryHeight : collapsedSummaryHeight
 
-        var meta = " \(Fmt.k(work.kudos))   \(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
+        var meta = (showsKudos ? " \(Fmt.k(work.kudos))   " : "")
+            + "\(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
         if downloaded {
             meta += "   ⤓ Offline"
         }
@@ -579,6 +581,9 @@ final class WorkRowCellView: NSTableCellView {
     /// Whether the signed-in user has left kudos on this work — the heart
     /// in the meta line turns red, matching the reader's kudos button.
     var kudosGiven = false
+    /// Whether the source's reaction shape is kudos at all; a rated
+    /// source's row carries no heart.
+    var showsKudos = true
     /// Meta text after the heart glyph; kept so the heart can be recolored
     /// without recomputing the line.
     var metaText = ""

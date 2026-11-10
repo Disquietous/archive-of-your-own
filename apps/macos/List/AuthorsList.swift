@@ -11,7 +11,7 @@ struct AuthorsList: View {
     @State private var newAuthor = ""
     /// Which source the typed name or link belongs to (links resolve
     /// themselves; a bare name is only a key on AO3).
-    @State private var newAuthorSource = "ao3"
+    @State private var newAuthorSource = ""
     @State private var followError: String?
     /// Live suggestions for what's typed: the source's own user search
     /// where it has one, the library's cached AO3 accounts otherwise.
@@ -74,14 +74,15 @@ struct AuthorsList: View {
     /// Sources an author can be followed on: those with a listing to
     /// check, or a user search to find them by.
     private var sources: [SourceCapabilities] {
-        appState.bridge.listSources().filter { $0.authorListings || $0.userSearch || $0.id == "ao3" }
+        appState.bridge.listSources().filter { $0.authorListings || $0.userSearch || $0.usernameIsKey }
     }
 
-    private var selectedSource: SourceCapabilities? { sources.first { $0.id == newAuthorSource } }
+    /// The picked source, or the first offered before a pick is made.
+    private var selectedSource: SourceCapabilities? { sources.first { $0.id == newAuthorSource } ?? sources.first }
 
     private var newAuthorPlaceholder: String {
         if selectedSource?.userSearch == true { return "Follow an author — name or profile link" }
-        return newAuthorSource == "ao3" ? "Follow an author — username or profile link" : "Follow an author — paste a profile link"
+        return selectedSource?.usernameIsKey == true ? "Follow an author — username or profile link" : "Follow an author — paste a profile link"
     }
 
     private var followField: some View {
@@ -174,7 +175,7 @@ struct AuthorsList: View {
             searching = false
             return
         }
-        let source = newAuthorSource
+        let source = selectedSource?.id ?? ""
         let bridge = appState.bridge
         suggestionsTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
@@ -185,11 +186,11 @@ struct AuthorsList: View {
                 let hits = (try? await bridge.searchUsers(source: source, query: query)) ?? []
                 guard !Task.isCancelled, newAuthor.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
                 suggestions = hits
-            } else if source == "ao3" {
-                // AO3 has no live people search here; the library's cached
-                // accounts are the suggestions, and any typed name is a key.
+            } else if bridge.sourceCapabilities(source)?.usernameIsKey == true {
+                // No live people search here; the library's cached accounts
+                // are the suggestions, and any typed name is a key.
                 suggestions = bridge.searchLibraryUsers(query, limit: 8).map {
-                    UUserHit(source: "ao3", sourceId: $0, username: $0, profileUrl: "", avatarUrl: "")
+                    UUserHit(source: source, sourceId: $0, username: $0, profileUrl: "", avatarUrl: "")
                 }
             } else {
                 suggestions = []
@@ -202,7 +203,7 @@ struct AuthorsList: View {
     private func follow(hit: UUserHit) {
         followError = nil
         let id: UInt64?
-        if hit.source == "ao3" {
+        if appState.bridge.sourceCapabilities(hit.source)?.usernameIsKey == true {
             id = appState.userID(forAO3Username: hit.username)
         } else {
             id = appState.bridge.ensureUser(source: hit.source, sourceID: hit.sourceId, url: hit.profileUrl, username: hit.username)
@@ -230,7 +231,8 @@ struct AuthorsList: View {
         var target: FollowModel.Target?
         if let link = bridge.resolveUserLink(input) {
             let slug = URL(string: link.url)?.pathComponents.last(where: { $0 != "/" && !$0.isEmpty }) ?? link.externalId
-            let name = link.source == "ao3" ? link.externalId : slug.replacingOccurrences(of: "-", with: "_")
+            let name = bridge.sourceCapabilities(link.source)?.usernameIsKey == true
+                ? link.externalId : slug.replacingOccurrences(of: "-", with: "_")
             if let id = bridge.ensureUser(source: link.source, sourceID: link.externalId, url: link.url, username: name) {
                 target = .author(id: id, name: name)
                 // The link names the user by key or slug; the profile gives
@@ -240,14 +242,14 @@ struct AuthorsList: View {
                     model.follows.reload()
                 }
             }
-        } else if newAuthorSource == "ao3" {
+        } else if selectedSource?.usernameIsKey == true {
             target = model.follows.ao3AuthorTarget(input, ensure: true)
         } else if let first = suggestions.first {
             // Enter on a searched name takes the top match, like the site.
             follow(hit: first)
             return
         } else {
-            let site = selectedSource?.name ?? newAuthorSource
+            let site = selectedSource?.name ?? "the site"
             followError = selectedSource?.userSearch == true
                 ? "No \(site) user matches that name yet — keep typing, or paste a profile link."
                 : "\(site) authors are followed by profile link — paste the link to their profile."
@@ -343,12 +345,16 @@ struct AuthorsList: View {
         case "series": "Series"
         default: "Author"
         }
-        // Where it lives, when not AO3; AO3 subscription state when it is.
-        if !follow.source.isEmpty && follow.source != "ao3" {
-            let site = appState.bridge.sourceCapabilities(follow.source)?.name ?? follow.source
+        // Subscription state where the source keeps subscriptions; the
+        // site's name elsewhere.
+        let caps = appState.bridge.sourceCapabilities(follow.source)
+        if caps?.subscriptions == true {
+            return model.follows.isSubscribed(target) ? "\(kind) · Subscribed on \(caps?.vocabulary.siteShort ?? "the site")" : kind
+        }
+        if let site = caps?.name ?? (follow.source.isEmpty ? nil : follow.source) {
             return "\(kind) · \(site)"
         }
-        return model.follows.isSubscribed(target) ? "\(kind) · Subscribed on AO3" : kind
+        return kind
     }
 
     private func open(_ follow: UFollow) {

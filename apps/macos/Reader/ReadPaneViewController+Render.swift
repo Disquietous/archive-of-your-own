@@ -161,20 +161,26 @@ extension ReadPaneViewController {
     private func renderFandomWorks() -> Bool {
         guard model.section == .fandoms, let tag = model.fandomWorksTag,
               model.selectedWork == nil else { return false }
-        let tagAO3 = ao3Button(url: ExternalLinkOpener.ao3TagURL(tag),
-                               tooltip: "Open this tag's works on AO3 in your browser")
+        // Tag pages belong to the source with tag listings; its adapter
+        // builds the URL (Area 10.2), the UI never does.
+        let tagSource = appState.bridge.listSources().first { $0.tagListings }
+        let tagControls = tagSource.flatMap { appState.bridge.tagControls(source: $0.id, tag: tag) }
+        let tagSite = siteButton(url: tagControls?.siteUrl.flatMap { URL(string: $0) },
+                                 caption: tagControls?.vocabulary.siteShort ?? "Site",
+                                 tooltip: "Open this tag's works on \(tagSource?.name ?? "the site") in your browser")
+        let tagAO3: [NSView] = tagControls?.siteUrl == nil ? [] : [tagSite]
         if model.fandomSearchActive {
             let search = model.search
             toolbar.configure(title: tag, sub: search.resultsSubtitle)
             toolbar.setLeading([fandomLibraryBackButton()])
-            toolbar.setTrailing([tagAO3] + (search.hasSearched
+            toolbar.setTrailing(tagAO3 + (search.hasSearched
                 ? [makePagerHost(), worksFilterButton(for: .search)] : []))
         } else {
             let count = model.fandomLibraryWorks.count
             toolbar.configure(title: tag,
                               sub: count == 1 ? "1 work in library" : "\(count) works in library")
             toolbar.setLeading([fandomCloseButton()])
-            toolbar.setTrailing([tagAO3, fandomSearchButton(), worksFilterButton(for: .fandoms)])
+            toolbar.setTrailing(tagAO3 + [fandomSearchButton(), worksFilterButton(for: .fandoms)])
         }
         show(mode: .searchResults)
         return true
@@ -213,8 +219,10 @@ extension ReadPaneViewController {
             splitWorksOpID = search.searchFetchOp.opID
             splitBookmarksOpID = search.bookmarksFetchOp.opID
             toolbar.setLeading([])
-            toolbar.setTrailing([ao3Button(url: search.splitCollectionURL,
-                                           tooltip: "Open this collection on AO3 in your browser"),
+            let tabCaps = appState.bridge.sourceCapabilities(search.sourceTab)
+            toolbar.setTrailing([siteButton(url: search.splitCollectionURL,
+                                            caption: tabCaps?.vocabulary.siteShort ?? "Site",
+                                            tooltip: "Open this collection on \(tabCaps?.name ?? "the site") in your browser"),
                                  searchSourceButton()])
             show(mode: .collectionSplit)
             return true
@@ -247,7 +255,7 @@ extension ReadPaneViewController {
                           sourceSortSpec() != nil {
                     trailing.insert(searchSortButton(), at: 0)
                 }
-                if search.sourceTab == "ao3" { trailing.append(searchSourceButton()) }
+                if search.usesArchiveForm { trailing.append(searchSourceButton()) }
                 toolbar.setTrailing(trailing)
                 show(mode: .searchResults)
             } else {
@@ -275,7 +283,7 @@ extension ReadPaneViewController {
             sources.configure(selected: search.sourceTab)
             toolbar.configure(title: "", sub: nil)
             toolbar.setLeading([])
-            if search.sourceTab != "ao3" {
+            if !search.usesArchiveForm {
                 toolbar.setAfterTitle(sources.segmentCount > 1 ? [sources] : [])
                 toolbar.setTrailing([searchGoButton(), searchEyeButton()])
                 show(mode: .sourceForm(search.sourceTab))
@@ -323,8 +331,12 @@ extension ReadPaneViewController {
             || (model.section == .subscriptions && model.subscriptionWorks.title != nil)
             || (model.section == .authors && model.author.userID != nil)
             || (model.section == .fandoms && model.fandomWorksTag != nil)
+        // Which controls this row offers — shapes, gates and words from
+        // its source (design/source-controls-plan.md).
+        let controls = appState.workControls(work.id)
+        let siteName = appState.bridge.sourceCapabilities(work.source)?.name ?? "the site"
         toolbar.configure(title: reading ? work.title : "Details",
-                          sub: !reading && appState.isRefreshingWork ? "Refreshing from AO3…" : nil)
+                          sub: !reading && appState.isRefreshingWork ? "Refreshing from \(siteName)…" : nil)
         // Kudos posts from either mode's toolbar, so its op shows in both.
         requestOverlayOpID = appState.kudosOp.opID
             ?? (reading ? model.paneReader.chapterFetchOp.opID : appState.workRefreshOp.opID)
@@ -334,19 +346,40 @@ extension ReadPaneViewController {
         let bookmarked = appState.bookmarkedWorkIDs.contains(work.id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
+        let refreshLabel = controls?.vocabulary.refresh ?? "Refresh"
+        let hasDiscussion = controls.map { $0.discussion != .none } ?? true
+        let remoteBookmark = controls?.remoteBookmark ?? .enabled
         if reading {
-            toolbar.setTrailing([detachButton, settingsButton, immersiveButton, chaptersButton,
-                                 readerRefreshButton(), commentsButton, bookmarkButton])
+            // Chapter comments ride the discussion panel only where the
+            // source has them (or a threaded work discussion to show).
+            let showComments = hasDiscussion && (controls?.chapterComments ?? true || controls?.discussion == .threaded)
+            var trailing: [NSView] = [detachButton, settingsButton, immersiveButton, chaptersButton,
+                                      readerRefreshButton(label: refreshLabel)]
+            if showComments { trailing.append(commentsButton) }
+            if remoteBookmark != .hidden { trailing.append(bookmarkButton) }
+            toolbar.setTrailing(trailing)
         } else {
-            refreshDetailActionButtons(for: work, bookmarked: bookmarked)
+            refreshDetailActionButtons(for: work, bookmarked: bookmarked, controls: controls)
             toolbar.setAfterTitle([startReadingButton])
-            var trailing: [NSView] = [ao3Button(url: work.url.isEmpty ? nil : URL(string: work.url),
-                                                tooltip: "Open this work on AO3 in your browser"),
-                                      detachButton, settingsButton, detailRefreshButton(),
-                                      downloadButton, readingListButton, subscribeButton,
-                                      kudosButton, workCommentsButton, finishedButton]
-            if bookmarked { trailing.append(editBookmarkButton) }
-            trailing.append(bookmarkButton)
+            var trailing: [NSView] = []
+            if let site = controls?.siteUrl, let url = URL(string: site) {
+                trailing.append(siteButton(url: url, caption: controls?.vocabulary.siteShort ?? "Site",
+                                           tooltip: controls?.vocabulary.openOnSite ?? "Open on site"))
+            }
+            trailing += [detachButton, settingsButton, detailRefreshButton(label: refreshLabel),
+                         downloadButton, readingListButton]
+            if controls?.subscribe != .hidden { trailing.append(subscribeButton) }
+            switch controls?.reaction ?? .kudos(given: false, gate: .enabled) {
+            case .kudos: trailing.append(kudosButton)
+            case .starRating: trailing.append(ratingControl)
+            case .none: break
+            }
+            if hasDiscussion { trailing.append(workCommentsButton) }
+            trailing.append(finishedButton)
+            if remoteBookmark != .hidden {
+                if bookmarked { trailing.append(editBookmarkButton) }
+                trailing.append(bookmarkButton)
+            }
             toolbar.setTrailing(trailing)
         }
 

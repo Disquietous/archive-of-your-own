@@ -5,42 +5,59 @@ extension WorkDetailView {
 
     func engagementRow(_ work: Work) -> some View {
         let kudosRed = Color(hex: "CE514D")
+        let reaction = controls?.reaction ?? .kudos(given: false, gate: .enabled)
+        let verb = controls?.vocabulary.reactionVerb ?? "Leave kudos"
         return HStack(spacing: 16) {
-            // Kudos — one-way; permanent on AO3. Empty = none (or the POST
-            // failed), faded = request in flight, full = AO3 confirmed.
-            Button {
-                state.giveKudos(workID)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: hasKudos || kudosPending ? "heart.fill" : "heart")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(hasKudos ? kudosRed
-                                         : kudosPending ? kudosRed.opacity(0.45) : theme.ink3)
-                    Text(work.kudos.abbreviated)
-                        .font(Typography.uiSmall())
-                        .foregroundStyle(theme.ink2)
+            // The reaction control by its source's shape. Kudos — one-way;
+            // permanent at the source. Empty = none (or the POST failed),
+            // faded = request in flight, full = confirmed. Stars — the
+            // reader's own value, settable and clearable.
+            switch reaction {
+            case .kudos(_, let gate):
+                Button {
+                    state.giveKudos(workID)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: hasKudos || kudosPending ? "heart.fill" : "heart")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(hasKudos ? kudosRed
+                                             : kudosPending ? kudosRed.opacity(0.45) : theme.ink3)
+                        Text(work.kudos.abbreviated)
+                            .font(Typography.uiSmall())
+                            .foregroundStyle(theme.ink2)
+                    }
                 }
+                .buttonStyle(IconButtonPressStyle())
+                .disabled(!isReal || hasKudos || kudosPending || gate != .enabled)
+                .accessibilityLabel(hasKudos ? "Kudos left — kudos are permanent"
+                                    : kudosPending ? "Leaving kudos…" : verb)
+            case .starRating(let max, _, let gate):
+                StarRatingView(max: max, mine: state.workReactions[workID], pending: kudosPending,
+                               gate: isReal ? gate : .disabled(reason: ""), verb: verb) { stars in
+                    state.rateWork(workID, stars: stars)
+                }
+            case .none:
+                EmptyView()
             }
-            .buttonStyle(IconButtonPressStyle())
-            .disabled(!isReal || hasKudos || kudosPending)
-            .accessibilityLabel(hasKudos ? "Kudos left — kudos are permanent on AO3"
-                                : kudosPending ? "Leaving kudos…" : "Leave kudos on AO3")
 
-            // Comments for the whole work
-            Button {
-                nav.presentedSheet = .viewComments(workID: workID, chapterID: nil)
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "bubble.right")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.ink3)
-                    Text(work.comments.abbreviated)
-                        .font(Typography.uiSmall())
-                        .foregroundStyle(theme.ink2)
+            // The work's discussion, where the source has one
+            if controls.map({ $0.discussion != .none }) ?? true {
+                Button {
+                    nav.presentedSheet = .viewComments(workID: workID, chapterID: nil)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "bubble.right")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(theme.ink3)
+                        Text(work.comments.abbreviated)
+                            .font(Typography.uiSmall())
+                            .foregroundStyle(theme.ink2)
+                    }
                 }
+                .buttonStyle(IconButtonPressStyle())
+                .disabled(!isReal)
+                .accessibilityLabel(controls?.vocabulary.discussionTitle ?? "Comments")
             }
-            .buttonStyle(IconButtonPressStyle())
-            .disabled(!isReal)
 
             Spacer()
 

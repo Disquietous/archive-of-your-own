@@ -24,6 +24,7 @@ use crate::storage::Storage;
 mod account;
 mod capabilities;
 mod connection;
+mod controls;
 mod error;
 mod follows;
 mod helpers;
@@ -43,6 +44,7 @@ mod works;
 
 pub use self::capabilities::{CapabilityError, PlatformCapabilities};
 pub use self::error::*;
+pub use self::controls::UWorkReaction;
 pub use self::records::*;
 pub(crate) use self::recovery::{with_recovery, with_recovery_as};
 pub use self::recovery::RetrySafety;

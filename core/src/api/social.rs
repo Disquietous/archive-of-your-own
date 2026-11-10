@@ -29,37 +29,7 @@ async fn fetch_discussion_elsewhere(
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
 impl AO3App {
-    // -- Kudos --
-
-    /// `op_id`: request-tracking standard (see `fetch_work_full`).
-    pub async fn leave_kudos(&self, work_id: u64, op_id: Option<u64>) -> Result<bool, AO3Error> {
-        self.run_on_runtime_for(op_id, move |client, storage| async move {
-            let number = {
-                let c = client.read().await;
-                let s = storage.lock().await;
-                seed_posting_credentials(&c, &s);
-                ao3_work_number(&s, work_id)?
-            };
-            // AO3 answers a duplicate kudos with "already left kudos"
-            // rather than erroring, so a full retry after rotation can
-            // never double-apply — safe to retry for every failure kind.
-            let accepted = with_recovery_as(client.clone(), storage.clone(),
-                op_id.unwrap_or_else(crate::events::next_op_id),
-                OpKind::Kudos, RetrySafety::Idempotent,
-                move |client| async move {
-                    client.read().await.leave_kudos(number).await.map_err(AO3Error::from)
-                }).await?;
-            let c = client.read().await;
-            let s = storage.lock().await;
-            persist_posting_credentials(&c, &s);
-            if accepted {
-                // Kudos are permanent on AO3 — record it so the UI stays
-                // truthful across launches.
-                log_db("mark_kudos_given", s.mark_kudos_given(work_id));
-            }
-            Ok(accepted)
-        }).await
-    }
+    // -- Kudos: `set_reaction` in controls.rs sends them; the record stays here --
 
     /// Works this device has successfully left kudos on.
     pub fn get_kudos_given(&self) -> Result<Vec<u64>, AO3Error> {

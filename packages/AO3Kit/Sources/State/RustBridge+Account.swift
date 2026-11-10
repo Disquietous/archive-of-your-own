@@ -173,6 +173,27 @@ extension RustBridge {
     }
     private static var capabilitiesByID: [String: SourceCapabilities] = [:]
 
+    // MARK: - Controls (design/source-controls-plan.md)
+
+    /// What the user can do with a work right now — shape, gates and
+    /// words from its source. Cache-only in Rust; call on render.
+    func workControls(_ workID: UInt64) -> WorkControls? {
+        app?.workControls(workId: workID)
+    }
+
+    func userControls(_ userID: UInt64) -> UserControls? {
+        app?.userControls(userId: userID)
+    }
+
+    func tagControls(source: String, tag: String) -> TagControls? {
+        app?.tagControls(sourceId: source, tag: tag)
+    }
+
+    /// Whether a stored sign-in at the source still carries its login.
+    func isSignedIn(source: String) -> Bool {
+        app?.isSignedIn(sourceId: source) ?? false
+    }
+
     /// The locally cached profile for a user — instant, DB-only.
     func getCachedUserProfile(username: String) -> UUserProfile? {
         guard let app else { return nil }

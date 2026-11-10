@@ -394,6 +394,12 @@ impl Storage {
         Ok(self.get_active_account()?.is_some_and(|a| a.id == id))
     }
 
+    /// Whether any stored sign-in at `source` still carries its login
+    /// cookie. Controls gate on this, never on which account is active.
+    pub fn signed_in_at(&self, source: &str) -> bool {
+        self.get_all_accounts().map(|rows| rows.iter().any(|a| a.source == source && a.logged_in())).unwrap_or(false)
+    }
+
     /// Every account, oldest first.
     pub fn get_all_accounts(&self) -> Result<Vec<AccountRow>, AppError> {
         let mut stmt = self.conn.prepare(

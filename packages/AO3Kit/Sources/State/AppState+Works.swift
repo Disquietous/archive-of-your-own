@@ -32,6 +32,7 @@ extension AppState {
             fetchedWorks[id] = Self.workFromSummary(summary)
             // The fetched page may have revealed kudos left outside the app.
             kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
+        workReactions = Dictionary(uniqueKeysWithValues: bridge.getWorkReactions().map { (String($0.key), $0.value) })
         } catch {
             if !metadataTask.isCancelled && !error.isCancellation {
                 bridge.writeLog(level: "ERROR", tag: "work",
@@ -56,6 +57,7 @@ extension AppState {
             fetchedWorks[id] = Self.workFromSummary(summary)
             // The fetched page may have revealed kudos left outside the app.
             kudosGivenWorkIDs = Set(bridge.getKudosGiven().map { String($0) })
+        workReactions = Dictionary(uniqueKeysWithValues: bridge.getWorkReactions().map { (String($0.key), $0.value) })
             // A detail open can mark before this fetch created the work's
             // row (Rust-side no-op) — re-assert now that the row exists.
             if detailViewedWorkIDs.contains(id) {
@@ -72,24 +74,45 @@ extension AppState {
         fetchedChapters[id]
     }
 
-    /// Leave kudos on AO3. One-way — kudos are permanent on the archive, so
-    /// there is no local toggle-off. The heart fades while the request is in
-    /// flight, fills fully once AO3 confirms, and empties again (with
-    /// kudosFailedWorkID set) if the archive rejects it.
+    /// The controls for a work: its source's shapes, gates and words.
+    /// nil for a row the library does not have.
+    func workControls(_ id: String) -> WorkControls? {
+        UInt64(id).flatMap { bridge.workControls($0) }
+    }
+
+    /// Leave kudos. One-way — kudos are permanent at the source, so there
+    /// is no local toggle-off. The heart fades while the request is in
+    /// flight, fills once the source confirms, and empties again (with
+    /// kudosFailedWorkID set) if the source rejects it.
     func giveKudos(_ id: String) {
-        guard !kudosGivenWorkIDs.contains(id), !kudosPendingWorkIDs.contains(id),
-              let workId = UInt64(id) else { return }
+        guard !kudosGivenWorkIDs.contains(id) else { return }
+        react(id, .kudos)
+    }
+
+    /// Set the reader's own star rating, or clear it with nil. Same
+    /// pending/failed bookkeeping as kudos; the value lands when the
+    /// source confirms it.
+    func rateWork(_ id: String, stars: UInt8?) {
+        react(id, stars.map { Reaction.stars(value: $0) } ?? .clear)
+    }
+
+    private func react(_ id: String, _ reaction: Reaction) {
+        guard !kudosPendingWorkIDs.contains(id), let workId = UInt64(id) else { return }
         kudosPendingWorkIDs.insert(id)
         kudosFailedWorkID = nil
         kudosFailedIsRetryable = false
         Task { @MainActor in
             do {
-                let success = try await kudosOp.run(bridge) { opID in
-                    try await bridge.leaveKudos(workId: workId, opID: opID)
+                let outcome = try await kudosOp.run(bridge) { opID in
+                    try await bridge.setReaction(workId: workId, reaction, opID: opID)
                 }
                 kudosPendingWorkIDs.remove(id)
-                if success {
-                    kudosGivenWorkIDs.insert(id)
+                if outcome.accepted {
+                    switch reaction {
+                    case .kudos: kudosGivenWorkIDs.insert(id)
+                    case .stars, .clear:
+                        if let value = outcome.value { workReactions[id] = value } else { workReactions.removeValue(forKey: id) }
+                    }
                 } else {
                     // A genuine rejection (not signed in, own work, etc.) —
                     // the recovery engine already ruled out a transport

@@ -18,7 +18,14 @@ final class SearchModel {
     /// platform builds (design/source-search-plan.md). Source searches
     /// travel as a generic `SearchQuery` to one bridge call; the adapter
     /// builds the site request.
-    var sourceTab = "ao3"
+    var sourceTab = SearchModel.archiveFormSource
+    /// The one source whose search form is still the archive's own scoped
+    /// form rather than a schema-built one: pinned here, and exempted in
+    /// scripts/check-no-source-ids.sh, until the AO3Source search move
+    /// (multi-source-plan Phase 3) retires it.
+    static let archiveFormSource = "ao3"
+    /// Whether the selected tab uses that form.
+    var usesArchiveForm: Bool { sourceTab == Self.archiveFormSource }
     /// The query behind the source works results now showing; sort
     /// re-runs amend this, never the form.
     var activeSourceQuery: SearchQuery?

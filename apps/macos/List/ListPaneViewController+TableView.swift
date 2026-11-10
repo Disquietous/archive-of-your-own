@@ -62,6 +62,10 @@ extension ListPaneViewController {
                        selected: model.selectedWorkID == work.id,
                        bookmarked: appState.bookmarkedWorkIDs.contains(work.id),
                        kudosGiven: appState.kudosGivenWorkIDs.contains(work.id),
+                       showsKudos: {
+                           if case .kudos = appState.workControls(work.id)?.reaction ?? .kudos(given: false, gate: .enabled) { return true }
+                           return false
+                       }(),
                        followShaded: model.isAuthorBellShaded(for: work),
                        isNew: model.section == .whatsNew && appState.unseenNewWorkIDs.contains(work.id),
                        isRemoved: appState.goneWorkIDs.contains(work.id),

@@ -57,12 +57,18 @@ extension MacAppModel {
         openAuthorProfile(userID: id)
     }
 
+    /// Whether a work's source keys users by name, so a byline alone
+    /// reaches the profile (a work saved before author links existed).
+    private func bylineIsKey(_ work: Work) -> Bool {
+        appState.bridge.sourceCapabilities(work.source)?.usernameIsKey == true
+    }
+
     /// A work's byline: the linked users row when the library has one,
-    /// else (an AO3 work saved before links existed) the AO3 account name.
+    /// else the account name where names are keys.
     func openAuthorProfile(of work: Work) {
         if let id = work.authorIDs.first, id != 0 {
             openAuthorProfile(userID: id)
-        } else if work.source.isEmpty || work.source == "ao3" {
+        } else if bylineIsKey(work) {
             openAuthorProfile(work.author)
         }
     }
@@ -78,7 +84,7 @@ extension MacAppModel {
     /// created).
     func showAuthorBellMenu(for work: Work, from view: NSView) {
         let target = authorTarget(for: work)
-            ?? ((work.source.isEmpty || work.source == "ao3") ? follows.ao3AuthorTarget(work.author, ensure: true) : nil)
+            ?? (bylineIsKey(work) ? follows.ao3AuthorTarget(work.author, ensure: true) : nil)
         guard let target else { return }
         FollowBellMenu.show(for: target, follows: follows, from: view)
     }
@@ -88,11 +94,10 @@ extension MacAppModel {
         authorTarget(for: work).map { follows.isShaded($0) } ?? false
     }
 
-    /// A comment byline on a work: AO3 comments name AO3 accounts; a
-    /// second source's commenters are guest rows with no profile to open.
+    /// A comment byline on a work: where names are keys the byline opens
+    /// the account; elsewhere commenters are guest rows with no profile.
     func openCommentAuthor(_ name: String, onWorkID workID: String?) {
-        let source = workID.flatMap { appState.work(byID: $0)?.source } ?? "ao3"
-        guard source.isEmpty || source == "ao3" else { return }
+        guard let work = workID.flatMap({ appState.work(byID: $0) }), bylineIsKey(work) else { return }
         openAuthorProfile(name)
     }
 

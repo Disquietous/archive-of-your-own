@@ -77,12 +77,13 @@ final class FollowModel {
         return id.map { Target.author(id: $0, name: byline) }
     }
 
-    /// The AO3 account name behind an author target, for the AO3-keyed
-    /// subscription records; nil for another source's user.
-    func ao3Username(of target: Target) -> String? {
+    /// The account name behind an author target at a source that keeps
+    /// subscriptions (the AO3-keyed subscription records); nil for a user
+    /// at a source without them.
+    func subscriptionName(of target: Target) -> String? {
         guard let id = target.userID else { return nil }
         let user = appState.user(id) ?? appState.bridge.getUser(id)
-        guard let user, user.source == "ao3" else { return nil }
+        guard let user, appState.bridge.sourceCapabilities(user.source)?.subscriptions == true else { return nil }
         return user.username
     }
 
@@ -146,7 +147,7 @@ final class FollowModel {
         // authors, the row id (AO3 number for AO3 rows) for works/series.
         let subID: String
         if target.kind == .author {
-            guard let name = ao3Username(of: target) else { return false }
+            guard let name = subscriptionName(of: target) else { return false }
             subID = name
         } else {
             subID = target.id
@@ -157,10 +158,34 @@ final class FollowModel {
         }
     }
 
-    /// Whether AO3 can subscribe to this target at all (an AO3 kind and,
-    /// for authors, an AO3 account).
-    func isAO3Target(_ target: Target) -> Bool {
-        target.kind == .author ? ao3Username(of: target) != nil : true
+    /// Whether this target's source keeps subscriptions at all (for
+    /// authors, the user's source; works and series answer by their
+    /// controls).
+    func isSubscribableTarget(_ target: Target) -> Bool {
+        target.kind == .author ? subscriptionName(of: target) != nil : true
+    }
+
+    /// The subscribe control's gate for a target, from the row's source
+    /// (design/source-controls-plan.md). Series rows carry no source over
+    /// the bridge yet, so they follow the active account.
+    func subscribeGate(_ target: Target) -> Gate {
+        switch target.kind {
+        case .author:
+            return target.userID.flatMap { appState.bridge.userControls($0)?.subscribe } ?? .hidden
+        case .work:
+            return UInt64(target.id).flatMap { appState.bridge.workControls($0)?.subscribe } ?? .hidden
+        case .series:
+            return appState.ao3Username != nil ? .enabled : .disabled(reason: "Sign in to subscribe")
+        case .fandom:
+            return .hidden
+        }
+    }
+
+    /// Why Subscribed is unavailable right now, for the menu; nil when it
+    /// is available or the target has no such control.
+    func subscribeHint(_ target: Target) -> String? {
+        if case .disabled(let reason) = subscribeGate(target) { return reason }
+        return nil
     }
 
     func state(_ target: Target) -> BellState {
@@ -174,10 +199,10 @@ final class FollowModel {
         return s.followed || s.subscribed
     }
 
-    /// The Subscribed item is available: an AO3 account is signed in and
-    /// AO3 can subscribe to this kind.
+    /// The Subscribed item is available: the target's source keeps
+    /// subscriptions and its account is signed in.
     func canSubscribe(_ target: Target) -> Bool {
-        target.kind.isSubscribable && appState.ao3Username != nil && isAO3Target(target)
+        target.kind.isSubscribable && isSubscribableTarget(target) && subscribeGate(target) == .enabled
     }
 
     /// When this follow's own What's New check last ran.

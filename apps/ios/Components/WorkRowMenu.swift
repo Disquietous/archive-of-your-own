@@ -66,7 +66,7 @@ struct WorkRowMenu<Tail: View>: View {
             Button {
                 UIPasteboard.general.string = work.url
             } label: {
-                Label("Copy AO3 Link", systemImage: "link")
+                Label(state.workControls(work.id)?.vocabulary.copyLink ?? "Copy Link", systemImage: "link")
             }
             if let onExportEpub, state.downloadedWorkIDs.contains(work.id) {
                 Button {

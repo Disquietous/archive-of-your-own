@@ -243,7 +243,7 @@ extension ReadPaneViewController {
 
     /// Symbols, tints, and enabled states for the detail-mode work action
     /// buttons — re-run on every render, like the bookmark button.
-    func refreshDetailActionButtons(for work: Work, bookmarked: Bool) {
+    func refreshDetailActionButtons(for work: Work, bookmarked: Bool, controls: WorkControls?) {
         let started = model.appState.progress(for: work) > 0
         let currentChapter = appState.progressMap[work.id]?.chapter ?? 1
         startReadingButton.isOn = true
@@ -269,20 +269,34 @@ extension ReadPaneViewController {
         subscribeButton.isEnabled = UInt64(work.id) != nil && !model.follows.isBusy(workTarget)
         subscribeButton.toolTip = "Followed / Subscribed — choose how to track this work"
 
-        // Heart states: empty = no kudos (or the POST failed), faded red =
-        // request in flight, full red = AO3 confirmed.
-        let hasKudos = appState.kudosGivenWorkIDs.contains(work.id)
-        let kudosPending = appState.kudosPendingWorkIDs.contains(work.id)
-        let kudosRed = NSColor(Color(hex: "CE514D"))
-        kudosButton.setSymbol(hasKudos || kudosPending ? "heart.fill" : "heart")
-        kudosButton.tintOverride = hasKudos ? kudosRed
-            : kudosPending ? kudosRed.withAlphaComponent(0.45) : nil
-        kudosButton.isEnabled = !hasKudos && !kudosPending
-        kudosButton.toolTip = hasKudos ? "Kudos left — kudos are permanent on AO3"
-            : kudosPending ? "Leaving kudos…" : "Leave kudos on AO3"
+        // The reaction control by shape. Heart states: empty = no kudos
+        // (or the POST failed), faded red = request in flight, full red =
+        // the site confirmed. Stars: the reader's own value, faded in flight.
+        let pending = appState.kudosPendingWorkIDs.contains(work.id)
+        let verb = controls?.vocabulary.reactionVerb ?? "Leave kudos"
+        switch controls?.reaction ?? .kudos(given: false, gate: .enabled) {
+        case .kudos(_, let gate):
+            let hasKudos = appState.kudosGivenWorkIDs.contains(work.id)
+            let kudosRed = NSColor(Color(hex: "CE514D"))
+            kudosButton.setSymbol(hasKudos || pending ? "heart.fill" : "heart")
+            kudosButton.tintOverride = hasKudos ? kudosRed
+                : pending ? kudosRed.withAlphaComponent(0.45) : nil
+            kudosButton.isEnabled = !hasKudos && !pending && gate == .enabled
+            kudosButton.toolTip = hasKudos ? "Kudos left — kudos are permanent"
+                : pending ? "Leaving kudos…"
+                : { if case .disabled(let reason) = gate { return reason } else { return verb } }()
+        case .starRating(let max, _, let gate):
+            var reason: String?
+            if case .disabled(let r) = gate { reason = r }
+            ratingControl.configure(max: max, value: appState.workReactions[work.id], pending: pending,
+                                    enabled: gate == .enabled, verb: verb, reason: reason)
+        case .none:
+            break
+        }
 
+        let discussionTitle = controls?.vocabulary.discussionTitle ?? "Comments"
         workCommentsButton.toolTip = work.comments > 0
-            ? "Comments · \(Fmt.k(work.comments))" : "Comments"
+            ? "\(discussionTitle) · \(Fmt.k(work.comments))" : discussionTitle
 
         let finished = appState.finishedWorkIDs.contains(work.id)
         finishedButton.setSymbol(finished ? "checkmark.circle.fill" : "checkmark.circle")

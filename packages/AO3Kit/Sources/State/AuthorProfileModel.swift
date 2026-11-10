@@ -22,8 +22,9 @@ final class AuthorProfileModel {
     /// The open author's display name (an AO3 account name for AO3 users,
     /// which the AO3-only lists and follows still key by).
     var username: String?
-    /// Whether the open author is an AO3 account.
-    var isAO3: Bool { userID.map { appState.userSource($0) == "ao3" } ?? true }
+    /// Whether the open author's source keys users by name — the
+    /// by-name crawl stamps and follow records apply only then.
+    var keyedByName: Bool { userID.map { appState.userControls($0)?.usernameIsKey ?? false } ?? true }
     var works: [Work] = []
     /// Last completed full crawl for this author (epoch-seconds string).
     var worksCrawledAt: String?
@@ -96,7 +97,7 @@ final class AuthorProfileModel {
         isLoadingWorks = false
 
         // Crawl stamps are follow-target bookkeeping, which is AO3-keyed.
-        worksCrawledAt = isAO3 ? appState.bridge.getWorksCrawledAt(kind: "author", targetId: username) : nil
+        worksCrawledAt = keyedByName ? appState.bridge.getWorksCrawledAt(kind: "author", targetId: username) : nil
         let cached = appState.bridge.getWorksByUser(id)
         let works = cached.map(AppState.workFromSummary)
         appState.adoptFetchedWorks(works)
@@ -127,7 +128,7 @@ final class AuthorProfileModel {
         // The crawl is an author-listing fetch; a source without listings
         // shows the works the library has discovered instead.
         guard appState.userCapabilities(userID)?.authorListings ?? true else { return }
-        let isAO3 = self.isAO3
+        let keyedByName = self.keyedByName
         let stop = resume ? worksCrawlStop : nil
         let seed = stop == nil ? [] : works
         worksCrawlStop = nil
@@ -156,7 +157,7 @@ final class AuthorProfileModel {
                         pageDone: { lastPage = ($0, $1) })
                 }
                 if self.userID == userID && !task.isCancelled {
-                    if isAO3 {
+                    if keyedByName {
                         appState.bridge.completeWorksCrawl(kind: "author", targetId: username,
                                                            workIds: all.compactMap { UInt64($0.id) })
                         worksCrawledAt = appState.bridge.getWorksCrawledAt(kind: "author", targetId: username)

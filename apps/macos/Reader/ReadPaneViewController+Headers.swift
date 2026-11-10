@@ -198,20 +198,21 @@ extension ReadPaneViewController {
     /// the user's configured link app. One cached instance — only one of
     /// the entity headers (work, collection, tag) is ever visible, and the
     /// URL is re-set on every render pass.
-    func ao3Button(url: URL?, tooltip: String) -> LabelToolButton {
-        let button = ao3Btn ?? LabelToolButton(theme: theme) { [weak self] in
-            guard let self, let url = ao3ButtonURL else { return }
+    /// Open-on-site: the stored canonical URL, captioned with the source's
+    /// short name. Callers hide it when the row has no URL.
+    func siteButton(url: URL?, caption: String, tooltip: String) -> LabelToolButton {
+        let button = siteBtn ?? LabelToolButton(theme: theme) { [weak self] in
+            guard let self, let url = siteURL else { return }
             ExternalLinkOpener.open(url, bridge: appState.bridge)
         }
-        ao3Btn = button
-        ao3ButtonURL = url
-        button.configure(title: "Ao3", symbol: "arrow.up.right", tooltip: tooltip)
+        siteBtn = button
+        siteURL = url
+        button.configure(title: caption, symbol: "arrow.up.right", tooltip: tooltip)
+        button.isEnabled = url != nil
         return button
     }
 
-    /// Reader header: refetch the chapters from AO3, bypassing the caches —
-    /// picks up chapter text that changed or arrived after the original fetch.
-    func readerRefreshButton() -> ToolButton {
+    func readerRefreshButton(label: String = "Refresh") -> ToolButton {
         let button = readerRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
                                                     tooltip: "Refresh chapter from AO3") { [weak self] in
             self?.readerController.refreshChaptersFromAO3()
@@ -221,13 +222,16 @@ extension ReadPaneViewController {
     }
 
     /// Detail header: re-fetch the work's current details from AO3.
-    func detailRefreshButton() -> ToolButton {
+    /// The fetch is dispatched by the row's source in the core; only the
+    /// label names the site.
+    func detailRefreshButton(label: String = "Refresh") -> ToolButton {
         let button = detailRefreshBtn ?? ToolButton(theme: theme, symbol: "arrow.clockwise",
-                                                    tooltip: "Refresh details from AO3") { [weak self] in
+                                                    tooltip: label) { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
             Task { @MainActor in await self.appState.refreshWorkMetadata(id) }
         }
         detailRefreshBtn = button
+        button.toolTip = label
         return button
     }
 

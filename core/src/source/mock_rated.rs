@@ -12,8 +12,8 @@ use crate::error::AppError;
 use crate::models::{AO3User, Chapter, Comment, CommentsPage, ContentBlock, ExternalRef, InlineContent, Rating,
                     WorkSummary};
 
-use super::{DiscussionShape, FetchedWork, ReactionShape, Reachability, Source, SourceCapabilities, SourceStat,
-            Vocabulary};
+use super::{DiscussionShape, FetchedWork, Gate, Reaction, ReactionOutcome, ReactionShape, Reachability, Source,
+            SourceCapabilities, SourceStat, Vocabulary};
 
 pub const SOURCE_ID: &str = "mockrated";
 pub const BASE_URL: &str = "https://rated.mock";
@@ -109,11 +109,18 @@ impl MockRatedSource {
                 subscriptions: false,
                 collections: false,
                 inbox: false,
+                user_moderation: false,
+                username_is_key: false,
                 vocabulary: Vocabulary {
                     discussion_title: "Reviews".to_string(),
                     reaction_verb: "Rate this story".to_string(),
                     reply_verb: None,
                     rating_label: "Rating".to_string(),
+                    site_short: "Mock".to_string(),
+                    open_on_site: "Open on Rated Mock".to_string(),
+                    copy_link: "Copy Rated Mock link".to_string(),
+                    refresh: "Refresh from Rated Mock".to_string(),
+                    subscribe_verb: None,
                 },
             },
         }
@@ -252,6 +259,26 @@ impl Source for MockRatedSource {
         Ok(FetchedWork { summary: Self::summary(story), chapters, stats, reacted_by: Vec::new(), authors: Vec::new() })
     }
 
+    /// No login to speak of: the mock rates for anyone, so the star
+    /// control is exercised offline.
+    fn reaction_gate(&self, _signed_in: bool) -> Gate {
+        Gate::Enabled
+    }
+
+    /// Accepts any star value in range and any clear; kudos is not a shape
+    /// here. Nothing is remembered site-side — the library row holds the
+    /// reader's value.
+    async fn react(&self, work: &ExternalRef, reaction: Reaction) -> Result<ReactionOutcome, AppError> {
+        Self::guard()?;
+        Self::story(&work.external_id)?;
+        match reaction {
+            Reaction::Stars { value } if (1..=5).contains(&value) => Ok(ReactionOutcome { accepted: true, value: Some(value) }),
+            Reaction::Stars { .. } => Ok(ReactionOutcome { accepted: false, value: None }),
+            Reaction::Clear => Ok(ReactionOutcome { accepted: true, value: None }),
+            Reaction::Kudos => Err(AppError::NetworkError("Rated Mock has ratings, not kudos".to_string())),
+        }
+    }
+
     async fn fetch_discussion(&self, work: &ExternalRef, chapter: Option<u64>, _page: u32)
         -> Result<CommentsPage, AppError>
     {
@@ -277,6 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetches_a_story_with_stats_and_reviews() {
+        let _g = crate::mock_site::tests::toggle_lock();
         let src = MockRatedSource::new();
         crate::mock_site::set_enabled(true);
         let work = src.fetch_work(&story_ref("1"), None).await;
@@ -300,8 +328,25 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_outside_the_mock() {
+        let _g = crate::mock_site::tests::toggle_lock();
         let src = MockRatedSource::new();
         assert!(matches!(src.fetch_work(&story_ref("1"), None).await, Err(AppError::NetworkDisabled)));
+    }
+
+    #[tokio::test]
+    async fn rates_and_clears_while_on() {
+        let _g = crate::mock_site::tests::toggle_lock();
+        let src = MockRatedSource::new();
+        crate::mock_site::set_enabled(true);
+        let four = src.react(&story_ref("1"), Reaction::Stars { value: 4 }).await;
+        let six = src.react(&story_ref("1"), Reaction::Stars { value: 6 }).await;
+        let clear = src.react(&story_ref("1"), Reaction::Clear).await;
+        let kudos = src.react(&story_ref("1"), Reaction::Kudos).await;
+        crate::mock_site::set_enabled(false);
+        assert_eq!(four.unwrap(), ReactionOutcome { accepted: true, value: Some(4) });
+        assert_eq!(six.unwrap(), ReactionOutcome { accepted: false, value: None });
+        assert_eq!(clear.unwrap(), ReactionOutcome { accepted: true, value: None });
+        assert!(kudos.is_err());
     }
 
     #[test]

@@ -118,7 +118,7 @@ extension ReadPaneViewController {
         let button = searchGoBtn ?? ToolButton(theme: theme, symbol: "magnifyingglass",
                                                tooltip: "Search") { [weak self] in
             guard let self else { return }
-            if model.search.sourceTab == "ao3" {
+            if model.search.usesArchiveForm {
                 model.search.performScopedSearch(appState)
             } else {
                 model.scribbleHubSearch.run(model.search, appState: appState)

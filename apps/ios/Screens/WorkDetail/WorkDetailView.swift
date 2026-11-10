@@ -42,13 +42,18 @@ struct WorkDetailView: View {
 
     var isReal: Bool { UInt64(workID) != nil }
 
+    /// The row's controls: shapes, gates and words from its source
+    /// (design/source-controls-plan.md). nil for a sample row.
+    var controls: WorkControls? { state.workControls(workID) }
+    var siteShort: String { controls?.vocabulary.siteShort ?? "the site" }
+
     var isLiveWork: Bool {
         isReal && work?.content == nil
     }
 
     /// The work's page at its source — from the record, never built from
     /// an id.
-    var ao3URL: URL? {
+    var siteURL: URL? {
         guard let url = work?.url, !url.isEmpty else { return nil }
         return URL(string: url)
     }

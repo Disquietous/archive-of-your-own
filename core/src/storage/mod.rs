@@ -314,7 +314,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 32;
+    pub(crate) const SCHEMA_VERSION: u32 = 33;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -397,6 +397,7 @@ impl Storage {
                 29 => self.migrate_v29_comment_rating(),
                 30 => self.migrate_v30_user_extra(),
                 32 => self.migrate_v32_merge_guest_rows(),
+                33 => self.migrate_v33_work_reactions(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1012,6 +1013,18 @@ impl Storage {
     /// the real `(source, id)` row — comments, authorship, follows and
     /// crawl stamps follow it — or, when no real row exists, rekey it.
     /// Pure guests (no profile id) are untouched.
+    /// v33: the reader's own star rating per work (design/source-controls-
+    /// plan.md). Kudos stay in `kudos_given`; this holds a value a source
+    /// lets the reader set and clear.
+    fn migrate_v33_work_reactions(&self) -> Result<(), AppError> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS work_reactions (
+                work_id INTEGER PRIMARY KEY REFERENCES works(id) ON DELETE CASCADE,
+                value   INTEGER NOT NULL
+            );",
+        ).map_err(map_sql)
+    }
+
     fn migrate_v32_merge_guest_rows(&self) -> Result<(), AppError> {
         if !self.table_exists("users")? || !self.column_exists("users", "source_id")? {
             return Ok(());
@@ -2058,6 +2071,10 @@ impl Storage {
                 CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_id);
                 CREATE TABLE IF NOT EXISTS kudos_given (
                     work_id INTEGER PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS work_reactions (
+                    work_id INTEGER PRIMARY KEY REFERENCES works(id) ON DELETE CASCADE,
+                    value   INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS image_cache (
                     key        TEXT PRIMARY KEY,

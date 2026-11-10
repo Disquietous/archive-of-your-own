@@ -245,9 +245,16 @@ extension RustBridge {
         (try? app?.getKudosGiven()) ?? []
     }
 
-    func leaveKudos(workId: UInt64, opID: UInt64? = nil) async throws -> Bool {
+    /// Works the reader has rated, by row id, with the value.
+    func getWorkReactions() -> [UInt64: UInt8] {
+        Dictionary(((try? app?.getWorkReactions()) ?? []).map { ($0.workId, $0.value) }, uniquingKeysWith: { _, b in b })
+    }
+
+    /// Send a reaction (kudos, stars, clear) to the work's source. The
+    /// outcome's `accepted` false is the site refusing, not a fault.
+    func setReaction(workId: UInt64, _ reaction: Reaction, opID: UInt64? = nil) async throws -> ReactionOutcome {
         guard let app else { throw BridgeError.notInitialized }
-        return try await app.leaveKudos(workId: workId, opId: opID)
+        return try await app.setReaction(workId: workId, reaction: reaction, opId: opID)
     }
 
     /// `chapterId` 0 = a whole-work comment. On success the composer's

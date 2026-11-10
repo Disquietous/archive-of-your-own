@@ -4,13 +4,11 @@ import SwiftUI
 /// The small mark that says which site something came from. Template
 /// images, so they take the color of the text beside them.
 enum SourceBadge {
-    /// Asset name for a source id; an empty id is the library's default (AO3).
+    /// Asset name for a source id: the assets are keyed by the id itself
+    /// ("SourceBadge-ao3"), so a new source needs a new imageset and no
+    /// code. nil for sample rows, which carry no source.
     static func imageName(for source: String) -> String? {
-        switch source {
-        case "", "ao3": "SourceBadgeAO3"
-        case "scribblehub": "SourceBadgeScribbleHub"
-        default: nil
-        }
+        source.isEmpty ? nil : "SourceBadge-\(source)"
     }
 
     static func image(for source: String) -> NSImage? {

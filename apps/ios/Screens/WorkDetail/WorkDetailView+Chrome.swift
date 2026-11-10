@@ -95,14 +95,14 @@ extension WorkDetailView {
                 }
             }
 
-            if let ao3URL {
+            if let siteURL {
                 Divider()
                 Button {
-                    ExternalLinkOpener.open(ao3URL, bridge: state.bridge)
+                    ExternalLinkOpener.open(siteURL, bridge: state.bridge)
                 } label: {
-                    Label("Open on AO3", systemImage: "arrow.up.right")
+                    Label(controls?.vocabulary.openOnSite ?? "Open on site", systemImage: "arrow.up.right")
                 }
-                ShareLink(item: ao3URL) {
+                ShareLink(item: siteURL) {
                     Label("Share Link", systemImage: "square.and.arrow.up")
                 }
                 if isDownloaded {

@@ -15,7 +15,7 @@ extension WorkRowCellView {
 
     func renderMeta() {
         let font = MacFont.ui(11, weight: .medium)
-        let line = NSMutableAttributedString(string: "♥", attributes: [
+        let line = NSMutableAttributedString(string: showsKudos ? "♥" : "", attributes: [
             .font: font,
             .foregroundColor: kudosGiven ? NSColor(srgbRed: 0xCE / 255, green: 0x51 / 255, blue: 0x4D / 255, alpha: 1) : theme.nsInk3,
         ])

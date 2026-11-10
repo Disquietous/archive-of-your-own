@@ -48,7 +48,7 @@ extension ListPaneViewController {
         authorAO3Btn = button
         let site = appState.userSourceName(userID)
         let name = appState.user(userID)?.username ?? ""
-        button.configure(title: appState.userSource(userID) == "ao3" ? "Ao3" : "Site", symbol: "arrow.up.right",
+        button.configure(title: appState.userCapabilities(userID)?.vocabulary.siteShort ?? "Site", symbol: "arrow.up.right",
                          tooltip: "Open \(name)'s profile on \(site) in your browser")
         return button
     }

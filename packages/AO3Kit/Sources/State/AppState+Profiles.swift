@@ -46,7 +46,13 @@ extension AppState {
     func userSource(_ id: UInt64) -> String {
         if let u = users[id] { return u.source }
         if let u = bridge.getUser(id) { users[id] = u; return u.source }
-        return "ao3"
+        return ""
+    }
+
+    /// What the user can do with this user right now (design/source-
+    /// controls-plan.md); nil for an unknown row.
+    func userControls(_ id: UInt64) -> UserControls? {
+        bridge.userControls(id)
     }
 
     /// What the user's source offers; nil only for an unknown source id.
@@ -56,7 +62,7 @@ extension AppState {
 
     /// Display name of the user's source ("Archive of Our Own").
     func userSourceName(_ id: UInt64) -> String {
-        userCapabilities(id)?.name ?? "AO3"
+        userCapabilities(id)?.name ?? "the site"
     }
 
     /// The users row for an AO3 username (created when never seen).
@@ -89,14 +95,15 @@ extension AppState {
         }
     }
 
-    /// A user's avatar by row id: AO3 users through the cached avatar path
-    /// (one scrape at most), any other source from the profile's URL.
-    /// Failures are remembered for the session.
+    /// A user's avatar by row id: a source that keys users by name goes
+    /// through the cached by-name avatar path (one scrape at most), any
+    /// other from the profile's URL. Failures are remembered for the
+    /// session.
     func loadUserAvatar(_ id: UInt64) {
         guard userAvatars[id] == nil, !userAvatarFetches.contains(id) else { return }
         let user = users[id] ?? bridge.getUser(id)
         guard let user else { return }
-        if user.source == "ao3" {
+        if bridge.sourceCapabilities(user.source)?.usernameIsKey == true {
             loadAuthorAvatar(user.username, urlHint: user.avatarUrl)
             if let data = authorAvatars[user.username] { userAvatars[id] = data }
             return

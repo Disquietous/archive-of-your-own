@@ -554,6 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn tor_required_refuses_a_direct_request_without_retrying() {
+        let _serial = crate::events::tests::serial().await;
         // Fail closed: with Tor required (the default), a client that isn't
         // on Tor sends nothing, and the engine doesn't retry the refusal.
         crate::client::set_tor_required(true);
@@ -570,6 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn edge_tls_failure_retries_up_to_cap_for_idempotent() {
+        let _serial = crate::events::tests::serial().await;
         let (client, storage) = test_app().await;
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
@@ -587,6 +589,7 @@ mod tests {
 
     #[tokio::test]
     async fn at_most_once_never_retries_an_ambiguous_connect_failure() {
+        let _serial = crate::events::tests::serial().await;
         let (client, storage) = test_app().await;
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
@@ -604,6 +607,7 @@ mod tests {
 
     #[tokio::test]
     async fn at_most_once_does_retry_edge_tls_failure() {
+        let _serial = crate::events::tests::serial().await;
         // 525 is provably pre-origin for every operation, so it's the one
         // kind that's safe to retry even for AtMostOnce ops.
         let (client, storage) = test_app().await;
@@ -623,6 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn origin_unavailable_never_retries_for_at_most_once() {
+        let _serial = crate::events::tests::serial().await;
         let (client, storage) = test_app().await;
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
@@ -640,6 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn unclassified_error_surfaces_immediately_with_one_call() {
+        let _serial = crate::events::tests::serial().await;
         let (client, storage) = test_app().await;
         let calls = Arc::new(AtomicU32::new(0));
         let calls2 = calls.clone();
@@ -657,6 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_on_first_attempt_never_touches_recovery() {
+        let _serial = crate::events::tests::serial().await;
         let (client, storage) = test_app().await;
         let result = with_recovery(client, storage, OpKind::Image, RetrySafety::Idempotent, |_c| async { Ok::<_, AO3Error>(42) }).await;
         assert_eq!(result.unwrap(), 42);

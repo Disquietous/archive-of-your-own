@@ -28,6 +28,9 @@ final class ReadPaneViewController: NSViewController {
     var readingListButton: ToolButton!
     var subscribeButton: ToolButton!
     var kudosButton: ToolButton!
+    /// The star control for a rated source; the header shows one of the
+    /// two by the row's reaction shape.
+    var ratingControl: StarRatingToolControl!
     var workCommentsButton: ToolButton!
     var editBookmarkButton: ToolButton!
     /// The user's manual "finished reading" flag — never inferred.
@@ -182,7 +185,7 @@ final class ReadPaneViewController: NSViewController {
             FollowBellMenu.show(for: FollowModel.Target(kind: .work, id: work.id, name: work.title),
                                 follows: model.follows, from: subscribeButton)
         }
-        kudosButton = ToolButton(theme: theme, symbol: "heart", tooltip: "Leave kudos on AO3") { [weak self] in
+        kudosButton = ToolButton(theme: theme, symbol: "heart", tooltip: "Leave kudos") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
             appState.giveKudos(id)
         }
@@ -190,11 +193,16 @@ final class ReadPaneViewController: NSViewController {
         // state display — AppKit's automatic disabled dim would wash the
         // full-red confirmation down to what reads as the faded state.
         (kudosButton.cell as? NSButtonCell)?.imageDimsWhenDisabled = false
+        ratingControl = StarRatingToolControl(theme: theme)
+        ratingControl.onSelect = { [weak self] stars in
+            guard let self, let id = model.selectedWorkID else { return }
+            appState.rateWork(id, stars: stars)
+        }
         workCommentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Comments") { [weak self] in
             self?.discussion.toggleOpen()
         }
         editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
-                                        tooltip: "Edit bookmark — notes, tags, sync to AO3") { [weak self] in
+                                        tooltip: "Edit bookmark — notes, tags, sync to the site") { [weak self] in
             self?.showBookmarkEditSheet()
         }
         finishedButton = ToolButton(theme: theme, symbol: "checkmark.circle",
@@ -263,8 +271,8 @@ final class ReadPaneViewController: NSViewController {
     lazy var sortFilterMenu = SortFilterMenuController(theme: theme, model: model)
     var detailRefreshBtn: ToolButton?
     var inboxThreadRefreshBtn: ToolButton?
-    var ao3Btn: LabelToolButton?
-    var ao3ButtonURL: URL?
+    var siteBtn: LabelToolButton?
+    var siteURL: URL?
 
     /// The pane's request-progress banner, hosted as a sibling of
     /// `container` added after it so the content swaps `show(mode:)`

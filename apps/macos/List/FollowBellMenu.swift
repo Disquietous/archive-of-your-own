@@ -37,8 +37,8 @@ final class FollowBellMenu: NSObject {
         subscribed.state = state.subscribed ? .on : .off
         subscribed.isEnabled = follows.canSubscribe(target) && !follows.isBusy(target)
         subscribed.toolTip = follows.canSubscribe(target)
-            ? "Your AO3 subscription — AO3 notifies you of updates. Asks before changing your account."
-            : "Sign in to subscribe on AO3"
+            ? "Your subscription at the site — it notifies you of updates. Asks before changing your account."
+            : (follows.subscribeHint(target) ?? "Sign in to subscribe")
         menu.addItem(subscribed)
 
         _ = withExtendedLifetime(controller) {

@@ -68,13 +68,16 @@ extension WorkDetailView {
     var kudosFailureBanner: some View {
         HStack(spacing: 8) {
             Text(state.kudosFailedIsRetryable
-                 ? "Couldn’t reach the archive to leave kudos."
-                 : "Couldn’t leave kudos — the archive rejected the request.")
+                 ? "Couldn’t reach \(siteShort) to send your reaction."
+                 : "\(siteShort) rejected the request.")
                 .font(Typography.uiSmall())
                 .foregroundStyle(Color(hex: "CE514D"))
                 .fixedSize(horizontal: false, vertical: true)
             if state.kudosFailedIsRetryable {
-                Button("Retry") { state.giveKudos(workID) }
+                Button("Retry") {
+                    if case .starRating = controls?.reaction { state.rateWork(workID, stars: state.workReactions[workID]) }
+                    else { state.giveKudos(workID) }
+                }
                     .font(Typography.smallButtonLabel())
                     .foregroundStyle(theme.accent)
                     .buttonStyle(ButtonPressStyle())
@@ -132,7 +135,7 @@ extension WorkDetailView {
                 textPill("Fetched \(fetched)", fg: theme.ink3)
             }
             if state.goneWorkIDs.contains(workID) {
-                textPill("No longer on AO3", icon: "archivebox", fg: theme.accent2,
+                textPill("No longer on \(siteShort)", icon: "archivebox", fg: theme.accent2,
                          bg: theme.accent2.opacity(0.13))
             }
         }
@@ -208,12 +211,19 @@ extension WorkDetailView {
     // MARK: - Stats
 
     func statsSection(_ work: Work) -> some View {
-        StatGridView(stats: [
-            ("Words", work.words.abbreviated),
-            ("Chapters", "\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"),
-            ("Kudos", work.kudos.abbreviated),
-            ("Saved", work.bookmarks.abbreviated),
-        ])
+        // Kudos and saves are counts only where the source has those
+        // shapes; a rated source's figures are registry stats.
+        var stats: [(value: String, label: String)] = [
+            (work.words.abbreviated, "Words"),
+            ("\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")", "Chapters"),
+        ]
+        if case .kudos = controls?.reaction ?? .kudos(given: false, gate: .enabled) {
+            stats.append((work.kudos.abbreviated, "Kudos"))
+        }
+        if controls?.remoteBookmark != .hidden {
+            stats.append((work.bookmarks.abbreviated, "Saved"))
+        }
+        return StatGridView(stats: stats)
     }
 
     // MARK: - Summary
