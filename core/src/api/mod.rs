@@ -31,6 +31,7 @@ mod helpers;
 mod library;
 mod listing;
 mod logs;
+mod pacing;
 mod prefs;
 mod records;
 mod recovery;

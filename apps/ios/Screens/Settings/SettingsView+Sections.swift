@@ -25,7 +25,8 @@ extension SettingsView {
                 )
                 settingsCaption("""
                     Links that leave the app open this way. Anything opened this way travels over that browser's own \
-                    connection, not this app's private one.
+                    connection, not this app's private one. While your registered VPN is carrying this device's \
+                    traffic, each link asks which browser to use instead.
                     """)
             }
             .padding(.vertical, 4)

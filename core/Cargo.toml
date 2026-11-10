@@ -23,6 +23,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+# Varying pause between requests of a successive download (api/pacing.rs).
+fastrand = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "cookies", "form", "http2", "gzip", "brotli", "zstd", "deflate"] }
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher", "functions", "trace"] }

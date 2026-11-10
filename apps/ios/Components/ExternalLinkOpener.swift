@@ -47,17 +47,53 @@ enum ExternalLinkOpener {
     }
 
     /// Open `url` per the stored preference. Only http(s) URLs can go to
-    /// the in-app browser; anything else falls back to the system.
+    /// the in-app browser; anything else falls back to the system. While
+    /// the registered VPN is carrying the device's traffic, every browser
+    /// is as private as the stored choice, so the opener asks which one
+    /// to use each time instead of applying the preference silently.
     @MainActor
     static func open(_ url: URL, bridge: RustBridge) {
-        if mode(bridge) == .inApp, let scheme = url.scheme?.lowercased(),
-           scheme == "http" || scheme == "https", let presenter = topViewController() {
+        if case .vpn(.matched, let label) = bridge.privacyStatus, isWeb(url),
+           let presenter = topViewController() {
+            askBrowser(for: url, vpnLabel: label, presenter: presenter)
+            return
+        }
+        open(url, mode: mode(bridge))
+    }
+
+    @MainActor
+    private static func open(_ url: URL, mode: Mode) {
+        if mode == .inApp, isWeb(url), let presenter = topViewController() {
             let safari = SFSafariViewController(url: url)
             safari.preferredControlTintColor = nil
             presenter.present(safari, animated: true)
             return
         }
         UIApplication.shared.open(url)
+    }
+
+    private static func isWeb(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// The VPN-mode chooser: an alert (works on iPhone and iPad alike,
+    /// no popover anchor needed) offering both ways to open the link.
+    /// Cancel drops the tap.
+    @MainActor
+    private static func askBrowser(for url: URL, vpnLabel: String?, presenter: UIViewController) {
+        let alert = UIAlertController(
+            title: "Open in which browser?",
+            message: "\(vpnLabel ?? "Your VPN") is carrying this device's traffic, so the page travels through it "
+                + "whichever browser opens it.",
+            preferredStyle: .alert)
+        for choice in Mode.allCases {
+            alert.addAction(UIAlertAction(title: choice.label, style: .default) { _ in
+                open(url, mode: choice)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        presenter.present(alert, animated: true)
     }
 
     /// The topmost presented view controller of the active scene — where

@@ -174,6 +174,13 @@ extension RustBridge {
         return try await app.fetchChapters(workId: workId, opId: opID)
     }
 
+    /// The core's pause between works of a bulk download: a varying 1–10 s,
+    /// never the same length twice in a row. Returns when the wait is over.
+    func paceDownloadGap() async {
+        guard let app else { return }
+        try? await app.paceDownloadGap()
+    }
+
     /// The chapter being opened (1-based), the way its source serves it:
     /// the whole work in one fetch, or the table of contents and then that
     /// one chapter page. Returns the full chapter list, the requested one

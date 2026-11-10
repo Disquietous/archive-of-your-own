@@ -23,7 +23,8 @@ struct GeneralSettingsPane: View {
                 ExternalLinkAppRow(theme: theme, appState: appState)
                 Text("""
                     Links that leave the app open in this application. Anything opened this way travels over that \
-                    app's own connection, not this app's private one.
+                    app's own connection, not this app's private one. While your registered VPN is carrying \
+                    this Mac's traffic, each link asks which browser to use instead.
                     """)
                     .font(Font(MacFont.ui(11.5)))
                     .foregroundStyle(theme.ink3)

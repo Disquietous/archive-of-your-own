@@ -179,10 +179,6 @@ async fn fetch_all_chapters(
     Ok(fetched.chapters.into_iter().map(UChapter::from).collect())
 }
 
-/// Pause between consecutive chapter requests when downloading a whole
-/// work from a source that serves one chapter per page.
-const CHAPTER_DOWNLOAD_GAP: std::time::Duration = std::time::Duration::from_secs(1);
-
 /// One chapter of a per-chapter source, fetched from its stub (id + title
 /// from the table of contents) and saved over it.
 async fn fetch_one_chapter(
@@ -679,8 +675,9 @@ impl AO3App {
             }
             // A per-chapter source: the work page lands the table of
             // contents (stubs keep text already fetched), then every
-            // chapter still without text is fetched in order, one second
-            // apart so the whole-work download stays polite.
+            // chapter still without text is fetched in order, a varying
+            // 1–10 s apart (see `pacing`) so the whole-work download
+            // stays polite and never settles into a fixed cadence.
             fetch_and_save_work(client.clone(), storage.clone(), registry.clone(), work_id, op_id).await?;
             let stubs: Vec<Chapter> = {
                 let s = storage.lock().await;
@@ -688,11 +685,23 @@ impl AO3App {
                     .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
             };
             for stub in stubs {
-                tokio::time::sleep(CHAPTER_DOWNLOAD_GAP).await;
+                super::pacing::download_gap().await;
                 fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
             }
             let s = storage.lock().await;
             Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
+        }).await
+    }
+
+    /// The pause between works of a bulk download ("Download all"): the
+    /// same 1–10 s pacer the per-chapter loop uses, so a list of works
+    /// downloaded one after another never settles into a fixed cadence
+    /// and the no-repeat rule carries across works. Returns once the wait
+    /// is over; the caller then fetches the next work.
+    pub async fn pace_download_gap(&self) -> Result<(), AO3Error> {
+        self.run_on_runtime(|_client, _storage| async move {
+            super::pacing::download_gap().await;
+            Ok(())
         }).await
     }
 

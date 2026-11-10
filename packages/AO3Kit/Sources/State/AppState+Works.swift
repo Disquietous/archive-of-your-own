@@ -193,8 +193,10 @@ extension AppState {
     }
 
     /// "Download all" for a list: each work not yet offline, one after
-    /// another (the core paces the requests). Stop ends the batch after the
-    /// work in flight, so nothing is left half-saved. One batch at a time.
+    /// another, with the core's varying 1–10 s pause before each work after
+    /// the first (the same pacer that spaces a per-chapter download). Stop
+    /// ends the batch after the work in flight, so nothing is left
+    /// half-saved. One batch at a time.
     func downloadAll(_ ids: [String]) {
         guard bulkDownload == nil else { return }
         let pending = pendingDownloads(ids)
@@ -202,8 +204,12 @@ extension AppState {
         bulkDownloadStopRequested = false
         bulkDownload = BulkDownloadProgress(done: 0, total: pending.count)
         Task { @MainActor in
-            for id in pending {
+            for (index, id) in pending.enumerated() {
                 if bulkDownloadStopRequested { break }
+                if index > 0 {
+                    await bridge.paceDownloadGap()
+                    if bulkDownloadStopRequested { break }
+                }
                 if !downloadedWorkIDs.contains(id), let workId = UInt64(id) {
                     downloadedWorkIDs.insert(id)
                     bridge.markDownloaded(workId)
