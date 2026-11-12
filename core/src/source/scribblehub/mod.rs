@@ -340,6 +340,44 @@ impl Source for ScribbleHubSource {
         Ok(listing)
     }
 
+    /// The series page's header stars (fic_page.js `changerating_reviews`):
+    /// POST admin-ajax `wi_changerating` with the series id (`mypostid`),
+    /// the value (`strRate`) and `intParentCID=0` (a rating outside a
+    /// review). No nonce; the login rides on the session cookies. The
+    /// reply is a short text with a trailing "0": empty when the rating
+    /// was taken, otherwise the site's own message for the reader, which
+    /// is read here as a refusal. The site has no way to withdraw a rating.
+    async fn react(&self, work: &ExternalRef, reaction: super::Reaction) -> Result<super::ReactionOutcome, AppError> {
+        Self::guard()?;
+        let value = match reaction {
+            super::Reaction::Stars { value } if (1..=5).contains(&value) => value,
+            _ => return Ok(super::ReactionOutcome { accepted: false, value: None }),
+        };
+        let form = [
+            ("action".to_string(), "wi_changerating".to_string()),
+            ("mypostid".to_string(), work.external_id.clone()),
+            ("strRate".to_string(), value.to_string()),
+            ("intParentCID".to_string(), "0".to_string()),
+        ];
+        let client = self.client.read().await;
+        let out = client.transport().post_form(
+            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            &|status, _| status < 400, &HOOKS).await?;
+        drop(client);
+        if out.status >= 400 {
+            return Err(AppError::Http {
+                kind: crate::client::FailureKind::from_status(out.status, None),
+                detail: format!("HTTP {} from the rating endpoint", out.status),
+            });
+        }
+        let message = out.body.trim().strip_suffix('0').unwrap_or(out.body.trim()).trim();
+        if !message.is_empty() {
+            log_info!("scribblehub", "rating {value} for {} answered: {message}", work.external_id);
+            return Ok(super::ReactionOutcome { accepted: false, value: None });
+        }
+        Ok(super::ReactionOutcome { accepted: true, value: Some(value) })
+    }
+
     /// The site header's live search in users mode: POST admin-ajax
     /// `wi_ajaxsearchmain` with `strOne` (the text) and `strType=users`
     /// (from fic_wi_all.js `showSearch`, which also skips queries under two

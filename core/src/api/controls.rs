@@ -18,7 +18,11 @@ fn reaction_control(source: &Arc<dyn Source>, s: &Storage, work_id: u64) -> Reac
         }
         ReactionShape::StarRating { max } => {
             let mine = s.get_work_reaction(work_id).ok().flatten();
-            ReactionControl::StarRating { max, mine, gate }
+            let average = s.field_id(source.id(), crate::source::STAT_SITE_RATING)
+                .and_then(|field| s.get_work_stat_num(work_id, field).ok().flatten())
+                .filter(|avg| *avg > 0.0)
+                .map(|avg| format!("{:.1}", avg.min(max as f64)));
+            ReactionControl::StarRating { max, mine, average, gate }
         }
     }
 }
@@ -168,7 +172,13 @@ mod tests {
         let rated = s.ensure_work_stub(&ExternalRef { source: "mockrated".into(), external_id: "1".into(), url: "https://rated.mock/story/1".into() }, "t").unwrap();
         let c = resolve_work_controls(&s, &reg, rated).unwrap();
         assert_eq!(c.site_url.as_deref(), Some("https://rated.mock/story/1"));
-        assert_eq!(c.reaction, ReactionControl::StarRating { max: 5, mine: None, gate: Gate::Enabled });
+        assert_eq!(c.reaction, ReactionControl::StarRating { max: 5, mine: None, average: None, gate: Gate::Enabled });
+
+        // The site average rides on the control, one decimal.
+        let field = s.ensure_field("mockrated", crate::source::STAT_SITE_RATING, "Rating", "num", 1).unwrap();
+        s.set_work_stats(rated, &[crate::storage::WorkStat { field_id: field, num_value: Some(4.14), text_value: None }]).unwrap();
+        assert!(matches!(resolve_work_controls(&s, &reg, rated).unwrap().reaction,
+                         ReactionControl::StarRating { average: Some(ref a), .. } if a == "4.1"));
         assert_eq!(c.discussion, DiscussionShape::Reviews);
         assert!(c.chapter_comments);
         assert_eq!(c.subscribe, Gate::Hidden);

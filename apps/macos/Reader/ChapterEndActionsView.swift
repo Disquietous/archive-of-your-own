@@ -25,7 +25,7 @@ struct ChapterEndActionsView: View {
                 }
                 .disabled(hasKudos || pending || gate != .enabled)
                 .help(gateReason(gate) ?? verb)
-            case .starRating(let max, _, let gate):
+            case .starRating(let max, _, _, let gate):
                 starPill(max: max, mine: appState.workReactions[workID], pending: pending, gate: gate, verb: verb)
             case .none:
                 EmptyView()

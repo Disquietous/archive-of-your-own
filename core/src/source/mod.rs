@@ -219,13 +219,18 @@ pub struct ReactionOutcome {
     pub value: Option<u8>,
 }
 
+/// The stat key a star-rated source reports its site average under.
+pub const STAT_SITE_RATING: &str = "rating";
+
 /// The reaction control for one work: its shape, the reader's own state,
 /// and whether it can be used.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ReactionControl {
     None,
     Kudos { given: bool, gate: Gate },
-    StarRating { max: u8, mine: Option<u8>, gate: Gate },
+    /// `average` is the site's average as the control shows it, one
+    /// decimal ("4.1"); None when the work has no rating yet.
+    StarRating { max: u8, mine: Option<u8>, average: Option<String>, gate: Gate },
 }
 
 /// The lists a user's profile offers to open.

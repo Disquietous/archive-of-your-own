@@ -31,8 +31,8 @@ extension WorkDetailView {
                 .disabled(!isReal || hasKudos || kudosPending || gate != .enabled)
                 .accessibilityLabel(hasKudos ? "Kudos left — kudos are permanent"
                                     : kudosPending ? "Leaving kudos…" : verb)
-            case .starRating(let max, _, let gate):
-                StarRatingView(max: max, mine: state.workReactions[workID], pending: kudosPending,
+            case .starRating(let max, _, let average, let gate):
+                StarRatingView(max: max, mine: state.workReactions[workID], average: average, pending: kudosPending,
                                gate: isReal ? gate : .disabled(reason: ""), verb: verb) { stars in
                     state.rateWork(workID, stars: stars)
                 }

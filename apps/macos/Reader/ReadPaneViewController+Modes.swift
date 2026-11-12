@@ -285,10 +285,10 @@ extension ReadPaneViewController {
             kudosButton.toolTip = hasKudos ? "Kudos left — kudos are permanent"
                 : pending ? "Leaving kudos…"
                 : { if case .disabled(let reason) = gate { return reason } else { return verb } }()
-        case .starRating(let max, _, let gate):
+        case .starRating(let max, _, let average, let gate):
             var reason: String?
             if case .disabled(let r) = gate { reason = r }
-            ratingControl.configure(max: max, value: appState.workReactions[work.id], pending: pending,
+            ratingControl.configure(max: max, value: appState.workReactions[work.id], average: average, pending: pending,
                                     enabled: gate == .enabled, verb: verb, reason: reason)
         case .none:
             break

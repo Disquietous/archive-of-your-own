@@ -66,6 +66,15 @@ impl Storage {
         Ok(())
     }
 
+    /// One numeric stat of one work; None when the work has no value.
+    pub fn get_work_stat_num(&self, work_id: u64, field_id: i64) -> Result<Option<f64>, AppError> {
+        use rusqlite::OptionalExtension;
+        self.conn.query_row(
+            "SELECT num_value FROM work_stats WHERE work_id = ?1 AND field_id = ?2",
+            params![work_id as i64, field_id], |r| r.get::<_, Option<f64>>(0),
+        ).optional().map_err(map_sql).map(Option::flatten)
+    }
+
     pub fn get_work_stats(&self, work_id: u64) -> Result<Vec<WorkStat>, AppError> {
         let mut stmt = self.conn.prepare(
             "SELECT field_id, num_value, text_value FROM work_stats WHERE work_id = ?1 ORDER BY field_id"
