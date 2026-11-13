@@ -21,7 +21,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::client::{AO3Client, SiteHooks};
+use crate::client::SiteHooks;
+use crate::source::ao3::AO3Client;
 use crate::error::AppError;
 use crate::models::{Chapter, CommentsPage, ExternalRef, WorkSummary};
 

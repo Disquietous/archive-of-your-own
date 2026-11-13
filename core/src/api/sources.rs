@@ -84,7 +84,7 @@ impl AO3App {
     /// The page the Tor-side challenge web view loads to earn the
     /// archive's clearance cookies.
     pub fn tor_challenge_url(&self) -> String {
-        format!("{}/", crate::client::BASE_URL)
+        format!("{}/", crate::source::ao3::BASE_URL)
     }
 
     /// Bring a work into the library from any link a source recognises:

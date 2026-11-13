@@ -1,15 +1,17 @@
-//! AO3 behind the source contract. A wrapper over the existing
-//! `AO3Client`, not a move of its code: the fetch plan, parsers and social
-//! paths stay where they are until AO3 is reachable and the move can be
-//! verified live. The client is the app's shared one, so a connect or a
-//! circuit rotation that swaps it is seen here too.
+//! AO3 behind the source contract. The adapter (`AO3Source`, below) maps
+//! the contract onto the AO3 site client (`client/`): AO3's fetch plan,
+//! sign-in, posting and page hooks, which moved here from the transport
+//! layer unchanged. The client is still the app's shared connection
+//! handle, so a connect or a circuit rotation that swaps it is seen here
+//! too, and the AO3-only features the contract does not cover (inbox,
+//! subscriptions, collections, AO3 bookmarks, block/mute) are called on
+//! it directly by the API layer (Area 4.1's AO3-specific interface).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::client::AO3Client;
 use crate::error::AppError;
 use crate::models::{CommentsPage, ExternalRef, WorkSummary, SOURCE_AO3};
 
@@ -17,7 +19,10 @@ use super::search::{SearchQuery, SearchSchema};
 use super::{DiscussionShape, FetchedWork, Gate, LinkTarget, ListedWork, ListingPage, Reaction, ReactionOutcome,
             ReactionShape, Reachability, Source, SourceCapabilities, UpdatePage, UpdateTarget, UserPane, Vocabulary};
 
+pub mod client;
 pub mod search;
+
+pub use client::{has_login_cookie, is_ao3_login_cookie, AO3Client, BASE_URL};
 
 pub struct AO3Source {
     client: Arc<RwLock<AO3Client>>,
@@ -232,12 +237,12 @@ impl Source for AO3Source {
     }
 
     fn comment_url(&self, comment_id: u64) -> Option<String> {
-        Some(format!("{}/comments/{comment_id}", crate::client::BASE_URL))
+        Some(format!("{}/comments/{comment_id}", crate::source::ao3::BASE_URL))
     }
 
     /// Archive requests show as their path.
     fn display_url(&self, url: &str) -> Option<String> {
-        url.strip_prefix(crate::client::BASE_URL).map(str::to_string)
+        url.strip_prefix(crate::source::ao3::BASE_URL).map(str::to_string)
     }
 
     async fn fetch_work(&self, work: &ExternalRef, _known: Option<&WorkSummary>) -> Result<FetchedWork, AppError> {
@@ -252,7 +257,7 @@ impl Source for AO3Source {
     /// as "no works" it would make a census flag every known work gone. A
     /// work page that fails to parse reports nothing.
     async fn fetch_updates(&self, target: &UpdateTarget, page: u32) -> Result<UpdatePage, AppError> {
-        let base = crate::client::BASE_URL;
+        let base = crate::source::ao3::BASE_URL;
         let id = &target.external().external_id;
         let url = match (target, page) {
             (UpdateTarget::Author(_), 0 | 1) => format!("{base}/users/{id}/works"),

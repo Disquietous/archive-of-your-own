@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
 
-use crate::client::{AO3Client, FailureKind};
+use crate::client::FailureKind;
+use crate::source::ao3::AO3Client;
 use crate::events::{self, CoreEvent, OpId, OpKind, OpOutcome, OperationStatus, RecoveryStep, Remedy};
 use crate::storage::Storage;
 
@@ -463,7 +464,7 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
         log_info!("recovery", "no PlatformCapabilities registered — skipping clearance");
         return;
     };
-    match capability.earn_cloudflare_clearance(socks_port, format!("{}/", crate::client::BASE_URL)).await {
+    match capability.earn_cloudflare_clearance(socks_port, format!("{}/", crate::source::ao3::BASE_URL)).await {
         Ok(cookies) => {
             // Mirrors `resolveCloudflare()`'s existing ordering: auth
             // cookies first, Cloudflare's cookies layered on top.
@@ -506,7 +507,7 @@ async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mute
                 let s = storage.lock().await;
                 clearance::save(&s, &source, &saved);
             }
-            clearance::apply(&*client.read().await, &source, &saved);
+            clearance::apply(client.read().await.transport(), &source, &saved);
             log_info!("recovery", "site clearance for {source}: {} cookies", saved.clearance.cookies.len());
             true
         }
@@ -534,7 +535,7 @@ async fn restore_persisted_cookies(client: &Arc<RwLock<AO3Client>>, storage: &Ar
     if let Some(cookies) = cookies {
         c.set_session_cookies(&cookies);
     }
-    crate::client::clearance::restore_all(&clearances, &c);
+    crate::client::clearance::restore_all(&clearances, c.transport());
     drop(c);
     // Every other source's active session.
     let c = client.read().await;

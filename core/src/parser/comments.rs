@@ -84,7 +84,7 @@ pub fn parse_inbox(html: &str) -> InboxPage {
         let avatar_url = li.select(&sel("div.icon img")).next()
             .and_then(|img| img.value().attr("src"))
             .map(|s| {
-                if s.starts_with('/') { format!("{}{s}", crate::client::BASE_URL) }
+                if s.starts_with('/') { format!("{}{s}", crate::source::ao3::BASE_URL) }
                 else { s.to_string() }
             });
 
@@ -283,7 +283,7 @@ fn parse_single_comment(li: &ElementRef) -> Option<(Comment, Option<u64>)> {
         .and_then(|img| img.value().attr("src"))
         .map(|s| {
             if s.starts_with("//") { format!("https:{s}") }
-            else if s.starts_with('/') { format!("{}{s}", crate::client::BASE_URL) }
+            else if s.starts_with('/') { format!("{}{s}", crate::source::ao3::BASE_URL) }
             else { s.to_string() }
         });
 

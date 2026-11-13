@@ -110,19 +110,19 @@ fn parse_number(s: &str) -> u64 {
 // ---------------------------------------------------------------------------
 
 pub fn ao3_work_url(work_number: u64) -> String {
-    format!("{}/works/{work_number}", crate::client::BASE_URL)
+    format!("{}/works/{work_number}", crate::source::ao3::BASE_URL)
 }
 
 pub fn ao3_series_url(series_number: u64) -> String {
-    format!("{}/series/{series_number}", crate::client::BASE_URL)
+    format!("{}/series/{series_number}", crate::source::ao3::BASE_URL)
 }
 
 pub fn ao3_collection_url(slug: &str) -> String {
-    format!("{}/collections/{slug}", crate::client::BASE_URL)
+    format!("{}/collections/{slug}", crate::source::ao3::BASE_URL)
 }
 
 pub fn ao3_user_url(username: &str) -> String {
-    format!("{}/users/{username}", crate::client::BASE_URL)
+    format!("{}/users/{username}", crate::source::ao3::BASE_URL)
 }
 
 /// AO3 sometimes injects a dismissible site-wide announcement between the

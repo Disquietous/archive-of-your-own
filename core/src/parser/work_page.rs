@@ -466,7 +466,7 @@ fn image_block(img: &ElementRef) -> Option<ContentBlock> {
     } else if let Some(rest) = raw.strip_prefix("//") {
         format!("https://{rest}")
     } else if raw.starts_with('/') {
-        format!("{}{raw}", crate::client::BASE_URL)
+        format!("{}{raw}", crate::source::ao3::BASE_URL)
     } else {
         return None;
     };
@@ -566,7 +566,7 @@ fn parse_inline_content_at(el: &ElementRef, depth: usize) -> Vec<InlineContent> 
                     // The archive's own pages link site-relative; another
                     // source's are resolved by `html_to_blocks`.
                     if super::content_base().is_none() && href.starts_with('/') && !href.starts_with("//") {
-                        href = format!("{}{href}", crate::client::BASE_URL);
+                        href = format!("{}{href}", crate::source::ao3::BASE_URL);
                     }
                     let content = parse_inline_content_at(&child_ref, depth + 1);
                     if !content.is_empty() {

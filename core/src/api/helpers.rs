@@ -12,7 +12,7 @@ pub(super) fn log_db<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) 
 /// from persisted state — fills gaps only, freshly harvested values win.
 /// Lets kudos/comment POSTs go out with no preparatory fetch even on a
 /// fresh launch.
-pub(super) fn seed_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::Storage) {
+pub(super) fn seed_posting_credentials(c: &crate::source::ao3::AO3Client, s: &crate::storage::Storage) {
     let token = s.get_state("csrf_token").ok().flatten();
     let pseud = s.get_state("comment_pseud_id").ok().flatten();
     c.seed_credentials(token, pseud);
@@ -148,7 +148,7 @@ pub(super) fn ao3_follow_id(s: &Storage, target: FollowTarget) -> Option<String>
     }
 }
 
-pub(super) fn persist_posting_credentials(c: &crate::client::AO3Client, s: &crate::storage::Storage) {
+pub(super) fn persist_posting_credentials(c: &crate::source::ao3::AO3Client, s: &crate::storage::Storage) {
     if let Some(token) = c.cached_csrf_token() {
         log_db("set_state", s.set_state("csrf_token", &token));
     }
@@ -391,7 +391,7 @@ pub(super) fn requeue_census_marker(s: &Storage, target: FollowTarget, name: &st
 /// against AO3 first so both spellings of one image share the row.
 pub(super) fn image_url_key(url: &str) -> String {
     if url.starts_with('/') {
-        format!("img:{}{url}", crate::client::BASE_URL)
+        format!("img:{}{url}", crate::source::ao3::BASE_URL)
     } else {
         format!("img:{url}")
     }

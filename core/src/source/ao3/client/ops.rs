@@ -2,8 +2,9 @@ use crate::error::AppError;
 use crate::models::*;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, SiteHooks};
-use super::audit::{ActiveRequestGuard, AuditCtx};
+use crate::client::SiteHooks;
+use super::{AO3Client, BASE_URL};
+use crate::client::audit::{ActiveRequestGuard, AuditCtx};
 use super::helpers::{ao3_tag_encode, extract_bookmark_id_from_response,
                      sub_id_from_action, urlencoded};
 

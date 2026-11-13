@@ -580,7 +580,7 @@ pub(crate) mod tests {
     use crate::parser;
 
     fn get(url: &str) -> String {
-        let r = respond_get(&format!("{}{url}", crate::client::BASE_URL), false, "");
+        let r = respond_get(&format!("{}{url}", crate::source::ao3::BASE_URL), false, "");
         assert_eq!(r.status, 200, "{url}");
         r.body
     }
@@ -754,7 +754,7 @@ pub(crate) mod tests {
         let _g = setup();
         assert!(login("someone", "wrong").is_none());
         let cookie = login("tester", "pw").unwrap();
-        assert!(crate::client::has_login_cookie(&cookie));
+        assert!(crate::source::ao3::has_login_cookie(&cookie));
         assert_eq!(viewer_from_cookies(&cookie).as_deref(), Some("tester"));
         // A relaunch restores the jar but not the mock's memory: the cookie signs the viewer back in.
         reset();
@@ -768,7 +768,7 @@ pub(crate) mod tests {
         assert!(parser::parse_kudos_usernames(&html).iter().all(|n| n != "tester"));
 
         // Subscribe → the result page and the work page both show it; unsubscribe clears it.
-        let r = respond_post(&format!("{}/users/tester/subscriptions", crate::client::BASE_URL), &[
+        let r = respond_post(&format!("{}/users/tester/subscriptions", crate::source::ao3::BASE_URL), &[
             ("subscription[subscribable_id]".into(), w.id.to_string()),
             ("subscription[subscribable_type]".into(), "Work".into()),
         ], "");
@@ -779,7 +779,7 @@ pub(crate) mod tests {
         let subs = parser::parse_subscriptions_page(&get("/users/tester/subscriptions?page=1")).unwrap();
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].ao3_id.as_deref(), Some(sid.as_str()));
-        let r = respond_post(&format!("{}/users/tester/subscriptions/{sid}", crate::client::BASE_URL),
+        let r = respond_post(&format!("{}/users/tester/subscriptions/{sid}", crate::source::ao3::BASE_URL),
                              &[("_method".into(), "delete".into())], "");
         assert!(!parser::parse_work_subscription_form(&r.body).unwrap().subscribed);
 
@@ -789,7 +789,7 @@ pub(crate) mod tests {
         assert!(parser::parse_kudos_usernames(&get(&format!("/works/{}?view_adult=true", w.id))).contains(&"tester".to_string()));
 
         // Bookmark create → listed under the viewer; delete → gone.
-        let r = respond_post(&format!("{}/works/{}/bookmarks", crate::client::BASE_URL, w.id), &[
+        let r = respond_post(&format!("{}/works/{}/bookmarks", crate::source::ao3::BASE_URL, w.id), &[
             ("bookmark[bookmarker_notes]".into(), "keep".into()),
             ("bookmark[tag_string]".into(), "Comfort Read, Reread".into()),
             ("bookmark[rec]".into(), "1".into()),
@@ -799,17 +799,17 @@ pub(crate) mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].ao3_bookmark_id, id);
         assert!(mine[0].rec && mine[0].tags.len() == 2 && mine[0].note == "keep");
-        respond_post(&format!("{}/bookmarks/{id}", crate::client::BASE_URL), &[("_method".into(), "delete".into())], "");
+        respond_post(&format!("{}/bookmarks/{id}", crate::source::ao3::BASE_URL), &[("_method".into(), "delete".into())], "");
         assert!(parser::parse_bookmark_listings(&get("/users/tester/bookmarks?page=1")).unwrap().is_empty());
 
         // Comment on a chapter, then reply to it; both show in the thread.
         let cid = chapter_id(2, 1);
-        let r = respond_post(&format!("{}/chapters/{cid}/comments", crate::client::BASE_URL), &[
+        let r = respond_post(&format!("{}/chapters/{cid}/comments", crate::source::ao3::BASE_URL), &[
             ("comment[comment_content]".into(), "A fresh comment from the test".into()),
         ], "");
         assert!(r.body.contains("Comment created") && r.body.contains("A fresh comment from the test"));
         let posted = parser::parse_comments(&r.body).comments.into_iter().find(|c| c.author.username == "tester").unwrap();
-        let r = respond_post(&format!("{}/comments/{}/comments", crate::client::BASE_URL, posted.id), &[
+        let r = respond_post(&format!("{}/comments/{}/comments", crate::source::ao3::BASE_URL, posted.id), &[
             ("comment[comment_content]".into(), "and a reply".into()),
         ], "");
         let tree = parser::parse_comments(&r.body).comments;
@@ -819,13 +819,13 @@ pub(crate) mod tests {
         // Block, then unblock, through the profile links and index.
         let p = parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap();
         assert!(p.viewer_signed_in && p.profile.property("blocked").is_none());
-        let r = respond_post(&format!("{}/users/tester/blocked/users", crate::client::BASE_URL),
+        let r = respond_post(&format!("{}/users/tester/blocked/users", crate::source::ao3::BASE_URL),
                              &[("blocked_id".into(), "Marrow_and_Moss".into())], "");
         let list = parser::parse_moderation_list(&r.body, "confirm_unblock");
         assert_eq!(list.len(), 1);
         let rid = list[0].1.clone().unwrap();
         assert!(parser::parse_user_profile(&get("/users/Marrow_and_Moss/profile")).unwrap().profile.property("blocked").is_some());
-        let r = respond_post(&format!("{}/users/tester/blocked/users/{rid}", crate::client::BASE_URL),
+        let r = respond_post(&format!("{}/users/tester/blocked/users/{rid}", crate::source::ao3::BASE_URL),
                              &[("_method".into(), "delete".into())], "");
         assert!(parser::parse_moderation_list(&r.body, "confirm_unblock").is_empty());
 
@@ -840,7 +840,7 @@ pub(crate) mod tests {
             let mut page = 1;
             let mut found = false;
             loop {
-                let r = respond_get(&format!("{}/comments/show_comments?work_id={work_id}&page={page}", crate::client::BASE_URL), true, "");
+                let r = respond_get(&format!("{}/comments/show_comments?work_id={work_id}&page={page}", crate::source::ao3::BASE_URL), true, "");
                 assert_eq!(r.status, 200);
                 let cp = parser::parse_comments(&r.body);
                 fn has(list: &[crate::models::Comment], id: u64) -> bool {
@@ -851,7 +851,7 @@ pub(crate) mod tests {
                 page += 1;
             }
             assert!(found, "inbox comment {} not on any comment page of work {work_id}", item.comment_id);
-            assert_eq!(respond_get(&format!("{}/comments/{}", crate::client::BASE_URL, item.comment_id), false, "").status, 200);
+            assert_eq!(respond_get(&format!("{}/comments/{}", crate::source::ao3::BASE_URL, item.comment_id), false, "").status, 200);
         }
 
         let img = image("/images/mock/long-table-9100010.png");

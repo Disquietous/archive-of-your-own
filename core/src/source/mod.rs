@@ -116,7 +116,7 @@ pub fn session_logged_in(source: &str, cookies: &str) -> bool {
 /// Whether `name` is one of the cookies that prove a login at `source`.
 pub fn is_login_cookie(source: &str, name: &str) -> bool {
     match source {
-        crate::models::SOURCE_AO3 => crate::client::is_ao3_login_cookie(name),
+        crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name),
         scribblehub::SOURCE_ID => scribblehub::is_login_cookie(name),
         _ => false,
     }
@@ -127,7 +127,7 @@ pub fn is_login_cookie(source: &str, name: &str) -> bool {
 /// cookies, a passed human check among them, are not the account's.
 pub fn is_session_cookie(source: &str, name: &str) -> bool {
     match source {
-        crate::models::SOURCE_AO3 => crate::client::is_ao3_login_cookie(name) || name == "_otwarchive_session",
+        crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name) || name == "_otwarchive_session",
         scribblehub::SOURCE_ID => scribblehub::is_session_cookie(name),
         _ => false,
     }
@@ -137,7 +137,7 @@ pub fn is_session_cookie(source: &str, name: &str) -> bool {
 /// None for a source without accounts.
 pub fn session_origin(source: &str) -> Option<&'static str> {
     match source {
-        crate::models::SOURCE_AO3 => Some(crate::client::BASE_URL),
+        crate::models::SOURCE_AO3 => Some(crate::source::ao3::BASE_URL),
         scribblehub::SOURCE_ID => Some(scribblehub::BASE_URL),
         _ => None,
     }
@@ -714,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn search_capability_matches_declared_schema() {
         // A direct client is a reqwest handle; nothing is sent here.
-        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let client = Arc::new(tokio::sync::RwLock::new(crate::source::ao3::AO3Client::new_direct().await.unwrap()));
         let sources: Vec<Arc<dyn Source>> = vec![
             Arc::new(ao3::AO3Source::new(client.clone())),
             Arc::new(scribblehub::ScribbleHubSource::new(client)),
@@ -771,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn reaction_gate_follows_the_shape_unless_the_adapter_says_otherwise() {
-        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let client = Arc::new(tokio::sync::RwLock::new(crate::source::ao3::AO3Client::new_direct().await.unwrap()));
         let ao3 = ao3::AO3Source::new(client.clone());
         assert_eq!(ao3.reaction_gate(false), Gate::Enabled, "guest kudos");
         let sh = scribblehub::ScribbleHubSource::new(client);
@@ -787,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn ao3_tag_pages_are_built_by_the_adapter() {
-        let client = Arc::new(tokio::sync::RwLock::new(crate::client::AO3Client::new_direct().await.unwrap()));
+        let client = Arc::new(tokio::sync::RwLock::new(crate::source::ao3::AO3Client::new_direct().await.unwrap()));
         let ao3 = ao3::AO3Source::new(client);
         assert_eq!(ao3.tag_url("Hurt/Comfort").as_deref(), Some("https://archiveofourown.org/tags/Hurt*s*Comfort/works"));
         assert_eq!(ao3.tag_url("Tom & Jerry").as_deref(), Some("https://archiveofourown.org/tags/Tom%20*a*%20Jerry/works"));

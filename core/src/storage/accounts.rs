@@ -494,7 +494,7 @@ impl Storage {
         // none, then retire the key either way.
         if let Some(c) = cookies.filter(|c| !c.is_empty()) {
             if let Some(active) = self.get_active_account()? {
-                if !active.logged_in() && crate::client::has_login_cookie(&c) {
+                if !active.logged_in() && crate::source::ao3::has_login_cookie(&c) {
                     self.update_account_cookies(active.id, &c)?;
                 }
             }

@@ -705,7 +705,7 @@ impl Storage {
                      ELSE 'img:' || substr(key, 7)
                  END
                  WHERE key LIKE 'chimg:%'",
-                [crate::client::BASE_URL],
+                [crate::source::ao3::BASE_URL],
             )
             .map_err(map_sql)?;
         self.conn
@@ -1553,7 +1553,7 @@ impl Storage {
             merged.id = target_id.clone();
             merged.username = account.clone();
             if merged.profile_url.is_empty() || merged.profile_url.contains("/pseuds/") {
-                merged.profile_url = format!("{}/users/{account}", crate::client::BASE_URL);
+                merged.profile_url = format!("{}/users/{account}", crate::source::ao3::BASE_URL);
             }
             let mut pseuds: Vec<String> = Vec::new();
             let mut add = |p: &str| {

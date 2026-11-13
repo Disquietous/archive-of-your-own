@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::client::AO3Client;
+use crate::source::ao3::AO3Client;
 use crate::error::AppError;
 use crate::models::*;
 use crate::storage::Storage;

@@ -187,7 +187,7 @@ pub mod epub;
 pub use error::AppError;
 pub use models::*;
 pub use parser::{parse_work_listings, parse_work_page};
-pub use client::AO3Client;
+pub use source::ao3::AO3Client;
 pub use storage::Storage;
 pub use api::{AO3App, AO3Error};
 

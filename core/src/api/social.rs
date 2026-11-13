@@ -102,7 +102,7 @@ impl AO3App {
                 seed_posting_credentials(&c, &s);
                 ao3_work_number(&s, work_id)?
             };
-            let base = crate::client::BASE_URL;
+            let base = crate::source::ao3::BASE_URL;
             let (endpoint, controller, form_page) = if chapter_id == 0 {
                 (format!("{base}/works/{number}/comments"), "works",
                  format!("{base}/works/{number}?show_comments=true&view_adult=true"))

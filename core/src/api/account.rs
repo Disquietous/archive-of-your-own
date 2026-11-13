@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::has_login_cookie;
+use crate::source::ao3::has_login_cookie;
 use crate::models::SOURCE_AO3;
 use crate::source::{session_origin, session_part, SignInShape};
 use crate::storage::AccountRow;
@@ -130,7 +130,7 @@ impl AO3App {
         let client = self.client.blocking_read();
         // Site clearances (passed human checks) ride along with the
         // session: both live in the jar the transport was just built with.
-        crate::client::clearance::restore_all(&crate::client::clearance::load(&storage), &client);
+        crate::client::clearance::restore_all(&crate::client::clearance::load(&storage), client.transport());
         restore_other_sessions(&client, &storage);
 
         if let Ok(Some(account)) = storage.get_active_account() {
@@ -404,7 +404,7 @@ impl AO3App {
                     }
                 }
                 clearance::save(&s, &source, &saved);
-                clearance::apply(&c, &source, &saved);
+                clearance::apply(c.transport(), &source, &saved);
                 put_jar_session(&c, &source, &session);
                 previous
             };

@@ -49,7 +49,7 @@ pub fn drain_request_records() -> Vec<RequestRecord> {
 /// Audit context for one logical request: captures identity and timing at
 /// construction, records the terminal outcome (transparent retries collapse
 /// into the final row). Every fetch/POST path logs through this.
-pub(super) struct AuditCtx {
+pub(crate) struct AuditCtx {
     source: &'static str,
     started_at_ms: u64,
     start: std::time::Instant,
@@ -62,7 +62,7 @@ pub(super) struct AuditCtx {
 impl AuditCtx {
     /// `payload` is the redacted POST body; None for GETs. Request size is
     /// approximated as URL + payload + a typical header block.
-    pub(super) fn new(source: &'static str, method: &str, url: &str, payload: Option<String>) -> Self {
+    pub(crate) fn new(source: &'static str, method: &str, url: &str, payload: Option<String>) -> Self {
         AuditCtx {
             source,
             started_at_ms: now_ms(),
@@ -74,7 +74,7 @@ impl AuditCtx {
         }
     }
 
-    pub(super) fn record(&self, status: u16, response_bytes: u64, error: Option<String>) {
+    pub(crate) fn record(&self, status: u16, response_bytes: u64, error: Option<String>) {
         push_request_record(RequestRecord {
             source: self.source.to_string(),
             started_at_ms: self.started_at_ms,

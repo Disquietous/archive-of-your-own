@@ -89,7 +89,7 @@ pub(super) async fn fetch_image_cached(
 /// source stats and the reacted-by list, atomically. Shared by the
 /// row-id fetch and the link import.
 pub(super) async fn fetch_and_save_work(
-    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
     storage: Arc<Mutex<Storage>>,
     registry: Arc<crate::source::SourceRegistry>,
     work_id: u64,
@@ -149,7 +149,7 @@ fn land_chapters(s: &Storage, source: &Arc<dyn crate::source::Source>, work_id: 
 /// The whole work's chapters in one fetch, saved and returned — the plan
 /// for sources that serve a work as one page (AO3).
 async fn fetch_all_chapters(
-    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
     storage: Arc<Mutex<Storage>>,
     source: Arc<dyn crate::source::Source>,
     external: ExternalRef,
@@ -182,7 +182,7 @@ async fn fetch_all_chapters(
 /// One chapter of a per-chapter source, fetched from its stub (id + title
 /// from the table of contents) and saved over it.
 async fn fetch_one_chapter(
-    client: Arc<tokio::sync::RwLock<crate::client::AO3Client>>,
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
     storage: Arc<Mutex<Storage>>,
     source: Arc<dyn crate::source::Source>,
     external: ExternalRef,

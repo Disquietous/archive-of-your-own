@@ -1,8 +1,9 @@
 use crate::error::AppError;
 use crate::parser;
 
-use super::{AO3Client, BASE_URL, FailureKind, SiteHooks};
-use super::audit::{AuditCtx, redact_payload};
+use crate::client::{FailureKind, SiteHooks};
+use super::{AO3Client, BASE_URL};
+use crate::client::audit::{AuditCtx, redact_payload};
 use super::helpers::{comment_post_succeeded, urlencoded};
 
 impl AO3Client {

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::events::OpId;
 use crate::storage::Storage;
 
-use super::AO3Client;
+use super::Transport;
 
 /// What the platform hands back after the user passes a site's check.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record, Serialize, Deserialize)]
@@ -84,9 +84,9 @@ pub fn origin_of(url: &str) -> Option<String> {
     Some(format!("{}://{}", parsed.scheme(), host))
 }
 
-/// Put a clearance to work on a live client: its cookies into the jar for
-/// the site, its User-Agent on the source's requests.
-pub fn apply(client: &AO3Client, source: &str, saved: &SavedClearance) {
+/// Put a clearance to work on the live transport: its cookies into the jar
+/// for the site, its User-Agent on the source's requests.
+pub fn apply(transport: &Transport, source: &str, saved: &SavedClearance) {
     set_user_agent(source, &saved.clearance.user_agent);
     let joined = saved.clearance.cookies.iter()
         .filter(|c| !c.is_empty())
@@ -94,7 +94,7 @@ pub fn apply(client: &AO3Client, source: &str, saved: &SavedClearance) {
         .collect::<Vec<_>>()
         .join("; ");
     if !joined.is_empty() {
-        client.transport().set_cookies(&saved.origin, &joined);
+        transport.set_cookies(&saved.origin, &joined);
     }
 }
 
@@ -118,9 +118,9 @@ pub fn save(storage: &Storage, source: &str, saved: &SavedClearance) {
 
 /// Re-apply every saved clearance — after a relaunch, or whenever the
 /// transport is rebuilt with an empty jar.
-pub fn restore_all(storage_snapshot: &HashMap<String, SavedClearance>, client: &AO3Client) {
+pub fn restore_all(storage_snapshot: &HashMap<String, SavedClearance>, transport: &Transport) {
     for (source, saved) in storage_snapshot {
-        apply(client, source, saved);
+        apply(transport, source, saved);
     }
 }
 
@@ -161,14 +161,14 @@ mod tests {
 
     #[tokio::test]
     async fn apply_sets_cookies_and_user_agent() {
-        let client = AO3Client::new_direct().await.unwrap();
+        let transport = Transport::new_direct().await.unwrap();
         let saved = SavedClearance {
             origin: "https://clearance.example".into(),
             clearance: SiteClearance { cookies: vec!["cf_clearance=abc".into(), "__cf_bm=d".into()], user_agent: "UA/2".into() },
         };
-        apply(&client, "clearance-test", &saved);
+        apply(&transport, "clearance-test", &saved);
         assert_eq!(user_agent("clearance-test").as_deref(), Some("UA/2"));
-        let header = client.transport().cookies_for("https://clearance.example");
+        let header = transport.cookies_for("https://clearance.example");
         assert!(header.contains("cf_clearance=abc") && header.contains("__cf_bm=d"), "{header}");
     }
 }
