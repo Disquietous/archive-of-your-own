@@ -314,7 +314,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 33;
+    pub(crate) const SCHEMA_VERSION: u32 = 34;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -398,6 +398,7 @@ impl Storage {
                 30 => self.migrate_v30_user_extra(),
                 32 => self.migrate_v32_merge_guest_rows(),
                 33 => self.migrate_v33_work_reactions(),
+                34 => self.migrate_v34_scribblehub_status_values(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1016,6 +1017,34 @@ impl Storage {
     /// v33: the reader's own star rating per work (design/source-controls-
     /// plan.md). Kudos stay in `kudos_given`; this holds a value a source
     /// lets the reader set and clear.
+    /// v34: ScribbleHub's `status` stat back into its range. The site has
+    /// three story statuses — Ongoing, Completed, Hiatus (its own finder's
+    /// choices, and the word that leads the series page's status line).
+    /// Before the parser kept only that word, a running or paused story
+    /// was stored with the whole line ("Ongoing - Updated Nov 9, 2026").
+    /// Each value becomes the status it starts with, in the site's
+    /// spelling; a value that starts with none of the three is not a
+    /// status and its row is dropped (the next refresh writes the real
+    /// one). One-time data fix; no table changes shape.
+    fn migrate_v34_scribblehub_status_values(&self) -> Result<(), AppError> {
+        if !self.table_exists("work_stats")? || !self.table_exists("fields")? {
+            return Ok(());
+        }
+        const STATUS_ROWS: &str =
+            "field_id IN (SELECT id FROM fields WHERE source = 'scribblehub' AND key = 'status')";
+        self.conn.execute_batch(&format!(
+            "UPDATE work_stats SET text_value = CASE
+                 WHEN lower(ltrim(text_value)) LIKE 'ongoing%'   THEN 'Ongoing'
+                 WHEN lower(ltrim(text_value)) LIKE 'completed%' THEN 'Completed'
+                 WHEN lower(ltrim(text_value)) LIKE 'hiatus%'    THEN 'Hiatus'
+                 ELSE text_value END
+             WHERE {STATUS_ROWS} AND text_value IS NOT NULL;
+             DELETE FROM work_stats
+             WHERE {STATUS_ROWS}
+               AND (text_value IS NULL OR text_value NOT IN ('Ongoing', 'Completed', 'Hiatus'));"
+        )).map_err(map_sql)
+    }
+
     fn migrate_v33_work_reactions(&self) -> Result<(), AppError> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS work_reactions (

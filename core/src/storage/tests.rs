@@ -3818,3 +3818,55 @@ fn imported_local_work_is_kept_whole() {
     assert_eq!((saved.source.as_str(), saved.url.as_str()), ("local", ""));
     assert_eq!((saved.kudos, saved.hits), (None, None));
 }
+
+#[test]
+fn v34_puts_scribblehub_status_values_back_in_range() {
+    let path = temp_db_path("sh_status");
+    let stat = |db: &Storage, work: u64, field: i64| -> Option<String> {
+        db.get_work_stats(work).unwrap().into_iter().find(|s| s.field_id == field).and_then(|s| s.text_value)
+    };
+    let (ids, status, other_source, views);
+    {
+        let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+        status = db.ensure_field("scribblehub", "status", "Status", "text", 6).unwrap();
+        views = db.ensure_field("scribblehub", "views", "Views", "num", 3).unwrap();
+        other_source = db.ensure_field("mockrated", "status", "Status", "text", 6).unwrap();
+        let values = [
+            "Ongoing - Updated Nov 9, 2026", "Hiatus - Updated Nov 8, 2026", "Completed", "ongoing",
+            "  COMPLETED ", "Ongoing", "Something else entirely",
+        ];
+        ids = values.iter().enumerate().map(|(i, value)| {
+            let mut w = sample_work(0);
+            w.source = "scribblehub".into();
+            w.external_id = format!("90{i}");
+            let id = db.save_work(&w).unwrap();
+            db.set_work_stats(id, &[
+                WorkStat { field_id: status, num_value: None, text_value: Some(value.to_string()) },
+                WorkStat { field_id: views, num_value: Some(12.0), text_value: None },
+            ]).unwrap();
+            id
+        }).collect::<Vec<_>>();
+        // Another source's field of the same key is not this migration's.
+        let mut w = sample_work(0);
+        w.source = "mockrated".into();
+        w.external_id = "1".into();
+        let other = db.save_work(&w).unwrap();
+        db.set_work_stats(other, &[
+            WorkStat { field_id: other_source, num_value: None, text_value: Some("Ongoing - whatever".into()) },
+        ]).unwrap();
+        db.conn.execute_batch("PRAGMA user_version = 33;").unwrap();
+    }
+    let db = Storage::open(path.to_str().unwrap(), "k").unwrap();
+    assert_eq!(db.schema_version().unwrap(), Storage::SCHEMA_VERSION);
+    let after: Vec<Option<String>> = ids.iter().map(|id| stat(&db, *id, status)).collect();
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(after, vec![s("Ongoing"), s("Hiatus"), s("Completed"), s("Ongoing"), s("Completed"), s("Ongoing"), None]);
+    // The work's other stats, and other sources, are untouched.
+    for id in &ids {
+        assert_eq!(db.get_work_stats(*id).unwrap().iter().find(|s| s.field_id == views).and_then(|s| s.num_value), Some(12.0));
+    }
+    let mockrated = db.resolve_work("mockrated", "1").unwrap();
+    assert_eq!(stat(&db, mockrated, other_source), s("Ongoing - whatever"));
+    drop(db);
+    library_file::remove_file_set(&path);
+}

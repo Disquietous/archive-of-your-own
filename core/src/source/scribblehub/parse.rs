@@ -248,6 +248,25 @@ fn plain_text_of(blocks: &[ContentBlock]) -> String {
 // Series page
 // ---------------------------------------------------------------------------
 
+/// The sidebar's status line: the status word and the site's own "last
+/// updated" date. A finished story carries the date on the status span
+/// (`<span title="Last updated: …">Completed</span>`); a running one nests
+/// it (`<span>Ongoing - Updated <span title="Last updated: …">…</span></span>`).
+/// The date is the site's statement of when the story last changed, so
+/// when it is there it is the work's updated date; the chapter list is
+/// only the fallback.
+fn status_and_updated(span: &ElementRef) -> (String, Option<String>) {
+    let dated = |el: &ElementRef| attr(el, "title")
+        .and_then(|t| t.strip_prefix("Last updated:"))
+        .map(|d| normalize_date(d.trim()))
+        .filter(|d| !d.is_empty());
+    let updated = dated(span).or_else(|| span.select(&sel("span[title]")).find_map(|inner| dated(&inner)));
+    // "Ongoing - Updated Nov 9, 2026" → "Ongoing".
+    let whole = text(span);
+    let status = whole.split(" - ").next().unwrap_or("").trim().to_string();
+    (status, updated)
+}
+
 fn parse_toc_rows<'a>(rows: impl Iterator<Item = ElementRef<'a>>) -> Vec<TocEntry> {
     rows.filter_map(|li| {
         let a = li.select(&sel("a.toc_a")).next()?;
@@ -368,7 +387,7 @@ pub fn parse_series_page(html: &str, external_id: &str) -> Result<SeriesPage, cr
     let (status, last_updated) = root.select(&sel("i.fa-question.status")).next()
         .and_then(|icon| icon.parent().and_then(ElementRef::wrap))
         .and_then(|rnd| rnd.next_siblings().filter_map(ElementRef::wrap).next())
-        .map(|span| (text(&span), attr(&span, "title").and_then(|t| t.strip_prefix("Last updated:")).map(|d| normalize_date(d.trim()))))
+        .map(|span| status_and_updated(&span))
         .unwrap_or_default();
 
     let toc = parse_toc_rows(root.select(&sel("ol.toc_ol li.toc_w")));
@@ -987,10 +1006,24 @@ mod tests {
         assert_eq!(s.chapter_count, 5);
         assert!(!s.complete);
         assert_eq!(s.total_chapters, None);
-        assert_eq!(s.date_updated, "2026-10-26");
+        // The sidebar's own date (a chapter was edited two days after the
+        // newest one was posted), not the newest chapter's.
+        assert_eq!(s.date_updated, "2026-10-28");
         assert_eq!(s.word_count, None);
         assert!(s.kudos.is_none() && s.hits.is_none());
         assert_eq!(page.status, "Ongoing");
+
+        // Both forms of the status line give the word and the site's date.
+        let line = |html: &str| {
+            let doc = Html::parse_fragment(html);
+            let span = doc.select(&sel("span.line")).next().unwrap();
+            status_and_updated(&span)
+        };
+        assert_eq!(line(r#"<span class="line" title="Last updated: Jul 26, 2026 09:14 PM">Completed</span>"#),
+                   ("Completed".to_string(), Some("2026-07-26".to_string())));
+        assert_eq!(line(r#"<span class="line">Ongoing - Updated <span title="Last updated: Nov 9, 2026 04:10 AM">Nov 9, 2026</span></span>"#),
+                   ("Ongoing".to_string(), Some("2026-11-09".to_string())));
+        assert_eq!(line(r#"<span class="line">Hiatus</span>"#), ("Hiatus".to_string(), None));
         assert_eq!(page.content_warnings, vec!["Strong Language"]);
     }
 
