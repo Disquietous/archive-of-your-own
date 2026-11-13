@@ -140,7 +140,7 @@ struct RequestProgressView: View {
     }
 
     private func shortURL(_ url: String) -> String {
-        url.replacingOccurrences(of: "https://archiveofourown.org", with: "")
+        appState.bridge.displayURL(url)
     }
 
     private func elapsed(_ ms: Int64) -> String {

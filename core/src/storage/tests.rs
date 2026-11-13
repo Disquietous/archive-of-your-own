@@ -528,6 +528,45 @@ fn test_subscriptions_persistence() {
 }
 
 #[test]
+fn test_accounts_are_active_per_source() {
+    let db = open_test_db();
+    let ao3 = account(&db, "Alice");
+    db.set_active_account(ao3).unwrap();
+    db.add_subscription(ao3, "work", "1", "W", None).unwrap();
+
+    // A sign-in at another source: its own active account, its own login
+    // cookie, and AO3's account and its subscriptions untouched.
+    let cookies = "wordpress_logged_in_abc=token; wordpress_sec_abc=s";
+    let first = db.create_account_at("scribblehub", "70412", "quillfeather", cookies).unwrap();
+    db.set_active_account(first).unwrap();
+    assert!(db.has_subscription(ao3, "work", "1").unwrap());
+    assert_eq!(db.get_active_account().unwrap().map(|a| a.id), Some(ao3));
+    assert_eq!(db.get_active_account_at("scribblehub").unwrap().map(|a| a.id), Some(first));
+    assert!(db.signed_in_at("scribblehub"));
+    assert_eq!(db.get_active_accounts().unwrap().len(), 2);
+
+    // The same account signing in again reuses its row, by its key.
+    assert_eq!(db.create_account_at("scribblehub", "70412", "quill", cookies).unwrap(), first);
+    assert_eq!(db.get_account(first).unwrap().unwrap().username, "quill");
+
+    // A second account there takes over as active; AO3 still untouched.
+    let second = db.create_account_at("scribblehub", "70413", "inkwell", "").unwrap();
+    db.set_active_account(second).unwrap();
+    assert_eq!(db.get_active_account_at("scribblehub").unwrap().map(|a| a.id), Some(second));
+    assert!(!db.get_account(second).unwrap().unwrap().logged_in(), "no login cookie stored");
+    assert!(db.has_subscription(ao3, "work", "1").unwrap());
+
+    // An AO3 cookie name proves nothing at another source, and back.
+    let wrong = db.create_account_at("scribblehub", "70414", "x", "remember_user_token=t").unwrap();
+    assert!(!db.get_account(wrong).unwrap().unwrap().logged_in());
+
+    // Signing the other source out leaves AO3's subscriptions alone.
+    db.clear_account_cookies(first).unwrap();
+    db.delete_account(second).unwrap();
+    assert!(db.has_subscription(ao3, "work", "1").unwrap());
+}
+
+#[test]
 fn test_subscriptions_cleared_on_account_transitions() {
     let db = open_test_db();
     let a = account(&db, "Alice");

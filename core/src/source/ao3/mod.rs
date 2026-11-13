@@ -14,8 +14,8 @@ use crate::error::AppError;
 use crate::models::{CommentsPage, ExternalRef, WorkSummary, SOURCE_AO3};
 
 use super::search::{SearchQuery, SearchSchema};
-use super::{DiscussionShape, FetchedWork, Gate, ListedWork, ListingPage, Reaction, ReactionOutcome, ReactionShape,
-            Reachability, Source, SourceCapabilities, Vocabulary};
+use super::{DiscussionShape, FetchedWork, Gate, LinkTarget, ListedWork, ListingPage, Reaction, ReactionOutcome,
+            ReactionShape, Reachability, Source, SourceCapabilities, UserPane, Vocabulary};
 
 pub mod search;
 
@@ -33,6 +33,7 @@ impl AO3Source {
         SourceCapabilities {
             id: SOURCE_AO3.to_string(),
             name: "Archive of Our Own".to_string(),
+            host: "archiveofourown.org".to_string(),
             reach: Reachability { tor: true, direct: true },
             reaction: ReactionShape::Kudos,
             discussion: DiscussionShape::Threaded,
@@ -44,6 +45,7 @@ impl AO3Source {
             tag_listings: true,
             update_checks: true,
             login: true,
+            sign_in: super::SignInShape::Credentials,
             remote_bookmarks: true,
             subscriptions: true,
             collections: true,
@@ -82,6 +84,115 @@ impl AO3Source {
         }
     }
 
+    /// An archive URL's path segments, percent-decoded, with the parsed
+    /// URL. None when the input is not an http(s) link to the archive (a
+    /// missing scheme is assumed).
+    fn archive_path(input: &str) -> Option<(url::Url, Vec<String>)> {
+        let candidate = if input.contains("://") { input.to_string() } else { format!("https://{input}") };
+        let url = url::Url::parse(&candidate).ok()?;
+        if !matches!(url.scheme(), "http" | "https") { return None }
+        let host = url.host_str()?.to_ascii_lowercase();
+        if host != "archiveofourown.org" && !host.ends_with(".archiveofourown.org") { return None }
+        let parts = url.path_segments()
+            .map(|segments| segments.filter(|s| !s.is_empty()).map(Self::decode_segment).collect())
+            .unwrap_or_default();
+        Some((url, parts))
+    }
+
+    fn decode_segment(segment: &str) -> String {
+        let bytes = segment.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = (bytes[i] == b'%' && i + 2 < bytes.len())
+                .then(|| std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()))
+                .flatten();
+            match hex {
+                Some(b) => { out.push(b); i += 3; }
+                None => { out.push(bytes[i]); i += 1; }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn is_id(s: &str) -> bool {
+        !s.is_empty() && s.parse::<u64>().is_ok()
+    }
+
+    fn work(id: &str) -> Option<ExternalRef> {
+        let number: u64 = id.parse().ok()?;
+        Some(ExternalRef::ao3(number.to_string(), crate::parser::ao3_work_url(number)))
+    }
+
+    /// `/works/{id}`, `/works/{id}/navigate`, `/works/{id}/chapters/{id}`;
+    /// `view_full_work=true` asks for the whole work.
+    fn work_link(parts: &[String], url: &url::Url) -> Option<LinkTarget> {
+        let work = Self::work(parts.get(1)?)?;
+        let entire = url.query_pairs().any(|(k, v)| k == "view_full_work" && v == "true");
+        match parts.len() {
+            2 => Some(LinkTarget::Work { work, entire }),
+            3 if parts[2] == "navigate" => Some(LinkTarget::Work { work, entire: false }),
+            4 if parts[2] == "chapters" && Self::is_id(&parts[3]) => Some(if entire {
+                LinkTarget::Work { work, entire: true }
+            } else {
+                LinkTarget::Chapter { work, chapter_id: parts[3].clone() }
+            }),
+            _ => None,
+        }
+    }
+
+    /// `/users/{name}[/pseuds/{pseud}][/profile|works|bookmarks|…]`.
+    /// Pseuds share their user's profile.
+    fn user_link(parts: &[String]) -> Option<LinkTarget> {
+        let name = parts.get(1).filter(|n| !n.is_empty())?;
+        let mut rest = &parts[2..];
+        if rest.first().map(String::as_str) == Some("pseuds") {
+            rest = if rest.len() >= 2 { &rest[2..] } else { &[] };
+        }
+        let pane = match rest.first().map(String::as_str) {
+            None | Some("profile") | Some("series") | Some("gifts") => UserPane::Profile,
+            Some("works") => UserPane::Works,
+            Some("bookmarks") => UserPane::Bookmarks,
+            Some("collections") => UserPane::Collections,
+            _ => return None, // inbox, readings, subscriptions, …
+        };
+        Some(LinkTarget::User { user: ExternalRef::ao3(name.clone(), crate::parser::ao3_user_url(name)), pane })
+    }
+
+    /// The archive escapes characters that can't sit in a tag's path
+    /// segment: `*s*` = "/", `*a*` = "&", `*d*` = ".", `*q*` = "?",
+    /// `*h*` = "#".
+    fn decode_tag(segment: &str) -> String {
+        segment.replace("*s*", "/").replace("*a*", "&").replace("*d*", ".").replace("*q*", "?").replace("*h*", "#")
+    }
+
+    /// Works, chapters, users, series, collections and tag listings; any
+    /// other archive page is the archive's but has no view here.
+    pub fn classify_link(input: &str) -> Option<LinkTarget> {
+        let (url, parts) = Self::archive_path(input)?;
+        let target = match parts.first().map(String::as_str) {
+            Some("works") => Self::work_link(&parts, &url),
+            Some("users") => Self::user_link(&parts),
+            Some("series") if parts.len() == 2 && Self::is_id(&parts[1]) => parts[1].parse().ok().map(|n: u64| {
+                LinkTarget::Series { series: ExternalRef::ao3(n.to_string(), crate::parser::ao3_series_url(n)) }
+            }),
+            Some("collections") if parts.len() >= 2 => {
+                // A work shown inside a collection is still the work.
+                if parts.len() >= 4 && parts[2] == "works" {
+                    Self::work_link(&parts[2..], &url)
+                } else {
+                    Some(LinkTarget::Collection { name: parts[1].clone() })
+                }
+            }
+            Some("tags") if parts.len() == 2 || (parts.len() == 3 && parts[2] == "works") => {
+                let name = Self::decode_tag(&parts[1]);
+                (!name.is_empty()).then_some(LinkTarget::Tag { name })
+            }
+            _ => None,
+        };
+        Some(target.unwrap_or(LinkTarget::Unsupported))
+    }
+
     fn number(external_id: &str) -> Result<u64, AppError> {
         external_id.parse().map_err(|_| AppError::InvalidWorkId(external_id.to_string()))
     }
@@ -111,6 +222,23 @@ impl Source for AO3Source {
         Some(ExternalRef::ao3(name.clone(), crate::parser::ao3_user_url(&name)))
     }
 
+    fn classify(&self, input: &str) -> Option<LinkTarget> {
+        Self::classify_link(input)
+    }
+
+    fn work_ref(&self, external_id: &str) -> Option<ExternalRef> {
+        Self::work(external_id)
+    }
+
+    fn comment_url(&self, comment_id: u64) -> Option<String> {
+        Some(format!("{}/comments/{comment_id}", crate::client::BASE_URL))
+    }
+
+    /// Archive requests show as their path.
+    fn display_url(&self, url: &str) -> Option<String> {
+        url.strip_prefix(crate::client::BASE_URL).map(str::to_string)
+    }
+
     async fn fetch_work(&self, work: &ExternalRef, _known: Option<&WorkSummary>) -> Result<FetchedWork, AppError> {
         let number = Self::number(&work.external_id)?;
         let (summary, chapters, kudos_names) = self.client.read().await.get_work(number).await?;
@@ -126,6 +254,11 @@ impl Source for AO3Source {
             Some(chapter_id) => client.fetch_comments_for_chapter(number, chapter_id, page).await,
             None => client.fetch_comments_for_work(number, page).await,
         }
+    }
+
+    /// The archive's login form, as the client has always sent it.
+    async fn login(&self, username: &str, password: &str) -> Result<bool, AppError> {
+        self.client.read().await.login(username, password).await
     }
 
     /// Kudos are open to guests; the site counts them by IP then.
@@ -179,6 +312,71 @@ impl Source for AO3Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(input: &str) -> Option<LinkTarget> {
+        AO3Source::classify_link(input)
+    }
+
+    fn work(id: &str, entire: bool) -> Option<LinkTarget> {
+        Some(LinkTarget::Work { work: AO3Source::work(id).unwrap(), entire })
+    }
+
+    fn user(pane: UserPane) -> Option<LinkTarget> {
+        Some(LinkTarget::User {
+            user: ExternalRef::ao3("sample_user", "https://archiveofourown.org/users/sample_user"),
+            pane,
+        })
+    }
+
+    #[test]
+    fn classifies_work_links() {
+        let base = "https://archiveofourown.org";
+        assert_eq!(target(&format!("{base}/works/111")), work("111", false));
+        assert_eq!(target("archiveofourown.org/works/111"), work("111", false));
+        assert_eq!(target(&format!("{base}/works/111?view_adult=true#main")), work("111", false));
+        assert_eq!(target(&format!("{base}/works/111/navigate")), work("111", false));
+        assert_eq!(target(&format!("{base}/works/111/chapters/222#workskin")),
+                   Some(LinkTarget::Chapter { work: AO3Source::work("111").unwrap(), chapter_id: "222".to_string() }));
+        assert_eq!(target(&format!("{base}/works/111?view_full_work=true")), work("111", true));
+        assert_eq!(target(&format!("{base}/works/111/chapters/222?view_full_work=true")), work("111", true));
+        assert_eq!(target(&format!("{base}/collections/Some_Fest/works/111")), work("111", false));
+        assert_eq!(target("https://www.archiveofourown.org/works/111"), work("111", false));
+    }
+
+    #[test]
+    fn classifies_user_series_collection_and_tag_links() {
+        let base = "https://archiveofourown.org";
+        assert_eq!(target(&format!("{base}/users/sample_user")), user(UserPane::Profile));
+        assert_eq!(target(&format!("{base}/users/sample_user/profile")), user(UserPane::Profile));
+        assert_eq!(target(&format!("{base}/users/sample_user/works")), user(UserPane::Works));
+        assert_eq!(target(&format!("{base}/users/sample_user/bookmarks")), user(UserPane::Bookmarks));
+        assert_eq!(target(&format!("{base}/users/sample_user/collections")), user(UserPane::Collections));
+        assert_eq!(target(&format!("{base}/users/sample_user/pseuds/alt")), user(UserPane::Profile));
+        assert_eq!(target(&format!("{base}/users/sample_user/pseuds/alt/works")), user(UserPane::Works));
+        assert_eq!(target(&format!("{base}/series/333")), Some(LinkTarget::Series {
+            series: ExternalRef::ao3("333", "https://archiveofourown.org/series/333"),
+        }));
+        let collection = Some(LinkTarget::Collection { name: "Some_Fest".to_string() });
+        assert_eq!(target(&format!("{base}/collections/Some_Fest")), collection);
+        assert_eq!(target(&format!("{base}/collections/Some_Fest/bookmarks")), collection);
+        let tag = |name: &str| Some(LinkTarget::Tag { name: name.to_string() });
+        assert_eq!(target(&format!("{base}/tags/Fluff/works")), tag("Fluff"));
+        assert_eq!(target(&format!("{base}/tags/Alpha*s*Beta%20Pair/works")), tag("Alpha/Beta Pair"));
+        assert_eq!(target(&format!("{base}/tags/Q*a*A")), tag("Q&A"));
+    }
+
+    #[test]
+    fn archive_pages_without_a_view_are_unsupported_and_other_hosts_are_not_ours() {
+        let base = "https://archiveofourown.org";
+        for path in ["/", "/works/search?work_search%5Bquery%5D=x", "/works/111/comments", "/chapters/222",
+                     "/users/sample_user/inbox", "/series/abc", "/tags/Fluff/bookmarks", "/admin_posts/5"] {
+            assert_eq!(target(&format!("{base}{path}")), Some(LinkTarget::Unsupported), "{path}");
+        }
+        for other in ["https://notarchiveofourown.org/works/111", "https://example.com/works/111",
+                      "ftp://archiveofourown.org/works/111", "just some words", ""] {
+            assert_eq!(target(other), None, "{other}");
+        }
+    }
 
     #[test]
     fn recognises_work_and_chapter_links() {

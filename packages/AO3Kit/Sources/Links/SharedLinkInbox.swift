@@ -1,9 +1,9 @@
 import Foundation
 
 /// The iOS share extension's hand-off to the app: one pending link in the
-/// app group's defaults, written by the extension (only after it classified
-/// the link as one the app opens) and taken — read and deleted — by the app
-/// the next time it's in front and unlocked. No network, no library access.
+/// app group's defaults, written by the extension and taken — read and
+/// deleted — by the app the next time it's in front and unlocked, which
+/// is when the link is classified. No network, no library access.
 enum SharedLinkInbox {
     static let appGroup = "group.com.archiveofyourown.reader"
     private static let key = "pendingSharedLink"

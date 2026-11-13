@@ -15,6 +15,14 @@ struct ArchiveApp: App {
         _appState = State(initialValue: appState)
         _models = State(initialValue: AppModels(appState: appState))
         Self.retireBackgroundCheck()
+        // A site's human check and its sign-in page are the user's to
+        // complete, in a sheet over whatever is on screen; the core asks.
+        RecoveryCapabilities.siteChallengeHandler = { _, url in
+            try await SiteSheetController.present(url: url, purpose: .humanCheck)
+        }
+        RecoveryCapabilities.siteSignInHandler = { _, url, loginCookiePrefix in
+            try await SiteSheetController.present(url: url, purpose: .signIn(loginCookiePrefix: loginCookiePrefix))
+        }
     }
 
     var body: some Scene {

@@ -40,7 +40,10 @@ struct TorCircuitView: View {
                     address: hop.address, country: hop.country, isTappable: true
                 ))
             }
-            result.append(HopInfo(id: 4, icon: "globe", label: "AO3", address: "archiveofourown.org", country: "", isTappable: false))
+            // The circuit ends at the site Tor reaches.
+            let site = state.bridge.listSources().first { $0.reach.tor }
+            result.append(HopInfo(id: 4, icon: "globe", label: site?.vocabulary.siteShort ?? "Site",
+                                  address: site?.host ?? "", country: "", isTappable: false))
             return result
         }
 

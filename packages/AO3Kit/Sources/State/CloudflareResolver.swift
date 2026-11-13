@@ -34,7 +34,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
     }
 
     struct ResolvedCookies {
-        /// All cookies for archiveofourown.org, as "name=value" strings.
+        /// All cookies for the challenged site, as "name=value" strings.
         let cookies: [String]
         /// Whether a cf_clearance cookie was found.
         let hasCfClearance: Bool
@@ -42,6 +42,9 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
 
     // MARK: - State
 
+    /// The page being loaded (the core names it); its host scopes the
+    /// cookies handed back.
+    private var challengeURL: URL?
     private var webView: WKWebView?
     private var continuation: CheckedContinuation<ResolvedCookies, Error>?
     private var timeoutTask: Task<Void, Never>?
@@ -57,8 +60,9 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
     /// WKWebView routed through the given SOCKS port.
     ///
     /// Returns the resolved cookies, or throws on failure.
-    func resolve(socksPort: UInt16) async throws -> ResolvedCookies {
+    func resolve(socksPort: UInt16, url: URL) async throws -> ResolvedCookies {
         guard socksPort > 0 else { throw ResolveError.noSocksPort }
+        challengeURL = url
         // Fail closed: without the leak rule, no page loads at all.
         let leakRules = try await Self.leakRules()
 
@@ -93,8 +97,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
                 self?.handleTimeout()
             }
 
-            // Load AO3 homepage
-            let url = URL(string: "https://archiveofourown.org/")!
+            // Load the site's home page
             wv.load(URLRequest(url: url))
         }
     }
@@ -156,7 +159,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
             // Retry after a short delay
             Task {
                 try? await Task.sleep(for: .seconds(2))
-                let url = URL(string: "https://archiveofourown.org/")!
+                guard let url = challengeURL else { return }
                 webView.load(URLRequest(url: url))
             }
         } else {
@@ -170,7 +173,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
             navigationRetries += 1
             Task {
                 try? await Task.sleep(for: .seconds(2))
-                let url = URL(string: "https://archiveofourown.org/")!
+                guard let url = challengeURL else { return }
                 webView.load(URLRequest(url: url))
             }
         } else {
@@ -190,7 +193,7 @@ final class CloudflareResolver: NSObject, WKNavigationDelegate {
             guard let self else { return }
 
             let ao3Cookies = cookies.filter { cookie in
-                cookie.domain.contains("archiveofourown.org")
+                cookie.domain.contains(self.challengeURL?.host ?? "\u{0}")
             }
 
             let cookieStrings = ao3Cookies.map { "\($0.name)=\($0.value)" }

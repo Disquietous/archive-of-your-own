@@ -303,6 +303,19 @@ extension RustBridge {
         return (username, hasSession)
     }
 
+    /// Every source that has sign-in, with its accounts and how one is
+    /// added (by password, or on the site's own page).
+    func accountGroups() -> [UAccountGroup] {
+        app?.accountGroups() ?? []
+    }
+
+    /// Sign in on the source's own page; the account that results is
+    /// saved and made that source's active one.
+    func signInAtSite(source: String) async throws -> UAccount {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.signInAtSite(source: source)
+    }
+
     func getActiveAccountUsername() -> String {
         guard let app else { return "" }
         return (try? app.getActiveAccountUsername()) ?? ""

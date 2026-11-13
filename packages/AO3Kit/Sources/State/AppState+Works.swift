@@ -3,17 +3,27 @@ import SwiftUI
 // MARK: - Works, chapters, downloads & reading progress
 
 extension AppState {
-    /// The library id (as the string every screen keys by) for an AO3 work
-    /// number — from a link, a series prev/next, or a subscription. nil
-    /// when the text isn't an AO3 number or the library is unavailable.
-    func rowID(forAO3Work number: String) -> String? {
-        guard let n = UInt64(number), let id = bridge.resolveAO3Work(n) else { return nil }
+    /// The library id (as the string every screen keys by) of another
+    /// work at the same source as `workID`, named by that source's own id
+    /// — a series prev/next. nil when the source can't address a work by
+    /// id alone or the library is unavailable.
+    func rowID(forSibling externalID: String, of workID: String) -> String? {
+        guard let id = UInt64(workID), let row = bridge.siblingWork(of: id, externalID: externalID) else { return nil }
+        return String(row)
+    }
+
+    /// The library id of the work a link names (a subscription's target
+    /// page). nil when the link isn't a work's or the library is
+    /// unavailable.
+    func workRowID(forLink link: String) -> String? {
+        guard case .work(let id, _)? = bridge.openLink(link) else { return nil }
         return String(id)
     }
 
-    /// The library id for an AO3 series number (see `rowID(forAO3Work:)`).
-    func rowID(forAO3Series number: String, name: String? = nil) -> String? {
-        guard let n = UInt64(number), let id = bridge.resolveAO3Series(n, name: name) else { return nil }
+    /// The library id of the series a link names; a never-seen series is
+    /// named `name` until its page is fetched.
+    func seriesRowID(forLink link: String, name: String? = nil) -> String? {
+        guard case .series(let id, _)? = bridge.openLink(link, nameHint: name) else { return nil }
         return String(id)
     }
 
@@ -77,7 +87,8 @@ extension AppState {
     /// The controls for a work: its source's shapes, gates and words.
     /// nil for a row the library does not have.
     func workControls(_ id: String) -> WorkControls? {
-        UInt64(id).flatMap { bridge.workControls($0) }
+        _ = accountsRevision  // gates follow sign-in state
+        return UInt64(id).flatMap { bridge.workControls($0) }
     }
 
     /// Leave kudos. One-way — kudos are permanent at the source, so there

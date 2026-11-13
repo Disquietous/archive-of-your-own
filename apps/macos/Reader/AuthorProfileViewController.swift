@@ -44,6 +44,8 @@ final class AuthorProfileViewController: NSViewController {
     /// Set by the hosting pane: swap the reading pane to one of the user's
     /// lists (works / bookmarks / collections).
     var onOpenList: ((UInt64, MacAppModel.AuthorPane) -> Void)?
+    /// A link clicked in the bio; unset → it leaves the app.
+    var onOpenLink: ((URL) -> Void)?
 
     private var loadedAvatarFor: UInt64?
     private var renderedBioKey: String?
@@ -463,7 +465,11 @@ extension AuthorProfileViewController: NSTextViewDelegate {
         // Bios have no image-loading flow; swallow tap-to-load placeholders.
         if ContentBlockRenderer.imageSrc(from: link) != nil { return true }
         guard let url = ExternalLinkOpener.url(from: link) else { return false }
-        ExternalLinkOpener.open(url, bridge: appState.bridge)
+        if let onOpenLink {
+            onOpenLink(url)
+        } else {
+            ExternalLinkOpener.open(url, bridge: appState.bridge)
+        }
         return true
     }
 }

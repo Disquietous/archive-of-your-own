@@ -25,7 +25,7 @@ enum ExternalLinkOpener {
 
     /// Every installed app that can open https URLs, name-sorted.
     static func installedBrowsers() -> [BrowserApp] {
-        guard let probe = URL(string: "https://archiveofourown.org") else { return [] }
+        guard let probe = URL(string: "https://example.com") else { return [] }
         var seen = Set<String>()
         return NSWorkspace.shared.urlsForApplications(toOpen: probe)
             .compactMap { url -> BrowserApp? in
@@ -42,31 +42,6 @@ enum ExternalLinkOpener {
         if let url = link as? URL { return url }
         if let s = link as? String { return URL(string: s) }
         return nil
-    }
-
-    // MARK: - AO3 entity URLs
-
-    static func ao3WorkURL(_ id: String) -> URL? {
-        URL(string: "https://archiveofourown.org/works/\(id)")
-    }
-
-    static func ao3UserURL(_ username: String) -> URL? {
-        URL(string: "https://archiveofourown.org/users/\(username)")
-    }
-
-    static func ao3CollectionURL(_ name: String) -> URL? {
-        URL(string: "https://archiveofourown.org/collections/\(name)")
-    }
-
-    /// AO3's tag-in-URL substitutions (mirrors the core's ao3_tag_encode),
-    /// then percent-encoding for whatever remains.
-    static func ao3TagURL(_ tag: String) -> URL? {
-        let substituted = tag
-            .replacingOccurrences(of: "/", with: "*s*")
-            .replacingOccurrences(of: "&", with: "*a*")
-            .replacingOccurrences(of: ".", with: "*d*")
-        let encoded = substituted.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? substituted
-        return URL(string: "https://archiveofourown.org/tags/\(encoded)/works")
     }
 
     @MainActor

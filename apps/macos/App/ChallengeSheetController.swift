@@ -1,11 +1,13 @@
 import AppKit
 import WebKit
 
-/// A site's human check (Cloudflare's checkbox), shown to the user in a
-/// sheet when a direct request comes back challenged. The web view runs
+/// A site's own page shown to the user in a sheet, for the two things only
+/// they can do there: pass its human check (Cloudflare's checkbox) when a
+/// direct request comes back challenged, or sign in to their account. The web view runs
 /// on the system connection — the same path the app's own direct requests
 /// take, so it is only ever asked for off Tor — with a throwaway data
-/// store. When the site's clearance cookie appears, every cookie it set is
+/// store. When the cookie that marks success appears (the clearance
+/// cookie, or the site's login cookie), every cookie the site set is
 /// handed back with the web view's User-Agent, which the clearance is
 /// bound to, and the sheet closes itself. Nothing the page renders reaches
 /// the app's own views.
@@ -18,20 +20,40 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
 
         var errorDescription: String? {
             switch self {
-            case .cancelled: "The check was dismissed."
-            case .loadFailed(let message): "The check page did not load: \(message)"
+            case .cancelled: "The window was closed before it finished."
+            case .loadFailed(let message): "The page did not load: \(message)"
             }
         }
     }
 
-    /// The cookie that means the check was passed.
-    private static let clearanceCookie = "cf_clearance"
+    /// What the sheet is up for, and so which cookie ends it.
+    enum Purpose {
+        case humanCheck
+        /// Done when a cookie whose name starts with the prefix arrives.
+        case signIn(loginCookiePrefix: String)
+
+        func isDone(_ cookies: [HTTPCookie]) -> Bool {
+            switch self {
+            case .humanCheck: cookies.contains { $0.name == "cf_clearance" }
+            case .signIn(let prefix): cookies.contains { $0.name.hasPrefix(prefix) && !$0.value.isEmpty }
+            }
+        }
+    }
 
     /// Show the check for `url` on the main window and wait for it to pass.
     static func present(source: String, url: URL) async throws -> SiteClearance {
-        let controller = ChallengeSheetController(source: source, url: url)
+        let controller = ChallengeSheetController(source: source, url: url, purpose: .humanCheck)
         return try await controller.run()
     }
+
+    /// Show the site's sign-in page and wait for the user to sign in.
+    static func presentSignIn(source: String, url: URL, loginCookiePrefix: String) async throws -> SiteClearance {
+        let controller = ChallengeSheetController(source: source, url: url,
+                                                  purpose: .signIn(loginCookiePrefix: loginCookiePrefix))
+        return try await controller.run()
+    }
+
+    private let purpose: Purpose
 
     private let url: URL
     private let site: String
@@ -43,8 +65,9 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
     /// no strong reference to its delegate).
     private var retained: ChallengeSheetController?
 
-    private init(source: String, url: URL) {
+    private init(source: String, url: URL, purpose: Purpose) {
         self.url = url
+        self.purpose = purpose
         let host = url.host ?? source
         site = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
 
@@ -55,11 +78,14 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
 
         sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 600),
                          styleMask: [.titled], backing: .buffered, defer: false)
-        sheet.title = "Human check"
+        let signingIn: Bool
+        if case .signIn = purpose { signingIn = true } else { signingIn = false }
+        sheet.title = signingIn ? "Sign in" : "Human check"
         super.init()
 
-        let heading = NSTextField(wrappingLabelWithString:
-            "\(site) is checking that you’re a person. Complete the check below to continue.")
+        let heading = NSTextField(wrappingLabelWithString: signingIn
+            ? "Sign in to \(site) below. Your password goes only to \(site); the app keeps the session it gives back."
+            : "\(site) is checking that you’re a person. Complete the check below to continue.")
         heading.font = MacFont.ui(13)
         heading.translatesAutoresizingMaskIntoConstraints = false
 
@@ -125,7 +151,7 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
             guard let self, !self.finished else { return }
             let ours = cookies.filter { Self.belongs($0.domain, to: self.site) }
-            guard ours.contains(where: { $0.name == Self.clearanceCookie }) else { return }
+            guard self.purpose.isDone(ours) else { return }
             self.webView.evaluateJavaScript("navigator.userAgent") { [weak self] result, _ in
                 guard let self, !self.finished else { return }
                 let userAgent = (result as? String) ?? ""
@@ -151,6 +177,8 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        // Submitting the sign-in form cancels the page load under it.
+        if (error as NSError).code == NSURLErrorCancelled { return }
         finish(.failure(Failure.loadFailed(error.localizedDescription)))
     }
 

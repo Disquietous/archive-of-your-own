@@ -7,6 +7,8 @@ struct AccountManagementView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var showAddAccount = false
+    /// The source picked in Add account; nil until the user chooses.
+    @State private var addSource: String?
     @State private var addUsername = ""
     @State private var addPassword = ""
     @State private var addError: String?
@@ -18,11 +20,20 @@ struct AccountManagementView: View {
     @State private var showLogoutConfirm = false
     @State private var loggingOutAccountId: String?
 
-    private var accounts: [AO3Account] {
-        // Observable reads so the list refreshes when login state changes.
-        _ = state.ao3Username
-        _ = state.ao3AccountCount
-        return state.bridge.getAccounts()
+    /// One account with the source it belongs to.
+    private struct Row: Identifiable {
+        let account: UAccount
+        let group: UAccountGroup
+        var id: String { account.id }
+    }
+
+    /// Every source that has sign-in, with its accounts. Observable
+    /// through `accountsRevision`, which every account change bumps.
+    private var groups: [UAccountGroup] { state.accountGroups() }
+
+    /// Every source's accounts, one list.
+    private var accounts: [Row] {
+        groups.flatMap { group in group.accounts.map { Row(account: $0, group: group) } }
     }
 
     var body: some View {
@@ -35,7 +46,7 @@ struct AccountManagementView: View {
                     EmptyStateView(
                         systemImage: "person.crop.circle.badge.plus",
                         title: "No accounts",
-                        subtitle: "Add an AO3 account to sync bookmarks, subscriptions, and comments."
+                        subtitle: "Add an account to sync bookmarks and subscriptions, comment, and rate."
                     )
                     .padding(.top, 20)
                 } else {
@@ -65,6 +76,8 @@ struct AccountManagementView: View {
                 } else {
                     Button {
                         showAddAccount = true
+                        addSource = nil
+                        state.siteSignInError = nil
                         addUsername = ""
                         addPassword = ""
                         addError = nil
@@ -91,8 +104,7 @@ struct AccountManagementView: View {
         .alert("Remove Account?", isPresented: $showRemoveConfirm) {
             Button("Remove", role: .destructive) {
                 if let id = removeConfirmId {
-                    state.bridge.removeAccount(accountId: id)
-                    state.refreshAO3Username()
+                    state.removeAccount(id)
                     removeConfirmId = nil
                 }
             }
@@ -109,7 +121,7 @@ struct AccountManagementView: View {
             }
             Button("Cancel", role: .cancel) { logoutConfirmId = nil }
         } message: {
-            Text("Forgets this account's AO3 session on this device. The account stays here so you can log back in.")
+            Text("Forgets this account's session on this device. The account stays here so you can log back in.")
         }
     }
 
@@ -125,7 +137,7 @@ struct AccountManagementView: View {
             }
             .buttonStyle(IconButtonPressStyle())
 
-            Text("AO3 Accounts")
+            Text("Accounts")
                 .font(Typography.browseTitle())
                 .foregroundStyle(theme.ink)
 
@@ -146,19 +158,21 @@ struct AccountManagementView: View {
 
     // MARK: - Account Row
 
-    private func accountRow(_ account: AO3Account) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func accountRow(_ row: Row) -> some View {
+        let account = row.account
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(account.username)
                         .font(.custom("HankenGrotesk", size: 15).weight(.semibold))
                         .foregroundStyle(theme.ink)
 
-                    Text(account.isActive
-                         ? "Active · \(account.isLoggedIn ? "Logged in" : "Logged out")"
-                         : (account.isLoggedIn ? "Logged in" : "Logged out"))
+                    // "ScribbleHub · Active · Logged in" — active is per source.
+                    Text(row.group.name + " · " + (account.isActive
+                         ? "Active · \(account.loggedIn ? "Logged in" : "Logged out")"
+                         : (account.loggedIn ? "Logged in" : "Logged out")))
                         .font(Typography.uiCaption())
-                        .foregroundStyle(account.isActive && account.isLoggedIn ? theme.sage : theme.ink3)
+                        .foregroundStyle(account.isActive && account.loggedIn ? theme.sage : theme.ink3)
                 }
 
                 Spacer()
@@ -166,9 +180,14 @@ struct AccountManagementView: View {
                 if loggingOutAccountId == account.id {
                     ProgressView()
                         .frame(width: 32, height: 32)
-                } else if account.isActive && !account.isLoggedIn {
+                } else if account.isActive && !account.loggedIn {
                     Button {
-                        nav.presentedSheet = .reauth
+                        // By password: the reauth sheet. On the site's own
+                        // page: that page again.
+                        switch row.group.signIn {
+                        case .site: Task { await state.signInAtSite(source: row.group.source) }
+                        case .credentials, .none: nav.presentedSheet = .reauth
+                        }
                     } label: {
                         Text("Log in")
                             .font(Typography.uiSmall())
@@ -176,7 +195,7 @@ struct AccountManagementView: View {
                             .frame(height: 32)
                     }
                     .buttonStyle(IconButtonPressStyle())
-                } else if account.isLoggedIn {
+                } else if account.loggedIn {
                     Button {
                         logoutConfirmId = account.id
                         showLogoutConfirm = true
@@ -207,53 +226,109 @@ struct AccountManagementView: View {
 
     // MARK: - Add Account
 
+    /// Add account: the source first, then that source's way of signing in.
     private var addAccountForm: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Add AO3 account")
+            Text("Add account")
                 .font(Typography.uiSmall())
                 .foregroundStyle(theme.ink3)
 
-            TextField("Username", text: $addUsername)
-                .font(Typography.uiBody())
-                .textContentType(.username)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .padding(10)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            SecureFieldWithToggle(placeholder: "Password", text: $addPassword)
-                .font(Typography.uiBody())
-                .padding(10)
-                .background(theme.surface2)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if let addError {
-                Text(addError)
-                    .font(Typography.uiCaption())
-                    .foregroundStyle(Color(hex: "CE514D"))
+            Picker("Source", selection: $addSource) {
+                Text("Choose a source…").tag(String?.none)
+                ForEach(groups, id: \.source) { group in
+                    Text(group.name).tag(String?.some(group.source))
+                }
+            }
+            .pickerStyle(.menu)
+            .tint(theme.accent)
+            .onChange(of: addSource) { _, _ in
+                addUsername = ""
+                addPassword = ""
+                addError = nil
+                state.siteSignInError = nil
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    Task { await performAddAccount() }
-                } label: {
-                    Text(isAddingAccount ? "Signing in…" : "Sign in")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.onAccent)
-                        .padding(.horizontal, 16)
-                        .frame(height: 34)
-                        .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.accent))
+            if let group = groups.first(where: { $0.source == addSource }) {
+                switch group.signIn {
+                case .credentials: credentialsStep(group)
+                case .site: siteStep(group)
+                case .none: EmptyView()
                 }
-                .disabled(isAddingAccount || addUsername.isEmpty || addPassword.isEmpty)
+            }
 
-                Button { showAddAccount = false } label: {
-                    Text("Cancel")
-                        .font(Typography.smallButtonLabel())
-                        .foregroundStyle(theme.ink3)
-                }
+            Button { showAddAccount = false } label: {
+                Text("Cancel")
+                    .font(Typography.smallButtonLabel())
+                    .foregroundStyle(theme.ink3)
             }
         }
+    }
+
+    /// A source that signs in with a username and password.
+    @ViewBuilder private func credentialsStep(_ group: UAccountGroup) -> some View {
+        TextField("Username", text: $addUsername)
+            .font(Typography.uiBody())
+            .textContentType(.username)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .padding(10)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        SecureFieldWithToggle(placeholder: "Password", text: $addPassword)
+            .font(Typography.uiBody())
+            .padding(10)
+            .background(theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+        if let addError {
+            Text(addError)
+                .font(Typography.uiCaption())
+                .foregroundStyle(Color(hex: "CE514D"))
+        }
+
+        Button {
+            Task { await performAddAccount() }
+        } label: {
+            Text(isAddingAccount ? "Signing in…" : "Sign in")
+                .font(Typography.smallButtonLabel())
+                .foregroundStyle(theme.onAccent)
+                .padding(.horizontal, 16)
+                .frame(height: 34)
+                .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.accent))
+        }
+        .disabled(isAddingAccount || addUsername.isEmpty || addPassword.isEmpty)
+
+        Text("Your password is used once to sign in to \(group.name) and never stored.")
+            .font(Typography.uiCaption())
+            .foregroundStyle(theme.ink3)
+    }
+
+    /// A source that signs in on its own page, shown in a sheet.
+    @ViewBuilder private func siteStep(_ group: UAccountGroup) -> some View {
+        if let error = state.siteSignInError, error.source == group.source {
+            Text(error.message)
+                .font(Typography.uiCaption())
+                .foregroundStyle(Color(hex: "CE514D"))
+        }
+
+        Button {
+            Task {
+                if await state.signInAtSite(source: group.source) { showAddAccount = false }
+            }
+        } label: {
+            Text(state.siteSignInSource == group.source ? "Signing in…" : "Sign in on \(group.name)")
+                .font(Typography.smallButtonLabel())
+                .foregroundStyle(theme.onAccent)
+                .padding(.horizontal, 16)
+                .frame(height: 34)
+                .background(RoundedRectangle(cornerRadius: Radius.chip).fill(theme.accent))
+        }
+        .disabled(state.siteSignInSource != nil || state.bridge.networkBlocked)
+
+        Text("Opens \(group.name)'s own sign-in page. Your password goes only to the site and is never stored; the app keeps the session.")
+            .font(Typography.uiCaption())
+            .foregroundStyle(theme.ink3)
     }
 
     // MARK: - Actions

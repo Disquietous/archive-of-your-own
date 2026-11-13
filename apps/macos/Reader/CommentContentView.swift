@@ -109,7 +109,7 @@ struct CommentContentView: View {
         case .link(let href, let content):
             var s = joined(content)
             s.foregroundColor = theme.accent
-            if let url = URL(string: href, relativeTo: URL(string: "https://archiveofourown.org")) {
+            if let url = URL(string: href) {
                 s.link = url.absoluteURL
             }
             return s

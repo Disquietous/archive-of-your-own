@@ -38,9 +38,19 @@ while IFS= read -r line; do
   (( ok )) || bad+=("$line")
 done <<< "$all"
 
+# Multi-source plan, Phase 6: no Swift file names a source's host either.
+# Links are classified, built and shortened by the core's adapters.
+hosts=$(grep -rnE 'archiveofourown\.org|scribblehub\.com' apps packages/AO3Kit/Sources --include='*.swift' \
+       | grep -v '/Generated/' || true)
+if [[ -n "$hosts" ]]; then
+  echo "error: Swift names a source's host — ask the core (openLink, controls, capabilities) instead:" >&2
+  printf '%s\n' "$hosts" | sed 's/^/  /' >&2
+  exit 1
+fi
+
 if (( ${#bad[@]} )); then
   echo "error: Swift compares a source id — ask the row's controls or capabilities instead:" >&2
   printf '  %s\n' "${bad[@]}" >&2
   exit 1
 fi
-echo "==> No source-id comparisons in Swift."
+echo "==> No source-id comparisons or source hosts in Swift."

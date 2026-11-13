@@ -732,6 +732,23 @@ pub fn parse_profile_page(html: &str, source_id: &str) -> Result<SourceUserProfi
     Ok(SourceUserProfile { source: SOURCE_ID.to_string(), source_id: source_id.to_string(), username, properties })
 }
 
+/// The signed-in account, from any page's header: the user menu shows the
+/// name (`span.menu_right.username`) and links the account's own profile
+/// (`a.user_menu_links` to `/profile/<id>/<slug>/`). None when the page
+/// was served signed out (the menu is absent).
+pub fn parse_signed_in_user(html: &str) -> Option<crate::source::SessionIdentity> {
+    let doc = Html::parse_document(html);
+    let root = doc.root_element();
+    let id = root.select(&sel("a.user_menu_links")).find_map(|a| {
+        let href = attr(&a, "href")?;
+        let rest = href.split("/profile/").nth(1)?;
+        let id = rest.split('/').next()?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then(|| id.to_string())
+    })?;
+    let username = first_text(&root, "span.menu_right.username").filter(|n| !n.is_empty())?;
+    Some(crate::source::SessionIdentity { external_id: id, username })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +757,22 @@ mod tests {
     fn series() -> SeriesPage {
         let html = fs::read_to_string("tests/fixtures/scribblehub_series.html").unwrap();
         parse_series_page(&html, "700412").unwrap()
+    }
+
+    #[test]
+    fn signed_in_user_from_the_header_menu() {
+        let signed_in = r#"<html><body><div class="header">
+            <span id="menu_right_item" class="menu_right username_main">
+              <span id="menu_right_item" class="menu_right username">quillfeather</span></span>
+            <div class="lo_main loggedin"><div class="lo_box">
+              <span><a class="user_menu_links" href="/account/">Account</a></span>
+              <span><a class="user_menu_links" href="/profile/70412/quillfeather/">Your Profile Page</a></span>
+              <span><a class="user_menu_links" href="https://www.scribblehub.com/logout/">Log Out</a></span>
+            </div></div></div></body></html>"#;
+        let who = parse_signed_in_user(signed_in).unwrap();
+        assert_eq!((who.external_id.as_str(), who.username.as_str()), ("70412", "quillfeather"));
+        let signed_out = r#"<html><body><a href="https://www.scribblehub.com/login/">Login</a></body></html>"#;
+        assert_eq!(parse_signed_in_user(signed_out), None);
     }
 
     #[test]

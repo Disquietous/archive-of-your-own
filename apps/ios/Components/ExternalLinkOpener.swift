@@ -34,18 +34,6 @@ enum ExternalLinkOpener {
         bridge.setPref(key: prefKey, value: mode.rawValue)
     }
 
-
-    /// AO3's tag-in-URL substitutions (mirrors the core's ao3_tag_encode),
-    /// then percent-encoding for whatever remains.
-    static func ao3TagURL(_ tag: String) -> URL? {
-        let substituted = tag
-            .replacingOccurrences(of: "/", with: "*s*")
-            .replacingOccurrences(of: "&", with: "*a*")
-            .replacingOccurrences(of: ".", with: "*d*")
-        let encoded = substituted.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? substituted
-        return URL(string: "https://archiveofourown.org/tags/\(encoded)/works")
-    }
-
     /// Open `url` per the stored preference. Only http(s) URLs can go to
     /// the in-app browser; anything else falls back to the system. While
     /// the registered VPN is carrying the device's traffic, every browser

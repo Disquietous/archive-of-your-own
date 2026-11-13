@@ -87,6 +87,10 @@ pub fn strip_cloudflare_cookies(cookies: &str) -> String {
 
 /// Whether a cookie string (a jar's `name=value; ...` header, or a single
 /// Set-Cookie value) carries an AO3 login. The one test of logged-in state.
+pub fn is_ao3_login_cookie(name: &str) -> bool {
+    LOGIN_COOKIE_NAMES.contains(&name)
+}
+
 pub fn has_login_cookie(cookies: &str) -> bool {
     cookies.split(';').any(|part| {
         let (name, value) = part.trim().split_once('=').unwrap_or((part.trim(), ""));

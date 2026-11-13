@@ -3,7 +3,39 @@ import SwiftUI
 // MARK: - Accounts & AO3 login
 
 extension AppState {
+    /// Every source that has sign-in, with its accounts. Reads
+    /// `accountsRevision`, so a view that calls this refreshes on change.
+    func accountGroups() -> [UAccountGroup] {
+        _ = accountsRevision
+        return bridge.accountGroups()
+    }
+
+    /// Sign in on the source's own page (the platform shows it). One at a
+    /// time; the error stays until the next attempt at that source.
+    @discardableResult
+    func signInAtSite(source: String) async -> Bool {
+        guard siteSignInSource == nil else { return false }
+        siteSignInSource = source
+        siteSignInError = nil
+        defer { siteSignInSource = nil }
+        do {
+            _ = try await bridge.signInAtSite(source: source)
+        } catch {
+            siteSignInError = (source, error.localizedDescription)
+            return false
+        }
+        accountsRevision += 1
+        return true
+    }
+
+    /// Remove an account (any source) from this device.
+    func removeAccount(_ accountId: String) {
+        bridge.removeAccount(accountId: accountId)
+        refreshAO3Username()
+    }
+
     func refreshAO3Username() {
+        accountsRevision += 1
         let accounts = bridge.getAccounts()
         let active = accounts.first { $0.isActive }
         ao3ActiveAccount = active?.username
@@ -83,19 +115,23 @@ extension AppState {
         return true
     }
 
+    /// Make an account the active one of its source. Switching another
+    /// source's account leaves the AO3 account, and everything keyed to
+    /// it, as it was.
     func switchAccount(_ accountId: String) {
-        let result = bridge.switchAccount(accountId: accountId)
-        ao3ActiveAccount = result.username.isEmpty ? nil : result.username
-        ao3Username = result.hasSession ? ao3ActiveAccount : nil
+        let previous = ao3ActiveAccount
+        _ = bridge.switchAccount(accountId: accountId)
+        // Re-derives the AO3 account state; the core emptied subscriptions
+        // if the AO3 account changed (they're account data).
+        refreshAO3Username()
+        guard ao3ActiveAccount != previous else { return }
 
-        if !result.hasSession && !result.username.isEmpty {
+        if ao3Username == nil && ao3ActiveAccount != nil {
             needsReauth = true
         }
 
-        // Invalidate per-account network data so views refetch. The core
-        // emptied subscriptions on the switch (they're account data).
+        // Invalidate per-account network data so views refetch.
         bookmarksLoadedForAccount = nil
-        reloadSubscriptionsFromStorage()
 
         // Reload per-account data from storage
         bookmarkedWorkIDs = Set(bridge.getBookmarkedWorkIds().map { String($0) })

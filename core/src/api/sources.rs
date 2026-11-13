@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::source::search::{FieldOption, SearchQuery, SearchSchema};
-use crate::source::{SourceCapabilities, SourceRegistry};
+use crate::source::{LinkTarget, SourceCapabilities, SourceRegistry, UserPane};
 
 /// The app's sources, in display order. AO3 first, then ScribbleHub (on
 /// the same transport); the rated mock answers only while the mock
@@ -29,13 +29,57 @@ impl AO3App {
         self.sources.by_id(&source_id).map(|s| s.capabilities().clone())
     }
 
-    /// Which source, if any, recognises a link, and the id it resolves to.
-    pub fn resolve_link(&self, link: String) -> Option<UResolvedLink> {
-        self.sources.resolve(&link).map(|(source, external)| UResolvedLink {
-            source: source.id().to_string(),
-            external_id: external.external_id,
-            url: external.url,
-        })
+    /// Whether a pasted, dropped or tapped string holds a link the app
+    /// has a view for. Reads only the adapters' URL rules: no library, no
+    /// network — cheap enough to ask while a drag is over a window.
+    pub fn can_open_link(&self, link: String) -> bool {
+        link_in(&self.sources, &link)
+            .and_then(|l| self.sources.classify(&l))
+            .is_some_and(|(_, target)| target != LinkTarget::Unsupported)
+    }
+
+    /// Where a link leads (Area 10): the adapters are asked in turn and
+    /// the first that claims it names the destination, by row id. A work,
+    /// series or user the library has never seen gets its row here (a stub
+    /// until fetched), so the caller can open it like any other.
+    /// `name_hint` names a never-seen series until its page is fetched.
+    /// `link` may be a bare URL, one without a scheme, or text holding one.
+    pub fn open_link(&self, link: String, name_hint: Option<String>) -> Result<ULinkDestination, AO3Error> {
+        let s = self.storage.blocking_lock();
+        destination(&self.sources, &s, &link, name_hint.as_deref())
+    }
+
+    /// The row id of another work at the same source as `work_id`, named
+    /// by that source's own id — a series' previous/next link. A work the
+    /// library has never seen gets a stub row.
+    pub fn sibling_work(&self, work_id: u64, external_id: String) -> Result<u64, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let sibling = s.work_ref(work_id)
+            .and_then(|of| self.sources.by_id(&of.source))
+            .and_then(|source| source.work_ref(&external_id));
+        let Some(sibling) = sibling else {
+            return Err(AO3Error::NotFound { message: format!("no work {external_id} beside work {work_id}") });
+        };
+        s.ensure_work_stub(&sibling, "").map_err(AO3Error::from)
+    }
+
+    /// The site page for one comment on a work, when its source gives
+    /// comments their own pages.
+    pub fn comment_url(&self, work_id: u64, comment_id: u64) -> Option<String> {
+        let source = { let s = self.storage.blocking_lock(); s.work_ref(work_id)?.source };
+        self.sources.by_id(&source)?.comment_url(comment_id)
+    }
+
+    /// A request URL as the request log and progress views show it: each
+    /// source shortens its own (the archive's show as their path).
+    pub fn display_url(&self, url: String) -> String {
+        self.sources.all().iter().find_map(|s| s.display_url(&url)).unwrap_or(url)
+    }
+
+    /// The page the Tor-side challenge web view loads to earn the
+    /// archive's clearance cookies.
+    pub fn tor_challenge_url(&self) -> String {
+        format!("{}/", crate::client::BASE_URL)
     }
 
     /// Bring a work into the library from any link a source recognises:
@@ -109,9 +153,148 @@ impl AO3App {
     }
 }
 
+/// Where a link leads, by row id. `Unsupported` is a known site's page
+/// with no view here; `Unknown` is a link no source claims (the caller
+/// opens it outside the app, or reports it).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum ULinkDestination {
+    /// `entire`: the link asked for the whole work on one page.
+    Work { work_id: u64, entire: bool },
+    /// The chapter by its source's own id; it resolves to a position
+    /// against the work's saved chapters.
+    Chapter { work_id: u64, chapter_external_id: String },
+    /// `username` is set when a bare name is the user's key at the source.
+    User { user_id: u64, username: Option<String>, pane: UserPane },
+    Series { series_id: u64, name: String },
+    Collection { name: String },
+    Tag { name: String },
+    Unsupported { message: String },
+    Unknown { message: String },
+}
+
+/// `open_link` over a registry and an open library.
+fn destination(sources: &SourceRegistry, s: &Storage, link: &str, name_hint: Option<&str>) -> Result<ULinkDestination, AO3Error> {
+    let Some((source, target)) = link_in(sources, link).and_then(|l| sources.classify(&l)) else {
+        return Ok(ULinkDestination::Unknown { message: "No supported site recognises that link.".to_string() });
+    };
+    let caps = source.capabilities();
+    Ok(match target {
+        LinkTarget::Work { work, entire } => ULinkDestination::Work {
+            work_id: s.ensure_work_stub(&work, "").map_err(AO3Error::from)?,
+            entire,
+        },
+        LinkTarget::Chapter { work, chapter_id } => ULinkDestination::Chapter {
+            work_id: s.ensure_work_stub(&work, "").map_err(AO3Error::from)?,
+            chapter_external_id: chapter_id,
+        },
+        LinkTarget::Series { series } => {
+            let series_id = s.ensure_series(&series, name_hint.unwrap_or("")).map_err(AO3Error::from)?;
+            let name = s.get_series(series_id).map_err(AO3Error::from)?.map(|r| r.name).unwrap_or_default();
+            ULinkDestination::Series { series_id, name }
+        }
+        LinkTarget::User { user, pane } => {
+            let row = if user.source == crate::models::SOURCE_AO3 {
+                s.ensure_ao3_user_row(&user.external_id).map_err(AO3Error::from)?
+            } else {
+                Some(s.record_user(&crate::models::AO3User {
+                    source: user.source.clone(), id: user.external_id.clone(), username: user.external_id.clone(),
+                    profile_url: Some(user.url.clone()).filter(|u| !u.is_empty()), avatar_url: None,
+                }).map_err(AO3Error::from)?)
+            };
+            match row {
+                Some(id) => ULinkDestination::User {
+                    user_id: id as u64,
+                    username: caps.username_is_key.then(|| user.external_id.clone()),
+                    pane,
+                },
+                None => unsupported(caps),
+            }
+        }
+        LinkTarget::Collection { name } => ULinkDestination::Collection { name },
+        LinkTarget::Tag { name } => ULinkDestination::Tag { name },
+        LinkTarget::Unsupported => unsupported(caps),
+    })
+}
+
+fn unsupported(caps: &SourceCapabilities) -> ULinkDestination {
+    ULinkDestination::Unsupported { message: format!("This {} link isn’t supported yet.", caps.vocabulary.site_short) }
+}
+
+/// The link a string holds: the whole string when it has no whitespace,
+/// else the first word in it that a source claims or that carries a
+/// scheme (text shared around a URL).
+fn link_in(sources: &SourceRegistry, raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return None }
+    if !trimmed.contains(char::is_whitespace) { return Some(trimmed.to_string()) }
+    trimmed.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| matches!(c, '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'' | ',' | '.' | '!')))
+        .find(|word| word.contains("://") || sources.classify(word).is_some())
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UResolvedLink {
     pub source: String,
     pub external_id: String,
     pub url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn sources() -> SourceRegistry {
+        // A direct client is a reqwest handle; nothing is sent here.
+        registry(Arc::new(tokio::sync::RwLock::new(AO3Client::new_direct().await.unwrap())))
+    }
+
+    #[tokio::test]
+    async fn links_resolve_to_rows_and_unknown_ones_are_told_apart() {
+        let sources = sources().await;
+        let s = Storage::open_in_memory("k").unwrap();
+        let open = |link: &str| destination(&sources, &s, link, None).unwrap();
+
+        let ULinkDestination::Work { work_id, entire: false } = open("https://archiveofourown.org/works/111") else {
+            panic!("a work link is a work");
+        };
+        assert!(s.is_work_stub(work_id), "a never-seen work gets a stub row");
+        // The same work again — by chapter, inside shared text, whole — is the same row.
+        assert_eq!(open("Read this! https://archiveofourown.org/works/111/chapters/222 so good"),
+                   ULinkDestination::Chapter { work_id, chapter_external_id: "222".to_string() });
+        assert_eq!(open("archiveofourown.org/works/111?view_full_work=true"),
+                   ULinkDestination::Work { work_id, entire: true });
+
+        // Another source's story is a work too, on its own row.
+        let ULinkDestination::Work { work_id: other, .. } = open("https://www.scribblehub.com/series/700412/a-story/") else {
+            panic!("a second source's story link is a work");
+        };
+        assert_ne!(other, work_id);
+
+        assert_eq!(open("https://archiveofourown.org/tags/Alpha*s*Beta/works"),
+                   ULinkDestination::Tag { name: "Alpha/Beta".to_string() });
+        assert_eq!(open("https://archiveofourown.org/collections/Some_Fest"),
+                   ULinkDestination::Collection { name: "Some_Fest".to_string() });
+        assert!(matches!(open("https://archiveofourown.org/users/sample_user/works"),
+                         ULinkDestination::User { username: Some(ref n), pane: UserPane::Works, .. } if n == "sample_user"));
+        assert!(matches!(open("https://www.scribblehub.com/profile/51230/quill/"),
+                         ULinkDestination::User { username: None, pane: UserPane::Profile, .. }));
+
+        assert_eq!(open("https://archiveofourown.org/works/111/comments"),
+                   ULinkDestination::Unsupported { message: "This AO3 link isn’t supported yet.".to_string() });
+        assert!(matches!(open("https://example.com/works/111"), ULinkDestination::Unknown { .. }));
+        assert!(matches!(open("just some words"), ULinkDestination::Unknown { .. }));
+        assert!(matches!(open(""), ULinkDestination::Unknown { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_never_seen_series_takes_the_hinted_name() {
+        let sources = sources().await;
+        let s = Storage::open_in_memory("k").unwrap();
+        let first = destination(&sources, &s, "https://archiveofourown.org/series/333", Some("Tide Charts")).unwrap();
+        let ULinkDestination::Series { series_id, name } = first else { panic!("a series link is a series") };
+        assert_eq!(name, "Tide Charts");
+        assert_eq!(destination(&sources, &s, "https://archiveofourown.org/series/333", None).unwrap(),
+                   ULinkDestination::Series { series_id, name: "Tide Charts".to_string() });
+    }
 }

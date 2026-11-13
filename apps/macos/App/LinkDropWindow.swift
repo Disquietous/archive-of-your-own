@@ -1,14 +1,17 @@
 import AppKit
 
-/// A window that accepts AO3 links dragged in from any app (a browser's
+/// A window that accepts links dragged in from any app (a browser's
 /// address bar or a link on a page, a text selection holding a URL) and
-/// opens them exactly as "Open AO3 URL…" does. While dragging, only the
-/// string is classified — nothing is read from or sent to the network —
-/// and the copy cursor appears only for links the app can open.
+/// opens them exactly as "Open URL…" does. While dragging, only the
+/// string is checked against the sources' URL rules (`canOpen`) — nothing
+/// is read from the library or sent to the network — and the copy cursor
+/// appears only for links the app can open.
 final class LinkDropWindow: NSWindow {
     /// Opens a link; returns nil when it opened, else the failure message.
     /// Unset (or `acceptsLinks` false) → drops are refused.
     var openLink: ((String) -> String?)?
+    /// Whether a string holds a link the app has a view for.
+    var canOpen: (String) -> Bool = { _ in false }
     /// False while the window can't route anywhere (e.g. locked).
     var acceptsLinks: () -> Bool = { true }
 
@@ -28,7 +31,7 @@ final class LinkDropWindow: NSWindow {
 
     private func droppable(_ info: NSDraggingInfo) -> String? {
         guard openLink != nil, acceptsLinks(), let raw = linkString(from: info),
-              case .success = AO3Link.classify(raw) else { return nil }
+              canOpen(raw) else { return nil }
         return raw
     }
 

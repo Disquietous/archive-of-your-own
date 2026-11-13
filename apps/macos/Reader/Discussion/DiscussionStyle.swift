@@ -163,7 +163,7 @@ struct DiscussionStyle {
             return inline(content, font: ContentBlockRenderer.applyTraits(.italic, to: font), color: color)
         case .link(let href, let content):
             let s = NSMutableAttributedString(attributedString: inline(content, font: font, color: accent))
-            if let url = URL(string: href, relativeTo: URL(string: "https://archiveofourown.org")) {
+            if let url = URL(string: href) {
                 s.addAttribute(.link, value: url.absoluteURL, range: NSRange(location: 0, length: s.length))
             }
             return s

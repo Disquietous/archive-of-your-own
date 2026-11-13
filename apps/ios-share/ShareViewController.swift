@@ -2,14 +2,16 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// "AoYO" in the share sheet. Reads the shared URL (or text holding one),
-/// classifies it with the app's own `AO3Link` rules, and — only for a link
-/// the app can open — leaves it in the app group for the app to open next
-/// time it's in front. Never touches the network, Tor, or the library.
+/// "AoYO" in the share sheet. Reads the shared URL (or text holding one)
+/// and leaves any web link in the app group for the app to open next time
+/// it's in front. Which site a link belongs to, and whether the app has a
+/// view for it, is the core's call — the app classifies the link when it
+/// takes it and reports one it can't open. Never touches the network,
+/// Tor, or the library.
 final class ShareViewController: UIViewController {
     private enum Outcome {
         case loading
-        case saved(kind: String)
+        case saved
         case rejected(String)
     }
 
@@ -44,27 +46,42 @@ final class ShareViewController: UIViewController {
     private var viewState: ShareResultView.State {
         switch outcome {
         case .loading: .loading
-        case .saved(let kind): .saved(kind)
+        case .saved: .saved
         case .rejected(let message): .rejected(message)
         }
     }
 
     @MainActor
     private func handleSharedItem() async {
-        guard let raw = await sharedString() else {
-            outcome = .rejected("\(AO3Link.Rejection.notAO3.message) \(AO3Link.supportedSummary)")
+        guard let raw = await sharedString(), let link = Self.webLink(in: raw) else {
+            outcome = .rejected("That isn’t a web link.")
             return
         }
-        switch AO3Link.classify(raw) {
-        case .failure(let rejection):
-            outcome = .rejected("\(rejection.message) \(AO3Link.supportedSummary)")
-        case .success(let link):
-            guard SharedLinkInbox.put(raw) else {
-                outcome = .rejected("AoYO couldn’t receive the link. Open the app and try again.")
-                return
-            }
-            outcome = .saved(kind: Self.kindName(link))
+        guard SharedLinkInbox.put(link) else {
+            outcome = .rejected("AoYO couldn’t receive the link. Open the app and try again.")
+            return
         }
+        outcome = .saved
+    }
+
+    /// The http(s) link a shared string holds: the whole string when it is
+    /// one (a scheme is assumed when missing), else the first link inside
+    /// the text.
+    private static func webLink(in raw: String) -> String? {
+        func web(_ url: URL?) -> String? {
+            guard let url, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+                  url.host != nil else { return nil }
+            return url.absoluteString
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if !trimmed.contains(where: \.isWhitespace) {
+            return web(URL(string: trimmed.contains("://") ? trimmed : "https://\(trimmed)"))
+        }
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        else { return nil }
+        let range = NSRange(trimmed.startIndex..., in: trimmed)
+        return web(detector.firstMatch(in: trimmed, options: [], range: range)?.url)
     }
 
     /// The first shared URL, else the first shared text.
@@ -83,23 +100,12 @@ final class ShareViewController: UIViewController {
         }
         return nil
     }
-
-    private static func kindName(_ link: AO3Link) -> String {
-        switch link {
-        case .work, .entireWork: "work"
-        case .chapter: "chapter"
-        case .user: "author"
-        case .series: "series"
-        case .collection: "collection"
-        case .tag: "tag"
-        }
-    }
 }
 
 struct ShareResultView: View {
     enum State {
         case loading
-        case saved(String)
+        case saved
         case rejected(String)
     }
 
@@ -113,13 +119,13 @@ struct ShareResultView: View {
                 switch state {
                 case .loading:
                     ProgressView()
-                case .saved(let kind):
+                case .saved:
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(.green)
                     Text("Sent to AoYO")
                         .font(.title3.weight(.semibold))
-                    Text("Open AoYO to see this \(kind).")
+                    Text("Open AoYO to see it.")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 case .rejected(let message):

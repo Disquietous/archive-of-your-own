@@ -93,6 +93,7 @@ impl MockRatedSource {
             capabilities: SourceCapabilities {
                 id: SOURCE_ID.to_string(),
                 name: "Rated Mock".to_string(),
+                host: "rated.mock".to_string(),
                 // Like ScribbleHub: blocks Tor exits, fine over a VPN.
                 reach: Reachability { tor: false, direct: true },
                 reaction: ReactionShape::StarRating { max: 5 },
@@ -105,6 +106,7 @@ impl MockRatedSource {
                 tag_listings: false,
                 update_checks: true,
                 login: false,
+                sign_in: super::SignInShape::None,
                 remote_bookmarks: false,
                 subscriptions: false,
                 collections: false,

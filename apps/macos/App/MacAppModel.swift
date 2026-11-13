@@ -208,86 +208,76 @@ final class MacAppModel {
         works(for: .readingLists)
     }
 
-    /// Route a link (⌘L, or a URL dropped on a window) to the matching
-    /// screen. AO3 links open their page; a link any other source
-    /// recognises (a ScribbleHub series or chapter) imports that work into
-    /// the library and opens its detail. Returns nil when it opened, else
-    /// the message to show — no source knows the link, or it's an AO3 page
-    /// the app has no view for.
+    /// Route a link (⌘L, a URL dropped on a window, or a link clicked in
+    /// content) to the matching screen. The core classifies it for every
+    /// source and names the destination by library id. Returns nil when it
+    /// opened, else the message to show — no source knows the link, or
+    /// it's a page the app has no view for.
     @discardableResult
-    func openAO3URL(_ raw: String) -> String? {
-        switch AO3Link.classify(raw) {
-        case .failure(.notAO3):
-            guard appState.bridge.resolveLink(raw) != nil else {
-                return AO3Link.Rejection.notAO3.message
-            }
-            importWork(fromLink: raw)
-            return nil
-        case .failure(let rejection):
-            return rejection.message
-        case .success(let link):
-            open(link)
-            return nil
+    func openLink(_ raw: String) -> String? {
+        guard let destination = appState.bridge.openLink(raw) else {
+            return "The link couldn’t be opened — the library isn’t available."
         }
-    }
-
-    /// Fetch a second-source work by its link and show it. The import
-    /// saves the work (and its chapter list) before returning, so the
-    /// detail opens from the local copy; a failure is reported the way an
-    /// unopenable link is.
-    private func importWork(fromLink raw: String) {
-        Task { @MainActor in
-            do {
-                let summary = try await appState.bridge.importWorkFromLink(raw)
-                openWorkByID(String(summary.id))
-            } catch {
-                if !error.isCancellation {
-                    AppDelegate.presentLinkFailure(RustBridge.errorMessage(error))
-                }
-            }
-        }
-    }
-
-    private func open(_ link: AO3Link) {
-        switch link {
-        case .work(let number), .entireWork(let number):
+        switch destination {
+        case .unknown(let message), .unsupported(let message):
+            return message
+        case .work(let workID, _):
             // The mac reader has no entire-work mode; the detail is the
-            // closest landing. Links name works by AO3 number; the app
-            // keys by library id.
-            guard let id = appState.rowID(forAO3Work: number) else { return }
-            openWorkByID(id)
-        case .chapter(let workNumber, let chapterID):
-            guard let workID = appState.rowID(forAO3Work: workNumber) else { return }
+            // closest landing.
+            openLinkedWork(String(workID))
+        case .chapter(let workID, let chapterID):
+            let id = String(workID)
             Task { @MainActor in
-                if let chapter = await appState.resolveChapterLink(workID: workID, chapterID: chapterID) {
-                    openReader(workID, chapter: chapter)
+                if let chapter = await appState.resolveChapterLink(workID: id, chapterID: chapterID) {
+                    openReader(id, chapter: chapter)
                 } else {
-                    openWorkByID(workID)
+                    openLinkedWork(id)
                 }
             }
-        case .user(let name, _, let pane):
-            // Pseuds share their user's profile.
+        case .user(let userID, _, let pane):
             switch pane {
-            case .profile: openAuthorProfile(name)
-            case .works: showAuthorPane(name, .works)
-            case .bookmarks: showAuthorPane(name, .bookmarks)
-            case .collections: showAuthorPane(name, .collections)
+            case .profile: openAuthorProfile(userID: userID)
+            case .works: showAuthorPane(userID: userID, .works)
+            case .bookmarks: showAuthorPane(userID: userID, .bookmarks)
+            case .collections: showAuthorPane(userID: userID, .collections)
             }
-        case .series(let number):
-            guard let id = appState.rowID(forAO3Series: number) else { return }
-            let name = appState.bridge.getCachedSeries(UInt64(id) ?? 0)?.name ?? ""
-            openSeries(id: id, name: name.isEmpty ? "Series \(number)" : name)
+        case .series(let seriesID, let name):
+            openSeries(id: String(seriesID), name: name)
         case .collection(let name):
             openSearch { [self] in
                 search.scope = .collections
                 search.startCollectionQuery(name, appState: appState)
             }
         case .tag(let name):
-            // An AO3 tag listing link: AO3's results, whatever the source
+            // A tag listing link: the site's results, whatever the source
             // toggle says (the Fandoms "Search AO3" rule).
             openSearch { [self] in
                 search.startAO3TagListing(name, appState: appState)
             }
+        }
+        return nil
+    }
+
+    /// Show a linked work's detail. A work the library knows only as a
+    /// stub is fetched first (the fetch saves it and its chapter list), and
+    /// a failed fetch is reported the way an unopenable link is.
+    private func openLinkedWork(_ id: String) {
+        if appState.work(byID: id) != nil {
+            selectWork(id)
+            return
+        }
+        Task { @MainActor in
+            if let workID = UInt64(id), appState.bridge.getCachedWork(workID) == nil {
+                do {
+                    _ = try await appState.bridge.fetchWork(workID)
+                } catch {
+                    if !error.isCancellation {
+                        AppDelegate.presentLinkFailure(RustBridge.errorMessage(error))
+                    }
+                    return
+                }
+            }
+            openWorkByID(id)
         }
     }
 
@@ -316,27 +306,25 @@ final class MacAppModel {
     }
 
     /// Open what a subscription row points at. A subscription names its
-    /// target by AO3 id (username, work number, series number); works and
-    /// series resolve to library ids first.
+    /// target by the site's id (username, work number, series number);
+    /// works and series resolve to library ids through the target's link.
     func openSubscriptionTarget(_ sub: USubscription) {
         let type = sub.subType.lowercased()
         if type.contains("series") {
-            guard let id = appState.rowID(forAO3Series: sub.id, name: sub.name) else { return }
+            guard let id = appState.seriesRowID(forLink: sub.url, name: sub.name) else { return }
             openSeries(id: id, name: sub.name)
         } else if type.contains("author") || type.contains("user") {
             openSubscriptionAuthorWorks(subscriptionID: sub.id, author: sub.name, subType: "author")
         } else if type.contains("work") {
-            guard let id = appState.rowID(forAO3Work: sub.id) else { return }
+            guard let id = appState.workRowID(forLink: sub.url) else { return }
             openWorkByID(id)
         }
     }
 
     /// Jump from the end of a work straight into the next work of its
     /// series, fetching metadata first when it isn't known locally.
-    /// `number` is the next work's AO3 number (series links name works
-    /// by number); it resolves to a library id here.
-    func openNextWorkInSeries(_ number: String) {
-        guard let id = appState.rowID(forAO3Work: number) else { return }
+    /// `id` is the next work's library id.
+    func openNextWorkInSeries(_ id: String) {
         Task { @MainActor in
             if appState.work(byID: id) == nil {
                 await appState.fetchWorkMetadata(id)
@@ -621,5 +609,19 @@ extension MacAppModel: ReaderSessionHost {
 
     func readerSession(_ session: ReaderSession, openNextWork id: String) {
         openNextWorkInSeries(id)
+    }
+
+    func readerSession(_ session: ReaderSession, openLink url: URL) {
+        openContentLink(url)
+    }
+
+    /// A link clicked in content (chapter text, a bio, a comment): a page
+    /// the app has a view for opens there, anything else leaves the app.
+    /// Returns whether it opened in the app.
+    @discardableResult
+    func openContentLink(_ url: URL) -> Bool {
+        if openLink(url.absoluteString) == nil { return true }
+        ExternalLinkOpener.open(url, bridge: appState.bridge)
+        return false
     }
 }

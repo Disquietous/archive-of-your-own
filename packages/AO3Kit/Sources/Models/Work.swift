@@ -74,7 +74,7 @@ struct SeriesInfo: Hashable {
     /// 1-based "Part N" position; 0 = unknown.
     let part: Int
     /// The adjacent works' ids at the source (AO3 work numbers) — usually
-    /// not in the library. Resolve with `AppState.rowID(forAO3Work:)`
+    /// not in the library. Resolve with `AppState.rowID(forSibling:of:)`
     /// before opening.
     let prevWorkExternalID: String?
     let nextWorkExternalID: String?

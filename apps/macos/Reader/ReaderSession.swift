@@ -183,6 +183,12 @@ final class ReaderSession {
     func openNextWork(_ id: String) {
         host?.readerSession(self, openNextWork: id)
     }
+
+    /// A link clicked in the chapter text: a page the app has a view for
+    /// opens there, anything else leaves the app.
+    func openLink(_ url: URL) {
+        host?.readerSession(self, openLink: url)
+    }
 }
 
 /// What a reader session's owner does when the reader asks to close or
@@ -191,4 +197,5 @@ final class ReaderSession {
 protocol ReaderSessionHost: AnyObject {
     func readerSessionDidClose(_ session: ReaderSession)
     func readerSession(_ session: ReaderSession, openNextWork id: String)
+    func readerSession(_ session: ReaderSession, openLink url: URL)
 }

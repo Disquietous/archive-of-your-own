@@ -114,8 +114,8 @@ pub struct USeriesMembership {
     /// 1-based position within the series; 0 = unknown.
     pub part: u32,
     /// The adjacent works' ids at the source (AO3 work numbers) — they are
-    /// usually not in the library. Resolve through `resolve_ao3_work`
-    /// before opening.
+    /// usually not in the library. Resolve through `sibling_work` before
+    /// opening.
     pub prev_work_external_id: Option<String>,
     pub next_work_external_id: Option<String>,
 }
@@ -767,7 +767,7 @@ pub struct URouteTimeout {
 /// One of the signed-in account's AO3 subscriptions — an AO3 record, so
 /// `id` is AO3's identifier for the target (username, work number, or
 /// series number), never a row id. Open a work or series subscription
-/// through `resolve_ao3_work` / `resolve_ao3_series`.
+/// through `open_link` on its `url`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct USubscription {
     pub sub_type: String,

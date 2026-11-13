@@ -196,7 +196,7 @@ struct ReaderView: View {
                             loadImage(src)
                         },
                         onLink: { url in
-                            ExternalLinkOpener.open(url, bridge: state.bridge)
+                            LinkRouter(state: state, nav: nav).openContentLink(url)
                         })
                     .ignoresSafeArea()
                 } else {

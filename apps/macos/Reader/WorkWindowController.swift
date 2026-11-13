@@ -66,7 +66,8 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
                                     backing: .buffered, defer: false)
         // A link dropped here routes through the main window, like ⌘L —
         // it never replaces this window's reader.
-        window.openLink = { [unowned model] raw in model.openAO3URL(raw) }
+        window.openLink = { [unowned model] raw in model.openLink(raw) }
+        window.canOpen = { [unowned model] raw in model.appState.bridge.canOpenLink(raw) }
         window.acceptsLinks = { [unowned appState] in
             appState.bridge.isInitialized && !appState.bridge.showingRecoveryKey
         }
@@ -192,10 +193,8 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
             },
             openURL: { [weak self] url in
                 guard let self else { return }
-                if model.openAO3URL(url.absoluteString) == nil {
+                if model.openContentLink(url) {
                     Self.mainWindow?.makeKeyAndOrderFront(nil)
-                } else {
-                    ExternalLinkOpener.open(url, bridge: appState.bridge)
                 }
             })
         discussion.onSignIn = { [weak self] in
@@ -418,6 +417,12 @@ extension WorkWindowController: ReaderSessionHost {
     /// End of the work: re-point this same window at the next work in the
     /// series — unless that work is already open elsewhere, in which case
     /// surface it there and leave this window on the finished work.
+    func readerSession(_ session: ReaderSession, openLink url: URL) {
+        if model.openContentLink(url) {
+            Self.mainWindow?.makeKeyAndOrderFront(nil)
+        }
+    }
+
     func readerSession(_ session: ReaderSession, openNextWork id: String) {
         Task { @MainActor in
             if appState.work(byID: id) == nil {

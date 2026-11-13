@@ -31,7 +31,7 @@ pub enum CapabilityError {
 #[uniffi::export(callback_interface)]
 #[async_trait::async_trait]
 pub trait PlatformCapabilities: Send + Sync {
-    async fn earn_cloudflare_clearance(&self, socks_port: u16) -> Result<Vec<String>, CapabilityError>;
+    async fn earn_cloudflare_clearance(&self, socks_port: u16, url: String) -> Result<Vec<String>, CapabilityError>;
 
     /// Off Tor, a site's human check is the user's to pass: show `url` in
     /// a web view on the system connection (the same path the app's own
@@ -39,6 +39,15 @@ pub trait PlatformCapabilities: Send + Sync {
     /// return every cookie it set with the web view's User-Agent. Fails
     /// when the user dismisses the check or the platform has no UI for it.
     async fn earn_site_clearance(&self, source: String, url: String)
+        -> Result<crate::client::SiteClearance, CapabilityError>;
+
+    /// Signing in at a site is the user's to do, on the site's own page:
+    /// show `url` in a web view on the system connection and wait until a
+    /// cookie whose name starts with `login_cookie_prefix` appears, then
+    /// return every cookie the site set with the web view's User-Agent.
+    /// The web view keeps nothing afterwards. Fails when the user
+    /// dismisses it or the platform has no UI for it.
+    async fn sign_in_at_site(&self, source: String, url: String, login_cookie_prefix: String)
         -> Result<crate::client::SiteClearance, CapabilityError>;
 }
 

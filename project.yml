@@ -50,9 +50,9 @@ targets:
           - "-lresolv"
           - "-llzma"
 
-  # "AoYO" in the iOS share sheet: classifies a shared AO3 link and hands
-  # it to the app through the app group. Deliberately links no Rust core —
-  # only the pure link classifier and the hand-off store.
+  # "AoYO" in the iOS share sheet: hands a shared web link to the app
+  # through the app group; the app classifies it. Deliberately links no
+  # Rust core — only the hand-off store.
   ArchiveShareExtension:
     type: app-extension
     platform: iOS

@@ -463,7 +463,7 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
         log_info!("recovery", "no PlatformCapabilities registered — skipping clearance");
         return;
     };
-    match capability.earn_cloudflare_clearance(socks_port).await {
+    match capability.earn_cloudflare_clearance(socks_port, format!("{}/", crate::client::BASE_URL)).await {
         Ok(cookies) => {
             // Mirrors `resolveCloudflare()`'s existing ordering: auth
             // cookies first, Cloudflare's cookies layered on top.
@@ -535,6 +535,11 @@ async fn restore_persisted_cookies(client: &Arc<RwLock<AO3Client>>, storage: &Ar
         c.set_session_cookies(&cookies);
     }
     crate::client::clearance::restore_all(&clearances, &c);
+    drop(c);
+    // Every other source's active session.
+    let c = client.read().await;
+    let s = storage.lock().await;
+    super::account::restore_other_sessions(&c, &s);
 }
 
 #[cfg(test)]

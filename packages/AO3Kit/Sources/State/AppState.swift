@@ -386,6 +386,13 @@ final class AppState {
     /// The active account's username, logged in or not.
     var ao3ActiveAccount: String?
     var ao3AccountCount = 0
+    /// Bumped whenever any source's accounts or sign-in state change, so
+    /// account lists and sign-in gates (a work's controls) re-read.
+    var accountsRevision = 0
+    /// The source whose site sign-in is in flight, if any.
+    var siteSignInSource: String?
+    /// Why the last site sign-in failed, with the source it was for.
+    var siteSignInError: (source: String, message: String)?
     /// An AO3 login request is in flight. Owned here, not by a view, so every
     /// login surface (including ones reopened mid-attempt) shows the attempt
     /// until it resolves.

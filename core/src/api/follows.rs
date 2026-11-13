@@ -10,7 +10,7 @@ use super::*;
 // Over the bridge a follow target is named by `kind` plus: the work or
 // series row id (as text), the author's username, or the fandom's tag
 // name. The core resolves that to a row; a work or series must already
-// have a row (a stub, if nothing else — see `resolve_ao3_work`).
+// have a row (a stub, if nothing else — see `open_link`).
 // ---------------------------------------------------------------------------
 
 /// Kinds a follow can have. Fandoms are followed but never checked.

@@ -88,10 +88,14 @@ extension AppState {
         return ids
     }
 
-    // MARK: - AO3 links
+    // MARK: - Links
 
-    /// The 0-based chapter number an AO3 chapter link points at (links are
-    /// classified by `AO3Link`). Saved chapters answer without a request;
+    /// What the app opens from a link, for prompts and alerts.
+    static let supportedLinkSummary = "Works, chapters, authors, series, collections and tags can be opened."
+
+    /// The 0-based chapter number a chapter link points at (links are
+    /// classified by the core's `openLink`; `chapterID` is the source's
+    /// own chapter id). Saved chapters answer without a request;
     /// otherwise this is the one fetch opening the work costs anyway — the
     /// work page, which saves the work and every chapter with its AO3 id.
     /// nil when the fetch fails or the work has no such chapter.

@@ -190,9 +190,33 @@ extension RustBridge {
         return try await app.fetchChapter(workId: workId, number: number, opId: opID)
     }
 
-    /// Which source, if any, recognises a link (any source, not only AO3).
-    func resolveLink(_ link: String) -> UResolvedLink? {
-        app?.resolveLink(link: link)
+    /// Whether a string holds a link the app has a view for. Pure URL
+    /// rules — no library, no network.
+    func canOpenLink(_ link: String) -> Bool {
+        app?.canOpenLink(link: link) ?? false
+    }
+
+    /// Where a link leads, by library row id (any source). A never-seen
+    /// work, series or user gets its row here. nil when the library is
+    /// unavailable.
+    func openLink(_ link: String, nameHint: String? = nil) -> ULinkDestination? {
+        try? app?.openLink(link: link, nameHint: nameHint)
+    }
+
+    /// The site page for one comment on a work; nil when its source has
+    /// no per-comment pages.
+    func commentURL(workID: UInt64, commentID: UInt64) -> URL? {
+        app?.commentUrl(workId: workID, commentId: commentID).flatMap(URL.init(string:))
+    }
+
+    /// The page the Tor-side challenge web view loads.
+    func torChallengeURL() -> URL? {
+        app.flatMap { URL(string: $0.torChallengeUrl()) }
+    }
+
+    /// A request URL as the log and progress views show it.
+    func displayURL(_ url: String) -> String {
+        app?.displayUrl(url: url) ?? url
     }
 
     /// Bring a work into the library from any link a source recognises;

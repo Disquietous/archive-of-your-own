@@ -44,10 +44,6 @@ enum DiscussionText {
         return text.count > limit ? String(text.prefix(limit)) + "…" : text
     }
 
-    static func commentURL(_ id: UInt64) -> URL {
-        URL(string: "https://archiveofourown.org/comments/\(id)")!
-    }
-
     private static let parser: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

@@ -126,9 +126,7 @@ extension ReadPaneViewController {
             },
             openURL: { [weak self] url in
                 guard let self else { return }
-                if model.openAO3URL(url.absoluteString) != nil {
-                    ExternalLinkOpener.open(url, bridge: appState.bridge)
-                }
+                model.openContentLink(url)
             })
         discussion.onSignIn = { [weak self] in self?.model.goSection(.settings) }
         discussion.onStateChange = { [weak self] in

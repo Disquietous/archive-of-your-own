@@ -27,7 +27,7 @@ impl AccountRow {
     /// Logged in = the stored session carries the source's auth cookie;
     /// independent of which account is active.
     pub fn logged_in(&self) -> bool {
-        crate::client::has_login_cookie(&self.cookies)
+        crate::source::session_logged_in(&self.source, &self.cookies)
     }
 }
 
@@ -343,29 +343,35 @@ impl Storage {
     /// own. Returns the row id.
     pub fn create_account(&self, username: &str, cookies: &str) -> Result<i64, AppError> {
         let external_id = super::owner_key_for(username);
-        self.conn.execute(
-            "INSERT INTO accounts (source, external_id, username, cookies)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(source, external_id) DO UPDATE SET username = ?3, cookies = ?4",
-            params![SOURCE_AO3, external_id, username.trim(), cookies],
-        ).map_err(map_sql)?;
-        let id: i64 = self.conn.query_row(
-            "SELECT id FROM accounts WHERE source = ?1 AND external_id = ?2",
-            params![SOURCE_AO3, external_id], |r| r.get(0),
-        ).map_err(map_sql)?;
+        let id = self.create_account_at(SOURCE_AO3, &external_id, username, cookies)?;
         self.ao3_bookmarks.claim_owner(&self.conn, &external_id, id)?;
         Ok(id)
     }
 
-    /// Make `id` the active account of its source. Subscriptions are
-    /// account data: activating a different account empties them (the
-    /// new account's list loads on demand).
+    /// Create (or refresh the name and session of) the account keyed
+    /// `external_id` at `source`. Returns the row id.
+    pub fn create_account_at(&self, source: &str, external_id: &str, username: &str, cookies: &str) -> Result<i64, AppError> {
+        self.conn.execute(
+            "INSERT INTO accounts (source, external_id, username, cookies)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source, external_id) DO UPDATE SET username = ?3, cookies = ?4",
+            params![source, external_id, username.trim(), cookies],
+        ).map_err(map_sql)?;
+        self.conn.query_row(
+            "SELECT id FROM accounts WHERE source = ?1 AND external_id = ?2",
+            params![source, external_id], |r| r.get(0),
+        ).map_err(map_sql)
+    }
+
+    /// Make `id` the active account of its source. Subscriptions are the
+    /// AO3 account's data: activating a different AO3 account empties
+    /// them (the new account's list loads on demand).
     pub fn set_active_account(&self, id: i64) -> Result<(), AppError> {
         let Some(target) = self.get_account(id)? else {
             return Err(AppError::StorageError(format!("no account with id {id}")));
         };
-        let previous = self.get_active_account()?.map(|a| a.id);
-        if previous != Some(id) {
+        let previous = self.get_active_account_at(&target.source)?.map(|a| a.id);
+        if previous != Some(id) && target.source == SOURCE_AO3 {
             self.clear_subscriptions()?;
         }
         self.conn.execute("UPDATE accounts SET is_active = 0 WHERE source = ?1", params![target.source])
@@ -382,12 +388,23 @@ impl Storage {
         ).optional().map_err(map_sql)
     }
 
-    /// The active AO3 account (the only source with accounts today).
+    /// The active AO3 account — the one AO3's account-scoped data
+    /// (subscriptions, bookmarks, inbox) belongs to.
     pub fn get_active_account(&self) -> Result<Option<AccountRow>, AppError> {
+        self.get_active_account_at(SOURCE_AO3)
+    }
+
+    /// The active account at `source` ("active" is per source, Area 1.2).
+    pub fn get_active_account_at(&self, source: &str) -> Result<Option<AccountRow>, AppError> {
         self.conn.query_row(
             &format!("SELECT {} FROM accounts WHERE source = ?1 AND is_active = 1", Self::ACCOUNT_COLS),
-            params![SOURCE_AO3], Self::account_from_row,
+            params![source], Self::account_from_row,
         ).optional().map_err(map_sql)
+    }
+
+    /// The active account of every source that has one.
+    pub fn get_active_accounts(&self) -> Result<Vec<AccountRow>, AppError> {
+        Ok(self.get_all_accounts()?.into_iter().filter(|a| a.is_active).collect())
     }
 
     fn is_active_account(&self, id: i64) -> Result<bool, AppError> {

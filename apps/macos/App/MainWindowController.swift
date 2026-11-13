@@ -29,7 +29,8 @@ final class MainWindowController: NSWindowController {
         window.setFrameAutosaveName("MainWindow")
         // AO3 links dropped on the window open like ⌘L; not while the
         // launch gate (setup / unlock) is up.
-        window.openLink = { [unowned model] raw in model.openAO3URL(raw) }
+        window.openLink = { [unowned model] raw in model.openLink(raw) }
+        window.canOpen = { [unowned model] raw in model.appState.bridge.canOpenLink(raw) }
         window.acceptsLinks = { [unowned appState] in
             appState.bridge.isInitialized && !appState.bridge.showingRecoveryKey
         }

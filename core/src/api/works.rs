@@ -245,25 +245,6 @@ impl AO3App {
         }).await
     }
 
-    /// The row id for an AO3 work number — the one way an AO3 number
-    /// enters the library from the UI (a pasted link, a series prev/next
-    /// link, a subscription). A work the library has never seen gets a
-    /// stub row, invisible everywhere until it is fetched. Phase 1 shim;
-    /// link classification moves into the core in Phase 6.
-    pub fn resolve_ao3_work(&self, work_number: u64) -> Result<u64, AO3Error> {
-        let s = self.storage.blocking_lock();
-        let external = ExternalRef::ao3(work_number.to_string(), crate::parser::ao3_work_url(work_number));
-        s.ensure_work_stub(&external, "").map_err(AO3Error::from)
-    }
-
-    /// The row id for an AO3 series number (see `resolve_ao3_work`); a
-    /// never-seen series gets a name-only row, named `name` when given.
-    pub fn resolve_ao3_series(&self, series_number: u64, name: Option<String>) -> Result<u64, AO3Error> {
-        let s = self.storage.blocking_lock();
-        let external = ExternalRef::ao3(series_number.to_string(), crate::parser::ao3_series_url(series_number));
-        s.ensure_series(&external, name.as_deref().unwrap_or("")).map_err(AO3Error::from)
-    }
-
     pub async fn browse_works(&self, page: u32) -> Result<Vec<UWorkSummary>, AO3Error> {
         self.run_listing_fetch("browse", None, None, move |client| async move {
             let c = client.read().await;

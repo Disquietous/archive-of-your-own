@@ -263,7 +263,7 @@ struct RequestLogView: View {
     }
 
     private func shortURL(_ url: String) -> String {
-        url.replacingOccurrences(of: "https://archiveofourown.org", with: "")
+        appState.bridge.displayURL(url)
     }
 
     private func bytes(_ n: Int64) -> String {

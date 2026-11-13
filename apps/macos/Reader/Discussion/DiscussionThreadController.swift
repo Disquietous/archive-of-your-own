@@ -431,12 +431,17 @@ extension DiscussionThreadController {
         }
         if model.isLoggedIn && c.notice.isEmpty { add("Reply") { [weak self] in self?.model.reply(to: c) } }
         add("Copy Text") { [weak self] in self?.copy(c) }
-        add("Copy Link") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(DiscussionText.commentURL(c.id).absoluteString, forType: .string)
+        let commentURL = model.commentURL(c.id)
+        if let commentURL {
+            add("Copy Link") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(commentURL.absoluteString, forType: .string)
+            }
         }
         menu.addItem(.separator())
-        add("Open on AO3") { [weak self] in self?.openURL(DiscussionText.commentURL(c.id)) }
+        if let commentURL, let title = model.openOnSiteTitle {
+            add(title) { [weak self] in self?.openURL(commentURL) }
+        }
         if !c.isGuest && !c.authorProfileUrl.isEmpty {
             add("View \(c.displayName)’s Profile") { [weak self] in self?.openAuthor(c.authorName) }
         }

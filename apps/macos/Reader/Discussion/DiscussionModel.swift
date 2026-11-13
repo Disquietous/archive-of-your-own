@@ -111,6 +111,17 @@ final class DiscussionModel {
 
     private var numericWorkID: UInt64? { workID.flatMap(UInt64.init) }
 
+    /// The comment's own page at the work's source; nil when that source
+    /// gives comments no pages.
+    func commentURL(_ id: UInt64) -> URL? {
+        numericWorkID.flatMap { appState.bridge.commentURL(workID: $0, commentID: id) }
+    }
+
+    /// The open-on-site label for the work's source ("Open on AO3").
+    var openOnSiteTitle: String? {
+        workID.flatMap { appState.workControls($0) }?.vocabulary.openOnSite
+    }
+
     var scopeTitle: String {
         scope == .work || chapterID == nil ? "Whole work" : "Chapter \(chapterIndex + 1)"
     }

@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RecoveryCapabilities.siteChallengeHandler = { source, url in
             try await ChallengeSheetController.present(source: source, url: url)
         }
+        // Signing in at such a site happens on its own page, same sheet.
+        RecoveryCapabilities.siteSignInHandler = { source, url, loginCookiePrefix in
+            try await ChallengeSheetController.presentSignIn(source: source, url: url, loginCookiePrefix: loginCookiePrefix)
+        }
         ReaderPosLog.sink = { [weak appState] message in
             appState?.bridge.writeLog(level: "DEBUG", tag: "readerpos", message: message)
         }
@@ -470,15 +474,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func promptOpenAO3URL() {
         let alert = NSAlert()
         alert.messageText = "Open URL"
-        alert.informativeText = "Paste an AO3 link (\(AO3Link.supportedSummary.lowercased())) or a ScribbleHub series or chapter link to import that story."
+        alert.informativeText = "Paste a link from a supported site. \(AppState.supportedLinkSummary)"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 340, height: 24))
-        field.placeholderString = "https://archiveofourown.org/works/…"
+        field.placeholderString = "https://…"
         alert.accessoryView = field
         alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        if let problem = model.openAO3URL(field.stringValue) {
+        if let problem = model.openLink(field.stringValue) {
             Self.presentLinkFailure(problem)
         }
     }
@@ -488,7 +492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let failed = NSAlert()
         failed.alertStyle = .warning
         failed.messageText = "Couldn’t open that link"
-        failed.informativeText = "\(problem) \(AO3Link.supportedSummary)"
+        failed.informativeText = "\(problem) \(AppState.supportedLinkSummary)"
         failed.runModal()
     }
 

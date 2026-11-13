@@ -111,8 +111,9 @@ extension ReaderViewController {
     }
 
     @objc func openNextWorkInSeries() {
-        guard let next = work?.nextInSeries?.nextWorkExternalID else { return }
-        session.openNextWork(next)
+        guard let work, let next = work.nextInSeries?.nextWorkExternalID,
+              let id = appState.rowID(forSibling: next, of: work.id) else { return }
+        session.openNextWork(id)
     }
 
     /// Keyboard navigation entry point (← / → in the reading pane).
@@ -337,7 +338,7 @@ extension ReaderViewController: NSTextViewDelegate {
             return true
         }
         guard let url = ExternalLinkOpener.url(from: link) else { return false }
-        ExternalLinkOpener.open(url, bridge: appState.bridge)
+        session.openLink(url)
         return true
     }
 }

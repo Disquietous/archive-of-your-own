@@ -32,6 +32,18 @@ pub const SOURCE_ID: &str = "scribblehub";
 pub const BASE_URL: &str = "https://www.scribblehub.com";
 const RELEASES_ENDPOINT: &str = "https://www.scribblehub.com/wp-admin/admin-ajax.php";
 
+/// WordPress names its login cookie `wordpress_logged_in_<site hash>`.
+const LOGIN_COOKIE_PREFIX: &str = "wordpress_logged_in_";
+
+pub fn is_login_cookie(name: &str) -> bool {
+    name.starts_with(LOGIN_COOKIE_PREFIX)
+}
+
+/// Every WordPress auth cookie (`wordpress_logged_in_…`, `wordpress_sec_…`).
+pub fn is_session_cookie(name: &str) -> bool {
+    name.starts_with("wordpress_")
+}
+
 /// The site has none of AO3's page quirks: nothing to harvest or strip,
 /// no session-expiry redirect to recognise (reads are public).
 struct Hooks;
@@ -57,6 +69,7 @@ impl ScribbleHubSource {
         SourceCapabilities {
             id: SOURCE_ID.to_string(),
             name: "ScribbleHub".to_string(),
+            host: "www.scribblehub.com".to_string(),
             reach: Reachability { tor: false, direct: true },
             reaction: ReactionShape::StarRating { max: 5 },
             discussion: DiscussionShape::Reviews,
@@ -69,8 +82,9 @@ impl ScribbleHubSource {
             // Phase 7 wires the update check; the adapter can already
             // compare TOCs, so the capability is declared.
             update_checks: true,
-            // Reads are public; writing a rating or review is Phase 9b.
-            login: false,
+            // Reads are public; an account is for rating and reviewing.
+            login: true,
+            sign_in: super::SignInShape::Site,
             remote_bookmarks: false,
             subscriptions: false,
             collections: false,
@@ -340,6 +354,21 @@ impl Source for ScribbleHubSource {
         Ok(listing)
     }
 
+    /// The site's own sign-in page: the user signs in there, in a web
+    /// view (the form sits behind the same human check as every page).
+    fn site_sign_in(&self) -> Option<super::SiteSignIn> {
+        Some(super::SiteSignIn {
+            url: format!("{BASE_URL}/login/"),
+            login_cookie_prefix: LOGIN_COOKIE_PREFIX.to_string(),
+        })
+    }
+
+    /// The home page's user menu names the signed-in account.
+    async fn whoami(&self) -> Result<Option<super::SessionIdentity>, AppError> {
+        let html = self.page(&format!("{BASE_URL}/")).await?;
+        Ok(parse::parse_signed_in_user(&html))
+    }
+
     /// The series page's header stars (fic_page.js `changerating_reviews`):
     /// POST admin-ajax `wi_changerating` with the series id (`mypostid`),
     /// the value (`strRate`) and `intParentCID=0` (a rating outside a
@@ -370,8 +399,11 @@ impl Source for ScribbleHubSource {
                 detail: format!("HTTP {} from the rating endpoint", out.status),
             });
         }
-        let message = out.body.trim().strip_suffix('0').unwrap_or(out.body.trim()).trim();
-        if !message.is_empty() {
+        // As the page reads it: drop the last character, and anything
+        // longer than one character left over is a message to show.
+        let body = out.body.trim();
+        let message = body.char_indices().last().map(|(i, _)| body[..i].trim()).unwrap_or("");
+        if message.chars().count() > 1 {
             log_info!("scribblehub", "rating {value} for {} answered: {message}", work.external_id);
             return Ok(super::ReactionOutcome { accepted: false, value: None });
         }

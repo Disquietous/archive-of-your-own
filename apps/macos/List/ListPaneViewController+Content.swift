@@ -246,6 +246,9 @@ extension ListPaneViewController {
             controller.onOpenList = { [weak self] userID, pane in
                 self?.model.showAuthorPane(userID: userID, pane)
             }
+            controller.onOpenLink = { [weak self] url in
+                self?.model.openContentLink(url)
+            }
             addChild(controller)
             return controller
         }()

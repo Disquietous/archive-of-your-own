@@ -262,8 +262,9 @@ extension AppState {
         bridge.writeLog(level: "INFO", tag: "cloudflare", message: "Starting challenge resolution via SOCKS port \(port)")
 
         do {
+            guard let url = bridge.torChallengeURL() else { throw CloudflareResolver.ResolveError.loadFailed("no challenge page") }
             let resolver = CloudflareResolver()
-            let resolved = try await resolver.resolve(socksPort: port)
+            let resolved = try await resolver.resolve(socksPort: port, url: url)
 
             // Restore auth cookies first (connectTor wiped them)
             bridge.restoreSessionCookies()

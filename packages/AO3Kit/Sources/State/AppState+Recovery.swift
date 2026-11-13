@@ -32,10 +32,20 @@ final class RecoveryCapabilities: PlatformCapabilities, @unchecked Sendable {
     /// challenged request fails as before.
     static var siteChallengeHandler: (@MainActor @Sendable (_ source: String, _ url: URL) async throws -> SiteClearance)?
 
-    func earnCloudflareClearance(socksPort: UInt16) async throws -> [String] {
+    /// The platform's UI for signing in on a site's own page: shows `url`
+    /// in a web view, returns every cookie the site set (with the web
+    /// view's User-Agent) once one whose name starts with the prefix
+    /// appears, or throws when the user dismisses it. Set by the app at
+    /// launch.
+    static var siteSignInHandler: (@MainActor @Sendable (_ source: String, _ url: URL, _ loginCookiePrefix: String) async throws -> SiteClearance)?
+
+    func earnCloudflareClearance(socksPort: UInt16, url: String) async throws -> [String] {
+        guard let pageURL = URL(string: url) else {
+            throw CapabilityError.Failed(message: "challenge URL is not a URL: \(url)")
+        }
         let resolver = await CloudflareResolver()
         do {
-            let resolved = try await resolver.resolve(socksPort: socksPort)
+            let resolved = try await resolver.resolve(socksPort: socksPort, url: pageURL)
             return resolved.cookies
         } catch {
             throw CapabilityError.Failed(message: "\(error)")
@@ -53,6 +63,20 @@ final class RecoveryCapabilities: PlatformCapabilities, @unchecked Sendable {
             return try await handler(source, pageURL)
         } catch {
             throw CapabilityError.Failed(message: "\(error)")
+        }
+    }
+
+    func signInAtSite(source: String, url: String, loginCookiePrefix: String) async throws -> SiteClearance {
+        guard let handler = Self.siteSignInHandler else {
+            throw CapabilityError.Failed(message: "no sign-in window on this platform")
+        }
+        guard let pageURL = URL(string: url) else {
+            throw CapabilityError.Failed(message: "sign-in URL is not a URL: \(url)")
+        }
+        do {
+            return try await handler(source, pageURL, loginCookiePrefix)
+        } catch {
+            throw CapabilityError.Failed(message: error.localizedDescription)
         }
     }
 }

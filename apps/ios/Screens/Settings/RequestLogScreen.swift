@@ -137,7 +137,7 @@ struct RequestLogScreen: View {
                 .font(.custom("HankenGrotesk", size: 11).weight(.semibold))
                 .foregroundStyle(a.method.hasPrefix("POST") ? theme.accent2 : theme.ink2)
                 .frame(width: 44, alignment: .leading)
-            Text(Self.shortURL(a.url))
+            Text(shortURL(a.url))
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(theme.ink)
                 .lineLimit(1)
@@ -174,7 +174,7 @@ struct RequestLogScreen: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.ink3)
             }
-            Text(Self.shortURL(e.url))
+            Text(shortURL(e.url))
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(theme.ink)
                 .lineLimit(2)
@@ -196,8 +196,8 @@ struct RequestLogScreen: View {
         active = state.bridge.getActiveRequests()
     }
 
-    static func shortURL(_ url: String) -> String {
-        url.replacingOccurrences(of: "https://archiveofourown.org", with: "")
+    private func shortURL(_ url: String) -> String {
+        state.bridge.displayURL(url)
     }
 
     static func elapsed(_ ms: Int64) -> String {

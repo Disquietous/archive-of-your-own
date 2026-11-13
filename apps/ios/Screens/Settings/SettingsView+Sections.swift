@@ -63,10 +63,11 @@ extension SettingsView {
 
             divider
 
-            navRow(icon: "person.2", title: "AO3 Accounts",
-                   detail: state.ao3AccountCount > 0
-                       ? "\(state.ao3AccountCount) account\(state.ao3AccountCount == 1 ? "" : "s")" : "None",
-                   detailTint: state.ao3AccountCount > 0 ? theme.sage : theme.ink3) {
+            let accountCount = state.accountGroups().reduce(0) { $0 + $1.accounts.count }
+            navRow(icon: "person.2", title: "Accounts",
+                   detail: accountCount > 0
+                       ? "\(accountCount) account\(accountCount == 1 ? "" : "s")" : "None",
+                   detailTint: accountCount > 0 ? theme.sage : theme.ink3) {
                 nav.settingsPath.append(AppDestination.accountManagement)
             }
 
