@@ -105,9 +105,19 @@ pub(super) fn parse_abbreviated(s: &str) -> Option<u64> {
     num.trim().parse::<f64>().ok().map(|n| (n * mult).round() as u64)
 }
 
-/// "Oct 5, 2026" or "Oct 5, 2026 06:30 PM" → "2026-10-05". Anything the
-/// site may format differently comes back unchanged.
+/// "Oct 5, 2026" or "Oct 5, 2026 06:30 PM" → "2026-10-05". A recent date
+/// the site writes as an age ("17 hours ago", "2 days ago") becomes the
+/// day that was. Anything the site may format differently comes back
+/// unchanged.
 pub(super) fn normalize_date(raw: &str) -> String {
+    normalize_date_at(raw, chrono::Utc::now())
+}
+
+/// `normalize_date` against a given "now" (the tests' clock).
+fn normalize_date_at(raw: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    if let Some(day) = relative_day(raw, now) {
+        return day;
+    }
     let parts: Vec<&str> = raw.split_whitespace().collect();
     if parts.len() < 3 { return raw.trim().to_string() }
     let month = match parts[0].to_ascii_lowercase().as_str() {
@@ -118,6 +128,38 @@ pub(super) fn normalize_date(raw: &str) -> String {
     let day: u32 = match parts[1].trim_end_matches(',').parse() { Ok(d) => d, Err(_) => return raw.trim().to_string() };
     let year: u32 = match parts[2].parse() { Ok(y) => y, Err(_) => return raw.trim().to_string() };
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// The day an age names: "49 mins ago", "17 hours ago", "a day ago",
+/// "3 weeks ago", "just now", "yesterday". The site gives no time zone
+/// with it, so the day is reckoned in UTC and can be one off near
+/// midnight. None for anything that is not an age.
+fn relative_day(raw: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let text = raw.trim().to_ascii_lowercase();
+    let ago = match text.as_str() {
+        "just now" | "now" | "today" => chrono::Duration::zero(),
+        "yesterday" => chrono::Duration::days(1),
+        _ => {
+            let mut parts = text.strip_suffix("ago")?.split_whitespace();
+            let (count, unit) = (parts.next()?, parts.next()?);
+            if parts.next().is_some() { return None }
+            let n: i64 = match count {
+                "a" | "an" | "one" => 1,
+                digits => digits.parse().ok()?,
+            };
+            match unit.trim_end_matches('s') {
+                "sec" | "second" => chrono::Duration::seconds(n),
+                "min" | "minute" => chrono::Duration::minutes(n),
+                "hour" | "hr" => chrono::Duration::hours(n),
+                "day" => chrono::Duration::days(n),
+                "week" => chrono::Duration::weeks(n),
+                "month" => chrono::Duration::days(n.checked_mul(30)?),
+                "year" => chrono::Duration::days(n.checked_mul(365)?),
+                _ => return None,
+            }
+        }
+    };
+    Some(now.checked_sub_signed(ago)?.format("%Y-%m-%d").to_string())
 }
 
 /// The `items: N` of the jQuery pagination bound to `#id`: how many pages
@@ -1049,6 +1091,26 @@ mod tests {
     }
 
     #[test]
+    fn listing_dates_written_as_an_age_become_dates() {
+        // The author's series list gives a recently updated story only an
+        // age in its "Last Updated" stat. Stored as written, the work kept
+        // a phrase where its date belongs and never read as updated.
+        let html = r#"<div class="search_main_box"><div class="search_body">
+            <div class="search_title"><a href="https://www.scribblehub.com/series/900001/a-recent-story/">A Recent Story</a></div>
+            <div class="search_stats">
+              <span class="nl_stat"><i class="fa fa-list-alt pad"></i> 37 Chapters</span>
+              <span class="nl_stat destp" title="Last Updated"><i class="fa fa-clock-o pad" aria-hidden="true"></i> 17 hours ago</span>
+              <span class="nl_stat destp" title="Author"><span class="a_un_st"><a href="https://www.scribblehub.com/profile/900/someone/">someone</a></span></span>
+            </div></div></div>"#;
+        let page = parse_profile_series(html);
+        let updated = &page.works[0].summary.date_updated;
+        let b = updated.as_bytes();
+        assert!(updated.len() == 10 && b[4] == b'-' && b[7] == b'-' && updated[..4].parse::<u32>().is_ok(),
+                "expected YYYY-MM-DD, got {updated:?}");
+        assert_eq!(page.works[0].summary.chapter_count, 37);
+    }
+
+    #[test]
     fn profile_series_listing() {
         let page = parse_profile_series(&fixture("scribblehub_profile_series.html"));
         assert_eq!(page.total_pages, 2);
@@ -1139,6 +1201,26 @@ mod tests {
         assert_eq!(parse_abbreviated("1.2m"), Some(1_200_000));
         assert_eq!(normalize_date("Jul 26, 2026 09:14 PM"), "2026-07-26");
         assert_eq!(normalize_date("Apr 5, 2025"), "2025-04-05");
+
+        // A recent update is written as an age, with no date anywhere in
+        // the element; it becomes the day that was.
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 13, 9, 30, 0).unwrap();
+        let at = |raw: &str| normalize_date_at(raw, now);
+        assert_eq!(at("17 hours ago"), "2026-11-12");
+        assert_eq!(at(" 49 mins ago "), "2026-11-13");
+        assert_eq!(at("1 hour ago"), "2026-11-13");
+        assert_eq!(at("2 days ago"), "2026-11-11");
+        assert_eq!(at("a day ago"), "2026-11-12");
+        assert_eq!(at("3 weeks ago"), "2026-10-23");
+        assert_eq!(at("1 month ago"), "2026-10-14");
+        assert_eq!(at("just now"), "2026-11-13");
+        assert_eq!(at("yesterday"), "2026-11-12");
+        // Dates still parse as dates; anything else is left as written.
+        assert_eq!(at("Aug 31, 2026"), "2026-08-31");
+        assert_eq!(at("long ago"), "long ago");
+        assert_eq!(at("17 parsecs ago"), "17 parsecs ago");
+        assert_eq!(at(""), "");
         assert_eq!(id_after("https://www.scribblehub.com/profile/169/name/", "/profile/"), Some(169));
         assert_eq!(pagination_items("x", "pagination-mesh"), 1);
     }
