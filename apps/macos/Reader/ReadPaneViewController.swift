@@ -155,7 +155,7 @@ final class ReadPaneViewController: NSViewController {
         immersiveButton = ToolButton(theme: theme, symbol: "safari", tooltip: "Immersive reading") { [weak self] in
             self?.model.immersive.toggle()
         }
-        bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark") { [weak self] in
+        bookmarkButton = ToolButton(theme: theme, symbol: "bookmark", tooltip: "Bookmark in the app") { [weak self] in
             guard let self, let id = model.selectedWorkID else { return }
             appState.toggleBookmark(id)
         }
@@ -201,8 +201,8 @@ final class ReadPaneViewController: NSViewController {
         workCommentsButton = ToolButton(theme: theme, symbol: "bubble.right", tooltip: "Comments") { [weak self] in
             self?.discussion.toggleOpen()
         }
-        editBookmarkButton = ToolButton(theme: theme, symbol: "square.and.pencil",
-                                        tooltip: "Edit bookmark — notes, tags, sync to the site") { [weak self] in
+        editBookmarkButton = ToolButton(theme: theme, symbol: "bookmark.square",
+                                        tooltip: "Bookmark on the site — notes, tags, collections") { [weak self] in
             self?.showBookmarkEditSheet()
         }
         finishedButton = ToolButton(theme: theme, symbol: "checkmark.circle",

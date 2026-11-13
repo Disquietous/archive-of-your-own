@@ -36,8 +36,12 @@ final class WorkRowMenuController: NSObject {
         menu.addItem(.separator())
         menu.addItem(item(appState.bookmarkedWorkIDs.contains(work.id) ? "Remove Bookmark" : "Bookmark",
                           #selector(menuToggleBookmark(_:)), row))
-        if appState.bookmarkedWorkIDs.contains(work.id) {
-            menu.addItem(item("Edit Bookmark…", #selector(menuEditBookmark(_:)), row))
+        // The source's own bookmark record, where it keeps one and an
+        // account is signed in — separate from the app bookmark above.
+        if let controls = appState.workControls(work.id), controls.remoteBookmark == .enabled {
+            let site = controls.vocabulary.siteShort
+            menu.addItem(item(appState.hasAO3Bookmark(work.id) ? "Edit \(site) Bookmark…" : "Add \(site) Bookmark…",
+                              #selector(menuEditBookmark(_:)), row))
         }
         menu.addItem(item(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
                           #selector(menuToggleDownload(_:)), row))
@@ -155,15 +159,8 @@ final class WorkRowMenuController: NSObject {
 
     @objc private func menuEditBookmark(_ sender: NSMenuItem) {
         guard let work = clickedWork(sender) else { return }
-        var dismissRef: () -> Void = {}
-        let view = MacBookmarkEditView(theme: theme, appState: appState,
-                                       workID: work.id, workTitle: work.title,
-                                       onClose: { dismissRef() })
-        let hosting = NSHostingController(rootView: view)
-        dismissRef = { [weak presenter, weak hosting] in
-            if let hosting { presenter?.dismiss(hosting) }
-        }
-        presenter.presentAsSheet(hosting)
+        ReaderToolbarActions.presentBookmarkEdit(theme: theme, appState: appState, work: work,
+                                                 presenter: presenter)
     }
 
     @objc private func menuToggleReadingList(_ sender: NSMenuItem) {

@@ -46,6 +46,7 @@ pub(super) fn resolve_work_controls(s: &Storage, registry: &crate::source::Sourc
             chapter_comments: caps.chapter_comments,
             subscribe: account_gate(caps.subscriptions, signed_in, "Sign in to subscribe"),
             remote_bookmark: account_gate(caps.remote_bookmarks, signed_in, "Sign in to bookmark"),
+            post: source.post_gate(signed_in),
             vocabulary: caps.vocabulary.clone(),
         })
 }

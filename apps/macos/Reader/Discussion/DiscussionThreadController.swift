@@ -111,7 +111,7 @@ final class DiscussionThreadController: NSObject, NSTableViewDataSource, NSTable
             guard let self else { return }
             let rows = model.buildRows()
             let query = model.isFinding ? model.findText.trimmingCharacters(in: .whitespaces) : ""
-            let canReply = model.isLoggedIn
+            let canReply = model.canReply
             DispatchQueue.main.async { self.apply(rows, query: query.isEmpty ? nil : query, canReply: canReply) }
         }
         ObservationRelay.track { [weak self] in
@@ -429,7 +429,7 @@ extension DiscussionThreadController {
         func add(_ title: String, _ handler: @escaping () -> Void) {
             menu.addItem(DiscussionMenuItem(title: title, handler: handler))
         }
-        if model.isLoggedIn && c.notice.isEmpty { add("Reply") { [weak self] in self?.model.reply(to: c) } }
+        if model.canReply && c.notice.isEmpty { add("Reply") { [weak self] in self?.model.reply(to: c) } }
         add("Copy Text") { [weak self] in self?.copy(c) }
         let commentURL = model.commentURL(c.id)
         if let commentURL {
@@ -461,7 +461,7 @@ extension DiscussionThreadController {
             if event.keyCode == 123 { model.collapsed.insert(id) } else { model.collapsed.remove(id) }
             return true
         default:
-            guard mods.isEmpty, event.charactersIgnoringModifiers?.lowercased() == "r", model.isLoggedIn,
+            guard mods.isEmpty, event.charactersIgnoringModifiers?.lowercased() == "r", model.canReply,
                   let id = model.selectedID, let c = model.find(id, in: model.comments) else { return false }
             model.reply(to: c)
             return true

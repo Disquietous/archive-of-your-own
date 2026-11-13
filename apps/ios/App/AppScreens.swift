@@ -23,6 +23,8 @@ enum AppScreens {
             AuthorProfileView(username: username, initialPane: pane)
         case .inboxThread:
             InboxThreadView()
+        case .ao3Bookmarks:
+            AO3BookmarksScreen()
         case .accountManagement:
             AccountManagementView()
         case .diagnostics:
@@ -63,6 +65,8 @@ enum AppScreens {
             CommentThreadView(workID: workID, chapterID: chapterID)
         case .bookmarkEdit(let workID):
             BookmarkEditSheet(workID: workID)
+        case .seriesBookmarkEdit(let seriesID, let name):
+            BookmarkEditSheet(target: .series(seriesID), title: name)
         case .readingListPicker(let workID):
             ReadingListPickerSheet(workID: workID)
         case .themeEditor:

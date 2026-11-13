@@ -46,11 +46,15 @@ struct WorkRowMenu<Tail: View>: View {
                 Label("Bookmark", systemImage: "bookmark")
             }
         }
-        if state.bookmarkedWorkIDs.contains(work.id) {
+        // The source's own bookmark record, where it keeps one and an
+        // account is signed in — separate from the app bookmark above.
+        if let controls = state.workControls(work.id), controls.remoteBookmark == .enabled {
+            let site = controls.vocabulary.siteShort
             Button {
                 nav.presentedSheet = .bookmarkEdit(workID: work.id)
             } label: {
-                Label("Edit Bookmark…", systemImage: "square.and.pencil")
+                Label(state.hasAO3Bookmark(work.id) ? "Edit \(site) Bookmark…" : "Add \(site) Bookmark…",
+                      systemImage: "bookmark.square")
             }
         }
         Button {

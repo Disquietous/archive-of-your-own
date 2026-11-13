@@ -57,6 +57,9 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         tableView.backgroundColor = .clear
         tableView.target = self
         tableView.action = #selector(rowClicked)
+        let menu = NSMenu()
+        menu.delegate = self
+        tableView.menu = menu
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -112,6 +115,11 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
             } else if let error = model.author.bookmarksError, hits.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "exclamationmark.triangle",
                                                 title: "Couldn’t load bookmarks", message: error))
+            } else if hits.isEmpty, model.author.isOwnAccount {
+                overlay = AnyView(EmptyStateMac(
+                    theme: theme, icon: "bookmark.square",
+                    title: "No AO3 bookmarks yet",
+                    message: "Press ↻ above to fetch the bookmarks on your AO3 account, or add one from a work’s page."))
             } else if hits.isEmpty {
                 overlay = AnyView(EmptyStateMac(theme: theme, icon: "bookmark",
                                                 title: "No bookmarks in your library",
@@ -268,7 +276,61 @@ final class BookmarkResultsViewController: NSViewController, NSTableViewDataSour
         }
     }
 
+    // MARK: - Own bookmarks: edit / delete
+
+    /// The clicked row's hit when this list is the signed-in account's own
+    /// AO3 bookmarks — the only rows that can be edited or deleted.
+    private func ownClickedHit() -> UBookmarkHit? {
+        guard source == .authorBookmarks, model.author.isOwnAccount else { return nil }
+        let row = tableView.clickedRow
+        return row >= 0 && row < hits.count ? hits[row] : nil
+    }
+
+    private static func title(of hit: UBookmarkHit) -> String {
+        hit.work?.title ?? hit.series?.name ?? "Bookmark"
+    }
+
+    @objc private func menuEdit() {
+        guard let hit = ownClickedHit() else { return }
+        ReaderToolbarActions.presentBookmarkEdit(theme: theme, appState: appState, target: hit.ao3Target,
+                                                 title: Self.title(of: hit), presenter: self)
+    }
+
+    @objc private func menuDelete() {
+        guard let hit = ownClickedHit(), let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete AO3 Bookmark?"
+        alert.informativeText = "“\(Self.title(of: hit))” is deleted from your AO3 bookmarks, on AO3 and in this app. "
+            + "It can’t be undone."
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            Task { @MainActor in
+                guard let failure = await self.appState.deleteAO3Bookmark(hit.ao3Target),
+                      let window = self.view.window else { return }
+                let failed = NSAlert()
+                failed.messageText = "Couldn’t delete the bookmark"
+                failed.informativeText = failure
+                _ = await failed.beginSheetModal(for: window)
+            }
+        }
+    }
+
     func tableView(_ tableView: NSTableView, shouldShowCellExpansionFor tableColumn: NSTableColumn?, row: Int) -> Bool {
         false
+    }
+}
+
+extension BookmarkResultsViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard ownClickedHit() != nil else { return }
+        let edit = NSMenuItem(title: "Edit AO3 Bookmark…", action: #selector(menuEdit), keyEquivalent: "")
+        edit.target = self
+        menu.addItem(edit)
+        let delete = NSMenuItem(title: "Delete AO3 Bookmark…", action: #selector(menuDelete), keyEquivalent: "")
+        delete.target = self
+        menu.addItem(delete)
     }
 }

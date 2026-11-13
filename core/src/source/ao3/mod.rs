@@ -44,6 +44,7 @@ impl AO3Source {
             user_search: false,
             tag_listings: true,
             update_checks: true,
+            discussion_posts: true,
             login: true,
             sign_in: super::SignInShape::Credentials,
             remote_bookmarks: true,

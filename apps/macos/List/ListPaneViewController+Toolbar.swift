@@ -69,6 +69,15 @@ extension ListPaneViewController {
         return button
     }
 
+    func ownAO3BookmarksButton() -> ToolButton {
+        let button = ownAO3BookmarksBtn ?? ToolButton(theme: theme, symbol: "bookmark.square",
+                                                      tooltip: "My AO3 Bookmarks — the bookmarks on your AO3 account") { [weak self] in
+            self?.model.openOwnAO3Bookmarks()
+        }
+        ownAO3BookmarksBtn = button
+        return button
+    }
+
     func clearHistoryButton() -> ToolButton {
         let button = clearHistoryBtn ?? ToolButton(theme: theme, symbol: "trash", tooltip: "Clear history") { [weak self] in
             self?.confirmClearHistory()

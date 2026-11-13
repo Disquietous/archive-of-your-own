@@ -749,10 +749,163 @@ pub fn parse_signed_in_user(html: &str) -> Option<crate::source::SessionIdentity
     Some(crate::source::SessionIdentity { external_id: id, username })
 }
 
+/// The site's comment form as a page carries it for a signed-in reader:
+/// the review form on a series page, the comment form on a chapter page.
+/// It is the site's stock WordPress form, posted as it stands — every
+/// field the page put in it rides along, so a field the site adds later
+/// is sent without this code knowing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentForm {
+    /// Where the form posts (absolute).
+    pub action: String,
+    /// The form's fields in page order: (name, value, the input's id).
+    pub fields: Vec<(String, String, String)>,
+}
+
+impl CommentForm {
+    /// Set the field named `name`, adding it when the form has none.
+    pub fn set(&mut self, name: &str, value: &str) {
+        match self.fields.iter_mut().find(|f| f.0 == name) {
+            Some(field) => field.1 = value.to_string(),
+            None => self.fields.push((name.to_string(), value.to_string(), String::new())),
+        }
+    }
+
+    /// Set a field the page names by element id; nothing when absent.
+    pub fn set_by_id(&mut self, id: &str, value: &str) {
+        if let Some(field) = self.fields.iter_mut().find(|f| f.2 == id) {
+            field.1 = value.to_string();
+        }
+    }
+
+    pub fn pairs(&self) -> Vec<(String, String)> {
+        self.fields.iter().map(|(name, value, _)| (name.clone(), value.clone())).collect()
+    }
+}
+
+/// The form holding the `comment` text area, with its hidden and text
+/// inputs as the page filled them and its submit button. None when the
+/// page offers no form to write in — a signed-out reader gets a "Login to
+/// Post Comment" link and a disabled text area instead.
+pub fn parse_comment_form(html: &str, page_url: &str) -> Option<CommentForm> {
+    let doc = Html::parse_document(html);
+    let form = doc.select(&sel("form")).find(|form| {
+        form.select(&sel("textarea[name='comment']")).any(|t| t.value().attr("disabled").is_none())
+    })?;
+    let action = attr(&form, "action")?;
+    let action = page_url.parse::<url::Url>().ok()
+        .and_then(|base| base.join(action).ok())
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| action.to_string());
+    let mut fields: Vec<(String, String, String)> = Vec::new();
+    for input in form.select(&sel("input[name]")) {
+        let kind = input.value().attr("type").unwrap_or("text").to_ascii_lowercase();
+        let checked = input.value().attr("checked").is_some();
+        let sent = match kind.as_str() {
+            "hidden" | "text" | "email" | "url" | "number" => true,
+            "checkbox" | "radio" => checked,
+            _ => false, // submit buttons are added below; files, buttons never
+        };
+        if !sent { continue }
+        let Some(name) = attr(&input, "name") else { continue };
+        fields.push((name.to_string(), input.value().attr("value").unwrap_or("").to_string(),
+                     input.value().attr("id").unwrap_or("").to_string()));
+    }
+    // The button a reader presses is part of what a browser sends.
+    let submit = form.select(&sel("button[type='submit'][name], input[type='submit'][name]")).next();
+    if let Some(button) = submit {
+        if let Some(name) = attr(&button, "name") {
+            fields.push((name.to_string(), button.value().attr("value").unwrap_or("").to_string(), String::new()));
+        }
+    }
+    Some(CommentForm { action, fields })
+}
+
+/// The reason on the error page WordPress answers a refused comment with
+/// ("Duplicate comment detected…", "You are posting comments too
+/// quickly…"). None when the page is not that error page.
+pub fn parse_post_refusal(html: &str) -> Option<String> {
+    let doc = Html::parse_document(html);
+    let root = doc.root_element();
+    first_text(&root, ".wp-die-message")
+        .or_else(|| first_text(&root, "body#error-page p"))
+        .map(|message| message.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|message| !message.is_empty())
+}
+
+/// The new comment's id in the address the site sends the reader to
+/// after a post: `…#comment-N`, or `…?tab=review&cid=N` for a review.
+pub fn posted_comment_id(final_url: &str) -> Option<u64> {
+    let digits = |rest: &str| -> Option<u64> {
+        let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        n.parse().ok()
+    };
+    final_url.split("#comment-").nth(1).and_then(digits)
+        .or_else(|| final_url.split("cid=").nth(1).and_then(digits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    // Hand-authored on the site's form markup; ids, names and text invented.
+    const REVIEW_FORM: &str = r#"<html><body><div id="respond" class="comment-respond">
+        <form action="/wp-comments-post.php" method="post" id="commentform" class="commentform" novalidate>
+          <div class="comment-form-title"><input id="cur_chp" name="cur_chp" type="text" value="Chapter 3: Low Tide"/></div>
+          <textarea id="comment" name="comment" cols="40" rows="200"></textarea>
+          <div class="form-submit chapter">
+            <button name="submit" type="submit" id="submit_review" class="btnrev review" value="Post">Submit</button>
+            <input type='hidden' name='comment_post_ID' value='700412' id='comment_post_ID' />
+            <input type='hidden' name='comment_parent' id='comment_parent' value='0' />
+            <input type='hidden' name='quote' id='mycidrpy' value='' />
+          </div>
+        </form></div></body></html>"#;
+
+    const SIGNED_OUT_FORM: &str = r#"<html><body><div id="respond" class="comment-respond">
+        <div class="cant_cmt_chapter">
+          <textarea class="login_to_reply_text" name="comment" id="comment" disabled></textarea>
+          <a href="https://www.scribblehub.com/wp-login.php" id="submit_chapter">Login to Post Comment</a>
+        </div></div></body></html>"#;
+
+    #[test]
+    fn the_comment_form_is_read_as_the_page_filled_it() {
+        let mut form = parse_comment_form(REVIEW_FORM, "https://www.scribblehub.com/series/700412/the-lighthouse-ledger/").unwrap();
+        assert_eq!(form.action, "https://www.scribblehub.com/wp-comments-post.php");
+        let field = |form: &CommentForm, name: &str| form.fields.iter().find(|f| f.0 == name).map(|f| f.1.clone());
+        assert_eq!(field(&form, "cur_chp").as_deref(), Some("Chapter 3: Low Tide"), "the site's own reading status rides along");
+        assert_eq!(field(&form, "comment_post_ID").as_deref(), Some("700412"));
+        assert_eq!(field(&form, "comment_parent").as_deref(), Some("0"));
+        assert_eq!(field(&form, "submit").as_deref(), Some("Post"));
+        assert_eq!(field(&form, "comment"), None, "the text area is filled by the caller");
+        form.set("comment", "A fine story.");
+        form.set("comment_parent", "2300999");
+        form.set_by_id("mycidrpy", "2300999");
+        form.set_by_id("nothing_here", "x");
+        assert_eq!(field(&form, "comment").as_deref(), Some("A fine story."));
+        assert_eq!(field(&form, "comment_parent").as_deref(), Some("2300999"));
+        assert_eq!(field(&form, "quote").as_deref(), Some("2300999"));
+        assert_eq!(form.pairs().len(), form.fields.len());
+    }
+
+    #[test]
+    fn a_signed_out_page_offers_no_form() {
+        assert_eq!(parse_comment_form(SIGNED_OUT_FORM, "https://www.scribblehub.com/read/700412-x/chapter/2300107/"), None);
+    }
+
+    #[test]
+    fn a_refused_post_carries_the_sites_reason_and_an_accepted_one_its_id() {
+        let die = r#"<html><body id="error-page"><div class="wp-die-message"><p>Duplicate comment detected;
+            it looks as though you&#8217;ve already said that!</p></div></body></html>"#;
+        assert_eq!(parse_post_refusal(die).as_deref(),
+                   Some("Duplicate comment detected; it looks as though you\u{2019}ve already said that!"));
+        let older = r#"<html><body id="error-page"><p>You are posting comments too quickly. Slow down.</p></body></html>"#;
+        assert_eq!(parse_post_refusal(older).as_deref(), Some("You are posting comments too quickly. Slow down."));
+        assert_eq!(parse_post_refusal(REVIEW_FORM), None);
+        assert_eq!(posted_comment_id("https://www.scribblehub.com/read/700412-x/chapter/2300107/#comment-2301555"), Some(2301555));
+        assert_eq!(posted_comment_id("https://www.scribblehub.com/series/700412/x/?tab=review&cid=2301556"), Some(2301556));
+        assert_eq!(posted_comment_id("https://www.scribblehub.com/series/700412/x/"), None);
+    }
 
     fn series() -> SeriesPage {
         let html = fs::read_to_string("tests/fixtures/scribblehub_series.html").unwrap();

@@ -137,8 +137,12 @@ extension RustBridge {
 
     // MARK: - Bookmarks
 
-    func addBookmark(_ workId: UInt64, note: String? = nil, syncToAo3: Bool = false) {
-        try? app?.addBookmark(workId: workId, note: note, syncToAo3: syncToAo3)
+    // The app bookmark is a flag on a work or series of any source. It
+    // has no note and no link to an AO3 bookmark (see "AO3 bookmarks" in
+    // RustBridge+Account).
+
+    func addBookmark(_ workId: UInt64) {
+        try? app?.addBookmark(workId: workId)
     }
 
     func removeBookmark(_ workId: UInt64) {
@@ -157,8 +161,8 @@ extension RustBridge {
     // A series must be cached (a series bookmark blurb fetched it) before
     // it can be bookmarked.
 
-    func addSeriesBookmark(_ seriesId: UInt64, note: String? = nil, syncToAo3: Bool = false) {
-        try? app?.addSeriesBookmark(seriesId: seriesId, note: note, syncToAo3: syncToAo3)
+    func addSeriesBookmark(_ seriesId: UInt64) {
+        try? app?.addSeriesBookmark(seriesId: seriesId)
     }
 
     func removeSeriesBookmark(_ seriesId: UInt64) {

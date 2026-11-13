@@ -16,6 +16,8 @@ enum AppDestination: Hashable {
     /// nil = the profile's own default.
     case authorWorks(username: String, pane: AuthorProfileModel.Pane? = nil)
     case inboxThread
+    /// The active AO3 account's own bookmarks (iOS): list, edit, delete.
+    case ao3Bookmarks
     case accountManagement
     /// Settings › Privacy › Privacy mode (iOS).
     case privacyMode
@@ -43,7 +45,10 @@ enum SheetType: Identifiable, Hashable {
     case reauth
     case comment(workID: String, chapterID: UInt64?)
     case viewComments(workID: String, chapterID: UInt64?)
+    /// The AO3 bookmark editor for a work / a series (the account's own
+    /// record on the site — not the app bookmark).
     case bookmarkEdit(workID: String)
+    case seriesBookmarkEdit(seriesID: UInt64, name: String)
     /// Find-or-create reading list picker for one work.
     case readingListPicker(workID: String)
     case themeEditor
@@ -57,6 +62,7 @@ enum SheetType: Identifiable, Hashable {
         case .comment(let workID, let chapterID): "comment-\(workID)-\(chapterID ?? 0)"
         case .viewComments(let workID, let chapterID): "viewComments-\(workID)-\(chapterID ?? 0)"
         case .bookmarkEdit(let workID): "bookmarkEdit-\(workID)"
+        case .seriesBookmarkEdit(let seriesID, _): "seriesBookmarkEdit-\(seriesID)"
         case .readingListPicker(let workID): "readingListPicker-\(workID)"
         case .themeEditor: "themeEditor"
         }
@@ -208,6 +214,10 @@ final class NavigationState {
 
     func openFandomWorks(_ tag: String) {
         push(.fandomWorks(tag: tag))
+    }
+
+    func openAO3Bookmarks() {
+        push(.ao3Bookmarks)
     }
 
     func openAuthor(_ username: String, pane: AuthorProfileModel.Pane? = nil) {

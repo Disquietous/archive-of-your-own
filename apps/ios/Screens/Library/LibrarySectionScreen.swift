@@ -207,11 +207,11 @@ private struct WhatsNewScreen: View {
 
 // MARK: - Bookmarks
 
+/// The app's own bookmarks: a flag on a work of any source. The signed-in
+/// AO3 account's bookmarks are a separate screen, reached from the menu.
 private struct BookmarksScreen: View {
     @Environment(AppState.self) private var state
-
-    @State private var isImporting = false
-    @State private var isSyncingAll = false
+    @Environment(NavigationState.self) private var nav
 
     var body: some View {
         WorkListScreen(
@@ -220,52 +220,17 @@ private struct BookmarksScreen: View {
             rawWorks: { state.bookmarkedWorkIDs.compactMap { state.work(byID: $0) }
                 .sorted { $0.title < $1.title } },
             empty: .init(systemImage: "bookmark", title: "No bookmarks yet",
-                         subtitle: "Works you bookmark will appear here."),
-            menuItems: state.ao3Username == nil ? nil : AnyView(Group {
+                         subtitle: "Works you bookmark, from any source, will appear here."),
+            swipe: .init(label: "Remove", systemImage: "bookmark.slash") { work in
+                if state.bookmarkedWorkIDs.contains(work.id) { state.toggleBookmark(work.id) }
+            },
+            menuItems: state.ao3Username == nil ? nil : AnyView(
                 Button {
-                    Task {
-                        isImporting = true
-                        await state.importAO3Bookmarks()
-                        isImporting = false
-                    }
+                    nav.openAO3Bookmarks()
                 } label: {
-                    Label("Import from AO3", systemImage: "arrow.down.circle")
+                    Label("My AO3 Bookmarks", systemImage: "bookmark.square")
                 }
-                .disabled(isImporting || isSyncingAll)
-                Button {
-                    Task {
-                        isSyncingAll = true
-                        await state.pushAllSyncedBookmarks()
-                        isSyncingAll = false
-                    }
-                } label: {
-                    Label("Sync to AO3", systemImage: "arrow.up.circle")
-                }
-                .disabled(isImporting || isSyncingAll)
-            })
-        )
-        .alert(
-            "Remove Synced Bookmark?",
-            isPresented: Binding(
-                get: { state.pendingBookmarkRemoval != nil },
-                set: { if !$0 { state.cancelBookmarkRemoval() } }
             )
-        ) {
-            Button("Remove Locally Only", role: .destructive) {
-                if let id = state.pendingBookmarkRemoval {
-                    state.bookmarkedWorkIDs.remove(id)
-                    if let workId = UInt64(id) { state.bridge.removeBookmark(workId) }
-                    state.pendingBookmarkRemoval = nil
-                }
-            }
-            Button("Remove Everywhere", role: .destructive) {
-                state.confirmBookmarkRemoval()
-            }
-            Button("Cancel", role: .cancel) {
-                state.cancelBookmarkRemoval()
-            }
-        } message: {
-            Text("This bookmark is synced to AO3. Would you like to also remove it from your AO3 account?")
-        }
+        )
     }
 }

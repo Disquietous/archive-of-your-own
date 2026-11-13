@@ -150,21 +150,26 @@ impl AO3App {
 
     // -- Bookmarks --
     //
-    // A bookmark targets a work or a series. The `*_bookmark(work_id)`
-    // functions are the work-target forms every existing caller uses; the
-    // `*_series_bookmark(series_id)` forms are their series twins.
+    // Two independent things (Area 7): the app bookmark is a flag on a
+    // work or series of any source — add / remove / is / get_bookmarked_*
+    // below touch nothing else. The AO3 bookmark is the active AO3
+    // account's record (note, tags, collections, private, rec, AO3 id) —
+    // the *_details / *_sync / push / delete / pull functions — and
+    // exists whether or not the target carries the flag. The
+    // `*(work_id)` functions are the work-target forms; the `*_series_*`
+    // forms are their series twins.
 
-    pub fn add_bookmark(&self, work_id: u64, note: Option<String>, sync_to_ao3: bool) -> Result<(), AO3Error> {
+    pub fn add_bookmark(&self, work_id: u64) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        storage.add_bookmark(work_id, note.as_deref(), sync_to_ao3).map_err(AO3Error::from)
+        storage.add_bookmark(work_id).map_err(AO3Error::from)
     }
 
     /// Bookmark a series. The series must be cached (a series bookmark
     /// blurb or series page fetched it) — the database rejects a bookmark
     /// of an unknown target.
-    pub fn add_series_bookmark(&self, series_id: u64, note: Option<String>, sync_to_ao3: bool) -> Result<(), AO3Error> {
+    pub fn add_series_bookmark(&self, series_id: u64) -> Result<(), AO3Error> {
         let storage = self.storage.blocking_lock();
-        storage.add_bookmark_for(BookmarkTarget::Series(series_id), note.as_deref(), sync_to_ao3)
+        storage.add_bookmark_for(BookmarkTarget::Series(series_id))
             .map(|_| ()).map_err(AO3Error::from)
     }
 
@@ -222,32 +227,19 @@ impl AO3App {
         Ok(bookmarks.into_iter().filter_map(|(t, _)| t.series_id()).collect())
     }
 
-    pub fn get_bookmark(&self, work_id: u64) -> Result<Option<UBookmark>, AO3Error> {
-        self.get_bookmark_for(BookmarkTarget::Work(work_id))
-    }
-
-    pub fn get_series_bookmark(&self, series_id: u64) -> Result<Option<UBookmark>, AO3Error> {
-        self.get_bookmark_for(BookmarkTarget::Series(series_id))
-    }
-
-    /// Every bookmark of the active account (works and series), newest first.
-    pub fn get_all_bookmarks_full(&self) -> Result<Vec<UBookmark>, AO3Error> {
+    /// The active AO3 account's own bookmark records, newest first: those
+    /// on AO3 and those kept only in the app so far. Library only.
+    pub fn get_own_ao3_bookmarks(&self) -> Result<Vec<UBookmarkHit>, AO3Error> {
         let storage = self.storage.blocking_lock();
-        let targets = storage.get_bookmark_targets().map_err(AO3Error::from)?;
-        let mut result = Vec::new();
-        for target in targets {
-            if let Some((note, sync, ao3_id)) = storage.get_bookmark_full_for(target).map_err(AO3Error::from)? {
-                let id = storage.get_bookmark_id(target).map_err(AO3Error::from)?.unwrap_or(0);
-                result.push(Self::ubookmark(target, note, sync, ao3_id, id));
-            }
-        }
-        Ok(result)
+        Ok(storage.get_own_ao3_bookmarks().map_err(AO3Error::from)?
+            .into_iter().map(UBookmarkHit::from).collect())
     }
 
     /// Pull the signed-in user's own bookmark listing and mirror it locally
-    /// (the explicit overwrite path: each listed bookmark's note replaces
-    /// the local one). Targets are cached first — the blurb's work or
-    /// series — so every bookmark row has its referent.
+    /// as AO3 records (the explicit overwrite path: each listed bookmark's
+    /// note replaces the local one). Targets are cached first — the
+    /// blurb's work or series — so every record has its referent. No app
+    /// flag is set: an AO3 bookmark does not make an app bookmark.
     pub async fn pull_bookmarks(&self, username: String) -> Result<Vec<UBookmark>, AO3Error> {
         // AO3 lists 20 bookmarks a page; this is 10,000 bookmarks. A
         // listing that still claims a next page past it is a parser or
@@ -292,13 +284,15 @@ impl AO3App {
                             }
                         }
                     };
-                    // Upsert bookmark with sync_to_ao3=true
-                    let id = match s.add_bookmark_for(target, Some(&listing.note), true) {
-                        Ok(id) => id,
-                        Err(e) => { log_error!("db", "add_bookmark failed: {e}"); continue; }
-                    };
+                    // Upsert the record: note from the listing, AO3 id
+                    // (which also marks it as synced).
+                    if let Err(e) = s.update_bookmark_note_for(target, &listing.note) {
+                        log_error!("db", "bookmark record upsert failed: {e}");
+                        continue;
+                    }
                     log_db("set_ao3_bookmark_id",
                            s.set_ao3_bookmark_id_for(target, listing.ao3_bookmark_id));
+                    let id = s.get_ao3_bookmark_record_id(target).ok().flatten().unwrap_or(0);
                     all_bookmarks.push(Self::ubookmark(target, listing.note.clone(), true,
                                                        Some(listing.ao3_bookmark_id), id));
                 }
@@ -457,13 +451,6 @@ impl AO3App {
         }
     }
 
-    fn get_bookmark_for(&self, target: BookmarkTarget) -> Result<Option<UBookmark>, AO3Error> {
-        let storage = self.storage.blocking_lock();
-        let bm = storage.get_bookmark_full_for(target).map_err(AO3Error::from)?;
-        let id = storage.get_bookmark_id(target).map_err(AO3Error::from)?.unwrap_or(0);
-        Ok(bm.map(|(note, sync, ao3_id)| Self::ubookmark(target, note, sync, ao3_id, id)))
-    }
-
     async fn push_bookmark_for(&self, target: BookmarkTarget) -> Result<bool, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
             let details = {
@@ -473,7 +460,7 @@ impl AO3App {
                 s.get_bookmark_details_for(target).map_err(AO3Error::from)?
             };
             let Some((note, tags, collections, private, rec, _, _)) = details else {
-                return Err(AO3Error::Network { message: "No local bookmark to push.".to_string() });
+                return Err(AO3Error::Network { message: "No AO3 bookmark to send.".to_string() });
             };
 
             // The client speaks AO3 numbers; the target is a row id.
@@ -527,15 +514,20 @@ impl AO3App {
                 s.get_ao3_bookmark_id_for(target).map_err(AO3Error::from)?
             };
 
-            match ao3_id {
-                Some(id) => {
-                    with_recovery(client, storage, OpKind::Fetch { label: "bookmark_delete".to_string() }, RetrySafety::Idempotent,
-                        move |client| async move {
-                            client.read().await.delete_ao3_bookmark(id).await.map_err(AO3Error::from)
-                        }).await
+            // A record that reached AO3 is deleted there first; the local
+            // record goes only once AO3 confirms, so a failed request
+            // leaves it to retry. One that never left the app just goes.
+            if let Some(id) = ao3_id {
+                let deleted = with_recovery(client, storage.clone(), OpKind::Fetch { label: "bookmark_delete".to_string() }, RetrySafety::Idempotent,
+                    move |client| async move {
+                        client.read().await.delete_ao3_bookmark(id).await.map_err(AO3Error::from)
+                    }).await?;
+                if !deleted {
+                    return Ok(false);
                 }
-                None => Ok(false),
             }
+            storage.lock().await.remove_ao3_bookmark_for(target).map_err(AO3Error::from)?;
+            Ok(true)
         }).await
     }
 

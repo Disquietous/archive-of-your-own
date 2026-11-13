@@ -79,6 +79,11 @@ fn comment_id(story: u64, chapter: u32, slot: u32) -> u64 {
     90_000_000 + story * 10_000 + chapter as u64 * 100 + slot as u64
 }
 
+/// What the reader posted this run, per story and chapter (None = a
+/// review), so a post shows up on the next fetch the way it would on a
+/// site. Process-wide and forgotten at exit, like the mock archive's.
+static POSTED: std::sync::Mutex<Vec<(u64, Option<u64>, Option<u64>, Comment)>> = std::sync::Mutex::new(Vec::new());
+
 pub struct MockRatedSource {
     capabilities: SourceCapabilities,
 }
@@ -105,6 +110,7 @@ impl MockRatedSource {
                 user_search: false,
                 tag_listings: false,
                 update_checks: true,
+                discussion_posts: true,
                 login: false,
                 sign_in: super::SignInShape::None,
                 remote_bookmarks: false,
@@ -286,13 +292,61 @@ impl Source for MockRatedSource {
     {
         Self::guard()?;
         let story = Self::story(&work.external_id)?;
-        let comments = match chapter {
+        let mut comments: Vec<Comment> = match chapter {
             None => (0..3).map(|slot| Self::review(story, slot)).collect(),
             Some(ch) if ch >= 1 && ch <= story.chapters as u64 =>
                 (0..2).map(|slot| Self::chapter_comment(story, ch as u32, slot)).collect(),
             Some(_) => Vec::new(),
         };
+        // The reader's own posts: replies under their parent, the rest on top.
+        let posted = POSTED.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, _, parent, comment) in posted.iter().filter(|p| p.0 == story.id && p.1 == chapter) {
+            match parent.and_then(|id| comments.iter_mut().find(|c| c.id == id)) {
+                Some(parent) => parent.replies.push(comment.clone()),
+                None => comments.insert(0, comment.clone()),
+            }
+        }
         Ok(CommentsPage { comments, current_page: 1, total_pages: 1 })
+    }
+
+    /// No login to speak of: the mock takes posts from anyone, so the
+    /// composer is exercised offline.
+    fn post_gate(&self, _signed_in: bool) -> Gate {
+        Gate::Enabled
+    }
+
+    /// Remembers the post for this run and answers with the discussion
+    /// carrying it. An empty post is refused the way a site refuses one.
+    async fn post_discussion(&self, work: &ExternalRef, post: &super::DiscussionPost)
+        -> Result<super::PostedDiscussion, AppError>
+    {
+        Self::guard()?;
+        let story = Self::story(&work.external_id)?;
+        let body = post.body.trim();
+        if body.is_empty() {
+            return Err(AppError::NetworkError("Rated Mock: a post needs some text.".to_string()));
+        }
+        let id = {
+            let mut posted = POSTED.lock().unwrap_or_else(|e| e.into_inner());
+            let id = 99_000_000 + posted.len() as u64;
+            posted.push((story.id, post.chapter, post.parent, Comment {
+                id,
+                author: Self::user("you"),
+                posted_at: crate::timefmt::now_utc_datetime(),
+                content: body.lines().filter(|line| !line.trim().is_empty()).map(|line| ContentBlock::Paragraph {
+                    text: vec![InlineContent::Text { value: line.trim().to_string() }],
+                }).collect(),
+                replies: Vec::new(),
+                chapter_label: post.chapter.map(|ch| format!("Chapter {ch}")),
+                chapter_id: post.chapter,
+                notice: None,
+                more_replies: 0,
+                rating: None,
+            }));
+            id
+        };
+        let page = self.fetch_discussion(work, post.chapter, 1).await?;
+        Ok(super::PostedDiscussion { page, comment_id: Some(id) })
     }
 }
 
@@ -343,6 +397,28 @@ mod tests {
         assert!(page.works[0].stats.iter().any(|s| s.key == "rating"), "the work's figures ride along");
         assert!(!page.has_next);
         assert!(series.is_err(), "a source without series listings has none to check");
+    }
+
+    #[tokio::test]
+    async fn a_post_shows_up_in_the_discussion_it_was_made_in() {
+        use crate::source::DiscussionPost;
+        let _g = crate::mock_site::tests::toggle_lock();
+        let src = MockRatedSource::new();
+        crate::mock_site::set_enabled(true);
+        let review = src.post_discussion(&story_ref("2"), &DiscussionPost { chapter: None, parent: None, body: "Kept me up.\nWorth it.".into() }).await;
+        let parent = src.fetch_discussion(&story_ref("2"), Some(1), 1).await.unwrap().comments[0].id;
+        let reply = src.post_discussion(&story_ref("2"), &DiscussionPost { chapter: Some(1), parent: Some(parent), body: "Agreed.".into() }).await;
+        let empty = src.post_discussion(&story_ref("2"), &DiscussionPost { chapter: None, parent: None, body: "  ".into() }).await;
+        let other_chapter = src.fetch_discussion(&story_ref("2"), Some(2), 1).await;
+        crate::mock_site::set_enabled(false);
+        let review = review.unwrap();
+        let mine = review.page.comments.iter().find(|c| Some(c.id) == review.comment_id).expect("the review is on the page");
+        assert_eq!(mine.content.len(), 2, "one paragraph per line");
+        let reply = reply.unwrap();
+        let under = reply.page.comments.iter().find(|c| c.id == parent).unwrap();
+        assert!(under.replies.iter().any(|c| Some(c.id) == reply.comment_id), "a reply sits under its parent");
+        assert!(empty.is_err());
+        assert!(other_chapter.unwrap().comments.iter().all(|c| c.replies.is_empty()), "another chapter is untouched");
     }
 
     #[tokio::test]

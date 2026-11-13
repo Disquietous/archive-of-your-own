@@ -182,6 +182,8 @@ pub struct SourceCapabilities {
     pub user_search: bool,
     pub tag_listings: bool,
     pub update_checks: bool,
+    /// The reader can post to the discussion (a comment, a review).
+    pub discussion_posts: bool,
     pub login: bool,
     /// How an account is signed in; `None` exactly when `login` is false.
     pub sign_in: SignInShape,
@@ -251,6 +253,28 @@ pub struct ListingPage {
     pub total_pages: u32,
     /// The listing's own result count when the page states one.
     pub total_works: Option<u32>,
+}
+
+/// A post to a work's discussion (Area 12): a review or comment on the
+/// work itself, a comment on one chapter, or a reply to a comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscussionPost {
+    /// The source's chapter id; None = the work's own discussion.
+    pub chapter: Option<u64>,
+    /// The comment replied to; None = top level.
+    pub parent: Option<u64>,
+    /// What the reader wrote, as plain text.
+    pub body: String,
+}
+
+/// A post the site accepted.
+#[derive(Debug, Clone)]
+pub struct PostedDiscussion {
+    /// The discussion as the site shows it after the post (the page it
+    /// answered with), cached like a fetch of the same scope.
+    pub page: crate::models::CommentsPage,
+    /// The new comment's id when the site named it.
+    pub comment_id: Option<u64>,
 }
 
 /// What a follow watches at a source (Area 9): the update check asks the
@@ -366,6 +390,8 @@ pub struct WorkControls {
     pub chapter_comments: bool,
     pub subscribe: Gate,
     pub remote_bookmark: Gate,
+    /// Posting to the discussion: a comment, a review, a reply.
+    pub post: Gate,
     pub vocabulary: Vocabulary,
 }
 
@@ -577,6 +603,22 @@ pub trait Source: Send + Sync {
         }
     }
 
+    /// Whether the reader can post to the discussion right now. Hidden
+    /// where the source takes no posts; otherwise it needs the login.
+    fn post_gate(&self, signed_in: bool) -> Gate {
+        let caps = self.capabilities();
+        Gate::when(caps.discussion_posts && caps.discussion != DiscussionShape::None, signed_in, "Sign in to post")
+    }
+
+    /// Post to a work's discussion and return it as the site then shows
+    /// it. A post creates a record with no natural dedup, so callers
+    /// never retry one that may have reached the site. Default: none —
+    /// AO3's own posting paths stay in the client until the AO3Source move.
+    async fn post_discussion(&self, work: &ExternalRef, post: &DiscussionPost) -> Result<PostedDiscussion, AppError> {
+        let _ = (work, post);
+        Err(AppError::NetworkError(format!("{} takes no posts through this path", self.capabilities().name)))
+    }
+
     /// Send the reader's reaction. Default: the source takes none.
     async fn react(&self, work: &ExternalRef, reaction: Reaction) -> Result<ReactionOutcome, AppError> {
         let _ = (work, reaction);
@@ -728,6 +770,10 @@ mod tests {
         assert_eq!(sh.reaction_gate(true), Gate::Enabled);
         // The mock has no login and rates anyway, so the control is exercised offline.
         assert_eq!(mock_rated::MockRatedSource::new().reaction_gate(false), Gate::Enabled);
+        // Posting needs the site's login everywhere but the mock.
+        assert_eq!(ao3.post_gate(false), Gate::Disabled { reason: "Sign in to post".to_string() });
+        assert_eq!(sh.post_gate(true), Gate::Enabled);
+        assert_eq!(mock_rated::MockRatedSource::new().post_gate(false), Gate::Enabled);
     }
 
     #[tokio::test]

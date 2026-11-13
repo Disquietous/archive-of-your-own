@@ -379,7 +379,9 @@ final class AppState {
     /// Kudos POSTs in flight — the heart shows faded until AO3 confirms.
     var kudosPendingWorkIDs: Set<String> = []
 
-    var pendingBookmarkRemoval: String?
+    /// Bumped whenever the active account's AO3 bookmark records change —
+    /// the observable input behind `hasAO3Bookmark(_:)`.
+    var ao3BookmarksRevision = 0
 
     /// The active account's username, only while it is logged in to AO3.
     var ao3Username: String?

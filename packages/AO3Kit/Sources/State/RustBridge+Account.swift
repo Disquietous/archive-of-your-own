@@ -47,13 +47,23 @@ extension RustBridge {
         return true
     }
 
-    // MARK: - Bookmark Sync
+    // MARK: - AO3 bookmarks
+    //
+    // The active AO3 account's bookmark records — independent of the app
+    // bookmark flag: a work can have either, both or neither.
+
+    /// The account's own records, newest first: those on AO3 and those
+    /// not sent yet. Library only.
+    func getOwnAo3Bookmarks() -> [UBookmarkHit] {
+        (try? app?.getOwnAo3Bookmarks()) ?? []
+    }
 
     func updateBookmarkNote(_ workId: UInt64, note: String) {
         try? app?.updateBookmarkNote(workId: workId, note: note)
     }
 
-    /// Full AO3 bookmark object (notes, tags, collections, private/rec).
+    /// The account's AO3 bookmark of a work (notes, tags, collections,
+    /// private/rec); nil when it has none.
     func getBookmarkDetails(_ workId: UInt64) -> UBookmarkDetails? {
         (try? app?.getBookmarkDetails(workId: workId)) ?? nil
     }
@@ -72,14 +82,6 @@ extension RustBridge {
         (try? app?.isBookmarkSynced(workId: workId)) ?? false
     }
 
-    func getBookmark(_ workId: UInt64) -> UBookmark? {
-        try? app?.getBookmark(workId: workId)
-    }
-
-    func getAllBookmarksFull() -> [UBookmark] {
-        (try? app?.getAllBookmarksFull()) ?? []
-    }
-
     func pullBookmarks(username: String) async throws -> [UBookmark] {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.pullBookmarks(username: username)
@@ -90,6 +92,8 @@ extension RustBridge {
         return try await app.pushBookmark(workId: workId)
     }
 
+    /// Delete the account's AO3 bookmark of a work: on AO3 when it is
+    /// there, then the local record. False when AO3 refused.
     func deleteAo3Bookmark(workId: UInt64) async throws -> Bool {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.deleteAo3Bookmark(workId: workId)

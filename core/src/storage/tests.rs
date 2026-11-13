@@ -259,7 +259,7 @@ fn test_save_and_load_work() {
     // Delete cascades
     db.save_chapter(id, &sample_chapter(1)).unwrap();
     db.save_progress(id, 1, 250).unwrap();
-    db.add_bookmark(id, None, false).unwrap();
+    db.add_bookmark(id).unwrap();
     db.add_to_history(id).unwrap();
 
     db.delete_work(id).expect("delete_work");
@@ -312,13 +312,13 @@ fn test_bookmarks() {
     assert!(db.get_bookmarks().unwrap().is_empty());
 
     // A bookmark needs its target row (trigger-enforced).
-    assert!(db.add_bookmark(1, Some("great fic"), false).is_err());
+    assert!(db.add_bookmark(1).is_err());
     db.save_work(&sample_work(1)).unwrap();
     db.save_work(&sample_work(2)).unwrap();
-    db.add_bookmark(1, Some("great fic"), false).unwrap();
+    db.add_bookmark(1).unwrap();
     assert!(db.is_bookmarked(1).unwrap());
 
-    db.add_bookmark(2, None, false).unwrap();
+    db.add_bookmark(2).unwrap();
     let bm = db.get_bookmarks().unwrap();
     assert_eq!(bm.len(), 2);
 
@@ -343,7 +343,6 @@ fn test_search_local_bookmarks_filtered() {
 
     // Own bookmark on work 1 (rec, own tag); a fetched listing's bookmark
     // by another user on work 2.
-    db.add_bookmark(1, Some("great fic"), false).unwrap();
     db.update_bookmark_details(1, "great fic", "Comfort Read", "", false, true).unwrap();
     db.cache_fetched_bookmark("OtherUser", 2, 999, "note from a friend", "Favorite", false).unwrap();
     // A bookmark of a work that was never cached has no referent — the
@@ -998,9 +997,11 @@ fn test_collection_bookmark_caching() {
         "SELECT account_id FROM ao3_bookmarks WHERE id = ?1", [mine], |r| r.get(0)).unwrap();
     assert_eq!(linked, Some(reader), "the signed-in user's record links to their account row");
 
-    // Flagging the work in the app adopts the record: the view shows it,
-    // AO3-synced with its id.
-    db.add_bookmark(1, None, false).unwrap();
+    // The record is the active account's AO3 bookmark whether or not the
+    // work carries the app flag, and flagging it changes nothing there.
+    assert!(db.get_bookmarks().unwrap().is_empty());
+    assert_eq!(db.get_bookmark_full(1).unwrap().unwrap().2, Some(111));
+    db.add_bookmark(1).unwrap();
     assert_eq!(db.get_bookmarks().unwrap(), vec![1]);
     let (note, sync, ao3_id) = db.get_bookmark_full(1).unwrap().unwrap();
     assert_eq!((note.as_str(), sync, ao3_id), ("seen in a collection", true, Some(111)));
@@ -1466,12 +1467,18 @@ fn test_subscription_member_ids() {
     db.cache_fetched_bookmark("Alice", 3, 501, "", "", false).unwrap();
     let mine = db.get_user_bookmarks("alice").unwrap();
     assert_eq!(mine.iter().map(|h| h.target.id()).collect::<Vec<_>>(), vec![3]);
-    // An app-only bookmark (no AO3 id) is not one of the user's AO3 bookmarks.
+    // Neither an app flag nor a record that never reached AO3 (no AO3 id)
+    // is one of the user's public AO3 bookmarks — but the account's own
+    // list shows the unsent record beside the one on AO3.
     let acct = account(&db, "Alice");
     db.set_active_account(acct).unwrap();
-    db.add_bookmark(1, None, false).unwrap();
+    db.add_bookmark(1).unwrap();
+    db.update_bookmark_note(2, "not sent yet").unwrap();
     let mine = db.get_user_bookmarks("alice").unwrap();
     assert_eq!(mine.iter().map(|h| h.target.id()).collect::<Vec<_>>(), vec![3]);
+    let mut own: Vec<u64> = db.get_own_ao3_bookmarks().unwrap().iter().map(|h| h.target.id()).collect();
+    own.sort();
+    assert_eq!(own, vec![2, 3]);
     assert!(db.get_user_bookmarks("nobody").unwrap().is_empty());
 }
 
@@ -2274,7 +2281,7 @@ fn test_migration_v25_to_v26() {
     let mut flagged = db.get_bookmark_targets().unwrap();
     flagged.sort_by_key(|t| (t.kind(), t.id()));
     assert_eq!(flagged, vec![BookmarkTarget::Series(501), BookmarkTarget::Work(1000), BookmarkTarget::Work(3000)]);
-    assert_eq!(db.get_bookmark_details(1000).unwrap().unwrap().6, None);
+    assert!(db.get_bookmark_details(1000).unwrap().is_none());
     assert_eq!(db.get_bookmark_full(3000).unwrap().unwrap(), ("synced".to_string(), true, Some(77001)));
     let records: Vec<(String, Option<i64>, i64, Option<i64>)> = {
         let mut stmt = db.conn.prepare(
@@ -2914,15 +2921,13 @@ fn state_cache_write_through_and_rollback() {
 fn bookmarks_cache_matches_rows() {
     let db = open_test_db();
     let id = db.save_work(&sample_work(11)).unwrap();
-    // A plain flag has no AO3 record; details read as the defaults.
-    db.add_bookmark(id, None, false).unwrap();
+    // A plain flag is no AO3 record.
+    db.add_bookmark(id).unwrap();
     assert!(db.is_bookmarked(id).unwrap());
     let records: i64 = db.conn.query_row("SELECT COUNT(*) FROM ao3_bookmarks", [], |r| r.get(0)).unwrap();
     assert_eq!(records, 0);
-    assert_eq!(db.get_bookmark_details(id).unwrap().unwrap(),
-               (String::new(), String::new(), String::new(), true, false, false, None));
+    assert!(db.get_bookmark_details(id).unwrap().is_none());
     // Details create the record.
-    db.add_bookmark(id, Some("first note"), false).unwrap();
     db.update_bookmark_details(id, "note2", "tag a, tag b", "coll", false, true).unwrap();
     db.set_ao3_bookmark_id(id, 999).unwrap();
 
@@ -2938,20 +2943,31 @@ fn bookmarks_cache_matches_rows() {
     );
     assert_eq!(ao3, Some(999));
 
-    // Flagging again adopts the record: details and the AO3 id stay, and
-    // the sync intent given is applied.
-    db.add_bookmark(id, None, true).unwrap();
+    // Flag and record are independent: flagging again leaves the record
+    // as it was, and un-flagging keeps it.
+    db.add_bookmark(id).unwrap();
     let d = db.get_bookmark_details(id).unwrap().unwrap();
     assert_eq!(d, ("note2".into(), "tag a, tag b".into(), "coll".into(), false, true, true, Some(999)));
+    db.remove_bookmark(id).unwrap();
+    assert!(!db.is_bookmarked(id).unwrap());
+    assert_eq!(db.get_bookmark_details(id).unwrap().unwrap().6, Some(999));
+    db.add_bookmark(id).unwrap();
 
-    // Rollback pulls the removal back out of the maps.
+    // Rollback pulls both removals back out of the maps.
     let tx = db.begin_tx().unwrap();
     db.remove_bookmark(id).unwrap();
+    db.remove_ao3_bookmark_for(BookmarkTarget::Work(id)).unwrap();
     assert!(!db.is_bookmarked(id).unwrap());
     assert!(db.get_bookmark_details(id).unwrap().is_none());
     drop(tx);
     assert!(db.is_bookmarked(id).unwrap());
     assert_eq!(db.get_bookmark_details(id).unwrap().unwrap().5, true);
+
+    // Removing the record leaves the flag.
+    db.remove_ao3_bookmark_for(BookmarkTarget::Work(id)).unwrap();
+    assert!(db.is_bookmarked(id).unwrap());
+    assert!(db.get_bookmark_details(id).unwrap().is_none());
+    db.update_bookmark_note(id, "again").unwrap();
 
     // delete_work drops every account's flag and record of the work.
     db.delete_work(id).unwrap();

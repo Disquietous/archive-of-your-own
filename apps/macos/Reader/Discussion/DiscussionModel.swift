@@ -92,7 +92,21 @@ final class DiscussionModel {
     // MARK: - Derived
 
     var work: Work? { workID.flatMap { appState.work(byID: $0) } }
-    var isLoggedIn: Bool { appState.ao3Username != nil }
+    /// Posting here, by the work's source: hidden where it takes no
+    /// posts, disabled until its account is signed in.
+    var postGate: Gate {
+        workID.map { appState.postGate($0) } ?? .hidden
+    }
+    var canWrite: Bool { postGate == .enabled }
+    /// A reply needs a thread to sit in: reviews are flat, chapter
+    /// comments and AO3's comments are threaded.
+    var canReply: Bool {
+        canWrite && !(effectiveChapterID == 0 && reviewsShape)
+    }
+    private var reviewsShape: Bool {
+        workID.flatMap { appState.workControls($0) }?.discussion == .reviews
+    }
+    var signInPrompt: String { workID.map { appState.postSignInPrompt($0) } ?? "Sign in to post." }
 
     /// The AO3 chapter id for the chapter scope; nil when chapter ids
     /// aren't known yet (single-chapter or unfetched works).
@@ -129,6 +143,7 @@ final class DiscussionModel {
     var composerPlaceholder: String {
         if let target = replyTarget { return "Reply to \(target.displayName)…" }
         if scope == .chapter, chapterID != nil { return "Comment on Chapter \(chapterIndex + 1)…" }
+        if reviewsShape { return "Review \(work?.title ?? "this work")…" }
         return "Comment on \(work?.title ?? "this work")…"
     }
 
@@ -406,7 +421,7 @@ final class DiscussionModel {
     }
 
     var trimmedDraft: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
-    var canPost: Bool { isLoggedIn && !trimmedDraft.isEmpty && draft.count <= Self.maxLength }
+    var canPost: Bool { canWrite && !trimmedDraft.isEmpty && draft.count <= Self.maxLength }
 
     func post() {
         guard canPost, let wid = numericWorkID else { return }
@@ -455,7 +470,7 @@ final class DiscussionModel {
                     result = try await appState.bridge.postComment(workId: wid, chapterId: cid, comment: item.body)
                 }
                 guard result.posted else {
-                    markFailed(item.id, "AO3 didn’t accept the comment. Try again.")
+                    markFailed(item.id, "The site didn’t accept the post. Try again.")
                     return
                 }
                 pending.removeAll { $0.id == item.id }
@@ -520,7 +535,7 @@ extension DiscussionModel {
     }
 
     private func saveDraftNow() {
-        guard let wid = numericWorkID, isLoggedIn else { return }
+        guard let wid = numericWorkID, canWrite else { return }
         appState.bridge.saveCommentDraft(workId: wid, chapterId: effectiveChapterID,
                                          parentCommentId: replyTargetID ?? 0, body: draft)
     }
@@ -536,7 +551,7 @@ extension DiscussionModel {
 
     private func restoreDraft() {
         withoutDraftSave {
-            if let wid = numericWorkID, isLoggedIn,
+            if let wid = numericWorkID, canWrite,
                let saved = appState.bridge.getCommentDraft(workId: wid, chapterId: effectiveChapterID) {
                 draft = saved.body
                 replyTargetID = saved.parentCommentId > 0 ? saved.parentCommentId : nil

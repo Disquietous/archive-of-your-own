@@ -112,6 +112,14 @@ extension MacAppModel {
         author.showPane(pane)
     }
 
+    /// The signed-in AO3 account's own bookmarks — its AO3 Bookmarks
+    /// screen: the account's profile with the bookmarks list beside it,
+    /// where each row can be edited or deleted. No-op when signed out.
+    func openOwnAO3Bookmarks() {
+        guard let username = appState.ao3Username else { return }
+        showAuthorPane(username, .bookmarks)
+    }
+
     /// AO3 link routing (/users/{name}/works etc.).
     func showAuthorPane(_ username: String, _ pane: AuthorPane) {
         guard let id = appState.userID(forAO3Username: username) else { return }

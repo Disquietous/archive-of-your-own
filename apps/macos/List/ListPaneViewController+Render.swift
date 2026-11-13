@@ -70,6 +70,11 @@ extension ListPaneViewController {
         if section == .history && !works.isEmpty {
             trailing.insert(clearHistoryButton(), at: 0)
         }
+        // This list is the app's own bookmarks, any source. The signed-in
+        // AO3 account's bookmarks are a separate screen.
+        if section == .bookmarks && appState.ao3Username != nil {
+            trailing.insert(ownAO3BookmarksButton(), at: 0)
+        }
         toolbar.setTrailing(trailing)
         let empty = works.isEmpty
             ? AnyView(EmptyStateMac(theme: theme, icon: meta.empty.0, title: meta.empty.1, message: meta.empty.2))
@@ -336,7 +341,7 @@ extension ListPaneViewController {
         switch section {
         case .reading: return ("Currently Reading", "In progress", ("book", "Nothing in progress", "Open a work to begin reading."))
         case .history: return ("History", "Recently read", ("clock", "No history yet", "Works you read appear here."))
-        case .bookmarks: return ("Bookmarks", "Saved works", ("bookmark", "No bookmarks", "Bookmark works to keep them."))
+        case .bookmarks: return ("Bookmarks", "Saved in the app", ("bookmark", "No bookmarks", "Bookmark works from any source to keep them here."))
         case .downloads: return ("Downloaded", "Available offline", ("arrow.down.circle", "No downloads", "Download works to read offline."))
         default: return ("Works", "", ("book", "Nothing here", ""))
         }

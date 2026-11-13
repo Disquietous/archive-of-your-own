@@ -294,6 +294,22 @@ extension ReadPaneViewController {
             break
         }
 
+        // The source's own bookmark record: filled when the account has
+        // one of this work, disabled with the gate's reason when signed out.
+        let site = controls?.vocabulary.siteShort ?? "site"
+        let hasRecord = appState.hasAO3Bookmark(work.id)
+        editBookmarkButton.setSymbol(hasRecord ? "bookmark.square.fill" : "bookmark.square")
+        editBookmarkButton.tintOverride = hasRecord ? theme.nsAccent : nil
+        if case .disabled(let reason) = controls?.remoteBookmark ?? .enabled {
+            editBookmarkButton.isEnabled = false
+            editBookmarkButton.toolTip = reason
+        } else {
+            editBookmarkButton.isEnabled = true
+            editBookmarkButton.toolTip = hasRecord
+                ? "Edit your \(site) bookmark — notes, tags, collections"
+                : "Bookmark on \(site) — notes, tags, collections"
+        }
+
         let discussionTitle = controls?.vocabulary.discussionTitle ?? "Comments"
         workCommentsButton.toolTip = work.comments > 0
             ? "\(discussionTitle) · \(Fmt.k(work.comments))" : discussionTitle

@@ -86,6 +86,20 @@ extension AppState {
 
     /// The controls for a work: its source's shapes, gates and words.
     /// nil for a row the library does not have.
+    /// Whether the reader can post to a work's discussion right now, by
+    /// its source's gate: hidden where the source takes no posts, disabled
+    /// until that source's account is signed in. A work the core has no
+    /// controls for (sample data) follows the archive login as before.
+    func postGate(_ id: String) -> Gate {
+        workControls(id)?.post ?? (ao3Username != nil ? .enabled : .disabled(reason: "Sign in to post"))
+    }
+
+    /// The sign-in prompt for a work's composer, naming its site.
+    func postSignInPrompt(_ id: String) -> String {
+        guard let site = workControls(id)?.vocabulary.siteShort, !site.isEmpty else { return "Sign in to post." }
+        return "Sign in to \(site) to post."
+    }
+
     func workControls(_ id: String) -> WorkControls? {
         _ = accountsRevision  // gates follow sign-in state
         return UInt64(id).flatMap { bridge.workControls($0) }

@@ -13,14 +13,6 @@ extension WorkDetailView {
                     .frame(width: 36, height: 36)
             }
             .buttonStyle(IconButtonPressStyle())
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.5)
-                    .onEnded { _ in
-                        if isBookmarked {
-                            nav.presentedSheet = .bookmarkEdit(workID: workID)
-                        }
-                    }
-            )
 
             if let work, isReal {
                 // The work's own bell: Followed / Subscribed.
@@ -53,12 +45,16 @@ extension WorkDetailView {
                 Label(commentsLabel, systemImage: "bubble.right")
             }
 
-            if isBookmarked {
+            // The source's own bookmark record, where it keeps them —
+            // separate from the app bookmark in the toolbar.
+            if let gate = controls?.remoteBookmark, gate != .hidden {
                 Button {
                     nav.presentedSheet = .bookmarkEdit(workID: workID)
                 } label: {
-                    Label("Edit Bookmark…", systemImage: "square.and.pencil")
+                    Label(state.hasAO3Bookmark(workID) ? "Edit \(siteShort) Bookmark…" : "Add \(siteShort) Bookmark…",
+                          systemImage: "bookmark.square")
                 }
+                .disabled(gate != .enabled)
             }
 
             Button {

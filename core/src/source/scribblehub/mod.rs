@@ -82,6 +82,7 @@ impl ScribbleHubSource {
             // Phase 7 wires the update check; the adapter can already
             // compare TOCs, so the capability is declared.
             update_checks: true,
+            discussion_posts: true,
             // Reads are public; an account is for rating and reviewing.
             login: true,
             sign_in: super::SignInShape::Site,
@@ -408,6 +409,75 @@ impl Source for ScribbleHubSource {
             return Ok(super::ReactionOutcome { accepted: false, value: None });
         }
         Ok(super::ReactionOutcome { accepted: true, value: Some(value) })
+    }
+
+    /// A review (on the story) or a chapter comment, posted the way the
+    /// page's own form posts it: the form is read from the live page —
+    /// the series page for a review, the chapter page for a comment — the
+    /// text and, for a reply, the parent are filled in, and it is sent to
+    /// the form's own address (the site's stock WordPress comment
+    /// endpoint). The site answers an accepted post by sending the reader
+    /// to the new comment on that page, and a refused one with an error
+    /// page whose message is passed on as it reads.
+    async fn post_discussion(&self, work: &ExternalRef, post: &super::DiscussionPost)
+        -> Result<super::PostedDiscussion, AppError>
+    {
+        Self::guard()?;
+        let id = work.external_id.as_str();
+        let slug = Self::slug_of(&work.url);
+        let page_url = match post.chapter {
+            None => Self::series_url(id, &slug),
+            Some(chapter_id) => Self::read_url(id, &slug, chapter_id),
+        };
+        let html = self.page(&page_url).await?;
+        let Some(mut form) = parse::parse_comment_form(&html, &page_url) else {
+            let reason = if parse::parse_signed_in_user(&html).is_none() {
+                "Sign in to ScribbleHub to post."
+            } else if post.chapter.is_none() {
+                "ScribbleHub shows no review form for this story. You may have reviewed it already."
+            } else {
+                "ScribbleHub shows no comment form for this chapter."
+            };
+            return Err(AppError::NetworkError(reason.to_string()));
+        };
+        // The page's editor hands the form its text as HTML, so what the
+        // reader typed goes as text: markup characters escaped, line
+        // breaks kept for the site to turn into paragraphs.
+        let body = post.body.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        form.set("comment", &body);
+        if let Some(parent) = post.parent {
+            // WordPress threads by `comment_parent`; the page's own reply
+            // control also notes the comment in its quote field.
+            form.set("comment_parent", &parent.to_string());
+            form.set_by_id("mycidrpy", &parent.to_string());
+        }
+        let out = {
+            let client = self.client.read().await;
+            client.transport().post_form(
+                &form.action, &form.pairs(), &[("Referer", page_url.as_str())],
+                &|status, _| status < 400, &HOOKS).await?
+        };
+        let refused = out.status >= 400 || out.final_url.starts_with(&form.action);
+        if refused {
+            return Err(match parse::parse_post_refusal(&out.body) {
+                Some(message) => AppError::NetworkError(format!("ScribbleHub: {message}")),
+                None if out.status >= 400 => AppError::Http {
+                    kind: crate::client::FailureKind::from_status(out.status, None),
+                    detail: format!("HTTP {} posting to ScribbleHub", out.status),
+                },
+                None => AppError::NetworkError("ScribbleHub did not accept the post.".to_string()),
+            });
+        }
+        // The page the site sent the reader to is the discussion with the
+        // post in it. A page that doesn't parse is still an accepted post.
+        let comments = match post.chapter {
+            None => parse::parse_reviews(&scraper::Html::parse_document(&out.body), &out.final_url),
+            Some(chapter_id) => parse::parse_chapter_page(&out.body, chapter_id).map(|p| p.comments).unwrap_or_default(),
+        };
+        Ok(super::PostedDiscussion {
+            page: CommentsPage { comments, current_page: 1, total_pages: 1 },
+            comment_id: parse::posted_comment_id(&out.final_url),
+        })
     }
 
     /// The site header's live search in users mode: POST admin-ajax

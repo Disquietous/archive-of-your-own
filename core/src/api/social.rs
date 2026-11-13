@@ -25,6 +25,54 @@ async fn fetch_discussion_elsewhere(
     }))
 }
 
+/// Post to the discussion of a work at a source other than AO3 (Area
+/// 12): the work's adapter sends it and answers with the discussion as
+/// the site then shows it, which is cached like a fetch of the same scope.
+/// None for an AO3 work — or a work the library has no row for (a reply
+/// from the AO3 inbox) — whose own paths the caller then takes. A post
+/// has no natural dedup, so only a failure that provably never reached
+/// the site is retried.
+#[allow(clippy::too_many_arguments)]
+async fn post_discussion_elsewhere(
+    client: Arc<tokio::sync::RwLock<AO3Client>>,
+    storage: &Arc<Mutex<Storage>>,
+    registry: &crate::source::SourceRegistry,
+    work_id: u64,
+    chapter_id: u64,
+    parent: Option<u64>,
+    body: String,
+    kind: OpKind,
+) -> Result<Option<UPostResult>, AO3Error> {
+    let (source, external) = {
+        let s = storage.lock().await;
+        let Some(external) = s.work_ref(work_id).filter(|r| r.source != SOURCE_AO3) else { return Ok(None) };
+        let Some(source) = registry.by_id(&external.source) else {
+            return Err(AO3Error::NotFound { message: format!("work {work_id} is from an unknown source {}", external.source) });
+        };
+        check_reachable(&source)?;
+        (source, external)
+    };
+    if parent.is_some() && chapter_id == 0 && source.capabilities().discussion == crate::source::DiscussionShape::Reviews {
+        return Err(AO3Error::Network { message: format!("{} reviews take no replies", source.capabilities().name) });
+    }
+    let post = crate::source::DiscussionPost { chapter: (chapter_id != 0).then_some(chapter_id), parent, body };
+    let posted = with_recovery(client, storage.clone(), kind, RetrySafety::AtMostOnce, move |_client| {
+        let (source, external, post) = (source.clone(), external.clone(), post.clone());
+        async move { source.post_discussion(&external, &post).await.map_err(AO3Error::from) }
+    }).await?;
+    let s = storage.lock().await;
+    // An accepted post whose page didn't parse leaves the cache alone.
+    if !posted.page.comments.is_empty() {
+        save_comments(&s, work_id, chapter_id, &posted.page.comments, chapter_id == 0);
+    }
+    log_db("clear_comment_draft", s.clear_comment_draft(work_id, chapter_id));
+    let comment_json = posted.comment_id
+        .and_then(|id| find_comment(&posted.page.comments, id))
+        .map(|c| serde_json::to_string(&CommentJson::from(c)).unwrap_or_default())
+        .unwrap_or_default();
+    Ok(Some(UPostResult { posted: true, comment_json }))
+}
+
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
 #[uniffi::export]
@@ -42,7 +90,12 @@ impl AO3App {
     /// found on the page AO3 redirected to; that page's comments are cached
     /// like a fetch of the same scope.
     pub async fn post_comment(&self, work_id: u64, chapter_id: u64, comment: String) -> Result<UPostResult, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
+            if let Some(result) = post_discussion_elsewhere(
+                client.clone(), &storage, &registry, work_id, chapter_id, None, comment.clone(), OpKind::Comment).await? {
+                return Ok(result);
+            }
             let number = {
                 let c = client.read().await;
                 let s = storage.lock().await;
@@ -153,7 +206,12 @@ impl AO3App {
     /// reply was written in, so its draft is cleared on success.
     pub async fn post_reply(&self, parent_comment_id: u64, comment: String,
                             work_id: u64, chapter_id: u64) -> Result<UPostResult, AO3Error> {
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
+            if let Some(result) = post_discussion_elsewhere(
+                client.clone(), &storage, &registry, work_id, chapter_id, Some(parent_comment_id), comment.clone(), OpKind::Reply).await? {
+                return Ok(result);
+            }
             {
                 let c = client.read().await;
                 let s = storage.lock().await;

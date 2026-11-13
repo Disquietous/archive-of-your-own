@@ -18,8 +18,9 @@ struct CommentSheet: View {
     @State private var draftSaveTask: Task<Void, Never>?
     @State private var draftLoaded = false
 
+    /// The work's source takes posts and its account is signed in.
     private var isLoggedIn: Bool {
-        state.ao3Username != nil
+        state.postGate(workID) == .enabled
     }
 
     var body: some View {
@@ -75,7 +76,7 @@ struct CommentSheet: View {
                 .foregroundStyle(theme.ink3)
                 .padding(.top, 8)
 
-            Text("You need to be signed in to your AO3 account to leave comments.")
+            Text(state.postSignInPrompt(workID))
                 .font(.custom("HankenGrotesk", size: 13.5).weight(.medium))
                 .foregroundStyle(theme.ink3)
                 .multilineTextAlignment(.center)

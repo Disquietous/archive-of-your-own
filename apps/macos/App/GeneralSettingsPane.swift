@@ -61,7 +61,8 @@ struct GeneralSettingsPane: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            AccountSection(theme: theme, appState: appState)
+            AccountSection(theme: theme, appState: appState,
+                           onOpenAO3Bookmarks: { model.openOwnAO3Bookmarks() })
 
         }
         .padding(16)

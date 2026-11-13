@@ -23,10 +23,10 @@ struct DiscussionComposerView: View {
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         Group {
-            if model.isLoggedIn {
-                composer
-            } else {
-                signedOut
+            switch model.postGate {
+            case .enabled: composer
+            case .disabled: signedOut
+            case .hidden: EmptyView()  // the source takes no posts
             }
         }
         .frame(maxWidth: .infinity, maxHeight: autoHeight ? nil : .infinity, alignment: .top)
@@ -144,7 +144,7 @@ struct DiscussionComposerView: View {
 
     private var signedOut: some View {
         HStack(spacing: 10) {
-            Text("Sign in to AO3 to leave comments.")
+            Text(model.signInPrompt)
                 .font(Font(MacFont.ui(12)))
                 .foregroundStyle(theme.ink3)
             Button("Sign In…", action: onSignIn)

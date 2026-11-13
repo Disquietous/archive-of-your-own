@@ -118,28 +118,6 @@ struct DetailView: View {
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
-        .alert("Remove Synced Bookmark?", isPresented: pendingRemovalBinding) {
-            Button("Remove Everywhere", role: .destructive) {
-                appState.confirmBookmarkRemoval()
-            }
-            Button("Remove Locally Only") {
-                if let id = appState.pendingBookmarkRemoval {
-                    appState.bookmarkedWorkIDs.remove(id)
-                    if let workId = UInt64(id) { appState.bridge.removeBookmark(workId) }
-                    appState.pendingBookmarkRemoval = nil
-                }
-            }
-            Button("Cancel", role: .cancel) {
-                appState.cancelBookmarkRemoval()
-            }
-        } message: {
-            Text("This bookmark is synced with your AO3 account. Remove it from AO3 as well, or only from this device?")
-        }
-    }
-
-    private var pendingRemovalBinding: Binding<Bool> {
-        Binding(get: { appState.pendingBookmarkRemoval != nil },
-                set: { if !$0 { appState.cancelBookmarkRemoval() } })
     }
 
     private var pills: some View {

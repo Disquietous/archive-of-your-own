@@ -1,15 +1,31 @@
 import SwiftUI
 
-/// Editor for the full AO3 bookmark object — notes, your tags, collections,
-/// private/rec flags — plus the per-bookmark sync opt-in. Saving is always
-/// local; the ONLY network action is the explicit sync, which pushes the
-/// bookmark to AO3 with the corrected form fields.
+/// Editor for the active account's AO3 bookmark of a work or series —
+/// notes, your tags, collections, private/rec flags — plus the
+/// per-bookmark sync opt-in. It creates the record when there is none and
+/// has nothing to do with the app bookmark flag. Saving is always local;
+/// the only network actions are the explicit sync, which sends the
+/// bookmark to AO3, and Delete, which removes it there.
 struct MacBookmarkEditView: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
-    let workID: String
-    let workTitle: String
+    let target: AO3BookmarkTarget
+    let title: String
     let onClose: () -> Void
+
+    init(theme: AppTheme, appState: AppState, target: AO3BookmarkTarget, title: String,
+         onClose: @escaping () -> Void) {
+        self.theme = theme
+        self.appState = appState
+        self.target = target
+        self.title = title
+        self.onClose = onClose
+    }
+
+    /// Whether the account already has this bookmark (on AO3 or not).
+    @State private var exists = false
+    @State private var onAO3 = false
+    @State private var confirmingDelete = false
 
     @State private var note = ""
     @State private var tagString = ""
@@ -75,8 +91,8 @@ struct MacBookmarkEditView: View {
                             .font(Font(MacFont.ui(12.5, weight: .medium)))
                             .foregroundStyle(theme.ink2)
                         Text("""
-                            Off = the bookmark stays on this device only. On = saving also creates it on your AO3 \
-                            account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).
+                            Off = the bookmark is kept in this app only. On = saving also creates or updates it on \
+                            your AO3 account (as \(isPrivate ? "a private bookmark" : "a public bookmark")).
                             """)
                             .font(Font(MacFont.ui(11)))
                             .foregroundStyle(theme.ink3)
@@ -107,14 +123,22 @@ struct MacBookmarkEditView: View {
         .frame(width: 460, height: 500)
         .background(theme.bg)
         .onAppear(perform: load)
+        .alert("Delete AO3 Bookmark?", isPresented: $confirmingDelete) {
+            Button("Delete", role: .destructive) { Task { await delete() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(onAO3
+                 ? "This deletes the bookmark from your AO3 account and from this app. It can’t be undone."
+                 : "This bookmark was never sent to AO3. Its notes and tags are deleted from this app.")
+        }
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Edit Bookmark")
+            Text(exists ? "Edit AO3 Bookmark" : "New AO3 Bookmark")
                 .font(Font(MacFont.serif(18, weight: .semibold)))
                 .foregroundStyle(theme.ink)
-            Text(workTitle)
+            Text(title)
                 .font(Font(MacFont.ui(11.5)))
                 .foregroundStyle(theme.ink3)
                 .lineLimit(1)
@@ -137,6 +161,10 @@ struct MacBookmarkEditView: View {
         HStack {
             Button("Cancel", action: onClose)
                 .keyboardShortcut(.cancelAction)
+            if exists {
+                Button("Delete…", role: .destructive) { confirmingDelete = true }
+                    .disabled(isPushing)
+            }
             Spacer()
             Button {
                 Task { await save() }
@@ -155,32 +183,28 @@ struct MacBookmarkEditView: View {
     // MARK: - Data
 
     private func load() {
-        guard !loaded, let workId = UInt64(workID) else { return }
+        guard !loaded else { return }
         loaded = true
-        if let details = appState.bridge.getBookmarkDetails(workId) {
+        if let details = appState.ao3BookmarkDetails(target) {
+            exists = true
+            onAO3 = details.ao3BookmarkId != nil
             note = details.note
             tagString = details.tagString
             collectionNames = details.collectionNames
             isPrivate = details.private
             rec = details.rec
             syncToAO3 = details.syncToAo3
+        } else {
+            // A new AO3 bookmark is meant for AO3 unless switched off.
+            syncToAO3 = isLoggedIn
         }
     }
 
     private func save() async {
-        guard let workId = UInt64(workID) else {
-            onClose()
-            return
-        }
-        // Ensure the bookmark row exists, then write the full object locally.
-        if !appState.bookmarkedWorkIDs.contains(workID) {
-            appState.bookmarkedWorkIDs.insert(workID)
-            appState.bridge.addBookmark(workId, syncToAo3: false)
-        }
-        appState.bridge.updateBookmarkDetails(workId, note: note, tagString: tagString,
-                                              collectionNames: collectionNames,
-                                              private: isPrivate, rec: rec)
-        appState.bridge.updateBookmarkSync(workId, sync: syncToAO3)
+        appState.saveAO3Bookmark(target, note: note, tagString: tagString,
+                                 collectionNames: collectionNames,
+                                 isPrivate: isPrivate, rec: rec, sync: syncToAO3)
+        exists = true
 
         guard syncToAO3 else {
             onClose()
@@ -191,12 +215,25 @@ struct MacBookmarkEditView: View {
         pushError = nil
         pushSucceeded = false
         do {
-            _ = try await appState.bridge.pushBookmark(workId: workId)
+            try await appState.pushAO3Bookmark(target)
             pushSucceeded = true
+            onAO3 = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { onClose() }
         } catch {
-            pushError = "Couldn’t sync to AO3: \(error.localizedDescription) The bookmark is saved locally — try syncing again later."
+            pushError = "Couldn’t sync to AO3: \(RustBridge.errorMessage(error)) The bookmark is saved in the app — try syncing again later."
         }
         isPushing = false
+    }
+
+    private func delete() async {
+        isPushing = true
+        pushError = nil
+        let failure = await appState.deleteAO3Bookmark(target)
+        isPushing = false
+        if let failure {
+            pushError = "Couldn’t delete the bookmark: \(failure)"
+        } else {
+            onClose()
+        }
     }
 }

@@ -12,6 +12,10 @@ final class AuthorProfileModel {
 
     init(appState: AppState) {
         self.appState = appState
+        NotificationCenter.default.addObserver(forName: .ao3BookmarksChanged, object: nil,
+                                               queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.reloadOwnBookmarks() }
+        }
     }
 
     enum Pane { case works, bookmarks, collections }
@@ -50,8 +54,25 @@ final class AuthorProfileModel {
     /// first non-empty one once the profile's counts arrive.
     private var paneAutoSelect = false
 
+    /// Whether the open profile is the active AO3 account's own — its
+    /// bookmarks pane is then the account's AO3 Bookmarks screen: every
+    /// record it has (those not sent to AO3 yet included), editable.
+    var isOwnAccount: Bool {
+        guard let username, !username.isEmpty, keyedByName, let own = appState.ao3Username else { return false }
+        return own.caseInsensitiveCompare(username) == .orderedSame
+    }
+
+    /// Re-read the own account's records after one changed. No-op for
+    /// anyone else's profile and while a refresh walk is filling the list.
+    func reloadOwnBookmarks() {
+        guard isOwnAccount, !isLoadingBookmarks else { return }
+        let own = appState.bridge.getOwnAo3Bookmarks()
+        appState.adoptFetchedWorks(own.compactMap(\.work).map(AppState.workFromSummary))
+        bookmarks = own
+    }
+
     /// The author's public bookmarks (work and series hits), accumulated
-    /// page by page.
+    /// page by page. For the own account: its records, from the library.
     var bookmarks: [UBookmarkHit] = []
     var bookmarksPage: UInt32 = 0
     var bookmarksHasNext = false
@@ -227,7 +248,9 @@ final class AuthorProfileModel {
         case .works:
             break
         case .bookmarks:
-            if bookmarks.isEmpty {
+            if isOwnAccount {
+                reloadOwnBookmarks()
+            } else if bookmarks.isEmpty {
                 let cached = appState.bridge.getLibraryUserBookmarks(username: username)
                 appState.adoptFetchedWorks(cached.compactMap(\.work).map(AppState.workFromSummary))
                 bookmarks = cached
@@ -274,7 +297,12 @@ final class AuthorProfileModel {
                 while await fetchBookmarksPage(username: username, opID: opID) == true,
                       self.username == username {}
             }
-            if self.username == username { isLoadingBookmarks = false }
+            if self.username == username {
+                isLoadingBookmarks = false
+                // The walk lists what AO3 has; the own list also holds
+                // the records not sent yet.
+                reloadOwnBookmarks()
+            }
         }
     }
 

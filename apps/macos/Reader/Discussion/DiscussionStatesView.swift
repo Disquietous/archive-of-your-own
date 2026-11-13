@@ -58,7 +58,7 @@ struct DiscussionStatesView: View {
                     Text("No comments on \(model.scopeTitle == "Whole work" ? "this work" : model.scopeTitle) yet.")
                         .font(Font(MacFont.ui(13, weight: .semibold)))
                         .foregroundStyle(theme.ink2)
-                    Text(model.isLoggedIn ? "Be the first — authors love hearing from readers." : "")
+                    Text(model.canWrite ? "Be the first — authors love hearing from readers." : "")
                         .font(Font(MacFont.ui(12)))
                         .foregroundStyle(theme.ink3)
                 }

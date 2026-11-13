@@ -15,12 +15,20 @@ enum ReaderToolbarActions {
         }
     }
 
+    /// The AO3 bookmark editor for a work (the source's own bookmark
+    /// record — not the app bookmark).
     static func presentBookmarkEdit(theme: AppTheme, appState: AppState, work: Work,
                                     presenter: NSViewController) {
+        guard let id = UInt64(work.id) else { return }
+        presentBookmarkEdit(theme: theme, appState: appState, target: .work(id),
+                            title: work.title, presenter: presenter)
+    }
+
+    static func presentBookmarkEdit(theme: AppTheme, appState: AppState, target: AO3BookmarkTarget,
+                                    title: String, presenter: NSViewController) {
         presentSheet(on: presenter) { dismiss in
             AnyView(MacBookmarkEditView(theme: theme, appState: appState,
-                                        workID: work.id, workTitle: work.title,
-                                        onClose: dismiss))
+                                        target: target, title: title, onClose: dismiss))
         }
     }
 

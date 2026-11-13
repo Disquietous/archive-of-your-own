@@ -45,7 +45,7 @@ extension CommentThreadView {
                 }
 
                 // Reply button
-                if isLoggedIn && comment.notice.isEmpty {
+                if canReply && comment.notice.isEmpty {
                     Button {
                         if replyingTo == comment.id {
                             replyingTo = nil

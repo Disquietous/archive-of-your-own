@@ -132,6 +132,7 @@ extension AppState {
 
         // Invalidate per-account network data so views refetch.
         bookmarksLoadedForAccount = nil
+        ao3BookmarksChanged()
 
         // Reload per-account data from storage
         bookmarkedWorkIDs = Set(bridge.getBookmarkedWorkIds().map { String($0) })

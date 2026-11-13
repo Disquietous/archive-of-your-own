@@ -135,7 +135,9 @@ extension ReadPaneViewController {
                 ? (count == 0 ? "Fetching bookmarks from AO3…"
                               : "Fetching bookmarks from AO3… \(count) so far")
                 : count == 1 ? "1 bookmark" : "\(count) bookmarks"
-            toolbar.configure(title: "Bookmarks", sub: sub)
+            // The signed-in account's own list is its AO3 Bookmarks
+            // screen (edit / delete from each row's menu).
+            toolbar.configure(title: model.author.isOwnAccount ? "My AO3 Bookmarks" : "Bookmarks", sub: sub)
             requestOverlayOpID = model.author.bookmarksRefreshOp.opID
             toolbar.setLeading([])
             var trailing: [NSView] = []
@@ -356,7 +358,8 @@ extension ReadPaneViewController {
             var trailing: [NSView] = [detachButton, settingsButton, immersiveButton, chaptersButton,
                                       readerRefreshButton(label: refreshLabel)]
             if showComments { trailing.append(commentsButton) }
-            if remoteBookmark != .hidden { trailing.append(bookmarkButton) }
+            // The app bookmark: any source.
+            trailing.append(bookmarkButton)
             toolbar.setTrailing(trailing)
         } else {
             refreshDetailActionButtons(for: work, bookmarked: bookmarked, controls: controls)
@@ -376,10 +379,10 @@ extension ReadPaneViewController {
             }
             if hasDiscussion { trailing.append(workCommentsButton) }
             trailing.append(finishedButton)
-            if remoteBookmark != .hidden {
-                if bookmarked { trailing.append(editBookmarkButton) }
-                trailing.append(bookmarkButton)
-            }
+            // The source's own bookmark record, where it keeps them;
+            // the app bookmark for every source.
+            if remoteBookmark != .hidden { trailing.append(editBookmarkButton) }
+            trailing.append(bookmarkButton)
             toolbar.setTrailing(trailing)
         }
 

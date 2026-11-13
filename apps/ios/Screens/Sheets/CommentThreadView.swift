@@ -37,7 +37,12 @@ struct CommentThreadView: View {
     var overrideLoggedIn: Bool = false
 
     var isLoggedIn: Bool {
-        overrideLoggedIn || state.ao3Username != nil
+        overrideLoggedIn || state.postGate(workID) == .enabled
+    }
+
+    /// A reply needs a thread to sit in: reviews are flat.
+    var canReply: Bool {
+        isLoggedIn && !((chapterID ?? 0) == 0 && state.workControls(workID)?.discussion == .reviews)
     }
 
     var body: some View {

@@ -11,6 +11,8 @@ import SwiftUI
 struct AccountSection: View {
     @Bindable var theme: AppTheme
     @Bindable var appState: AppState
+    /// Opens the signed-in AO3 account's bookmarks screen.
+    var onOpenAO3Bookmarks: (() -> Void)?
 
     @State private var username = ""
     @State private var password = ""
@@ -312,8 +314,11 @@ struct AccountSection: View {
 
     private var bookmarkSync: some View {
         VStack(spacing: 8) {
+            if let onOpenAO3Bookmarks {
+                ghostButton("My AO3 Bookmarks", tint: theme.ink, action: onOpenAO3Bookmarks)
+            }
             HStack(spacing: 8) {
-                ghostButton("Import Bookmarks", tint: theme.ink) {
+                ghostButton("Import AO3 Bookmarks", tint: theme.ink) {
                     Task { await appState.importAO3Bookmarks() }
                 }
                 ghostButton("Push Synced", tint: theme.ink) {

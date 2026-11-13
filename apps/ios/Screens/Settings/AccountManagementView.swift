@@ -69,6 +69,22 @@ struct AccountManagementView: View {
                     .padding(.horizontal, theme.pad)
                 }
 
+                // The signed-in AO3 account's own bookmarks.
+                if state.ao3Username != nil {
+                    Button {
+                        nav.openAO3Bookmarks()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "bookmark.square")
+                                .font(.system(size: 16, weight: .medium))
+                            Text("My AO3 Bookmarks")
+                                .font(Typography.uiBody())
+                        }
+                        .foregroundStyle(theme.accent)
+                    }
+                    .padding(.horizontal, theme.pad)
+                }
+
                 // Add account
                 if showAddAccount {
                     addAccountForm

@@ -202,54 +202,29 @@ impl Storage {
         self.ao3_bookmarks.id_of(&owner, target)
     }
 
-    /// The active account's AO3 record for a flagged target, created with
-    /// defaults when the flag exists without one. None when the target is
-    /// not bookmarked at all.
-    fn active_record_for_update(&self, target: BookmarkTarget) -> Result<Option<i64>, AppError> {
+    /// The active account's AO3 record for a target, created with defaults
+    /// when there is none. The app flag plays no part: a record and a flag
+    /// are independent (Area 7.3).
+    fn active_record_for_update(&self, target: BookmarkTarget) -> Result<i64, AppError> {
         if let Some(id) = self.active_record_id(target) {
-            return Ok(Some(id));
-        }
-        if self.active_flag_id(target).is_none() {
-            return Ok(None);
+            return Ok(id);
         }
         let (account_id, owner) = self.active_owner();
         self.ao3_bookmarks.add(&self.conn, account_id, &owner, target, "", false,
-                               &crate::timefmt::now_utc_datetime()).map(Some)
+                               &crate::timefmt::now_utc_datetime())
     }
 
-    /// Bookmark a work or series, optionally attaching a note. The target
-    /// must already be cached (works/series row) — the database trigger
-    /// rejects a dangling bookmark. Sets the flag. An existing AO3 record
-    /// for the active account (one cached from a listing, say) is adopted
-    /// as is — its AO3 id and details stay — with the note and sync intent
-    /// applied when given; otherwise a note or sync intent creates the
-    /// record. Returns the flag's row id.
-    pub fn add_bookmark_for(&self, target: BookmarkTarget, note: Option<&str>, sync_to_ao3: bool)
-        -> Result<i64, AppError>
-    {
-        let (account_id, owner) = self.active_owner();
-        let now = crate::timefmt::now_utc_datetime();
-        let flag = self.app_bookmarks.add(&self.conn, account_id, target, &now)?;
-        let note = note.unwrap_or("");
-        match self.ao3_bookmarks.id_of(&owner, target) {
-            Some(id) => {
-                if !note.is_empty() {
-                    self.ao3_bookmarks.update_note(&self.conn, id, note)?;
-                }
-                if sync_to_ao3 {
-                    self.ao3_bookmarks.update_sync(&self.conn, id, true)?;
-                }
-            }
-            None if !note.is_empty() || sync_to_ao3 => {
-                self.ao3_bookmarks.add(&self.conn, account_id, &owner, target, note, sync_to_ao3, &now)?;
-            }
-            None => {}
-        }
-        Ok(flag)
+    /// Bookmark a work or series of any source: sets the app flag and
+    /// nothing else — no AO3 record is created, read or changed. The
+    /// target must already be cached (works/series row) — the database
+    /// trigger rejects a dangling bookmark. Returns the flag's row id.
+    pub fn add_bookmark_for(&self, target: BookmarkTarget) -> Result<i64, AppError> {
+        let (account_id, _) = self.active_owner();
+        self.app_bookmarks.add(&self.conn, account_id, target, &crate::timefmt::now_utc_datetime())
     }
 
-    pub fn add_bookmark(&self, work_id: u64, note: Option<&str>, sync_to_ao3: bool) -> Result<(), AppError> {
-        self.add_bookmark_for(BookmarkTarget::Work(work_id), note, sync_to_ao3).map(|_| ())
+    pub fn add_bookmark(&self, work_id: u64) -> Result<(), AppError> {
+        self.add_bookmark_for(BookmarkTarget::Work(work_id)).map(|_| ())
     }
 
     /// Cache an AO3 bookmark seen in a fetched listing, under the byline
@@ -281,10 +256,8 @@ impl Storage {
     }
 
     pub fn update_bookmark_note_for(&self, target: BookmarkTarget, note: &str) -> Result<(), AppError> {
-        match self.active_record_for_update(target)? {
-            Some(id) => self.ao3_bookmarks.update_note(&self.conn, id, note),
-            None => Ok(()),
-        }
+        let id = self.active_record_for_update(target)?;
+        self.ao3_bookmarks.update_note(&self.conn, id, note)
     }
 
     pub fn update_bookmark_note(&self, work_id: u64, note: &str) -> Result<(), AppError> {
@@ -295,11 +268,9 @@ impl Storage {
     /// private/rec flags).
     pub fn update_bookmark_details_for(&self, target: BookmarkTarget, note: &str, tag_string: &str,
                                        collection_names: &str, private: bool, rec: bool) -> Result<(), AppError> {
-        match self.active_record_for_update(target)? {
-            Some(id) => self.ao3_bookmarks.update_details(&self.conn, id, note, tag_string,
-                                                          collection_names, private, rec),
-            None => Ok(()),
-        }
+        let id = self.active_record_for_update(target)?;
+        self.ao3_bookmarks.update_details(&self.conn, id, note, tag_string,
+                                          collection_names, private, rec)
     }
 
     pub fn update_bookmark_details(&self, work_id: u64, note: &str, tag_string: &str,
@@ -308,21 +279,17 @@ impl Storage {
                                          collection_names, private, rec)
     }
 
-    /// Full bookmark object for a flagged target: (note, tag_string,
-    /// collection_names, private, rec, sync_to_ao3, ao3_bookmark_id) —
-    /// the record's values, or the defaults when the flag has no record
-    /// yet. None when the target is not bookmarked.
+    /// The active account's AO3 bookmark record for a target: (note,
+    /// tag_string, collection_names, private, rec, sync_to_ao3,
+    /// ao3_bookmark_id). None when the account has no record of it —
+    /// whether the target carries the app flag is irrelevant.
     #[allow(clippy::type_complexity)]
     pub fn get_bookmark_details_for(&self, target: BookmarkTarget)
         -> Result<Option<(String, String, String, bool, bool, bool, Option<u64>)>, AppError> {
-        if self.active_flag_id(target).is_none() {
-            return Ok(None);
-        }
         let (_, owner) = self.active_owner();
-        Ok(Some(match self.ao3_bookmarks.get(&owner, target) {
-            Some(e) => (e.note.clone(), e.tag_string.clone(), e.collection_names.clone(),
-                        e.private, e.rec, e.sync_to_ao3, e.ao3_bookmark_id),
-            None => (String::new(), String::new(), String::new(), true, false, false, None),
+        Ok(self.ao3_bookmarks.get(&owner, target).map(|e| {
+            (e.note.clone(), e.tag_string.clone(), e.collection_names.clone(),
+             e.private, e.rec, e.sync_to_ao3, e.ao3_bookmark_id)
         }))
     }
 
@@ -332,28 +299,33 @@ impl Storage {
         self.get_bookmark_details_for(BookmarkTarget::Work(work_id))
     }
 
-    /// The active account's flag row id for a target, if any.
-    pub fn get_bookmark_id(&self, target: BookmarkTarget) -> Result<Option<i64>, AppError> {
-        Ok(self.active_flag_id(target))
+    /// The row id of the active account's AO3 record for a target, if any.
+    pub fn get_ao3_bookmark_record_id(&self, target: BookmarkTarget) -> Result<Option<i64>, AppError> {
+        Ok(self.active_record_id(target))
     }
 
     pub fn update_bookmark_sync_for(&self, target: BookmarkTarget, sync: bool) -> Result<(), AppError> {
-        match self.active_record_for_update(target)? {
-            Some(id) => self.ao3_bookmarks.update_sync(&self.conn, id, sync),
-            None => Ok(()),
-        }
+        let id = self.active_record_for_update(target)?;
+        self.ao3_bookmarks.update_sync(&self.conn, id, sync)
     }
 
     pub fn update_bookmark_sync(&self, work_id: u64, sync: bool) -> Result<(), AppError> {
         self.update_bookmark_sync_for(BookmarkTarget::Work(work_id), sync)
     }
 
-    /// Un-bookmark: the flag goes, and so does the active account's AO3
-    /// record (its collection links cascade).
+    /// Un-bookmark: the app flag goes. The active account's AO3 record,
+    /// if it has one, is untouched.
     pub fn remove_bookmark_for(&self, target: BookmarkTarget) -> Result<(), AppError> {
         if let Some(id) = self.active_flag_id(target) {
             self.app_bookmarks.remove(&self.conn, id)?;
         }
+        Ok(())
+    }
+
+    /// Drop the active account's AO3 record of a target (its collection
+    /// links cascade). Local only — deleting it on AO3 is the caller's
+    /// request. The app flag is untouched.
+    pub fn remove_ao3_bookmark_for(&self, target: BookmarkTarget) -> Result<(), AppError> {
         if let Some(id) = self.active_record_id(target) {
             self.ao3_bookmarks.remove(&self.conn, id)?;
             self.collections_cache.purge_bookmarks(&[id]);
@@ -381,20 +353,6 @@ impl Storage {
         Ok(self.get_bookmark_targets()?.into_iter().filter_map(|t| t.series_id()).collect())
     }
 
-    pub fn get_bookmarks_full(&self) -> Result<Vec<(u64, String, bool)>, AppError> {
-        let (account_id, owner) = self.active_owner();
-        Ok(self.app_bookmarks
-            .for_account(account_id)
-            .into_iter()
-            .filter_map(|e| e.target.work_id().map(|w| {
-                let record = self.ao3_bookmarks.get(&owner, e.target);
-                (w,
-                 record.as_ref().map(|r| r.note.clone()).unwrap_or_default(),
-                 record.as_ref().is_some_and(|r| r.sync_to_ao3))
-            }))
-            .collect())
-    }
-
     /// (target, note) for every bookmark the active account syncs to AO3.
     pub fn get_synced_bookmarks(&self) -> Result<Vec<(BookmarkTarget, String)>, AppError> {
         let (_, owner) = self.active_owner();
@@ -414,8 +372,8 @@ impl Storage {
         self.is_bookmarked_for(BookmarkTarget::Work(work_id))
     }
 
-    /// (note, sync_to_ao3, ao3_bookmark_id) for the active account's
-    /// bookmark of a target; None when not bookmarked.
+    /// (note, sync_to_ao3, ao3_bookmark_id) of the active account's AO3
+    /// record for a target; None when it has none.
     pub fn get_bookmark_full_for(&self, target: BookmarkTarget)
         -> Result<Option<(String, bool, Option<u64>)>, AppError>
     {
@@ -430,13 +388,9 @@ impl Storage {
     /// Record AO3's id for the active account's bookmark of a target (it
     /// now exists on AO3, so the record carries sync intent too).
     pub fn set_ao3_bookmark_id_for(&self, target: BookmarkTarget, ao3_id: u64) -> Result<(), AppError> {
-        match self.active_record_for_update(target)? {
-            Some(id) => {
-                self.ao3_bookmarks.set_ao3_id(&self.conn, id, ao3_id)?;
-                self.ao3_bookmarks.update_sync(&self.conn, id, true)
-            }
-            None => Ok(()),
-        }
+        let id = self.active_record_for_update(target)?;
+        self.ao3_bookmarks.set_ao3_id(&self.conn, id, ao3_id)?;
+        self.ao3_bookmarks.update_sync(&self.conn, id, true)
     }
 
     pub fn set_ao3_bookmark_id(&self, work_id: u64, ao3_id: u64) -> Result<(), AppError> {
@@ -490,6 +444,20 @@ impl Storage {
         })
     }
 
+    /// The active account's own AO3 bookmark records, newest first —
+    /// those on AO3 and those kept only in the app so far (no
+    /// `ao3_bookmark_id` yet). Empty when signed out.
+    pub fn get_own_ao3_bookmarks(&self) -> Result<Vec<BookmarkHit>, AppError> {
+        let (account_id, owner) = self.active_owner();
+        if account_id.is_none() {
+            return Ok(Vec::new());
+        }
+        Ok(self.ao3_bookmarks.for_owner(&owner)
+            .iter()
+            .filter_map(|e| self.hit_for_entity(e))
+            .collect())
+    }
+
     /// Every cached AO3 bookmark attributed to `username` (any owner's
     /// rows, keyed the way fetched listings key them), newest first — the
     /// library-mode view of a user's public bookmarks. Records that exist
@@ -513,42 +481,10 @@ impl Storage {
             .collect())
     }
 
-    /// Every bookmark the library knows, as AO3-record entities: the
-    /// cached records, plus a default-valued stand-in for each app flag
-    /// that has no record (so a plain local bookmark still shows in the
-    /// library bookmark search, as it did before the split). Stand-ins
-    /// carry row id 0.
+    /// Every AO3 bookmark record the library holds, any owner. App flags
+    /// are not AO3 bookmarks and take no part in the bookmark search.
     fn all_bookmark_entities(&self) -> Vec<std::sync::Arc<Ao3BookmarkEntity>> {
-        let mut all = self.ao3_bookmarks.all();
-        let accounts: std::collections::HashMap<i64, String> = self.get_all_accounts()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| (a.id, a.external_id))
-            .collect();
-        let flags: Vec<_> = self.app_bookmarks.for_account(None).into_iter()
-            .chain(accounts.keys().flat_map(|id| self.app_bookmarks.for_account(Some(*id))))
-            .collect();
-        for f in flags {
-            let owner = f.account_id.and_then(|id| accounts.get(&id).cloned()).unwrap_or_default();
-            if self.ao3_bookmarks.id_of(&owner, f.target).is_some() {
-                continue;
-            }
-            all.push(std::sync::Arc::new(Ao3BookmarkEntity {
-                id: 0,
-                account_id: f.account_id,
-                owner,
-                target: f.target,
-                ao3_bookmark_id: None,
-                note: String::new(),
-                tag_string: String::new(),
-                collection_names: String::new(),
-                private: true,
-                rec: false,
-                sync_to_ao3: false,
-                created_at: f.created_at.clone(),
-            }));
-        }
-        all
+        self.ao3_bookmarks.all()
     }
 
     // -------------------------------------------------------------------
