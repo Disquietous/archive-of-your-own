@@ -14,6 +14,7 @@
 //! exercises the second set of shapes offline.
 
 pub mod ao3;
+pub mod local;
 pub mod mock_rated;
 pub mod scribblehub;
 pub mod search;
@@ -390,6 +391,9 @@ pub struct WorkControls {
     pub chapter_comments: bool,
     pub subscribe: Gate,
     pub remote_bookmark: Gate,
+    /// Re-fetching the work from its source; `Hidden` for a work that
+    /// was imported, not fetched (a local file has nothing to refresh).
+    pub refresh: Gate,
     /// Posting to the discussion: a comment, a review, a reply.
     pub post: Gate,
     pub vocabulary: Vocabulary,
@@ -500,6 +504,11 @@ pub trait Source: Send + Sync {
     /// reader fills them in through `fetch_chapter` one at a time; the
     /// save path then never overwrites fetched text with a stub.
     fn fetches_chapters_individually(&self) -> bool { false }
+
+    /// The library's copy is the only copy: the work was imported, not
+    /// fetched, so there is nothing to fetch again (local files). Its
+    /// chapters are served from the library and never purged.
+    fn library_only(&self) -> bool { false }
 
     /// The work and every chapter. The adapter owns the fetch plan (one
     /// page, or TOC plus per-chapter pages). `work.url` is the stored

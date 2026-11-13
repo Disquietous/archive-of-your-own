@@ -343,6 +343,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     }
 
     private func configureCell(_ cell: WorkRowCellView, with work: Work, tableWidth: CGFloat) {
+        cell.showsFollowBell = appState.sourceChecksUpdates(work)
         cell.configure(with: work,
                        progress: model.appState.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),

@@ -56,6 +56,7 @@ extension ListPaneViewController {
         }
         let work = works[row]
         let textWidth = max(100, tableView.bounds.width - 45)
+        cell.showsFollowBell = appState.sourceChecksUpdates(work)
         cell.configure(with: work,
                        progress: model.appState.progress(for: work),
                        downloaded: appState.downloadedWorkIDs.contains(work.id),
@@ -179,6 +180,7 @@ extension ListPaneViewController {
         let key = rowHeightKey(for: work, isNew: isNew, isRemoved: isRemoved, finished: finished,
                                summaryExpanded: summaryExpanded, tagsExpanded: tagsExpanded)
         if let cached = rowHeightCache[key] { return cached }
+        sizingCell.showsFollowBell = appState.sourceChecksUpdates(work)
         sizingCell.configure(with: work,
                              progress: model.appState.progress(for: work),
                              downloaded: appState.downloadedWorkIDs.contains(work.id),

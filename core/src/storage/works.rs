@@ -887,6 +887,16 @@ impl Storage {
     // Downloads (intentional user downloads)
     // -------------------------------------------------------------------
 
+    /// Drop a work's chapters numbered past `last` (a re-import that came
+    /// back shorter).
+    pub fn delete_chapters_after(&self, work_id: u64, last: u32) -> Result<(), AppError> {
+        self.conn.execute(
+            "DELETE FROM chapters WHERE work_id = ?1 AND number > ?2",
+            params![work_id as i64, last],
+        ).map_err(map_sql)?;
+        Ok(())
+    }
+
     pub fn mark_downloaded(&self, work_id: u64) -> Result<(), AppError> {
         self.conn.execute(
             "INSERT OR REPLACE INTO downloads (work_id) VALUES (?1)",
@@ -929,8 +939,11 @@ impl Storage {
     /// text. Rows carrying a comment-fetch stamp become stubs (id, title
     /// and stamp kept); the rest are deleted.
     pub fn purge_non_retained_chapters(&self) -> Result<(), AppError> {
+        // An imported work's text has no other copy to fetch again, so it
+        // is retained whatever its download mark says.
         const NOT_RETAINED: &str = "work_id NOT IN (SELECT work_id FROM downloads)
-                                    AND work_id NOT IN (SELECT id FROM works WHERE last_chapter_read > 0)";
+                                    AND work_id NOT IN (SELECT id FROM works WHERE last_chapter_read > 0)
+                                    AND work_id NOT IN (SELECT id FROM works WHERE source = 'local')";
         self.conn.execute(
             &format!("DELETE FROM chapters WHERE comments_fetched_at IS NULL AND {NOT_RETAINED}"),
             [],

@@ -35,6 +35,11 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # sysinfo 0.38 (required by arti's tor-memquota) calls it on iOS too, so
 # every iOS build fails. Lift once sysinfo or tor-memquota fixes it.
 libc = ">=0.2.189, <0.2.190"
+# Local EPUB import (source/local): inflate for zip entries, and the
+# content-hash fallback id. Both crates are already in the graph (reqwest's
+# decompression, arti) — this adds no new code.
+flate2 = "1"
+sha2 = "0.10"
 
 # Tor (optional — heavy deps, only for release builds)
 arti-client = { version = "0.47", optional = true, default-features = false, features = ["tokio", "rustls", "geoip", "experimental-api"] }

@@ -8,14 +8,19 @@ use crate::source::{LinkTarget, SourceCapabilities, SourceRegistry, UserPane};
 
 /// The app's sources, in display order. AO3 first, then ScribbleHub (on
 /// the same transport); the rated mock answers only while the mock
-/// archive is on.
+/// archive is on; local files last (no site, nothing to fetch).
 pub(super) fn registry(client: Arc<tokio::sync::RwLock<AO3Client>>) -> SourceRegistry {
     SourceRegistry::new(vec![
         Arc::new(crate::source::ao3::AO3Source::new(client.clone())),
         Arc::new(crate::source::scribblehub::ScribbleHubSource::new(client)),
         Arc::new(crate::source::mock_rated::MockRatedSource::new()),
+        Arc::new(crate::source::local::LocalSource::new()),
     ])
 }
+
+/// Largest file `import_local_file` will read. A text-only book is a few
+/// MB; an illustrated one a few tens.
+const MAX_IMPORT_BYTES: u64 = 256 * 1024 * 1024;
 
 #[uniffi::export]
 impl AO3App {
@@ -100,6 +105,41 @@ impl AO3App {
 
 #[uniffi::export]
 impl AO3App {
+    /// Bring a book into the library from a file the user picked (Area
+    /// 11.2): EPUB, one file. The text is read once and saved like any
+    /// fetched work — whole, marked as an offline copy — and the file
+    /// itself is neither kept nor changed. Importing the same book again
+    /// replaces its record and chapters. No request is made.
+    pub async fn import_local_file(&self, path: String) -> Result<UWorkSummary, AO3Error> {
+        self.run_on_runtime(move |_client, storage| async move {
+            let size = std::fs::metadata(&path)
+                .map_err(|e| AO3Error::Storage { message: format!("Couldn’t open the file: {e}") })?
+                .len();
+            if size > MAX_IMPORT_BYTES {
+                return Err(AO3Error::Parse { message: "The file is too large to import.".to_string() });
+            }
+            let bytes = std::fs::read(&path)
+                .map_err(|e| AO3Error::Storage { message: format!("Couldn’t read the file: {e}") })?;
+            let book = crate::source::local::read_epub(&bytes, &path).map_err(AO3Error::from)?;
+            drop(bytes);
+
+            let s = storage.lock().await;
+            // Record, chapters and the offline mark land atomically.
+            let tx = s.begin_tx().map_err(AO3Error::from)?;
+            let id = s.save_work(&book.summary).map_err(AO3Error::from)?;
+            for chapter in &book.chapters {
+                s.save_chapter(id, chapter).map_err(AO3Error::from)?;
+            }
+            // A re-import of a shorter edition leaves no stale tail.
+            s.delete_chapters_after(id, book.chapters.len() as u32).map_err(AO3Error::from)?;
+            s.mark_downloaded(id).map_err(AO3Error::from)?;
+            tx.commit().map_err(AO3Error::from)?;
+            let mut summary = book.summary;
+            summary.id = id;
+            Ok(UWorkSummary::from(s.get_work(id).ok().flatten().unwrap_or(summary)))
+        }).await
+    }
+
     /// A source's search form (design/source-search-plan.md): static
     /// configuration, no I/O. `language_candidates` are the device
     /// language's codes (compacted tag, alpha-2, alpha-3) so a language

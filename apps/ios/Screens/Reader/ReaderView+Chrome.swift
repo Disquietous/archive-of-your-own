@@ -171,12 +171,15 @@ extension ReaderView {
     var readerMenu: some View {
         let bookmarked = state.bookmarkedWorkIDs.contains(workID)
         return Menu {
-            Button {
-                refreshChaptersFromAO3()
-            } label: {
-                Label("Refresh Chapters from AO3", systemImage: "arrow.clockwise")
+            // An imported work (a local file) has nothing to refresh from.
+            if state.workControls(workID)?.refresh != .hidden {
+                Button {
+                    refreshChaptersFromAO3()
+                } label: {
+                    Label("Refresh Chapters", systemImage: "arrow.clockwise")
+                }
+                .disabled(UInt64(workID) == nil || isLoading)
             }
-            .disabled(UInt64(workID) == nil || isLoading)
 
             Button {
                 presentFind()

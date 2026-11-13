@@ -651,6 +651,11 @@ impl AO3App {
         let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
             let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
+            if source.library_only() {
+                // Imported, not fetched: the library's chapters are the work.
+                let s = storage.lock().await;
+                return Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect());
+            }
             if !source.fetches_chapters_individually() {
                 return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
             }
@@ -696,6 +701,11 @@ impl AO3App {
         let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
             let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
+            if source.library_only() {
+                // Imported, not fetched: the library's chapters are the work.
+                let s = storage.lock().await;
+                return Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect());
+            }
             if !source.fetches_chapters_individually() {
                 return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
             }

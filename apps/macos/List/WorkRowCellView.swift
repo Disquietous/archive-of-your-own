@@ -131,6 +131,13 @@ final class WorkRowCellView: NSTableCellView {
     var onToggleTags: (() -> Void)?
     /// Called when the user clicks the byline — opens the author profile.
     var onAuthorClick: (() -> Void)?
+    /// Whether the byline carries a follow bell. Off for a work whose
+    /// source has no update checks (a local file): there is nothing a
+    /// follow of its author could check. Set on every configure.
+    var showsFollowBell = true {
+        didSet { followButton.isHidden = !showsFollowBell }
+    }
+
     /// Called when the user clicks the byline's follow bell.
     /// The byline bell was clicked — the owner pops the bell menu from it.
     var onFollowBell: ((NSView) -> Void)?

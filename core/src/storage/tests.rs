@@ -3785,3 +3785,36 @@ fn v32_folds_profile_keyed_guest_rows() {
     let follow: i64 = db.conn.query_row("SELECT target_id FROM follows WHERE kind = 'author'", [], |r| r.get(0)).unwrap();
     assert_eq!(follow, 901);
 }
+
+#[test]
+fn imported_local_work_is_kept_whole() {
+    let db = open_test_db();
+    let mut book = sample_work(0);
+    book.source = "local".into();
+    book.external_id = "urn:uuid:local-book".into();
+    book.url = String::new();
+    book.kudos = None;
+    book.hits = None;
+    let id = db.save_work(&book).unwrap();
+    for n in 1..=3 { db.save_chapter(id, &sample_chapter(n)).unwrap(); }
+    let fetched = db.save_work(&sample_work(77)).unwrap();
+    db.save_chapter(fetched, &sample_chapter(1)).unwrap();
+
+    // Saving the same book again lands on the same row; a shorter edition
+    // leaves no stale tail.
+    assert_eq!(db.save_work(&book).unwrap(), id);
+    db.delete_chapters_after(id, 2).unwrap();
+    assert_eq!(db.get_chapters(id).unwrap().len(), 2);
+
+    // Neither downloaded nor being read: a fetched work's text is purged,
+    // an imported work's is not — there is nowhere to fetch it again.
+    db.purge_non_retained_chapters().unwrap();
+    assert!(db.get_chapters(fetched).unwrap().iter().all(|c| c.content.is_empty()));
+    let kept = db.get_chapters(id).unwrap();
+    assert_eq!(kept.len(), 2);
+    assert!(kept.iter().all(|c| !c.content.is_empty()));
+
+    let saved = db.get_work(id).unwrap().unwrap();
+    assert_eq!((saved.source.as_str(), saved.url.as_str()), ("local", ""));
+    assert_eq!((saved.kudos, saved.hits), (None, None));
+}

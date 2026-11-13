@@ -349,14 +349,18 @@ extension ReadPaneViewController {
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         let refreshLabel = controls?.vocabulary.refresh ?? "Refresh"
+        // Hidden for a work that was imported, not fetched: it is whole
+        // and offline already, so refresh and download have no meaning.
+        let canRefresh = controls?.refresh != .hidden
         let hasDiscussion = controls.map { $0.discussion != .none } ?? true
         let remoteBookmark = controls?.remoteBookmark ?? .enabled
         if reading {
             // Chapter comments ride the discussion panel only where the
             // source has them (or a threaded work discussion to show).
             let showComments = hasDiscussion && (controls?.chapterComments ?? true || controls?.discussion == .threaded)
-            var trailing: [NSView] = [detachButton, settingsButton, immersiveButton, chaptersButton,
-                                      readerRefreshButton(label: refreshLabel)]
+            var trailing: [NSView] = [detachButton, settingsButton, immersiveButton, chaptersButton]
+            // An imported work has nothing to refresh from.
+            if canRefresh { trailing.append(readerRefreshButton(label: refreshLabel)) }
             if showComments { trailing.append(commentsButton) }
             // The app bookmark: any source.
             trailing.append(bookmarkButton)
@@ -369,8 +373,11 @@ extension ReadPaneViewController {
                 trailing.append(siteButton(url: url, caption: controls?.vocabulary.siteShort ?? "Site",
                                            tooltip: controls?.vocabulary.openOnSite ?? "Open on site"))
             }
-            trailing += [detachButton, settingsButton, detailRefreshButton(label: refreshLabel),
-                         downloadButton, readingListButton]
+            trailing += [detachButton, settingsButton]
+            if canRefresh {
+                trailing += [detailRefreshButton(label: refreshLabel), downloadButton]
+            }
+            trailing.append(readingListButton)
             if controls?.subscribe != .hidden { trailing.append(subscribeButton) }
             switch controls?.reaction ?? .kudos(given: false, gate: .enabled) {
             case .kudos: trailing.append(kudosButton)

@@ -268,6 +268,9 @@ final class WorkWindowController: NSWindowController, NSWindowDelegate {
 
         discussion.model.follow(workID: id, chapterIndex: chapter)
 
+        // An imported work has nothing to refresh from.
+        refreshButton.isHidden = appState.workControls(id)?.refresh == .hidden
+
         let bookmarked = appState.bookmarkedWorkIDs.contains(id)
         bookmarkButton.setSymbol(bookmarked ? "bookmark.fill" : "bookmark")
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil

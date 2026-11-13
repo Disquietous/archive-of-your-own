@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import UserNotifications
 
 @MainActor
@@ -494,6 +495,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         failed.messageText = "Couldn’t open that link"
         failed.informativeText = "\(problem) \(AppState.supportedLinkSummary)"
         failed.runModal()
+    }
+
+    // MARK: - EPUB import
+
+    /// File › Import EPUB…: one book file, read into the library and
+    /// opened. The file is not kept and nothing is sent anywhere.
+    @objc func importLocalBook() {
+        let panel = NSOpenPanel()
+        panel.title = "Import EPUB"
+        panel.prompt = "Import"
+        panel.message = "Choose an EPUB to add to your library. The file is read once; it isn’t moved or changed."
+        panel.allowedContentTypes = [.epub]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { @MainActor in
+            switch await appState.importLocalFile(url) {
+            case .imported(let workID):
+                model.openWorkByID(workID)
+            case .failed(let message):
+                let failed = NSAlert()
+                failed.alertStyle = .warning
+                failed.messageText = "Couldn’t import “\(url.lastPathComponent)”"
+                failed.informativeText = message
+                failed.runModal()
+            }
+        }
     }
 
     // MARK: - EPUB export

@@ -169,6 +169,13 @@ extension RustBridge {
         return try await app.fetchWork(workId: workId, opId: opID)
     }
 
+    /// Read a book file the user picked (EPUB) into the library. No
+    /// request is made; the file is neither kept nor changed.
+    func importLocalFile(path: String) async throws -> UWorkSummary {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.importLocalFile(path: path)
+    }
+
     func fetchChapters(_ workId: UInt64, opID: UInt64? = nil) async throws -> [UChapter] {
         guard let app else { throw BridgeError.notInitialized }
         return try await app.fetchChapters(workId: workId, opId: opID)

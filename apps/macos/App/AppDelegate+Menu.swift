@@ -62,6 +62,10 @@ extension AppDelegate {
     private func makeFileMenuItem() -> NSMenuItem {
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
+        let importItem = NSMenuItem(title: "Import EPUB…", action: #selector(importLocalBook), keyEquivalent: "i")
+        importItem.keyEquivalentModifierMask = [.command, .shift]
+        importItem.target = self
+        fileMenu.addItem(importItem)
         let exportItem = NSMenuItem(title: "Export as EPUB…", action: #selector(exportSelectedWork), keyEquivalent: "e")
         exportItem.keyEquivalentModifierMask = [.command, .shift]
         exportItem.target = self

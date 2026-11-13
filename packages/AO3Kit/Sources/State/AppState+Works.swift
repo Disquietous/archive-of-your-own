@@ -176,6 +176,37 @@ extension AppState {
         }
     }
 
+    /// Whether a work's source can be checked for updates — what a follow
+    /// (and so a follow bell on the row) needs. True for an unknown source.
+    func sourceChecksUpdates(_ work: Work) -> Bool {
+        bridge.sourceCapabilities(work.source)?.updateChecks ?? true
+    }
+
+    /// The outcome of importing a book file.
+    enum LocalImport {
+        case imported(workID: String)
+        case failed(String)
+    }
+
+    /// Import a book file the user picked (EPUB) as a library work, whole
+    /// and available offline. `url` may be security-scoped (a document
+    /// picker's); access is held only for the read.
+    func importLocalFile(_ url: URL) async -> LocalImport {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let summary = try await bridge.importLocalFile(path: url.path)
+            let work = Self.workFromSummary(summary)
+            adoptFetchedWorks([work])
+            fetchedChapters[work.id] = nil
+            downloadedWorkIDs.insert(work.id)
+            reloadCachedWorks()
+            return .imported(workID: work.id)
+        } catch {
+            return .failed(RustBridge.errorMessage(error))
+        }
+    }
+
     func toggleDownload(_ id: String) {
         if downloadedWorkIDs.contains(id) {
             downloadedWorkIDs.remove(id)

@@ -30,14 +30,17 @@ extension WorkDetailView {
     /// detail header carries as a button.
     var actionsMenu: some View {
         Menu {
-            Button {
-                Task { await state.refreshWorkMetadata(workID) }
-            } label: {
-                Label("Refresh Details from AO3", systemImage: "arrow.clockwise")
-            }
-            .disabled(!isReal || state.isRefreshingWork)
+            // An imported work (a local file) has nothing to refresh from.
+            if controls?.refresh != .hidden {
+                Button {
+                    Task { await state.refreshWorkMetadata(workID) }
+                } label: {
+                    Label(controls?.vocabulary.refresh ?? "Refresh Details", systemImage: "arrow.clockwise")
+                }
+                .disabled(!isReal || state.isRefreshingWork)
 
-            Divider()
+                Divider()
+            }
 
             Button {
                 nav.presentedSheet = .viewComments(workID: workID, chapterID: nil)

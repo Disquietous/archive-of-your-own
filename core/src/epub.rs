@@ -298,18 +298,18 @@ fn xml_escape(s: &str) -> String {
 // Minimal STORED-only zip writer
 // ---------------------------------------------------------------------------
 
-struct StoredZipWriter {
+pub(crate) struct StoredZipWriter {
     data: Vec<u8>,
     central: Vec<u8>,
     entries: u16,
 }
 
 impl StoredZipWriter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { data: Vec::new(), central: Vec::new(), entries: 0 }
     }
 
-    fn add(&mut self, name: &str, content: &[u8]) {
+    pub(crate) fn add(&mut self, name: &str, content: &[u8]) {
         let offset = self.data.len() as u32;
         let crc = crc32(content);
         let size = content.len() as u32;
@@ -353,7 +353,7 @@ impl StoredZipWriter {
         self.entries += 1;
     }
 
-    fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         let central_offset = self.data.len() as u32;
         let central_size = self.central.len() as u32;
         self.data.extend_from_slice(&self.central);
