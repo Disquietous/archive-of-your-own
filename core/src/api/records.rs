@@ -821,6 +821,14 @@ pub struct UFollowState {
     pub subscribed: bool,
 }
 
+/// What a target's bell offers: the Followed and Subscribed items, each
+/// by its source's gate.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct UFollowGates {
+    pub follow: crate::source::Gate,
+    pub subscribe: crate::source::Gate,
+}
+
 /// What a confirmed bell-menu change did.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct UFollowChange {

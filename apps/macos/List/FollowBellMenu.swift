@@ -25,11 +25,15 @@ final class FollowBellMenu: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        // A source that runs no update checks has nothing a follow could
+        // watch: no Followed item, and no menu at all.
+        guard follows.canFollow(target) else { return }
+
         let followed = NSMenuItem(title: "Followed", action: #selector(chooseFollowed), keyEquivalent: "")
         followed.target = controller
         followed.state = state.followed ? .on : .off
         followed.isEnabled = !follows.isBusy(target)
-        followed.toolTip = "Follow on this device — What’s New checks followed items. Never sent to AO3."
+        followed.toolTip = "Follow on this device — What’s New checks followed items. Never sent to the site."
         menu.addItem(followed)
 
         let subscribed = NSMenuItem(title: "Subscribed", action: #selector(chooseSubscribed), keyEquivalent: "")
@@ -78,6 +82,7 @@ struct FollowBell: NSViewRepresentable {
 
     func updateNSView(_ button: FollowBellButton, context: Context) {
         button.configure(name: target.name, shaded: shaded)
+        button.isHidden = !follows.canFollow(target)
         let follows = follows, target = target
         button.onClick = { view in FollowBellMenu.show(for: target, follows: follows, from: view) }
     }

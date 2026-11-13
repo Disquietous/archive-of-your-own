@@ -253,6 +253,37 @@ pub struct ListingPage {
     pub total_works: Option<u32>,
 }
 
+/// What a follow watches at a source (Area 9): the update check asks the
+/// target's own adapter what it lists now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateTarget {
+    Work(ExternalRef),
+    Series(ExternalRef),
+    Author(ExternalRef),
+}
+
+impl UpdateTarget {
+    pub fn external(&self) -> &ExternalRef {
+        match self {
+            UpdateTarget::Work(r) | UpdateTarget::Series(r) | UpdateTarget::Author(r) => r,
+        }
+    }
+}
+
+/// One page of what a followed target lists: the work itself for a work,
+/// a page of the listing (newest update first) for an author or series.
+/// The check diffs it against the library; the adapter only reports.
+#[derive(Debug, Clone, Default)]
+pub struct UpdatePage {
+    pub works: Vec<ListedWork>,
+    pub has_next: bool,
+    /// Highest page the pager shows (1 = no pager).
+    pub total_pages: u32,
+    /// The listing's own count of works when the page states one — what
+    /// lets the check notice a removal or a backdated post.
+    pub total_works: Option<u32>,
+}
+
 // ---------------------------------------------------------------------------
 // Controls (design/source-controls-plan.md)
 // ---------------------------------------------------------------------------
@@ -465,6 +496,36 @@ pub trait Source: Send + Sync {
     async fn fetch_author_works(&self, author: &ExternalRef, page: u32) -> Result<ListingPage, AppError> {
         let _ = (author, page);
         Err(AppError::NetworkError(format!("{} has no author listings to fetch", self.capabilities().name)))
+    }
+
+    /// One page of what a followed target lists now, for the What's New
+    /// check (`capabilities().update_checks`). `page` is 1-based; a work
+    /// has only page 1. Default: an author through `fetch_author_works`,
+    /// a work through `fetch_work`; no series.
+    async fn fetch_updates(&self, target: &UpdateTarget, page: u32) -> Result<UpdatePage, AppError> {
+        match target {
+            UpdateTarget::Author(author) => {
+                let listing = self.fetch_author_works(author, page).await?;
+                Ok(UpdatePage {
+                    works: listing.works,
+                    has_next: listing.has_next,
+                    total_pages: listing.total_pages,
+                    total_works: listing.total_works,
+                })
+            }
+            UpdateTarget::Work(work) => {
+                let fetched = self.fetch_work(work, None).await?;
+                Ok(UpdatePage {
+                    works: vec![ListedWork { summary: fetched.summary, stats: fetched.stats, authors: fetched.authors }],
+                    has_next: false,
+                    total_pages: 1,
+                    total_works: None,
+                })
+            }
+            UpdateTarget::Series(_) => {
+                Err(AppError::NetworkError(format!("{} has no series to check", self.capabilities().name)))
+            }
+        }
     }
 
     /// Users whose names match `query`, as the source's own search ranks

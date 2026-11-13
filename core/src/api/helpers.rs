@@ -215,21 +215,21 @@ pub(super) struct CensusState {
 }
 
 /// The What's-New qualification rules applied to one page of parsed blurbs,
-/// BEFORE they are saved. Returns (external ids of works to flag, how many
-/// were never in the cache); the caller maps flagged external ids to row
-/// ids once the page is saved (`flagged_row_ids`).
+/// BEFORE they are saved. Returns (the works to flag as (source, external
+/// id), how many were never in the cache); the caller maps the flagged
+/// works to row ids once the page is saved (`flagged_row_ids`).
 pub(super) fn diff_and_flag_works(
     s: &Storage,
     parsed_works: &[WorkSummary],
     sub_type: &str,
     sub_name: &str,
     seed: bool,
-) -> (Vec<String>, usize) {
+) -> (Vec<(String, String)>, usize) {
     // Per-work diff against the local cache, BEFORE overwriting it.
     // date_updated is day-granular, so a chapter posted later the
     // same day is invisible to date comparison — chapter and word
     // counts (already in the parsed blurbs) catch it.
-    let mut updated_ids: Vec<String> = Vec::new();
+    let mut updated_ids: Vec<(String, String)> = Vec::new();
     let mut unseen = 0usize;
     for w in parsed_works {
         let cached = s.resolve_work(&w.source, &w.external_id)
@@ -270,7 +270,7 @@ pub(super) fn diff_and_flag_works(
                     log_info!("whats_new",
                         "Flagged work {} '{}' from {} subscription '{}': {}",
                         w.external_id, w.title, sub_type, sub_name, reasons.join("; "));
-                    updated_ids.push(w.external_id.clone());
+                    updated_ids.push((w.source.clone(), w.external_id.clone()));
                 } else if date_changed {
                     log_info!("whats_new",
                         "Suppressed work {} '{}' from {} subscription '{}': {} — no chapter/word change corroborates it (rule: an uncorroborated date change is site-side date drift, not an update; the fresh date is cached so it won't re-trigger)",
@@ -287,7 +287,7 @@ pub(super) fn diff_and_flag_works(
                 log_info!("whats_new",
                     "Flagged work {} '{}' from {} subscription '{}': not in the local works cache (rule: a work we've never cached from any source is new to us)",
                     w.external_id, w.title, sub_type, sub_name);
-                updated_ids.push(w.external_id.clone());
+                updated_ids.push((w.source.clone(), w.external_id.clone()));
             }
         }
     }
@@ -303,8 +303,46 @@ pub(super) fn save_works(s: &Storage, works: &[WorkSummary]) -> Vec<u64> {
 }
 
 /// The row ids of flagged works, after the page was saved.
-pub(super) fn flagged_row_ids(s: &Storage, flagged: &[String]) -> Vec<u64> {
-    flagged.iter().filter_map(|ext| s.resolve_work(SOURCE_AO3, ext)).collect()
+pub(super) fn flagged_row_ids(s: &Storage, flagged: &[(String, String)]) -> Vec<u64> {
+    flagged.iter().filter_map(|(source, ext)| s.resolve_work(source, ext)).collect()
+}
+
+/// What the update check asks a follow target's source for: the target
+/// as that source addresses it. AO3 lists a user's works by account name.
+/// None for a fandom (followed, never checked) or a row that is gone.
+pub(super) fn update_target(s: &Storage, target: FollowTarget) -> Option<crate::source::UpdateTarget> {
+    use crate::source::UpdateTarget;
+    match target {
+        FollowTarget::Author(id) => {
+            let user = s.get_user(id)?;
+            let mut external = user.external_ref();
+            if user.source == SOURCE_AO3 {
+                external.external_id = user.username.clone();
+            }
+            Some(UpdateTarget::Author(external))
+        }
+        FollowTarget::Work(id) => s.work_ref(id).map(UpdateTarget::Work),
+        FollowTarget::Series(id) => s.get_series(id).ok().flatten().map(|r| UpdateTarget::Series(ExternalRef {
+            source: r.source, external_id: r.external_id, url: r.url,
+        })),
+        FollowTarget::Fandom(_) => None,
+    }
+}
+
+/// Whether a follow target can be followed for updates: its source runs
+/// update checks (Area 9). A fandom is always followable — it is never
+/// checked. None when the target's row or source is unknown.
+pub(super) fn follow_source_caps(
+    s: &Storage, registry: &crate::source::SourceRegistry, target: FollowTarget,
+) -> Option<crate::source::SourceCapabilities> {
+    let source = update_target(s, target)?.external().source.clone();
+    registry.by_id(&source).map(|src| src.capabilities().clone())
+}
+
+/// A checked follow whose source runs no update checks is skipped by
+/// every round (an unknown source too: nothing could fetch it).
+pub(super) fn update_checked(s: &Storage, registry: &crate::source::SourceRegistry, target: FollowTarget) -> bool {
+    follow_source_caps(s, registry, target).is_some_and(|caps| caps.update_checks)
 }
 
 /// Census complete: `seen_ids` is everything AO3 still lists. Reconcile the

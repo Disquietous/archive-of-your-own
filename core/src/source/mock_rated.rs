@@ -329,6 +329,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_update_check_reads_a_work_through_its_own_fetch() {
+        use crate::source::UpdateTarget;
+        let _g = crate::mock_site::tests::toggle_lock();
+        let src = MockRatedSource::new();
+        crate::mock_site::set_enabled(true);
+        let work = src.fetch_updates(&UpdateTarget::Work(story_ref("1")), 1).await;
+        let series = src.fetch_updates(&UpdateTarget::Series(story_ref("1")), 1).await;
+        crate::mock_site::set_enabled(false);
+        let page = work.unwrap();
+        assert_eq!(page.works.len(), 1);
+        assert_eq!(page.works[0].summary.title, "The Cartographer's Apprentice");
+        assert!(page.works[0].stats.iter().any(|s| s.key == "rating"), "the work's figures ride along");
+        assert!(!page.has_next);
+        assert!(series.is_err(), "a source without series listings has none to check");
+    }
+
+    #[tokio::test]
     async fn refuses_outside_the_mock() {
         let _g = crate::mock_site::tests::toggle_lock();
         let src = MockRatedSource::new();

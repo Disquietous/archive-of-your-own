@@ -15,7 +15,7 @@ use crate::models::{CommentsPage, ExternalRef, WorkSummary, SOURCE_AO3};
 
 use super::search::{SearchQuery, SearchSchema};
 use super::{DiscussionShape, FetchedWork, Gate, LinkTarget, ListedWork, ListingPage, Reaction, ReactionOutcome,
-            ReactionShape, Reachability, Source, SourceCapabilities, UserPane, Vocabulary};
+            ReactionShape, Reachability, Source, SourceCapabilities, UpdatePage, UpdateTarget, UserPane, Vocabulary};
 
 pub mod search;
 
@@ -245,6 +245,42 @@ impl Source for AO3Source {
         Ok(FetchedWork { summary, chapters, stats: Vec::new(), reacted_by: kudos_names, authors: Vec::new() })
     }
 
+    /// The check's own light requests, as it has always made them: the
+    /// user's or series' works listing (page 1 without a page parameter),
+    /// or the work page. A listing that fails to parse is an error — read
+    /// as "no works" it would make a census flag every known work gone. A
+    /// work page that fails to parse reports nothing.
+    async fn fetch_updates(&self, target: &UpdateTarget, page: u32) -> Result<UpdatePage, AppError> {
+        let base = crate::client::BASE_URL;
+        let id = &target.external().external_id;
+        let url = match (target, page) {
+            (UpdateTarget::Author(_), 0 | 1) => format!("{base}/users/{id}/works"),
+            (UpdateTarget::Author(_), p) => format!("{base}/users/{id}/works?page={p}"),
+            (UpdateTarget::Series(_), 0 | 1) => format!("{base}/series/{id}"),
+            (UpdateTarget::Series(_), p) => format!("{base}/series/{id}?page={p}"),
+            (UpdateTarget::Work(_), _) => format!("{base}/works/{id}?view_adult=true"),
+        };
+        let html = {
+            let client = self.client.read().await;
+            let timeout = client.timeout_for_url(&url);
+            client.fetch_with_progress(&url, timeout).await?
+        };
+        let listed = |summary| ListedWork { summary, stats: Vec::new(), authors: Vec::new() };
+        if let UpdateTarget::Work(_) = target {
+            let work = id.parse::<u64>().ok()
+                .and_then(|number| crate::parser::parse_work_page(&html, number).ok())
+                .map(|(summary, _)| summary);
+            return Ok(UpdatePage { works: work.into_iter().map(listed).collect(), has_next: false, total_pages: 1, total_works: None });
+        }
+        let works = crate::parser::parse_work_listings(&html)?;
+        Ok(UpdatePage {
+            works: works.into_iter().map(listed).collect(),
+            has_next: crate::parser::has_next_page(&html),
+            total_pages: crate::parser::total_pages(&html),
+            total_works: crate::parser::parse_listing_works_total(&html),
+        })
+    }
+
     async fn fetch_discussion(&self, work: &ExternalRef, chapter: Option<u64>, page: u32)
         -> Result<CommentsPage, AppError>
     {
@@ -326,6 +362,29 @@ mod tests {
             user: ExternalRef::ao3("sample_user", "https://archiveofourown.org/users/sample_user"),
             pane,
         })
+    }
+
+    #[tokio::test]
+    async fn the_update_check_reads_listings_and_work_pages() {
+        let _g = crate::mock_site::tests::toggle_lock();
+        let source = AO3Source::new(Arc::new(RwLock::new(AO3Client::new_direct().await.unwrap())));
+        let author = ExternalRef::ao3("quietcartographer", "https://archiveofourown.org/users/quietcartographer");
+        crate::mock_site::set_enabled(true);
+        let listing = source.fetch_updates(&UpdateTarget::Author(author), 1).await;
+        let first = listing.as_ref().ok().and_then(|p| p.works.first()).map(|w| w.summary.external_id.clone());
+        let work = match &first {
+            Some(id) => Some(source.fetch_updates(&UpdateTarget::Work(AO3Source::work(id).unwrap()), 1).await),
+            None => None,
+        };
+        crate::mock_site::set_enabled(false);
+        let listing = listing.unwrap();
+        assert_eq!(listing.works.len(), 3);
+        assert!(listing.works.iter().all(|w| w.summary.source == SOURCE_AO3 && w.stats.is_empty()));
+        assert!(!listing.has_next);
+        let work = work.expect("the listing names a work").unwrap();
+        assert_eq!(work.works.len(), 1);
+        assert_eq!(Some(&work.works[0].summary.external_id), first.as_ref());
+        assert_eq!(work.total_works, None);
     }
 
     #[test]

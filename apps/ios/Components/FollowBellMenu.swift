@@ -16,7 +16,16 @@ struct FollowBellMenu: View {
 
     @State private var pending: FollowModel.Confirmation?
 
+    /// No bell at all where the target's source runs no update checks:
+    /// there is nothing a follow could watch.
     var body: some View {
+        if follows.canFollow(target) {
+            bell
+        }
+    }
+
+    @ViewBuilder
+    private var bell: some View {
         let state = follows.state(target)
         let shaded = follows.isShaded(target)
         Menu {

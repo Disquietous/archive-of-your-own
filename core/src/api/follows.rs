@@ -39,6 +39,33 @@ fn follow_source(s: &Storage, target: FollowTarget) -> String {
     }
 }
 
+/// Following means being checked for updates, so a target at a source
+/// that runs no update checks can't be followed (Area 9). Fandoms are
+/// followed but never checked, and are always allowed.
+fn refuse_unfollowable(s: &Storage, registry: &crate::source::SourceRegistry, target: FollowTarget) -> Result<(), AO3Error> {
+    match follow_source_caps(s, registry, target) {
+        Some(caps) if !caps.update_checks => Err(invalid(&format!(
+            "{} has no update checks, so nothing from it can be followed", caps.name))),
+        _ => Ok(()),
+    }
+}
+
+/// The bell's two gates for a target, from its row's source: Followed is
+/// hidden where the source runs no update checks, Subscribed where it
+/// keeps no subscriptions (disabled until its account is signed in). A
+/// fandom, or a target the library has no row for yet, can be followed
+/// and has no subscription.
+fn gates_for(s: &Storage, registry: &crate::source::SourceRegistry, target: Option<FollowTarget>) -> UFollowGates {
+    use crate::source::Gate;
+    let Some(caps) = target.and_then(|t| follow_source_caps(s, registry, t)) else {
+        return UFollowGates { follow: Gate::Enabled, subscribe: Gate::Hidden };
+    };
+    UFollowGates {
+        follow: Gate::when(caps.update_checks, true, ""),
+        subscribe: Gate::when(caps.subscriptions, s.signed_in_at(&caps.id), "Sign in to subscribe"),
+    }
+}
+
 fn invalid(message: &str) -> AO3Error {
     AO3Error::Storage { message: message.to_string() }
 }
@@ -76,6 +103,21 @@ impl AO3App {
         Ok(UFollowState { followed, subscribed })
     }
 
+    /// What the bell offers for a target (see `gates_for`). Cache-only.
+    pub fn follow_gates(&self, kind: String, target_id: String) -> UFollowGates {
+        let s = self.storage.blocking_lock();
+        gates_for(&s, &self.sources, s.follow_target(&kind, &canonical_target(&kind, &target_id)))
+    }
+
+    /// The id the target's subscription record is keyed by at its source
+    /// (the account name, or the work/series number) — what a bell
+    /// matches against the account's subscriptions. None for a target at
+    /// a source without subscriptions, or one the library has no row for.
+    pub fn subscription_key(&self, kind: String, target_id: String) -> Option<String> {
+        let s = self.storage.blocking_lock();
+        s.follow_target(&kind, &canonical_target(&kind, &target_id)).and_then(|t| ao3_follow_id(&s, t))
+    }
+
     /// Follow a target locally — never an AO3 request. Returns true when the
     /// follow was created (false: already followed).
     pub fn add_follow(&self, kind: String, target_id: String, name: String) -> Result<bool, AO3Error> {
@@ -91,6 +133,7 @@ impl AO3App {
         let Some(target) = s.ensure_follow_target(&kind, &bridge_id).map_err(AO3Error::from)? else {
             return Err(unknown_target(&kind, &bridge_id));
         };
+        refuse_unfollowable(&s, &self.sources, target)?;
         s.add_follow(target, &name).map_err(AO3Error::from)
     }
 
@@ -125,6 +168,7 @@ impl AO3App {
         if !FOLLOW_KINDS.contains(&kind.as_str()) {
             return Err(invalid(&format!("Unknown follow kind: {kind}")));
         }
+        let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
             let bridge_id = canonical_target(&kind, &target_id);
             if bridge_id.is_empty() {
@@ -138,6 +182,9 @@ impl AO3App {
                 };
                 let account = s.subscription_account();
                 let followed = s.is_followed(target).map_err(AO3Error::from)?;
+                if want_followed && !followed {
+                    refuse_unfollowable(&s, &registry, target)?;
+                }
                 let sub_id = ao3_follow_id(&s, target);
                 let subscribed = match (&account, &sub_id) {
                     (Some(a), Some(id)) => s.has_subscription(a.id, &kind, id).map_err(AO3Error::from)?,
@@ -326,4 +373,86 @@ async fn set_subscription_remote(
                 }.map_err(AO3Error::from)
             }
         }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{Gate, Source, SourceCapabilities, SourceRegistry};
+
+    /// A source that reads works but runs no update checks (what a local
+    /// file source will be).
+    struct NoChecks(SourceCapabilities);
+
+    #[async_trait::async_trait]
+    impl Source for NoChecks {
+        fn capabilities(&self) -> &SourceCapabilities { &self.0 }
+        fn resolve(&self, _input: &str) -> Option<ExternalRef> { None }
+        async fn fetch_work(&self, _work: &ExternalRef, _known: Option<&WorkSummary>)
+            -> Result<crate::source::FetchedWork, crate::error::AppError>
+        {
+            Err(crate::error::AppError::NetworkError("not fetched in tests".to_string()))
+        }
+    }
+
+    async fn sources() -> SourceRegistry {
+        let mut caps = crate::source::mock_rated::MockRatedSource::new().capabilities().clone();
+        caps.id = "nochecks".to_string();
+        caps.name = "No Checks".to_string();
+        caps.update_checks = false;
+        // A direct client is a reqwest handle; nothing is sent here.
+        let client = Arc::new(tokio::sync::RwLock::new(AO3Client::new_direct().await.unwrap()));
+        SourceRegistry::new(vec![
+            Arc::new(crate::source::ao3::AO3Source::new(client)),
+            Arc::new(crate::source::mock_rated::MockRatedSource::new()),
+            Arc::new(NoChecks(caps)),
+        ])
+    }
+
+    fn stub(s: &Storage, source: &str, id: &str) -> FollowTarget {
+        let external = ExternalRef { source: source.to_string(), external_id: id.to_string(), url: String::new() };
+        FollowTarget::Work(s.ensure_work_stub(&external, "A Work").unwrap())
+    }
+
+    #[tokio::test]
+    async fn the_bell_follows_the_target_rows_source() {
+        let sources = sources().await;
+        let s = Storage::open_in_memory("k").unwrap();
+        let ao3 = gates_for(&s, &sources, Some(stub(&s, SOURCE_AO3, "111")));
+        assert_eq!(ao3.follow, Gate::Enabled);
+        assert_eq!(ao3.subscribe, Gate::Disabled { reason: "Sign in to subscribe".to_string() });
+        let rated = gates_for(&s, &sources, Some(stub(&s, crate::source::mock_rated::SOURCE_ID, "1")));
+        assert_eq!((rated.follow, rated.subscribe), (Gate::Enabled, Gate::Hidden));
+        let unchecked = gates_for(&s, &sources, Some(stub(&s, "nochecks", "7")));
+        assert_eq!((unchecked.follow, unchecked.subscribe), (Gate::Hidden, Gate::Hidden));
+        // A fandom (never checked) and a target with no row yet can be followed.
+        let none = gates_for(&s, &sources, None);
+        assert_eq!((none.follow, none.subscribe), (Gate::Enabled, Gate::Hidden));
+    }
+
+    #[tokio::test]
+    async fn a_source_without_update_checks_is_neither_followed_nor_checked() {
+        let sources = sources().await;
+        let s = Storage::open_in_memory("k").unwrap();
+        let (ao3, unchecked) = (stub(&s, SOURCE_AO3, "111"), stub(&s, "nochecks", "7"));
+        assert!(refuse_unfollowable(&s, &sources, ao3).is_ok());
+        assert!(refuse_unfollowable(&s, &sources, unchecked).is_err());
+        assert!(update_checked(&s, &sources, ao3));
+        assert!(!update_checked(&s, &sources, unchecked));
+    }
+
+    #[test]
+    fn an_ao3_author_is_checked_by_account_name_and_others_by_their_key() {
+        use crate::source::UpdateTarget;
+        let s = Storage::open_in_memory("k").unwrap();
+        let ao3 = s.ensure_ao3_user_row("sample_user").unwrap().unwrap();
+        let Some(UpdateTarget::Author(r)) = update_target(&s, FollowTarget::Author(ao3)) else { panic!("an author") };
+        assert_eq!((r.source.as_str(), r.external_id.as_str()), (SOURCE_AO3, "sample_user"));
+        let other = s.record_user(&crate::models::AO3User {
+            source: crate::source::mock_rated::SOURCE_ID.to_string(), id: "51230".to_string(),
+            username: "Quill".to_string(), profile_url: None, avatar_url: None,
+        }).unwrap();
+        let Some(UpdateTarget::Author(r)) = update_target(&s, FollowTarget::Author(other)) else { panic!("an author") };
+        assert_eq!(r.external_id, "51230");
+    }
 }

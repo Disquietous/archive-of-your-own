@@ -25,6 +25,10 @@ impl AO3App {
             .unwrap_or_default();
 
         for row in s.get_check_targets().map_err(AO3Error::from)? {
+            // A source without update checks is never asked (Area 9).
+            if !update_checked(&s, &self.sources, row.target) {
+                continue;
+            }
             let kind = row.target.kind();
             let id = row.bridge_id;
             let queued = queue.iter().any(|q|
@@ -59,7 +63,7 @@ impl AO3App {
         }
         Ok(s.get_check_targets().map_err(AO3Error::from)?
             .iter()
-            .any(|row| follow_check_due(&s, row.target)))
+            .any(|row| update_checked(&s, &self.sources, row.target) && follow_check_due(&s, row.target)))
     }
 
     /// How many checked follows were last checked longer ago than
@@ -68,7 +72,8 @@ impl AO3App {
     /// has its own recent stamp, however many interrupted runs it took.
     pub fn whats_new_overdue(&self, max_age_secs: u64) -> Result<UWhatsNewOverdue, AO3Error> {
         let s = self.storage.blocking_lock();
-        let targets = s.get_check_targets().map_err(AO3Error::from)?;
+        let targets: Vec<_> = s.get_check_targets().map_err(AO3Error::from)?
+            .into_iter().filter(|row| update_checked(&s, &self.sources, row.target)).collect();
         let mut overdue = 0u32;
         let mut never_checked = 0u32;
         for row in &targets {
@@ -291,21 +296,28 @@ impl AO3App {
                 let sub_name = item["name"].as_str().unwrap_or("").to_string();
                 let is_census = item["census"].as_bool().unwrap_or(false);
                 checked = Some(target);
-                // What AO3 is asked for: the username or the AO3 number. An
-                // author at another source has none; their adapter lists
-                // their works instead.
-                let sourced_author = match target {
-                    FollowTarget::Author(id) => s.get_user(id).filter(|u| u.source != SOURCE_AO3),
-                    _ => None,
+                // What the target's own source is asked for (Area 9): the
+                // check dispatches by the row's source, never by kind alone.
+                let update = update_target(&s, target)
+                    .and_then(|t| registry.by_id(&t.external().source).map(|source| (source, t)));
+                let refusal = match &update {
+                    None => Some("No source can check this follow".to_string()),
+                    Some((source, _)) if !source.capabilities().update_checks =>
+                        Some(format!("{} has no update checks", source.capabilities().name)),
+                    // A source the current privacy mode can't reach is
+                    // reported for this follow; the round goes on.
+                    Some((source, _)) => check_reachable(source).err().map(|e| format!("{e}")),
                 };
-                let ao3_id = match (ao3_follow_id(&s, target), &sourced_author) {
-                    (Some(id), _) => id,
-                    (None, Some(_)) => String::new(),
-                    (None, None) => return Ok(Some(UFollowCheckResult {
-                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
-                        remaining: queue.len() as u32,
-                        error: Some("Not an AO3 target".to_string()),
-                    })),
+                let (source, update) = match (update, refusal) {
+                    (Some(found), None) => found,
+                    (_, error) => {
+                        let json = serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string());
+                        log_db("set_check_queue", s.set_check_queue(&json));
+                        return Ok(Some(UFollowCheckResult {
+                            kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
+                            remaining: queue.len() as u32, error,
+                        }));
+                    }
                 };
 
                 // Persist updated queue before the fetch (so a crash mid-fetch
@@ -333,66 +345,26 @@ impl AO3App {
                     }));
                 }
 
-                // Build URL
-                let base = crate::client::BASE_URL;
-                let census_page = census_state.as_ref().map(|c| c.next_page);
-                let url = if let Some(user) = &sourced_author {
-                    user.field(crate::user_fields::UserField::ProfileUrl).unwrap_or("").to_string()
-                } else { match (sub_type.as_str(), census_page) {
-                    ("author", None) => format!("{base}/users/{ao3_id}/works"),
-                    ("author", Some(p)) => format!("{base}/users/{ao3_id}/works?page={p}"),
-                    ("series", None) => format!("{base}/series/{ao3_id}"),
-                    ("series", Some(p)) => format!("{base}/series/{ao3_id}?page={p}"),
-                    ("work", _) => format!("{base}/works/{ao3_id}?view_adult=true"),
-                    _ => return Ok(Some(UFollowCheckResult {
-                        kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
-                        error: Some("Unknown subscription type".to_string()),
-                    })),
-                } };
-
-                /// What a check fetched: AO3's page, or another source's
-                /// listing of the author's works (already parsed).
-                enum Fetched { Html(String), Listed(Vec<crate::source::ListedWork>) }
+                // The target's page at its source, for the log.
+                let url = update.external().url.clone();
+                let page = census_state.as_ref().map(|c| c.next_page).unwrap_or(1);
 
                 // Fetch through the recovery engine (Idempotent — a plain GET):
                 // a transient failure already gets rotated-and-retried in Rust
                 // before ever reaching this match. What's left after that is
                 // classified (never string-matched) to decide whether it's
                 // still worth requeuing for the next census cycle.
-                let url_for_fetch = url.clone();
-                let fetch_result: Result<Fetched, AO3Error> = if let Some(user) = &sourced_author {
-                    let Some(source) = registry.by_id(&user.source) else {
-                        return Ok(Some(UFollowCheckResult {
-                            kind: sub_type, target_id: sub_id, name: sub_name, changed: false, remaining,
-                            error: Some(format!("no source {}", user.source)),
-                        }));
-                    };
-                    check_reachable(&source)?;
-                    let external = user.external_ref();
-                    with_recovery(
-                        client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
-                        move |_client| {
-                            let (source, external) = (source.clone(), external.clone());
-                            async move {
-                                tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
-                                source.fetch_author_works(&external, 1).await.map_err(AO3Error::from)
-                            }
-                        }).await.map(|page| Fetched::Listed(page.works))
-                } else {
-                    with_recovery(
-                        client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
-                        move |client| {
-                            let url = url_for_fetch.clone();
-                            async move {
-                                // Inside the attempt closure so retries pace too —
-                                // not just the first request for each item.
-                                tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
-                                let c = client.read().await;
-                                let timeout = c.timeout_for_url(&url);
-                                c.fetch_with_progress(&url, timeout).await.map_err(AO3Error::from)
-                            }
-                        }).await.map(Fetched::Html)
-                };
+                let fetch_result: Result<crate::source::UpdatePage, AO3Error> = with_recovery(
+                    client.clone(), storage.clone(), OpKind::Fetch { label: "subscription_check".to_string() }, RetrySafety::Idempotent,
+                    move |_client| {
+                        let (source, update) = (source.clone(), update.clone());
+                        async move {
+                            // Inside the attempt closure so retries pace too —
+                            // not just the first request for each item.
+                            tokio::time::sleep(SUBSCRIPTION_CHECK_DELAY).await;
+                            source.fetch_updates(&update, page).await.map_err(AO3Error::from)
+                        }
+                    }).await;
                 let fetched = match fetch_result {
                     Ok(f) => {
                         // A successful fetch ends any not-found streak.
@@ -403,6 +375,12 @@ impl AO3App {
                     Err(e) => {
                         let msg = format!("{e}");
                         log_error!("sub_check", "Failed to fetch {sub_type} '{sub_name}' ({url}): {msg}");
+                        // A page that arrived but didn't parse was still
+                        // found: it ends a not-found streak like any fetch.
+                        if matches!(e, AO3Error::Parse { .. }) {
+                            let s = storage.lock().await;
+                            log_db("reset_follow_status", s.reset_follow_status(target));
+                        }
 
                         // A 404 counts toward the not-found limit; reaching it
                         // excludes the follow from every future check.
@@ -445,52 +423,30 @@ impl AO3App {
                     }
                 };
 
-                let (html, sourced_listed) = match fetched {
-                    Fetched::Html(h) => (h, None),
-                    Fetched::Listed(w) => (String::new(), Some(w)),
-                };
-
-                // Parse works and extract the newest date
-                let (newest_date, parsed_works) = if let Some(listed) = &sourced_listed {
-                    let works: Vec<WorkSummary> = listed.iter().map(|l| l.summary.clone()).collect();
-                    let date = works.iter().map(|w| w.date_updated.as_str()).max().unwrap_or("").to_string();
-                    (date, works)
-                } else { match sub_type.as_str() {
-                    "author" | "series" => {
-                        // Both author pages and series pages use li.work.blurb.
-                        // A parse error (schema canary) must abort the check:
-                        // treating it as "0 works" would make the census flag
-                        // every known work as gone. An interrupted census
-                        // resumes on this subscription's next regular check.
-                        let works = match crate::parser::parse_work_listings(&html) {
-                            Ok(w) => w,
-                            Err(e) => {
-                                log_error!("sub_check", "Parse failed for {sub_type} '{sub_name}' ({url}): {e}");
-                                return Ok(Some(UFollowCheckResult {
-                                    kind: sub_type, target_id: sub_id, name: sub_name, changed: false,
-                                    remaining, error: Some(format!("{e}")),
-                                }));
+                // The works the page lists and the newest update date among
+                // them (a listing that failed to parse never gets here: the
+                // adapter reports it as an error, so it can't read as "0
+                // works" and make the census flag every known work gone).
+                let parsed_works: Vec<WorkSummary> = fetched.works.iter().map(|l| l.summary.clone()).collect();
+                let newest_date = parsed_works.iter()
+                    .map(|w| w.date_updated.as_str())
+                    .max()
+                    .unwrap_or("")
+                    .to_string();
+                // A listing may carry each work's figures and its authors
+                // as users; they land beside the saved works.
+                let save_listed_extras = |s: &Storage| {
+                    for lw in &fetched.works {
+                        if lw.authors.is_empty() && lw.stats.is_empty() { continue }
+                        let Some(id) = s.resolve_work(&lw.summary.source, &lw.summary.external_id) else { continue };
+                        if !lw.authors.is_empty() {
+                            if let Ok(ids) = s.record_users(&lw.authors) {
+                                log_db("link_work_authors", s.link_work_authors(id, &ids));
                             }
-                        };
-                        let date = works.iter()
-                            .map(|w| w.date_updated.as_str())
-                            .max()
-                            .unwrap_or("")
-                            .to_string();
-                        (date, works)
-                    }
-                    "work" => {
-                        let parsed = ao3_id.parse::<u64>().ok()
-                            .and_then(|id| crate::parser::parse_work_page(&html, id).ok());
-                        if let Some((w, _)) = parsed {
-                            let date = w.date_updated.clone();
-                            (date, vec![w])
-                        } else {
-                            (String::new(), vec![])
                         }
+                        save_source_stats(s, id, &lw.summary.source, &lw.stats);
                     }
-                    _ => (String::new(), vec![]),
-                } };
+                };
 
                 let s = storage.lock().await;
 
@@ -501,6 +457,7 @@ impl AO3App {
                     // flags land together or not at all.
                     let tx = s.begin_tx().map_err(AO3Error::from)?;
                     let page_ids = save_works(&s, &parsed_works);
+                    save_listed_extras(&s);
                     for id in page_ids {
                         if !state.seen_ids.contains(&id) {
                             state.seen_ids.push(id);
@@ -512,10 +469,10 @@ impl AO3App {
                     }
                     log_db("commit census page", tx.commit());
 
-                    let done = !crate::parser::has_next_page(&html)
+                    let done = !fetched.has_next
                         || state.next_page >= CENSUS_MAX_PAGES
                         || parsed_works.is_empty();
-                    if done && state.next_page >= CENSUS_MAX_PAGES && crate::parser::has_next_page(&html) {
+                    if done && state.next_page >= CENSUS_MAX_PAGES && fetched.has_next {
                         log_error!("whats_new",
                             "Census for {sub_type} '{sub_name}' hit the {CENSUS_MAX_PAGES}-page cap with pages left — listing walk truncated");
                     }
@@ -559,19 +516,7 @@ impl AO3App {
                 // Membership (author byline / series part) rides on the saved
                 // works themselves — nothing to record per subscription.
                 let all_ids = save_works(&s, &parsed_works);
-                // A listing from another source carries each work's figures
-                // and its authors as users; land them beside the works.
-                if let Some(listed) = &sourced_listed {
-                    for lw in listed {
-                        let Some(id) = s.resolve_work(&lw.summary.source, &lw.summary.external_id) else { continue };
-                        if !lw.authors.is_empty() {
-                            if let Ok(ids) = s.record_users(&lw.authors) {
-                                log_db("link_work_authors", s.link_work_authors(id, &ids));
-                            }
-                        }
-                        save_source_stats(&s, id, &lw.summary.source, &lw.stats);
-                    }
-                }
+                save_listed_extras(&s);
                 if changed {
                     log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &updated_ids)));
                 }
@@ -590,7 +535,7 @@ impl AO3App {
                 // count can't see (an addition paired with a removal between
                 // checks) and to reconcile the gone-from-AO3 flags.
                 if sub_type == "author" || sub_type == "series" {
-                    let header_total = crate::parser::parse_listing_works_total(&html);
+                    let header_total = fetched.total_works;
                     let (prev_total, last_census_at, existing_state) =
                         s.get_follow_census_meta(target).unwrap_or((None, None, None));
 
@@ -639,7 +584,7 @@ impl AO3App {
                         let fresh = resumed.is_none();
                         let mut state = resumed.unwrap_or_else(|| CensusState {
                             next_page: 2,
-                            total_pages: crate::parser::total_pages(&html),
+                            total_pages: fetched.total_pages,
                             seen_ids: Vec::new(),
                             started_at: now_utc(),
                             reason: reason.clone(),
@@ -653,7 +598,7 @@ impl AO3App {
                         log_info!("whats_new",
                             "Census for {} subscription '{}': {} (from page {}, ~{} pages)",
                             sub_type, sub_name, reason, state.next_page, state.total_pages);
-                        if fresh && !crate::parser::has_next_page(&html) {
+                        if fresh && !fetched.has_next {
                             // Single-page listing: page 1 was the whole census.
                             finalize_census(&s, target, &sub_name, &state);
                         } else {

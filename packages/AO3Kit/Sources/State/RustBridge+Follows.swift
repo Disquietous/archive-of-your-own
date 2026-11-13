@@ -21,6 +21,19 @@ extension RustBridge {
         (try? app?.getFollows(kind: kind)) ?? []
     }
 
+    /// What a target's bell offers, by its row's source: Followed is
+    /// hidden where the source runs no update checks, Subscribed where it
+    /// keeps no subscriptions. nil when the library is unavailable.
+    func followGates(kind: String, targetId: String) -> UFollowGates? {
+        app?.followGates(kind: kind, targetId: targetId)
+    }
+
+    /// The id a target's subscription record is keyed by at its source;
+    /// nil when it has none.
+    func subscriptionKey(kind: String, targetId: String) -> String? {
+        app?.subscriptionKey(kind: kind, targetId: targetId)
+    }
+
     /// Local follow — never an AO3 request. True when newly created.
     @discardableResult
     func addFollow(kind: String, targetId: String, name: String) -> Bool {

@@ -143,14 +143,20 @@ final class FollowModel {
     /// The signed-in account's AO3 subscription (false when signed out).
     func isSubscribed(_ target: Target) -> Bool {
         guard target.kind.isSubscribable else { return false }
-        // Subscriptions are AO3 records keyed by AO3 id: the username for
-        // authors, the row id (AO3 number for AO3 rows) for works/series.
+        // Subscriptions are the site's records keyed by its own id: the
+        // username for authors, the work/series number for the rest. The
+        // core maps a library row to that id (a row id is not one).
         let subID: String
         if target.kind == .author {
             guard let name = subscriptionName(of: target) else { return false }
             subID = name
-        } else {
+        } else if let key = appState.bridge.subscriptionKey(kind: target.kind.rawValue, targetId: target.id) {
+            subID = key
+        } else if UInt64(target.id) == nil {
+            // Sample data keys works by slug, in memory only.
             subID = target.id
+        } else {
+            return false
         }
         return appState.subscriptions.contains {
             $0.subType.lowercased() == target.kind.rawValue
@@ -165,20 +171,22 @@ final class FollowModel {
         target.kind == .author ? subscriptionName(of: target) != nil : true
     }
 
-    /// The subscribe control's gate for a target, from the row's source
-    /// (design/source-controls-plan.md). Series rows carry no source over
-    /// the bridge yet, so they follow the active account.
+    /// What the bell offers for a target, resolved by the core from the
+    /// target row's own source (design/source-controls-plan.md).
+    private func gates(_ target: Target) -> UFollowGates? {
+        _ = appState.accountsRevision  // gates follow sign-in state
+        return appState.bridge.followGates(kind: target.kind.rawValue, targetId: target.id)
+    }
+
+    /// The subscribe control's gate for a target.
     func subscribeGate(_ target: Target) -> Gate {
-        switch target.kind {
-        case .author:
-            return target.userID.flatMap { appState.bridge.userControls($0)?.subscribe } ?? .hidden
-        case .work:
-            return UInt64(target.id).flatMap { appState.bridge.workControls($0)?.subscribe } ?? .hidden
-        case .series:
-            return appState.ao3Username != nil ? .enabled : .disabled(reason: "Sign in to subscribe")
-        case .fandom:
-            return .hidden
-        }
+        gates(target)?.subscribe ?? .hidden
+    }
+
+    /// Whether the target can be followed at all: its source runs update
+    /// checks (a fandom always can). A source without them shows no bell.
+    func canFollow(_ target: Target) -> Bool {
+        gates(target)?.follow != .hidden
     }
 
     /// Why Subscribed is unavailable right now, for the menu; nil when it
@@ -226,7 +234,7 @@ final class FollowModel {
     // MARK: - Local follow (no AO3 request, no confirmation)
 
     func follow(_ target: Target) {
-        guard !target.id.isEmpty, !isFollowed(target) else { return }
+        guard !target.id.isEmpty, !isFollowed(target), canFollow(target) else { return }
         appState.bridge.addFollow(kind: target.kind.rawValue, targetId: target.id, name: target.name)
         reload()
     }
