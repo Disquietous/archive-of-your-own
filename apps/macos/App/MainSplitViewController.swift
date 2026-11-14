@@ -162,6 +162,10 @@ final class ContentAreaViewController: NSViewController {
     private static func host(_ root: some View) -> NSView {
         let hosting = NSHostingView(rootView: root)
         hosting.sizingOptions = []
+        // The tab strip sits under the transparent titlebar. Left on, the
+        // titlebar's safe area pushes its content down past its own
+        // bottom edge and over the top of the panes below.
+        hosting.safeAreaRegions = []
         hosting.translatesAutoresizingMaskIntoConstraints = false
         return hosting
     }

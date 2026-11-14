@@ -393,7 +393,19 @@ fn parse_element_children_at(el: &ElementRef, depth: usize) -> Vec<ContentBlock>
         return blocks;
     }
 
+    // Text and inline markup sitting directly in a block container (a
+    // site that writes its paragraphs as `<div>text</div>`, or bare text
+    // split by `<br>`) is a paragraph of its own: gathered here, closed
+    // by the next block element.
+    let mut loose: Vec<InlineContent> = Vec::new();
     for child in el.children() {
+        let is_loose = child.value().is_text()
+            || child.value().as_element().is_some_and(|e| is_inline_element(e.name()));
+        if is_loose {
+            push_inline_node(child, depth + 1, &mut loose);
+            continue;
+        }
+        flush_loose(&mut loose, &mut blocks);
         if let Some(element) = child.value().as_element() {
             let child_ref = ElementRef::wrap(child).unwrap();
             match element.name() {
@@ -449,8 +461,31 @@ fn parse_element_children_at(el: &ElementRef, depth: usize) -> Vec<ContentBlock>
             }
         }
     }
+    flush_loose(&mut loose, &mut blocks);
 
     blocks
+}
+
+/// Elements that are part of a line of text rather than a block.
+fn is_inline_element(name: &str) -> bool {
+    matches!(name, "br" | "strong" | "b" | "em" | "i" | "a" | "s" | "strike" | "del" | "sup" | "sub"
+        | "span" | "u" | "font" | "small")
+}
+
+/// Close a run of loose inline content as a paragraph. A run with no
+/// text in it (whitespace, stray line breaks between blocks) is dropped.
+fn flush_loose(loose: &mut Vec<InlineContent>, blocks: &mut Vec<ContentBlock>) {
+    let mut inlines = std::mem::take(loose);
+    let blank = |i: &InlineContent| match i {
+        InlineContent::Text { value } => value.trim().is_empty(),
+        InlineContent::LineBreak => true,
+        _ => false,
+    };
+    while inlines.first().is_some_and(blank) { inlines.remove(0); }
+    while inlines.last().is_some_and(blank) { inlines.pop(); }
+    if !inlines.is_empty() {
+        blocks.push(ContentBlock::Paragraph { text: inlines });
+    }
 }
 
 /// An `<img>` as a block, with its URL resolved to an absolute https form.
@@ -533,6 +568,20 @@ fn parse_inline_content_at(el: &ElementRef, depth: usize) -> Vec<InlineContent> 
     }
 
     for child in el.children() {
+        push_inline_node(child, depth, &mut inlines);
+    }
+    while inlines.first().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+        inlines.remove(0);
+    }
+    while inlines.last().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
+        inlines.pop();
+    }
+    inlines
+}
+
+/// One node of a line of text, appended to `inlines`.
+fn push_inline_node(child: ego_tree::NodeRef<scraper::Node>, depth: usize, inlines: &mut Vec<InlineContent>) {
+    {
         if child.value().is_text() {
             let t = child.value().as_text().unwrap();
             // HTML whitespace semantics: newlines/tabs/space runs in source
@@ -597,13 +646,6 @@ fn parse_inline_content_at(el: &ElementRef, depth: usize) -> Vec<InlineContent> 
             }
         }
     }
-    while inlines.first().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
-        inlines.remove(0);
-    }
-    while inlines.last().is_some_and(|i| matches!(i, InlineContent::Text { value } if value.trim().is_empty())) {
-        inlines.pop();
-    }
-    inlines
 }
 
 /// Usernames shown in a work page's kudos list ("X, Y, and Z left kudos on

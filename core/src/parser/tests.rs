@@ -1061,3 +1061,22 @@ fn html_to_blocks_resolves_relative_urls_against_the_page() {
     let ContentBlock::Image { src, .. } = &blocks[1] else { panic!("image second, got {blocks:?}") };
     assert_eq!(src, "https://rated.mock/story/1/img/cover.png");
 }
+
+#[test]
+fn text_sitting_directly_in_a_div_is_a_paragraph() {
+    // A site that writes its paragraphs as divs, with empty spacers.
+    let html = "<div>\n<div>\u{a0}</div>\n<p></p>\n<div>The first <i>line</i>.</div>\n<p></p>\n\
+                <div>The second line.</div>\n<br>\n</div>Loose <b>tail</b><br>next<p>Last.</p>";
+    let blocks = html_to_blocks(html, "https://rated.mock/story/1/chapter/1");
+    let plain: Vec<String> = blocks.iter().map(|b| match b {
+        ContentBlock::Paragraph { text } => text.iter().map(|i| match i {
+            InlineContent::Text { value } => value.clone(),
+            InlineContent::Italic { .. } => "<i>".to_string(),
+            InlineContent::Bold { .. } => "<b>".to_string(),
+            InlineContent::LineBreak => "|".to_string(),
+            _ => "?".to_string(),
+        }).collect::<String>(),
+        other => format!("{other:?}"),
+    }).collect();
+    assert_eq!(plain, vec!["The first <i>.", "The second line.", "Loose <b>|next", "Last."]);
+}
