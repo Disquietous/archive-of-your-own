@@ -219,6 +219,7 @@ mod tests {
             date_updated: updated.to_string(),
             language: "en".to_string(),
             complete,
+            status: String::new(),
             series: vec![],
             fetched_at: String::new(),
             author_ids: Vec::new(),

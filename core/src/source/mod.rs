@@ -300,6 +300,10 @@ impl UpdateTarget {
 /// The check diffs it against the library; the adapter only reports.
 #[derive(Debug, Clone, Default)]
 pub struct UpdatePage {
+    /// The works come from each work's own page (a followed work's check),
+    /// not from a listing: everything the source states about them. Only
+    /// then may saving replace what the library holds; a listing merges.
+    pub detailed: bool,
     pub works: Vec<ListedWork>,
     pub has_next: bool,
     /// Highest page the pager shows (1 = no pager).
@@ -505,6 +509,14 @@ pub trait Source: Send + Sync {
     /// save path then never overwrites fetched text with a stub.
     fn fetches_chapters_individually(&self) -> bool { false }
 
+    /// A listing here leaves out something a work's own page states (on
+    /// ScribbleHub: whether a story is ongoing or on hiatus — a listing
+    /// marks only the completed ones). A user-requested listing fetch then
+    /// follows each listed work with its details, paced like any run of
+    /// requests. Update checks are not affected: they read the listing
+    /// alone.
+    fn listings_need_details(&self) -> bool { false }
+
     /// The library's copy is the only copy: the work was imported, not
     /// fetched, so there is nothing to fetch again (local files). Its
     /// chapters are served from the library and never purged.
@@ -542,6 +554,7 @@ pub trait Source: Send + Sync {
             UpdateTarget::Author(author) => {
                 let listing = self.fetch_author_works(author, page).await?;
                 Ok(UpdatePage {
+                    detailed: false,
                     works: listing.works,
                     has_next: listing.has_next,
                     total_pages: listing.total_pages,
@@ -551,6 +564,7 @@ pub trait Source: Send + Sync {
             UpdateTarget::Work(work) => {
                 let fetched = self.fetch_work(work, None).await?;
                 Ok(UpdatePage {
+                    detailed: true,
                     works: vec![ListedWork { summary: fetched.summary, stats: fetched.stats, authors: fetched.authors }],
                     has_next: false,
                     total_pages: 1,

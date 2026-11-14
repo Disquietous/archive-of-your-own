@@ -5,6 +5,7 @@ mod circuit;
 pub mod clearance;
 mod failure;
 mod helpers;
+pub mod pacing;
 pub mod privacy;
 pub mod routes;
 #[cfg(feature = "tor")]

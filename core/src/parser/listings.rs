@@ -112,6 +112,7 @@ fn parse_single_blurb(blurb: &ElementRef) -> Result<WorkSummary, AppError> {
         date_updated,
         language,
         complete,
+        status: crate::source::ao3::work_status(complete).to_string(),
         // Blurb series carry id, name and part; prev/next links exist only
         // on the work page (storage merges them in on save).
         series,
@@ -486,6 +487,7 @@ fn parse_single_bookmark_blurb(blurb: &ElementRef) -> Result<BookmarkListing, Ap
             date_updated: String::new(),
             language: String::new(),
             complete: false,
+            status: String::new(),
             series: Vec::new(),
             fetched_at: String::new(),
         

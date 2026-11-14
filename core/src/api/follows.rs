@@ -437,8 +437,41 @@ mod tests {
         let (ao3, unchecked) = (stub(&s, SOURCE_AO3, "111"), stub(&s, "nochecks", "7"));
         assert!(refuse_unfollowable(&s, &sources, ao3).is_ok());
         assert!(refuse_unfollowable(&s, &sources, unchecked).is_err());
-        assert!(update_checked(&s, &sources, ao3));
-        assert!(!update_checked(&s, &sources, unchecked));
+        let none = Default::default();
+        assert!(check_selected(&s, &sources, &none, ao3));
+        assert!(!check_selected(&s, &sources, &none, unchecked));
+    }
+
+    #[tokio::test]
+    async fn a_left_out_source_is_skipped_and_its_queue_items_parked() {
+        let sources = sources().await;
+        let s = Storage::open_in_memory("k").unwrap();
+        let rated_id = crate::source::mock_rated::SOURCE_ID;
+        let (ao3, rated) = (stub(&s, SOURCE_AO3, "111"), stub(&s, rated_id, "1"));
+        let item = |t: FollowTarget| serde_json::json!({"kind": t.kind(), "target_id": s.follow_bridge_id(t), "name": "A Work"});
+        s.set_check_queue(&serde_json::to_string(&vec![item(ao3), item(rated)]).unwrap()).unwrap();
+
+        // Nothing left out: both are asked, the queue is untouched.
+        let all = skipped_check_sources(&s, &sources);
+        assert!(all.is_empty());
+        assert!(check_selected(&s, &sources, &all, ao3) && check_selected(&s, &sources, &all, rated));
+        assert_eq!(park_unselected_checks(&s, &all).unwrap().len(), 2);
+
+        // AO3 left out: its follow is skipped and its queue item parked.
+        set_skipped_check_sources(&s, &[SOURCE_AO3.to_string()]).unwrap();
+        let skipped = skipped_check_sources(&s, &sources);
+        assert!(!check_selected(&s, &sources, &skipped, ao3));
+        assert!(check_selected(&s, &sources, &skipped, rated));
+        assert_eq!(park_unselected_checks(&s, &skipped).unwrap(), vec![item(rated)]);
+
+        // Selected again: the parked item returns to the front.
+        set_skipped_check_sources(&s, &[]).unwrap();
+        let none = skipped_check_sources(&s, &sources);
+        assert_eq!(park_unselected_checks(&s, &none).unwrap(), vec![item(ao3), item(rated)]);
+
+        // Leaving every checking source out is ignored.
+        set_skipped_check_sources(&s, &[SOURCE_AO3.to_string(), rated_id.to_string()]).unwrap();
+        assert!(skipped_check_sources(&s, &sources).is_empty());
     }
 
     #[test]

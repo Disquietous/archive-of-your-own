@@ -42,10 +42,63 @@ final class FollowBellButton: NSButton {
     }
 }
 
+/// A filled, non-interactive tag: the capsule shape of a work-details tag
+/// in the filled style of the "Go" button — accent fill, on-accent text.
+final class StatusPillView: NSView {
+    private static let padding = NSSize(width: 10, height: 4)
+    private let label = NSTextField(labelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.isSelectable = false
+        label.lineBreakMode = .byClipping
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    func configure(text: String, font: NSFont) {
+        label.font = font
+        label.stringValue = text
+        invalidateIntrinsicContentSize()
+    }
+
+    func applyColors(fill: NSColor, text: NSColor) {
+        layer?.backgroundColor = fill.cgColor
+        label.textColor = text
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let text = label.intrinsicContentSize
+        return NSSize(width: ceil(text.width) + Self.padding.width * 2,
+                      height: ceil(text.height) + Self.padding.height * 2)
+    }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
+    }
+
+    // Clicks belong to the row.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// One work row in the list pane, drawn per the handoff spec: fandom spine,
 /// accent fandom label, serif title with inline rating badge, byline, 2-line
-/// summary, meta row, published/updated dates in the top-right corner,
-/// optional progress bar. Selection = accent-soft fill with a 3px accent bar
+/// summary, meta row, the updated date over the work's status pill in the
+/// top-right corner, optional progress bar. Selection = accent-soft fill with a 3px accent bar
 /// on the left edge.
 final class WorkRowCellView: NSTableCellView {
     static let reuseID = NSUserInterfaceItemIdentifier("WorkRowCell")
@@ -72,6 +125,12 @@ final class WorkRowCellView: NSTableCellView {
     private var fullTagsHeight: CGFloat = 0
     let metaLabel = NSTextField(labelWithString: "")
     let datesLabel = NSTextField(labelWithString: "")
+    /// The work's status ("Ongoing", "Complete", "Hiatus") under the
+    /// updated date: a filled, non-interactive tag.
+    let statusPill = StatusPillView()
+    /// The top-right corner block: updated date over the status pill. A
+    /// hidden member detaches, so either can stand alone.
+    private let cornerStack = NSStackView()
     /// "New" pill in the top-right corner: a What's New entry the user has
     /// not selected since it was added. Hidden everywhere else.
     let newBadge = NSTextField(labelWithString: "NEW")
@@ -184,7 +243,7 @@ final class WorkRowCellView: NSTableCellView {
         badgeStack.spacing = 6
         badgeStack.addArrangedSubview(removedBadge)
         badgeStack.addArrangedSubview(newBadge)
-        for view in [selectionBar, spine, body, datesLabel, badgeStack, separator, bookmarkButton] {
+        for view in [selectionBar, spine, body, cornerStack, badgeStack, separator, bookmarkButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -197,6 +256,8 @@ final class WorkRowCellView: NSTableCellView {
     private func makeByline() -> NSStackView {
         authorLabel.font = MacFont.ui(12)
         authorLabel.lineBreakMode = .byTruncatingTail
+        // Truncates rather than pushing under the corner block.
+        authorLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         authorLabel.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(authorClicked)))
         followButton.onClick = { [weak self] bell in self?.onFollowBell?(bell) }
         let byline = NSStackView(views: [authorLabel, followButton])
@@ -241,7 +302,13 @@ final class WorkRowCellView: NSTableCellView {
 
         datesLabel.font = MacFont.ui(10, weight: .medium)
         datesLabel.alignment = .right
-        datesLabel.maximumNumberOfLines = 2
+        datesLabel.maximumNumberOfLines = 1
+
+        cornerStack.orientation = .vertical
+        cornerStack.alignment = .trailing
+        cornerStack.spacing = Self.cornerSpacing
+        cornerStack.addArrangedSubview(datesLabel)
+        cornerStack.addArrangedSubview(statusPill)
 
         newBadge.wantsLayer = true
         newBadge.layer?.cornerRadius = 4
@@ -291,7 +358,10 @@ final class WorkRowCellView: NSTableCellView {
         bodyTop = body.topAnchor.constraint(equalTo: topAnchor, constant: 12)
         spineTop = spine.topAnchor.constraint(equalTo: topAnchor, constant: 12)
         spineBottom = spine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
-        datesTop = datesLabel.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+        datesTop = cornerStack.topAnchor.constraint(equalTo: topAnchor, constant: 12)
+        // The byline never runs under the corner block.
+        let bylineClear = bylineRow.trailingAnchor.constraint(
+            lessThanOrEqualTo: cornerStack.leadingAnchor, constant: -8)
 
         NSLayoutConstraint.activate([
             bodyBottom,
@@ -314,10 +384,11 @@ final class WorkRowCellView: NSTableCellView {
             bodyTop,
 
             datesTop,
-            datesLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            // Pills sit left of the dates block, on the dates' first line.
-            badgeStack.trailingAnchor.constraint(equalTo: datesLabel.leadingAnchor, constant: -8),
-            badgeStack.centerYAnchor.constraint(equalTo: datesLabel.firstBaselineAnchor, constant: -3),
+            bylineClear,
+            cornerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            // Pills sit left of the corner block, on its first line.
+            badgeStack.trailingAnchor.constraint(equalTo: cornerStack.leadingAnchor, constant: -8),
+            badgeStack.centerYAnchor.constraint(equalTo: cornerStack.topAnchor, constant: 8),
             newBadge.widthAnchor.constraint(equalToConstant: 36),
             newBadge.heightAnchor.constraint(equalToConstant: 16),
             removedBadge.widthAnchor.constraint(equalToConstant: 58),
@@ -451,14 +522,14 @@ final class WorkRowCellView: NSTableCellView {
 
         applyDensityMetrics()
 
-        let dateLines = renderDates(for: work, availableTextWidth: availableTextWidth)
+        let cornerSize = renderCorner(for: work, availableTextWidth: availableTextWidth)
 
         spine.layer?.backgroundColor = NSColor(work.spineColor).cgColor
         // One fandom per line, matching the work-details header.
         fandomLabel.preferredMaxLayoutWidth = max(60, availableTextWidth)
         fandomLabel.stringValue = work.fandomList.joined(separator: "\n")
 
-        renderTitle(for: work, dateLines: dateLines, isNew: isNew, isRemoved: isRemoved,
+        renderTitle(for: work, cornerSize: cornerSize, isNew: isNew, isRemoved: isRemoved,
                     availableTextWidth: availableTextWidth)
 
         let author = NSMutableAttributedString(
@@ -519,22 +590,32 @@ final class WorkRowCellView: NSTableCellView {
         bodyStack.setCustomSpacing(gap, after: metaLabel)
     }
 
-    private func renderDates(for work: Work, availableTextWidth: CGFloat) -> [String] {
-        // Published/updated dates in the top-right corner. Blurb data only
-        // carries an updated date; a work page carries both (identical for
-        // single-chapter works — collapse to the published line then).
-        var dateLines: [String] = []
-        if !work.published.isEmpty { dateLines.append("Published \(work.published)") }
-        if !work.updated.isEmpty && work.updated != work.published {
-            dateLines.append("Updated \(work.updated)")
-        }
-        datesLabel.stringValue = dateLines.joined(separator: "\n")
-        datesLabel.isHidden = dateLines.isEmpty
+    /// Spacing between the updated date and the status pill.
+    private static let cornerSpacing: CGFloat = 4
+
+    /// Fill the corner block — the updated date over the status pill — and
+    /// return the size the title has to wrap around (zero when empty).
+    private func renderCorner(for work: Work, availableTextWidth: CGFloat) -> NSSize {
+        datesLabel.stringValue = work.updated.isEmpty ? "" : "Updated \(work.updated)"
+        datesLabel.isHidden = work.updated.isEmpty
+        // Sized like the summary text; shaped like a work-details tag.
+        statusPill.configure(text: work.status, font: MacFont.ui(12.5, weight: .medium))
+        statusPill.isHidden = work.status.isEmpty
         titleLabel.preferredMaxLayoutWidth = availableTextWidth
-        return dateLines
+
+        var size = NSSize.zero
+        if !datesLabel.isHidden {
+            size = datesLabel.intrinsicContentSize
+        }
+        if !statusPill.isHidden {
+            let pill = statusPill.intrinsicContentSize
+            size.width = max(size.width, pill.width)
+            size.height += pill.height + (datesLabel.isHidden ? 0 : Self.cornerSpacing)
+        }
+        return size
     }
 
-    private func renderTitle(for work: Work, dateLines: [String], isNew: Bool, isRemoved: Bool,
+    private func renderTitle(for work: Work, cornerSize: NSSize, isNew: Bool, isRemoved: Bool,
                              availableTextWidth: CGFloat) {
         // Serif title with the rating badge inline after the last word — a
         // non-breaking space keeps the badge from wrapping onto its own line.
@@ -547,12 +628,11 @@ final class WorkRowCellView: NSTableCellView {
         badge.bounds = CGRect(x: 0, y: (titleFont.capHeight - Self.badgeSize) / 2,
                               width: Self.badgeSize, height: Self.badgeSize)
         title.append(NSAttributedString(attachment: badge))
-        // The dates block occupies the row's top-right corner. The opening
+        // The corner block occupies the row's top-right corner. The opening
         // title line(s) wrap short of it; every line below runs full width.
         var datesSize = NSSize.zero
-        if !dateLines.isEmpty {
-            let size = datesLabel.intrinsicContentSize
-            datesSize = NSSize(width: size.width + 10, height: size.height)
+        if cornerSize.height > 0 {
+            datesSize = NSSize(width: cornerSize.width + 10, height: cornerSize.height)
         }
         // The pills share the corner — keep the title clear of them too.
         if isNew { datesSize.width += 44 }

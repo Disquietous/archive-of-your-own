@@ -438,6 +438,10 @@ final class AppState {
     }
     /// The warning shows at most once per app run.
     @ObservationIgnored var whatsNewOverdueWarned = false
+    /// The sources the What's New check can ask, each with whether it is
+    /// selected. Owned by the Rust store; refreshed by
+    /// `loadWhatsNewCheckSources`.
+    var whatsNewCheckSources: [UCheckSource] = []
 
     // MARK: - Browse & Search state
 
@@ -551,6 +555,8 @@ final class AppState {
 
         // iCloud sync starts once the library is readable (no-op when off).
         cloudSync.attach(self)
+
+        loadWhatsNewCheckSources()
 
         // No automatic check at launch — warn instead when a full check is
         // overdue. Rust decides per row: any checked follow whose

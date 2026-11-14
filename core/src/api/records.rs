@@ -168,6 +168,9 @@ pub struct UWorkSummary {
     pub date_updated: String,
     pub language: String,
     pub complete: bool,
+    /// The work's status as its source words it ("Ongoing", "Complete",
+    /// "Hiatus"); "" when the source states none. Display text.
+    pub status: String,
     pub series: Vec<USeriesMembership>,
     /// When this summary last arrived from AO3 (UTC "YYYY-MM-DD HH:MM:SS",
     /// "" = unknown). Display metadata only — never a refresh trigger.
@@ -203,6 +206,7 @@ impl From<WorkSummary> for UWorkSummary {
             date_updated: w.date_updated,
             language: w.language,
             complete: w.complete,
+            status: w.status,
             series: w.series.into_iter().map(USeriesMembership::from).collect(),
             fetched_at: w.fetched_at,
         }
@@ -1011,6 +1015,17 @@ pub struct UWhatsNewOverdue {
     pub never_checked: u32,
     /// Every follow the check covers.
     pub total: u32,
+}
+
+/// One source the What's New check can ask, for the source selection.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UCheckSource {
+    pub id: String,
+    pub name: String,
+    /// The check asks this source; false leaves its follows out of rounds.
+    pub selected: bool,
+    /// Checked follows this source holds.
+    pub follows: u32,
 }
 
 /// One pending item of the What's New check queue, for the monitor UI.

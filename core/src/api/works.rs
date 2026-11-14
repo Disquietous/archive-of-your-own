@@ -469,7 +469,7 @@ impl AO3App {
                 works.len());
             let s = storage.lock().await;
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            let ids = save_works(&s, &works);
+            let ids = save_listed_works(&s, &works);
             log_db("save_collection_works", s.add_collection_works(&slug, &ids));
             log_db("commit listing save", tx.commit());
             let works: Vec<UWorkSummary> = works.into_iter()
@@ -671,7 +671,7 @@ impl AO3App {
                     .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
             };
             for stub in stubs {
-                super::pacing::download_gap().await;
+                crate::client::pacing::request_gap().await;
                 fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
             }
             let s = storage.lock().await;
@@ -686,7 +686,7 @@ impl AO3App {
     /// is over; the caller then fetches the next work.
     pub async fn pace_download_gap(&self) -> Result<(), AO3Error> {
         self.run_on_runtime(|_client, _storage| async move {
-            super::pacing::download_gap().await;
+            crate::client::pacing::request_gap().await;
             Ok(())
         }).await
     }

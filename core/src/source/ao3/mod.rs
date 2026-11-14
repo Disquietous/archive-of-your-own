@@ -276,10 +276,11 @@ impl Source for AO3Source {
             let work = id.parse::<u64>().ok()
                 .and_then(|number| crate::parser::parse_work_page(&html, number).ok())
                 .map(|(summary, _)| summary);
-            return Ok(UpdatePage { works: work.into_iter().map(listed).collect(), has_next: false, total_pages: 1, total_works: None });
+            return Ok(UpdatePage { detailed: true, works: work.into_iter().map(listed).collect(), has_next: false, total_pages: 1, total_works: None });
         }
         let works = crate::parser::parse_work_listings(&html)?;
         Ok(UpdatePage {
+            detailed: false,
             works: works.into_iter().map(listed).collect(),
             has_next: crate::parser::has_next_page(&html),
             total_pages: crate::parser::total_pages(&html),
@@ -453,4 +454,9 @@ mod tests {
         assert_eq!(n("https://archiveofourown.org/series/123"), None);
         assert_eq!(n("https://rated.mock/story/1"), None);
     }
+}
+
+/// A work's status as AO3 has it: finished or not, nothing between.
+pub fn work_status(complete: bool) -> &'static str {
+    if complete { "Complete" } else { "Ongoing" }
 }

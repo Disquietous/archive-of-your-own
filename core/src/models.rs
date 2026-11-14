@@ -205,6 +205,11 @@ pub struct WorkSummary {
     pub date_updated: String,
     pub language: String,
     pub complete: bool,
+    /// The work's status in its source's own terms, set by the adapter:
+    /// AO3 has "Ongoing" / "Complete" (from `complete`), ScribbleHub its
+    /// three story statuses. "" when the source states none.
+    #[serde(default)]
+    pub status: String,
     /// Series this work belongs to (work pages only; listing blurbs leave
     /// this empty). Default keeps previously serialized summaries readable.
     #[serde(default)]

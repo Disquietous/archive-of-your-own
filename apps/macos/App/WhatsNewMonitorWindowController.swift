@@ -68,7 +68,10 @@ struct WhatsNewMonitorView: View {
         }
         .background(theme.bg)
         .onReceive(timer) { now = $0 }
-        .onAppear { keepOnTop = WhatsNewMonitorWindowController.keepOnTopPreference }
+        .onAppear {
+            keepOnTop = WhatsNewMonitorWindowController.keepOnTopPreference
+            appState.loadWhatsNewCheckSources()
+        }
     }
 
     // MARK: - Header: phase, summary, progress
@@ -192,6 +195,9 @@ struct WhatsNewMonitorView: View {
                     appState.startWhatsNewCheck(all: true)
                 }
             }
+            if appState.whatsNewCheckSources.count > 1 {
+                sourcesMenu
+            }
             Spacer()
             Toggle("Keep on top", isOn: $keepOnTop)
                 .toggleStyle(.switch)
@@ -204,6 +210,26 @@ struct WhatsNewMonitorView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    /// Which sources the check asks. A left-out source is skipped by
+    /// every round until it is ticked again.
+    private var sourcesMenu: some View {
+        Menu {
+            ForEach(appState.whatsNewCheckSources, id: \.id) { source in
+                Toggle("\(source.name) (\(source.follows))", isOn: Binding(
+                    get: { source.selected },
+                    set: { appState.setWhatsNewCheckSource(source.id, selected: $0) }))
+                    .disabled(!appState.canToggleWhatsNewCheckSource(source))
+            }
+        } label: {
+            Text(appState.whatsNewCheckSourcesSummary)
+                .font(Font(MacFont.ui(12)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(monitor.isRunning)
+        .help("Choose which sources the check asks")
     }
 
     private func controlButton(_ label: String, symbol: String, fill: Color, disabled: Bool = false,

@@ -173,6 +173,7 @@ pub fn read_epub(bytes: &[u8], file_name: &str) -> Result<FetchedWork, AppError>
         date_updated: modified,
         language: text_of("dc:language").map(|l| language_name(&l)).unwrap_or_default(),
         complete: true,
+        status: String::new(),
         series: Vec::new(),
         fetched_at: crate::timefmt::now_utc_datetime(),
     };

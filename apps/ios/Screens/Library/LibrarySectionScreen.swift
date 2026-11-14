@@ -233,6 +233,19 @@ private struct WhatsNewScreen: View {
                     Label("Check Everything", systemImage: "arrow.clockwise.circle")
                 }
                 .disabled(state.isCheckingWhatsNew || state.ao3Username == nil)
+                if state.whatsNewCheckSources.count > 1 {
+                    Menu {
+                        ForEach(state.whatsNewCheckSources, id: \.id) { source in
+                            Toggle("\(source.name) (\(source.follows))", isOn: Binding(
+                                get: { source.selected },
+                                set: { state.setWhatsNewCheckSource(source.id, selected: $0) }))
+                                .disabled(!state.canToggleWhatsNewCheckSource(source))
+                        }
+                    } label: {
+                        Label("Sources: \(state.whatsNewCheckSourcesSummary)", systemImage: "square.stack.3d.up")
+                    }
+                    .disabled(state.isCheckingWhatsNew)
+                }
                 Button(role: .destructive) {
                     confirmClear = true
                 } label: {

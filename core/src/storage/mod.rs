@@ -314,7 +314,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 34;
+    pub(crate) const SCHEMA_VERSION: u32 = 35;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -399,6 +399,7 @@ impl Storage {
                 32 => self.migrate_v32_merge_guest_rows(),
                 33 => self.migrate_v33_work_reactions(),
                 34 => self.migrate_v34_scribblehub_status_values(),
+                35 => self.migrate_v35_work_status(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1043,6 +1044,32 @@ impl Storage {
              WHERE {STATUS_ROWS}
                AND (text_value IS NULL OR text_value NOT IN ('Ongoing', 'Completed', 'Hiatus'));"
         )).map_err(map_sql)
+    }
+
+    /// v35: `works.status` — the work's status in its source's own terms,
+    /// set by the adapter from here on. Existing rows are filled the way
+    /// the adapters would: AO3 from its completeness, ScribbleHub from
+    /// the `status` stat its series page stored (or "Completed" where
+    /// only a listing's finished mark is known). Other sources state none.
+    fn migrate_v35_work_status(&self) -> Result<(), AppError> {
+        if !self.table_exists("works")? || self.column_exists("works", "status")? {
+            return Ok(());
+        }
+        self.conn.execute_batch(
+            "ALTER TABLE works ADD COLUMN status TEXT NOT NULL DEFAULT '';
+             UPDATE works SET status = CASE WHEN complete <> 0 THEN 'Complete' ELSE 'Ongoing' END
+             WHERE source = 'ao3' AND stub = 0;"
+        ).map_err(map_sql)?;
+        if self.table_exists("work_stats")? && self.table_exists("fields")? {
+            self.conn.execute_batch(
+                "UPDATE works SET status = COALESCE(
+                     (SELECT ws.text_value FROM work_stats ws JOIN fields f ON f.id = ws.field_id
+                      WHERE ws.work_id = works.id AND f.source = 'scribblehub' AND f.key = 'status'),
+                     CASE WHEN complete <> 0 THEN 'Completed' ELSE '' END)
+                 WHERE source = 'scribblehub' AND stub = 0;"
+            ).map_err(map_sql)?;
+        }
+        Ok(())
     }
 
     fn migrate_v33_work_reactions(&self) -> Result<(), AppError> {

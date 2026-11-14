@@ -20,13 +20,15 @@ impl AO3App {
     pub fn start_whats_new_check(&self, only_stale: bool, older_than_secs: Option<u64>) -> Result<u32, AO3Error> {
         self.census_cycle_used.store(false, std::sync::atomic::Ordering::Relaxed);
         let s = self.storage.blocking_lock();
-        let mut queue: Vec<serde_json::Value> = s.get_check_queue().map_err(AO3Error::from)?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default();
+        // Only the selected sources are asked: their leftover items keep
+        // their place, a left-out source's are parked until it is back.
+        let skipped = skipped_check_sources(&s, &self.sources);
+        let mut queue = park_unselected_checks(&s, &skipped).map_err(AO3Error::from)?;
 
         for row in s.get_check_targets().map_err(AO3Error::from)? {
-            // A source without update checks is never asked (Area 9).
-            if !update_checked(&s, &self.sources, row.target) {
+            // A source without update checks is never asked (Area 9), nor
+            // is one the user left out of the check.
+            if !check_selected(&s, &self.sources, &skipped, row.target) {
                 continue;
             }
             let kind = row.target.kind();
@@ -48,32 +50,70 @@ impl AO3App {
         Ok(queue.len() as u32)
     }
 
+    /// The sources a What's New check can ask, each with whether the user
+    /// has it selected and how many follows it would cover. A source
+    /// without update checks is not listed.
+    pub fn whats_new_check_sources(&self) -> Result<Vec<UCheckSource>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let skipped = skipped_check_sources(&s, &self.sources);
+        let mut follows: std::collections::HashMap<String, u32> = Default::default();
+        for row in s.get_check_targets().map_err(AO3Error::from)? {
+            if let Some(caps) = follow_source_caps(&s, &self.sources, row.target) {
+                *follows.entry(caps.id).or_default() += 1;
+            }
+        }
+        Ok(self.sources.capabilities().into_iter().filter(|caps| caps.update_checks).map(|caps| UCheckSource {
+            selected: !skipped.contains(&caps.id),
+            follows: follows.get(&caps.id).copied().unwrap_or(0),
+            id: caps.id,
+            name: caps.name,
+        }).collect())
+    }
+
+    /// Choose the sources the What's New check asks — one of them up to
+    /// all. Every round, the due test and the overdue warning leave the
+    /// others out until they are selected again; their queued items are
+    /// parked, not lost. Refused when it would select no source.
+    pub fn set_whats_new_check_sources(&self, selected: Vec<String>) -> Result<(), AO3Error> {
+        let s = self.storage.blocking_lock();
+        let checking: Vec<String> = self.sources.capabilities().into_iter()
+            .filter(|caps| caps.update_checks).map(|caps| caps.id).collect();
+        let skipped: Vec<String> = checking.iter().filter(|id| !selected.contains(id)).cloned().collect();
+        if skipped.len() >= checking.len() {
+            return Err(AO3Error::NotFound { message: "Select at least one source to check".to_string() });
+        }
+        set_skipped_check_sources(&s, &skipped).map_err(AO3Error::from)?;
+        park_unselected_checks(&s, &skipped.into_iter().collect()).map_err(AO3Error::from)?;
+        Ok(())
+    }
+
     /// Would a check round have anything to do? True when leftover queue
     /// items exist or any follow's own `last_checked_at` is missing or
-    /// stale. This replaces gating on the global queue-drain time, which
+    /// stale — among the selected sources only.
+    /// This replaces gating on the global queue-drain time, which
     /// only describes when a round finished — after an interrupted round it
     /// overstates the freshness of every row checked before the break.
     pub fn is_whats_new_check_due(&self) -> Result<bool, AO3Error> {
         let s = self.storage.blocking_lock();
-        if let Some(json) = s.get_check_queue().map_err(AO3Error::from)? {
-            let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap_or_default();
-            if !arr.is_empty() {
-                return Ok(true);
-            }
+        let skipped = skipped_check_sources(&s, &self.sources);
+        if !park_unselected_checks(&s, &skipped).map_err(AO3Error::from)?.is_empty() {
+            return Ok(true);
         }
         Ok(s.get_check_targets().map_err(AO3Error::from)?
             .iter()
-            .any(|row| update_checked(&s, &self.sources, row.target) && follow_check_due(&s, row.target)))
+            .any(|row| check_selected(&s, &self.sources, &skipped, row.target) && follow_check_due(&s, row.target)))
     }
 
     /// How many checked follows were last checked longer ago than
     /// `max_age_secs`, or never — the overdue warning's numbers. Per-row,
     /// like `is_whats_new_check_due`: a round counts as full once every row
     /// has its own recent stamp, however many interrupted runs it took.
+    /// Follows of a source left out of the check are not counted.
     pub fn whats_new_overdue(&self, max_age_secs: u64) -> Result<UWhatsNewOverdue, AO3Error> {
         let s = self.storage.blocking_lock();
+        let skipped = skipped_check_sources(&s, &self.sources);
         let targets: Vec<_> = s.get_check_targets().map_err(AO3Error::from)?
-            .into_iter().filter(|row| update_checked(&s, &self.sources, row.target)).collect();
+            .into_iter().filter(|row| check_selected(&s, &self.sources, &skipped, row.target)).collect();
         let mut overdue = 0u32;
         let mut never_checked = 0u32;
         for row in &targets {
@@ -435,6 +475,7 @@ impl AO3App {
                     .to_string();
                 // A listing may carry each work's figures and its authors
                 // as users; they land beside the saved works.
+                let detailed = fetched.detailed;
                 let save_listed_extras = |s: &Storage| {
                     for lw in &fetched.works {
                         if lw.authors.is_empty() && lw.stats.is_empty() { continue }
@@ -444,8 +485,20 @@ impl AO3App {
                                 log_db("link_work_authors", s.link_work_authors(id, &ids));
                             }
                         }
-                        save_source_stats(s, id, &lw.summary.source, &lw.stats);
+                        if detailed {
+                            save_source_stats(s, id, &lw.summary.source, &lw.stats);
+                        } else {
+                            merge_listed_stats(s, id, &lw.summary.source, &lw.stats);
+                        }
                     }
+                };
+                // A followed work's check read the work's own page, which
+                // owns its values and replaces them; an author's or series'
+                // listing only adds to what the library holds.
+                let save_page = |s: &Storage| if detailed {
+                    save_works(s, &parsed_works)
+                } else {
+                    save_listed_works(s, &parsed_works)
                 };
 
                 let s = storage.lock().await;
@@ -456,7 +509,7 @@ impl AO3App {
                     // One transaction per census page: works + associations +
                     // flags land together or not at all.
                     let tx = s.begin_tx().map_err(AO3Error::from)?;
-                    let page_ids = save_works(&s, &parsed_works);
+                    let page_ids = save_page(&s);
                     save_listed_extras(&s);
                     for id in page_ids {
                         if !state.seen_ids.contains(&id) {
@@ -515,7 +568,7 @@ impl AO3App {
                 let tx = s.begin_tx().map_err(AO3Error::from)?;
                 // Membership (author byline / series part) rides on the saved
                 // works themselves — nothing to record per subscription.
-                let all_ids = save_works(&s, &parsed_works);
+                let all_ids = save_page(&s);
                 save_listed_extras(&s);
                 if changed {
                     log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &updated_ids)));

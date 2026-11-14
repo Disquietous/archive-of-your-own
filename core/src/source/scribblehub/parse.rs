@@ -430,6 +430,7 @@ pub fn parse_series_page(html: &str, external_id: &str) -> Result<SeriesPage, cr
         date_updated: last_updated.or(newest).unwrap_or_default(),
         language: "English".to_string(),
         complete,
+        status: status.clone(),
         series: Vec::new(),
         fetched_at: String::new(),
     
@@ -683,6 +684,8 @@ fn parse_series_boxes(html: &str, pager_id: &str) -> ListingPage {
             date_updated: updated,
             language: "English".to_string(),
             complete,
+            // A listing marks only a finished story; anything else is unknown here.
+            status: if complete { "Completed".to_string() } else { String::new() },
             series: Vec::new(),
             fetched_at: String::new(),
         

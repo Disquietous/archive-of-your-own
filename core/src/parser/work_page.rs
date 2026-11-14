@@ -78,6 +78,7 @@ fn work_page(doc: &Html, id: u64) -> Result<(WorkSummary, Vec<Chapter>), AppErro
         date_updated,
         language,
         complete,
+        status: crate::source::ao3::work_status(complete).to_string(),
         series,
         fetched_at: String::new(),
     

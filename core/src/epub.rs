@@ -415,6 +415,7 @@ mod tests {
             date_updated: "2024-01-02".to_string(),
             language: "English".to_string(),
             complete: true,
+            status: String::new(),
             series: vec![],
             fetched_at: String::new(),
             author_ids: Vec::new(),

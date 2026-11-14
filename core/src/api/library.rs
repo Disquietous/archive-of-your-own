@@ -271,7 +271,7 @@ impl AO3App {
                     let target = match listing.kind {
                         BookmarkKind::Work => {
                             let Some(ws) = listing.work_summary.as_ref() else { continue };
-                            match s.save_work(ws) {
+                            match s.save_listed_work(ws) {
                                 Ok(id) => BookmarkTarget::Work(id),
                                 Err(e) => { log_error!("db", "save_work failed: {e}"); continue; }
                             }

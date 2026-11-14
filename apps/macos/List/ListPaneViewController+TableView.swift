@@ -216,6 +216,7 @@ extension ListPaneViewController {
         h.combine(work.chapterCount)
         h.combine(work.totalChapters)
         h.combine(work.complete)
+        h.combine(work.status)
         h.combine(work.words)
         h.combine(work.kudos)
         h.combine(isNew)

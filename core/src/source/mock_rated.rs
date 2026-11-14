@@ -190,6 +190,7 @@ impl MockRatedSource {
             date_updated: story.updated.to_string(),
             language: "English".to_string(),
             complete: story.complete,
+            status: String::new(),
             series: Vec::new(),
             fetched_at: crate::timefmt::now_utc_datetime(),
             author_ids: Vec::new(),

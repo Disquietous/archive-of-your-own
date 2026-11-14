@@ -158,18 +158,49 @@ impl AO3App {
             };
             check_reachable(&source)?;
             let external = record.external_ref();
+            let needs_details = source.listings_need_details();
             let listing = super::with_recovery_as(
-                client, storage.clone(),
+                client.clone(), storage.clone(),
                 op_id.unwrap_or_else(crate::events::next_op_id),
                 OpKind::Fetch { label: "author_works".to_string() }, RetrySafety::Idempotent,
                 move |_client| {
                     let (source, external) = (source.clone(), external.clone());
                     async move { source.fetch_author_works(&external, page).await.map_err(AO3Error::from) }
                 }).await?;
-            let s = storage.lock().await;
-            save_listing_page(&s, &listing)
+            let mut page = { let s = storage.lock().await; save_listing_page(&s, &listing)? };
+            if needs_details {
+                fetch_listed_details(client, storage, registry, &mut page, op_id).await?;
+            }
+            Ok(page)
         }).await
     }
+}
+
+/// Follow a saved listing page with each work's own details, for a source
+/// whose listings leave something out (`Source::listings_need_details`).
+/// One work after another, the shared request pacer's wait before each.
+/// A work whose page fails is logged and keeps what the listing gave —
+/// one missing story must not stop the author's whole list — but a
+/// refused network or a dead session ends the run: every later fetch
+/// would fail the same way.
+async fn fetch_listed_details(
+    client: Arc<tokio::sync::RwLock<AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    registry: Arc<crate::source::SourceRegistry>,
+    page: &mut UPagedWorks,
+    op_id: Option<u64>,
+) -> Result<(), AO3Error> {
+    for listed in page.works.iter_mut() {
+        crate::client::pacing::request_gap().await;
+        match super::works::fetch_and_save_work(client.clone(), storage.clone(), registry.clone(), listed.id, op_id).await {
+            Ok(detailed) => *listed = detailed,
+            Err(e @ (AO3Error::NetworkDisabled | AO3Error::SessionExpired)) => return Err(e),
+            Err(e) => {
+                log_error!("listing", "details for work {} failed, keeping the listing's: {e:?}", listed.id);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

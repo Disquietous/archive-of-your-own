@@ -331,6 +331,10 @@ impl Source for ScribbleHubSource {
     /// which the site fills by POSTing `wi_perseries` to admin-ajax with
     /// the profile id (`intAuthorID`) and page (`pagenum`); `isMobile` and
     /// `str_isapp` are the desktop web page's values.
+    /// The series list marks a completed story and says nothing of the
+    /// rest; only the series page tells ongoing from hiatus.
+    fn listings_need_details(&self) -> bool { true }
+
     async fn fetch_author_works(&self, author: &ExternalRef, page: u32) -> Result<ListingPage, AppError> {
         Self::guard()?;
         let form = [

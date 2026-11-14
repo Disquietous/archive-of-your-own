@@ -168,6 +168,39 @@ extension AppState {
         Task { await runWhatsNewCheck(force: all) }
     }
 
+    // MARK: - Source selection
+
+    func loadWhatsNewCheckSources() {
+        whatsNewCheckSources = bridge.whatsNewCheckSources()
+    }
+
+    /// Include a source in the What's New check or leave it out. The last
+    /// selected source stays selected, and the selection holds still
+    /// while a check is running.
+    func setWhatsNewCheckSource(_ id: String, selected: Bool) {
+        guard !isCheckingWhatsNew else { return }
+        var ids = Set(whatsNewCheckSources.filter(\.selected).map(\.id))
+        if selected { ids.insert(id) } else { ids.remove(id) }
+        guard !ids.isEmpty else { return }
+        try? bridge.setWhatsNewCheckSources(Array(ids))
+        loadWhatsNewCheckSources()
+        checkMonitor.queued(bridge.getWhatsNewCheckQueue())
+    }
+
+    /// Whether a source's toggle can change: never mid-check, and never
+    /// the last selected one.
+    func canToggleWhatsNewCheckSource(_ source: UCheckSource) -> Bool {
+        !isCheckingWhatsNew && !(source.selected && whatsNewCheckSources.filter(\.selected).count == 1)
+    }
+
+    /// The selection in a few words: "All sources", one name, or "2 of 3 sources".
+    var whatsNewCheckSourcesSummary: String {
+        let chosen = whatsNewCheckSources.filter(\.selected)
+        if chosen.count == whatsNewCheckSources.count { return "All sources" }
+        if chosen.count == 1 { return chosen[0].name }
+        return "\(chosen.count) of \(whatsNewCheckSources.count) sources"
+    }
+
     /// The overdue warning's "check just these": a round over only the
     /// follows last checked over `whatsNewOverdueSecs` ago, or never.
     func startOverdueWhatsNewCheck() {

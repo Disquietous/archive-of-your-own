@@ -39,6 +39,7 @@ extension WorkRowCellView {
         summaryLabel.textColor = theme.nsInk2
         renderMeta()
         datesLabel.textColor = theme.nsInk3
+        statusPill.applyColors(fill: theme.nsAccent, text: theme.nsOnAccent)
         newBadge.font = MacFont.ui(9, weight: .bold)
         newBadge.textColor = theme.nsAccent
         newBadge.layer?.backgroundColor = theme.nsAccentSoft.cgColor

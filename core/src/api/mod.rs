@@ -31,7 +31,6 @@ mod helpers;
 mod library;
 mod listing;
 mod logs;
-mod pacing;
 mod prefs;
 mod records;
 mod recovery;
@@ -221,7 +220,7 @@ impl AO3App {
                 _ => Vec::new(),
             };
             let tx = s.begin_tx().map_err(AO3Error::from)?;
-            let ids = save_works(&s, &works);
+            let ids = save_listed_works(&s, &works);
             if !flagged.is_empty() {
                 log_db("add_new_work_ids", s.add_new_work_ids(&flagged_row_ids(&s, &flagged)));
             }

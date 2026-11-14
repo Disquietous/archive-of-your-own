@@ -7,6 +7,54 @@ use crate::models::{BookmarkTarget, Chapter, ContentBlock, ExternalRef, LocalSea
 use super::consts::*;
 use super::{map_json, map_sql, str_to_rating, Storage};
 
+/// `listed` laid over `old` by the listing rule (see `save_listed_work`).
+fn merge_listed(old: &WorkSummary, listed: &WorkSummary) -> WorkSummary {
+    fn text(listed: &str, old: &str) -> String {
+        if listed.trim().is_empty() { old.to_string() } else { listed.to_string() }
+    }
+    fn add<T: Clone + PartialEq>(old: &[T], listed: &[T]) -> Vec<T> {
+        let mut all = old.to_vec();
+        for item in listed {
+            if !all.contains(item) { all.push(item.clone()); }
+        }
+        all
+    }
+    WorkSummary {
+        id: old.id,
+        source: listed.source.clone(),
+        external_id: listed.external_id.clone(),
+        url: text(&listed.url, &old.url),
+        title: text(&listed.title, &old.title),
+        authors: if listed.authors.is_empty() { old.authors.clone() } else { listed.authors.clone() },
+        author_ids: Vec::new(),
+        fandoms: add(&old.fandoms, &listed.fandoms),
+        rating: if listed.rating == crate::models::Rating::NotRated { old.rating.clone() } else { listed.rating.clone() },
+        warnings: add(&old.warnings, &listed.warnings),
+        categories: add(&old.categories, &listed.categories),
+        relationships: add(&old.relationships, &listed.relationships),
+        characters: add(&old.characters, &listed.characters),
+        tags: add(&old.tags, &listed.tags),
+        summary: text(&old.summary, &listed.summary),
+        word_count: listed.word_count.or(old.word_count),
+        chapter_count: if listed.chapter_count == 0 { old.chapter_count } else { listed.chapter_count },
+        // "Not finished" is something a listing states, so an absent
+        // total is a value here, not a gap.
+        total_chapters: listed.total_chapters,
+        kudos: listed.kudos.or(old.kudos),
+        hits: listed.hits.or(old.hits),
+        bookmarks: listed.bookmarks.or(old.bookmarks),
+        comments: listed.comments.or(old.comments),
+        date_published: text(&listed.date_published, &old.date_published),
+        date_updated: text(&listed.date_updated, &old.date_updated),
+        language: text(&listed.language, &old.language),
+        complete: listed.complete,
+        // A listing that names no status leaves the known one alone.
+        status: text(&listed.status, &old.status),
+        series: listed.series.clone(),
+        fetched_at: listed.fetched_at.clone(),
+    }
+}
+
 impl Storage {
     // -------------------------------------------------------------------
     // Works
@@ -15,12 +63,12 @@ impl Storage {
     /// The works table's scalar columns, in `work_from_row` order. The tag
     /// vectors (fandoms, characters, relationships, freeforms) are not
     /// columns — they hydrate from the work_tags join via attach_work_tags.
-    pub(super) const WORK_COLS: [&'static str; 23] = [
+    pub(super) const WORK_COLS: [&'static str; 24] = [
         "id", "source", "external_id", "url", "title", "authors_json", "rating", "warnings_json",
         "categories_json", "summary", COL_WORD_COUNT, "chapter_count",
         "total_chapters", COL_KUDOS, COL_HITS, COL_BOOKMARKS, COL_COMMENTS,
         "date_published", "date_updated", "language", "complete",
-        "series_json", "fetched_at",
+        "series_json", "fetched_at", "status",
     ];
 
     /// The SELECT list for `work_from_row`, with an optional table prefix
@@ -83,6 +131,32 @@ impl Storage {
             }
             Ok(id)
         })
+    }
+
+    /// Save a work as a listing shows it (a series list, search results,
+    /// an author's works page). The work's own page owns its values; a
+    /// listing is a partial view and may only add to what the library
+    /// holds:
+    ///
+    /// * a value the listing does not return (blank text, no figure, an
+    ///   unrated rating, a zero chapter count) keeps the stored value;
+    /// * tags of every kind are additive — the stored ones stay and the
+    ///   listed ones join them. Only a fetch of the work itself
+    ///   (`save_work`) may drop a tag;
+    /// * the description is the stored one when there is one: a blurb is
+    ///   a flattened copy of the same text;
+    /// * what the listing does return (title, dates, counts, completion)
+    ///   updates the row.
+    ///
+    /// A work the library has never seen is saved as listed.
+    pub fn save_listed_work(&self, listed: &WorkSummary) -> Result<u64, AppError> {
+        let known = self.works_cache
+            .resolve(&listed.source, &listed.external_id)
+            .and_then(|id| self.get_work(id).ok().flatten());
+        match known {
+            Some(old) => self.save_work(&merge_listed(&old, listed)),
+            None => self.save_work(listed),
+        }
     }
 
     /// Memberships with their series row ids filled in, creating a
@@ -983,6 +1057,7 @@ impl Storage {
         let complete: i32 = row.get(20)?;
         let series_json: String = row.get(21)?;
         let fetched_at: String = row.get(22)?;
+        let status: String = row.get(23)?;
 
         // Deserialize JSON columns — use unwrap_or_default so a corrupted
         // row doesn't crash the whole query; the caller can still surface the
@@ -1022,6 +1097,7 @@ impl Storage {
             date_updated,
             language,
             complete: complete != 0,
+            status,
             series,
             fetched_at,
         

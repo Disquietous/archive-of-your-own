@@ -254,13 +254,13 @@ impl WorksCache {
                     warnings_json, categories_json, summary, word_count,
                     chapter_count, total_chapters, kudos, hits,
                     bookmarks, comments, date_published, date_updated, language, complete,
-                    fetched_at, warnings_mask, categories_mask, fandom_count
+                    fetched_at, warnings_mask, categories_mask, fandom_count, status
                 ) VALUES (
                     ?1, ?2, ?3, 0, ?4, ?5, ?6,
                     ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14,
                     ?15, ?16, ?17, ?18, ?19, ?20,
-                    ?21, ?22, ?23, ?24
+                    ?21, ?22, ?23, ?24, ?25
                 )
                 ON CONFLICT(source, external_id) DO UPDATE SET
                     url = ?3, stub = 0, title = ?4, authors_json = ?5, rating = ?6,
@@ -268,7 +268,7 @@ impl WorksCache {
                     chapter_count = ?11, total_chapters = ?12, kudos = ?13, hits = ?14,
                     bookmarks = ?15, comments = ?16, date_published = ?17, date_updated = ?18,
                     language = ?19, complete = ?20, fetched_at = ?21,
-                    warnings_mask = ?22, categories_mask = ?23, fandom_count = ?24",
+                    warnings_mask = ?22, categories_mask = ?23, fandom_count = ?24, status = ?25",
                 params![
                     work.source,
                     work.external_id,
@@ -294,6 +294,7 @@ impl WorksCache {
                     super::works_search::warnings_mask(&work.warnings),
                     super::works_search::categories_mask(&work.categories),
                     work.fandoms.len() as i64,
+                    work.status,
                 ],
             )
             .map_err(map_sql)?;
@@ -562,6 +563,7 @@ fn stub_summary() -> WorkSummary {
         date_updated: String::new(),
         language: String::new(),
         complete: false,
+        status: String::new(),
         series: Vec::new(),
         fetched_at: String::new(),
         author_ids: Vec::new(),

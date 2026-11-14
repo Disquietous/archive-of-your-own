@@ -34,6 +34,7 @@ fn sample_work(n: u64) -> WorkSummary {
         date_updated: "2025-01-15".into(),
         language: "English".into(),
         complete: false,
+        status: String::new(),
         series: vec![],
         fetched_at: String::new(),
         author_ids: Vec::new(),
@@ -2778,6 +2779,8 @@ fn cache_owned_tables_have_no_stray_writers() {
         ("mod.rs", "DELETE FROM series_authors WHERE user_id = {guest};"), // v32 guest fold
         ("mod.rs", "DELETE FROM user_source_properties WHERE user_id = {guest} /* v32 fold */;"), // v32 guest fold
         ("mod.rs", "DELETE FROM users WHERE id = {guest} /* v32 fold */;"), // v32 guest fold
+        ("mod.rs", "UPDATE works SET status = CASE WHEN complete <> 0 THEN 'Complete' ELSE 'Ongoing' END"), // v35 status backfill (runs before caches load)
+        ("mod.rs", "UPDATE works SET status = COALESCE("), // v35 status backfill (runs before caches load)
         ("users_cache.rs", "INSERT INTO users (source, source_id, username, created_at, updated_at)"), // the cache's own write
         ("users_cache.rs", "INSERT INTO user_source_properties"), // the cache's own write
         ("users_cache.rs", "DELETE FROM user_source_properties WHERE user_id = ?1 AND property_name = ?2"), // the cache's own write
@@ -3869,4 +3872,128 @@ fn v34_puts_scribblehub_status_values_back_in_range() {
     assert_eq!(stat(&db, mockrated, other_source), s("Ongoing - whatever"));
     drop(db);
     library_file::remove_file_set(&path);
+}
+
+#[test]
+fn listing_stats_merge_and_leave_the_rest() {
+    let db = open_test_db();
+    let mut w = sample_work(0);
+    w.source = "scribblehub".into();
+    w.external_id = "700".into();
+    let id = db.save_work(&w).unwrap();
+    let status = db.ensure_field("scribblehub", "status", "Status", "text", 6).unwrap();
+    let views = db.ensure_field("scribblehub", "views", "Views", "num", 3).unwrap();
+    let ratings = db.ensure_field("scribblehub", "rating_count", "Ratings", "num", 2).unwrap();
+    let num = |field: i64| db.get_work_stat_num(id, field).unwrap();
+    let text = |field: i64| db.get_work_stats(id).unwrap().into_iter().find(|s| s.field_id == field).and_then(|s| s.text_value);
+
+    // The work's own page: everything the source states.
+    db.set_work_stats(id, &[
+        WorkStat { field_id: status, num_value: None, text_value: Some("Hiatus".into()) },
+        WorkStat { field_id: views, num_value: Some(100.0), text_value: None },
+        WorkStat { field_id: ratings, num_value: Some(12.0), text_value: None },
+    ]).unwrap();
+
+    // A series list carries views only: views update, status and the
+    // rating count stay — the list said nothing about them.
+    db.merge_work_stats(id, &[WorkStat { field_id: views, num_value: Some(140.0), text_value: None }]).unwrap();
+    assert_eq!(num(views), Some(140.0));
+    assert_eq!(text(status), Some("Hiatus".to_string()));
+    assert_eq!(num(ratings), Some(12.0));
+
+    // A listing that does state a status changes it.
+    db.merge_work_stats(id, &[WorkStat { field_id: status, num_value: None, text_value: Some("Completed".into()) }]).unwrap();
+    assert_eq!(text(status), Some("Completed".to_string()));
+    assert_eq!(num(views), Some(140.0));
+
+    // The work's own page still replaces: a figure it no longer states goes.
+    db.set_work_stats(id, &[WorkStat { field_id: views, num_value: Some(150.0), text_value: None }]).unwrap();
+    assert_eq!(num(views), Some(150.0));
+    assert_eq!(text(status), None);
+    assert_eq!(num(ratings), None);
+}
+
+#[test]
+fn a_listing_adds_to_a_work_and_only_its_own_page_replaces() {
+    let db = open_test_db();
+    // The work's own page: the full record.
+    let mut page = sample_work(0);
+    page.source = "scribblehub".into();
+    page.external_id = "700".into();
+    page.url = "https://www.scribblehub.com/series/700/a-story/".into();
+    page.title = "A Story".into();
+    page.summary = "First paragraph.\n\nSecond paragraph.".into();
+    page.tags = vec!["Fantasy".into(), "Slow Burn".into(), "Found Family".into()];
+    page.fandoms = vec!["Original Work".into()];
+    page.rating = Rating::Mature;
+    page.word_count = Some(50_000);
+    page.chapter_count = 20;
+    page.total_chapters = None;
+    page.complete = false;
+    page.date_published = "2025-01-10".into();
+    page.date_updated = "2026-10-01".into();
+    page.hits = Some(900);
+    let id = db.save_work(&page).unwrap();
+
+    // The series list: genres only, a flattened blurb, no published date,
+    // no rating, no hits — and what it does state has moved on.
+    let mut listed = page.clone();
+    listed.tags = vec!["Fantasy".into(), "Adventure".into()];
+    listed.summary = "First paragraph. Second paragraph.".into();
+    listed.rating = Rating::NotRated;
+    listed.date_published = String::new();
+    listed.hits = None;
+    listed.word_count = Some(53_000);
+    listed.chapter_count = 21;
+    listed.date_updated = "2026-11-12".into();
+    assert_eq!(db.save_listed_work(&listed).unwrap(), id);
+
+    let now = db.get_work(id).unwrap().unwrap();
+    // Returned values update the row.
+    assert_eq!((now.word_count, now.chapter_count, now.date_updated.as_str()), (Some(53_000), 21, "2026-11-12"));
+    // Values the list did not return are kept.
+    assert_eq!(now.date_published, "2025-01-10");
+    assert_eq!(now.hits, Some(900));
+    assert_eq!(now.rating, Rating::Mature);
+    assert_eq!(now.summary, "First paragraph.\n\nSecond paragraph.");
+    // Tags are additive: nothing dropped, the new genre joins.
+    assert_eq!(now.tags, vec!["Fantasy", "Slow Burn", "Found Family", "Adventure"]);
+
+    // A list that returns nothing useful changes nothing.
+    let mut bare = listed.clone();
+    bare.title = String::new();
+    bare.tags = Vec::new();
+    bare.word_count = None;
+    bare.chapter_count = 0;
+    bare.date_updated = String::new();
+    db.save_listed_work(&bare).unwrap();
+    let still = db.get_work(id).unwrap().unwrap();
+    assert_eq!((still.title.as_str(), still.word_count, still.chapter_count, still.date_updated.as_str()),
+               ("A Story", Some(53_000), 21, "2026-11-12"));
+    assert_eq!(still.tags.len(), 4);
+
+    // The list does state completion.
+    let mut finished = listed.clone();
+    finished.complete = true;
+    finished.total_chapters = Some(21);
+    db.save_listed_work(&finished).unwrap();
+    let done = db.get_work(id).unwrap().unwrap();
+    assert_eq!((done.complete, done.total_chapters), (true, Some(21)));
+
+    // The work's own page is the owner: its tag set replaces, and a value
+    // it no longer has goes.
+    let mut refreshed = page.clone();
+    refreshed.tags = vec!["Fantasy".into(), "Adventure".into()];
+    refreshed.hits = None;
+    db.save_work(&refreshed).unwrap();
+    let owned = db.get_work(id).unwrap().unwrap();
+    assert_eq!(owned.tags, vec!["Fantasy", "Adventure"]);
+    assert_eq!(owned.hits, None);
+
+    // A work the library has never seen is saved as listed.
+    let mut fresh = listed.clone();
+    fresh.external_id = "701".into();
+    let new_id = db.save_listed_work(&fresh).unwrap();
+    assert_ne!(new_id, id);
+    assert_eq!(db.get_work(new_id).unwrap().unwrap().tags, vec!["Fantasy", "Adventure"]);
 }

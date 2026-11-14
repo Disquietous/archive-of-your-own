@@ -67,7 +67,7 @@ pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPag
     let tx = s.begin_tx().map_err(AO3Error::from)?;
     let mut works = Vec::with_capacity(listing.works.len());
     for listed in &listing.works {
-        match s.save_work(&listed.summary) {
+        match s.save_listed_work(&listed.summary) {
             Ok(id) => {
                 if !listed.authors.is_empty() {
                     match s.record_users(&listed.authors) {
@@ -75,8 +75,10 @@ pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPag
                         Err(e) => { log_error!("db", "record_users failed: {e}"); }
                     }
                 }
-                save_source_stats(s, id, &listed.summary.source, &listed.stats);
-                works.push(UWorkSummary::from(WorkSummary { id, ..listed.summary.clone() }));
+                merge_listed_stats(s, id, &listed.summary.source, &listed.stats);
+                // What the library holds now: the listing merged into it.
+                works.push(UWorkSummary::from(s.get_work(id).ok().flatten()
+                    .unwrap_or_else(|| WorkSummary { id, ..listed.summary.clone() })));
             }
             Err(e) => { log_error!("db", "save_work failed: {e}"); }
         }
@@ -89,6 +91,19 @@ pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPag
 /// sight, then replace the work's values (absent = NULL, never zero).
 pub(super) fn save_source_stats(s: &Storage, work_row: u64, source: &str, stats: &[crate::source::SourceStat]) {
     if stats.is_empty() && s.fields_for_source(source).is_empty() { return }
+    log_db("set_work_stats", s.set_work_stats(work_row, &stat_rows(s, source, stats)));
+}
+
+/// Persist the stats a listing blurb carries for a work, leaving every
+/// stat the listing does not carry as it is: a series list that omits a
+/// story's status or rating count has not said they are gone.
+pub(super) fn merge_listed_stats(s: &Storage, work_row: u64, source: &str, stats: &[crate::source::SourceStat]) {
+    if stats.is_empty() { return }
+    log_db("merge_work_stats", s.merge_work_stats(work_row, &stat_rows(s, source, stats)));
+}
+
+/// Source stats as storage rows, registering each field on first sight.
+fn stat_rows(s: &Storage, source: &str, stats: &[crate::source::SourceStat]) -> Vec<crate::storage::WorkStat> {
     let mut rows = Vec::with_capacity(stats.len());
     for stat in stats {
         let value_type = if stat.num.is_some() { "num" } else { "text" };
@@ -99,7 +114,7 @@ pub(super) fn save_source_stats(s: &Storage, work_row: u64, source: &str, stats:
             Err(e) => { log_error!("db", "ensure_field {}:{} failed: {e}", source, stat.key); }
         }
     }
-    log_db("set_work_stats", s.set_work_stats(work_row, &rows));
+    rows
 }
 
 /// The AO3 identity of a work row — what a fetch or a site URL needs.
@@ -294,6 +309,16 @@ pub(super) fn diff_and_flag_works(
     (updated_ids, unseen)
 }
 
+/// Save every work of a listing page under the listing rule
+/// (`Storage::save_listed_work`: add and update, never take away) and
+/// return their row ids, in order.
+pub(super) fn save_listed_works(s: &Storage, works: &[WorkSummary]) -> Vec<u64> {
+    works.iter().filter_map(|w| match s.save_listed_work(w) {
+        Ok(id) => Some(id),
+        Err(e) => { log_error!("db", "save_listed_work failed: {e}"); None }
+    }).collect()
+}
+
 /// Save every parsed work and return their row ids, in order.
 pub(super) fn save_works(s: &Storage, works: &[WorkSummary]) -> Vec<u64> {
     works.iter().filter_map(|w| match s.save_work(w) {
@@ -339,10 +364,73 @@ pub(super) fn follow_source_caps(
     registry.by_id(&source).map(|src| src.capabilities().clone())
 }
 
-/// A checked follow whose source runs no update checks is skipped by
-/// every round (an unknown source too: nothing could fetch it).
-pub(super) fn update_checked(s: &Storage, registry: &crate::source::SourceRegistry, target: FollowTarget) -> bool {
-    follow_source_caps(s, registry, target).is_some_and(|caps| caps.update_checks)
+/// app_state keys of the What's New source selection: the update-checking
+/// sources the user left out of the check (so a source added later starts
+/// selected), and the queue items held back while their source is out.
+const STATE_CHECK_SKIPPED_SOURCES: &str = "whats_new_skipped_sources";
+const STATE_CHECK_QUEUE_PARKED: &str = "subscription_check_queue_parked";
+
+/// The update-checking sources the What's New check leaves out. A stored
+/// selection that would leave none in is ignored — a round always has at
+/// least one source to ask.
+pub(super) fn skipped_check_sources(
+    s: &Storage, registry: &crate::source::SourceRegistry,
+) -> std::collections::HashSet<String> {
+    let stored: Vec<String> = s.get_state(STATE_CHECK_SKIPPED_SOURCES).ok().flatten()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    let checking: Vec<String> = registry.capabilities().into_iter()
+        .filter(|caps| caps.update_checks).map(|caps| caps.id).collect();
+    let skipped: std::collections::HashSet<String> =
+        stored.into_iter().filter(|id| checking.contains(id)).collect();
+    if skipped.len() >= checking.len() {
+        return Default::default();
+    }
+    skipped
+}
+
+/// Store the sources a check covers, as the set left out of it.
+pub(super) fn set_skipped_check_sources(s: &Storage, skipped: &[String]) -> Result<(), AppError> {
+    s.set_state(STATE_CHECK_SKIPPED_SOURCES, &serde_json::to_string(skipped).unwrap_or_else(|_| "[]".to_string()))
+}
+
+/// A follow the current round asks about: its source runs update checks
+/// (an unknown source doesn't: nothing could fetch it) and the user has
+/// not left that source out.
+pub(super) fn check_selected(
+    s: &Storage, registry: &crate::source::SourceRegistry,
+    skipped: &std::collections::HashSet<String>, target: FollowTarget,
+) -> bool {
+    follow_source_caps(s, registry, target)
+        .is_some_and(|caps| caps.update_checks && !skipped.contains(&caps.id))
+}
+
+/// Bring the check queue in line with the source selection and return it.
+/// Items of a left-out source move to the parked list — out of every
+/// round, census continuations intact — and come back to the front of the
+/// queue once their source is selected again. An item whose follow or
+/// source can't be told stays queued; the check itself disposes of it.
+pub(super) fn park_unselected_checks(
+    s: &Storage, skipped: &std::collections::HashSet<String>,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    let read = |json: Option<String>| -> Vec<serde_json::Value> {
+        json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
+    };
+    let parked = read(s.get_state(STATE_CHECK_QUEUE_PARKED)?);
+    let queued = read(s.get_check_queue()?);
+    let left_out = |item: &serde_json::Value| {
+        s.follow_target(item["kind"].as_str().unwrap_or(""), item["target_id"].as_str().unwrap_or(""))
+            .and_then(|target| update_target(s, target))
+            .is_some_and(|update| skipped.contains(&update.external().source))
+    };
+    let moved = parked.iter().any(|item| !left_out(item)) || queued.iter().any(&left_out);
+    if !moved {
+        return Ok(queued);
+    }
+    let (park, queue): (Vec<_>, Vec<_>) = parked.into_iter().chain(queued).partition(|item| left_out(item));
+    s.set_state(STATE_CHECK_QUEUE_PARKED, &serde_json::to_string(&park).unwrap_or_else(|_| "[]".to_string()))?;
+    s.set_check_queue(&serde_json::to_string(&queue).unwrap_or_else(|_| "[]".to_string()))?;
+    Ok(queue)
 }
 
 /// Census complete: `seen_ids` is everything AO3 still lists. Reconcile the
@@ -438,7 +526,7 @@ pub(super) fn cache_bookmark_listing(s: &Storage, l: &BookmarkListing) -> (Optio
     let target = match l.kind {
         BookmarkKind::Work => {
             let Some(w) = l.work_summary.as_ref() else { return (None, None) };
-            match s.save_work(w) {
+            match s.save_listed_work(w) {
                 Ok(id) => BookmarkTarget::Work(id),
                 Err(e) => { log_error!("db", "save_work failed: {e}"); return (None, None); }
             }

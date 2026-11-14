@@ -51,8 +51,27 @@ impl Storage {
         self.fields_cache.for_source(source, "work")
     }
 
+    /// Write the stats a partial view of a work carries (a listing blurb):
+    /// each given field is set, and every field the view does not carry
+    /// keeps the value it has. A listing not mentioning a figure says
+    /// nothing about it — only the work's own page can take one away
+    /// (`set_work_stats`).
+    pub fn merge_work_stats(&self, work_id: u64, stats: &[WorkStat]) -> Result<(), AppError> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO work_stats (work_id, field_id, num_value, text_value) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(work_id, field_id) DO UPDATE SET
+                 num_value = excluded.num_value, text_value = excluded.text_value"
+        ).map_err(map_sql)?;
+        for s in stats {
+            stmt.execute(params![work_id as i64, s.field_id, s.num_value, s.text_value])
+                .map_err(map_sql)?;
+        }
+        Ok(())
+    }
+
     /// Replace a work's stats with `stats` (one value per field; a field
-    /// absent from the slice is removed — absent, never zero).
+    /// absent from the slice is removed — absent, never zero). For a
+    /// fetch of the work itself, which states everything the source has.
     pub fn set_work_stats(&self, work_id: u64, stats: &[WorkStat]) -> Result<(), AppError> {
         self.conn.execute("DELETE FROM work_stats WHERE work_id = ?1", params![work_id as i64])
             .map_err(map_sql)?;

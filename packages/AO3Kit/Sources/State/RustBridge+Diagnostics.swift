@@ -135,6 +135,17 @@ extension RustBridge {
         return try app.startWhatsNewCheck(onlyStale: onlyStale, olderThanSecs: olderThanSecs)
     }
 
+    /// The sources a What's New check can ask, with the user's selection.
+    func whatsNewCheckSources() -> [UCheckSource] {
+        (try? app?.whatsNewCheckSources()) ?? []
+    }
+
+    /// Choose the sources the check asks (at least one).
+    func setWhatsNewCheckSources(_ selected: [String]) throws {
+        guard let app else { throw BridgeError.notInitialized }
+        try app.setWhatsNewCheckSources(selected: selected)
+    }
+
     /// The persisted What's New queue, front item first.
     func getWhatsNewCheckQueue() -> [UCheckQueueItem] {
         (try? app?.getWhatsNewCheckQueue()) ?? []

@@ -43,6 +43,10 @@ struct Work: Identifiable, Hashable {
     /// The users row behind each byline (0 = not linked yet). The one
     /// identity an author is opened with; `author` is display text.
     var authorIDs: [UInt64] = []
+    /// The work's status as its source words it ("Ongoing", "Complete",
+    /// "Hiatus"); "" when the source states none. Decided in the core by
+    /// the source's adapter — shown as is.
+    var status: String = ""
 
     /// The membership to follow at end-of-work — first series that has a
     /// next work.
