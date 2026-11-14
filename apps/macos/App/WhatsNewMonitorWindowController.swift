@@ -186,12 +186,10 @@ struct WhatsNewMonitorView: View {
                     appState.stopWhatsNewCheck()
                 }
             } else {
-                controlButton(monitor.pending.isEmpty ? "Start" : "Resume", symbol: "play.fill", fill: theme.accent,
-                              disabled: appState.ao3Username == nil) {
+                controlButton(monitor.pending.isEmpty ? "Start" : "Resume", symbol: "play.fill", fill: theme.accent) {
                     appState.startWhatsNewCheck(all: false)
                 }
-                controlButton("Check All", symbol: "arrow.clockwise", fill: theme.accent2,
-                              disabled: appState.ao3Username == nil) {
+                controlButton("Check All", symbol: "arrow.clockwise", fill: theme.accent2) {
                     appState.startWhatsNewCheck(all: true)
                 }
             }

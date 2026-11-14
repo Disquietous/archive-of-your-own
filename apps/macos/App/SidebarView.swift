@@ -27,30 +27,28 @@ struct SidebarView: View {
         return VStack(spacing: 0) {
             header
             ScrollView {
-                VStack(spacing: 6) {
-                    topGroup
-                    group("Discover") {
-                        item(.fandoms, "flame", "Fandoms", count: model.follows.followedFandoms.count)
-                        item(.authors, "person", "Following",
-                             count: model.follows.follows(of: .author).count
-                                 + model.follows.follows(of: .work).count
-                                 + model.follows.follows(of: .series).count)
+                VStack(spacing: 1) {
+                    item(.reading, "book", "Currently Reading", count: model.appState.currentlyReading.count)
+                    item(.search, "magnifyingglass", "Search")
+                    item(.history, "clock", "History")
+                    item(.authors, "person", "Following",
+                         count: model.follows.follows(of: .author).count
+                             + model.follows.follows(of: .work).count
+                             + model.follows.follows(of: .series).count)
+                    item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)
+                    item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
+                    item(.readingLists, "books.vertical", "Reading Lists", count: appState.readingLists.count)
+                    item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
+                    item(.stats, "chart.bar", "Reading Stats")
+                    // Everything that belongs to one source lives behind
+                    // this: a tab per source, each with its own sidebar.
+                    SidebarRow(theme: theme, icon: "square.stack.3d.up", label: "Sources",
+                               selected: model.sourcesShown, badge: appState.inboxUnreadCount) {
+                        model.showSources()
                     }
-                    group("Following") {
-                        item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)
-                        item(.subscriptions, "bell", "Subscriptions")
-                        item(.inbox, "tray", "Inbox", badge: appState.inboxUnreadCount)
-                    }
-                    group("Saved") {
-                        item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
-                        item(.readingLists, "books.vertical", "Reading Lists", count: appState.readingLists.count)
-                        item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
-                        item(.stats, "chart.bar", "Reading Stats")
-                    }
-                    group("App") {
-                        item(.settings, "gearshape", "Settings")
-                    }
+                    item(.settings, "gearshape", "Settings")
                 }
+                .padding(.top, 6)
                 .padding(.bottom, 8)
             }
             footer
@@ -75,73 +73,16 @@ struct SidebarView: View {
         .contentShape(Rectangle())
     }
 
-    private var topGroup: some View {
-        VStack(spacing: 1) {
-            item(.reading, "book", "Currently Reading", count: model.appState.currentlyReading.count)
-            item(.search, "magnifyingglass", "Search")
-            item(.history, "clock", "History")
-        }
-        .padding(.top, 6)
-    }
-
-    private func group(_ label: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(spacing: 1) {
-            HStack {
-                Text(label.uppercased())
-                    .font(Font(MacFont.ui(10.5, weight: .bold)))
-                    .kerning(0.6)
-                    .foregroundStyle(theme.ink3)
-                Spacer()
-            }
-            .padding(.init(top: 8, leading: 18, bottom: 4, trailing: 18))
-            content()
-        }
-    }
-
     private func item(_ section: MacAppModel.Section, _ icon: String, _ label: String,
                       count: Int? = nil, badge: Int = 0) -> some View {
         // Author-works browsing keeps Authors highlighted.
         let effectiveSection = model.section == .authorWorks ? MacAppModel.Section.authors : model.section
-        let selected = effectiveSection == section
-        return Button {
+        // While the Sources area is up, its item carries the highlight.
+        let selected = !model.sourcesShown && effectiveSection == section
+        return SidebarRow(theme: theme, icon: icon, label: label, selected: selected,
+                          count: count, badge: badge) {
             model.goSection(section)
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 17)
-                    .foregroundStyle(selected ? theme.onAccent : theme.ink3)
-                Text(label)
-                    .font(Font(MacFont.ui(13.5, weight: .medium)))
-                    .foregroundStyle(selected ? theme.onAccent : theme.ink2)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if badge > 0 {
-                    Text("\(badge)")
-                        .font(Font(MacFont.ui(10.5, weight: .bold)))
-                        .foregroundStyle(selected ? theme.onAccent : theme.ink3)
-                        .padding(.horizontal, 5)
-                        .frame(minWidth: 18, minHeight: 18)
-                        .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
-                        .clipShape(Capsule())
-                } else if let count, count > 0 {
-                    Text("\(count)")
-                        .font(Font(MacFont.ui(11, weight: .bold)))
-                        .foregroundStyle(selected ? theme.onAccent : theme.ink3)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 1)
-                        .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
-                        .clipShape(Capsule())
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(selected ? theme.accent : .clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
-        .padding(.horizontal, 8)
     }
 
     /// The app-state hub pill: identity on the first line, the circuit's
@@ -463,6 +404,58 @@ struct SidebarView: View {
 
     private var torConnecting: Bool {
         appState.torStatus == .connecting || appState.isTestingCircuit || appState.isResolvingCloudflare
+    }
+}
+
+/// One row of a sidebar — the main one and each source's — with an
+/// optional count pill or unread badge.
+struct SidebarRow: View {
+    let theme: AppTheme
+    let icon: String
+    let label: String
+    let selected: Bool
+    var count: Int?
+    var badge: Int = 0
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 17)
+                    .foregroundStyle(selected ? theme.onAccent : theme.ink3)
+                Text(label)
+                    .font(Font(MacFont.ui(13.5, weight: .medium)))
+                    .foregroundStyle(selected ? theme.onAccent : theme.ink2)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(Font(MacFont.ui(10.5, weight: .bold)))
+                        .foregroundStyle(selected ? theme.onAccent : theme.ink3)
+                        .padding(.horizontal, 5)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
+                        .clipShape(Capsule())
+                } else if let count, count > 0 {
+                    Text("\(count)")
+                        .font(Font(MacFont.ui(11, weight: .bold)))
+                        .foregroundStyle(selected ? theme.onAccent : theme.ink3)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 1)
+                        .background(selected ? Color.white.opacity(0.25) : theme.ink.opacity(0.08))
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(selected ? theme.accent : .clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarItemStyle(hover: theme.ink.opacity(0.06)))
+        .padding(.horizontal, 8)
     }
 }
 

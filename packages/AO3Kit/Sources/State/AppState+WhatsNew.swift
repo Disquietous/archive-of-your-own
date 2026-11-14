@@ -24,8 +24,9 @@ extension AppState {
     /// resumed round re-checks only what actually needs it.
     /// `olderThanSecs` limits the round to follows last checked longer ago
     /// than that, or never (the overdue warning's "check just these").
+    /// Follows are the library's own, so the check needs no account —
+    /// each follow's source decides what it can be asked.
     func runWhatsNewCheck(force: Bool = false, olderThanSecs: UInt64? = nil) async {
-        guard ao3Username != nil else { return }
         guard !isCheckingWhatsNew else { return }
         // Claim the check BEFORE the first await. Waiting for Tor can take
         // a minute; a second caller arriving in that window (the toolbar

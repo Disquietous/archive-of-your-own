@@ -66,25 +66,23 @@ struct LibraryView: View {
             Spacer()
 
             // What's New check button
-            if state.ao3Username != nil {
-                // Checks what's due (and resumes a stopped run); the
-                // status bar below carries progress and Stop.
-                Button {
-                    state.startWhatsNewCheck(all: false)
-                } label: {
-                    if state.isCheckingWhatsNew {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(theme.ink2)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(theme.ink2)
-                    }
+            // Checks what's due (and resumes a stopped run); the
+            // status bar below carries progress and Stop.
+            Button {
+                state.startWhatsNewCheck(all: false)
+            } label: {
+                if state.isCheckingWhatsNew {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(theme.ink2)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.ink2)
                 }
-                .buttonStyle(IconButtonPressStyle())
-                .disabled(state.isCheckingWhatsNew)
             }
+            .buttonStyle(IconButtonPressStyle())
+            .disabled(state.isCheckingWhatsNew)
 
             PrivacyPillView {
                 nav.presentedSheet = .privacy
@@ -96,7 +94,7 @@ struct LibraryView: View {
 
     private var lastCheckedLabel: some View {
         Group {
-            if state.ao3Username != nil, let ts = state.bridge.getLastWhatsNewCheck(),
+            if let ts = state.bridge.getLastWhatsNewCheck(),
                let date = DBTimestamp.date(ts) {
                 Text("Last checked: \(date.formatted(.relative(presentation: .named)))")
                     .font(.custom("HankenGrotesk", size: 11).weight(.medium))

@@ -208,9 +208,7 @@ private struct WhatsNewScreen: View {
             title: "What’s New",
             rawWorks: { state.newWorkIDs.compactMap { state.work(byID: $0) } },
             empty: .init(systemImage: "bell.badge", title: "Nothing new",
-                         subtitle: state.ao3Username == nil
-                            ? "Sign in, then follow authors, works or series — updates land here after a check."
-                            : "Updates to the authors, works and series you follow land here after a check."),
+                         subtitle: "Updates to the authors, works and series you follow land here after a check."),
             marksNew: true,
             swipe: .init(label: "Remove", systemImage: "minus.circle") { work in
                 state.removeNewWork(work.id)
@@ -226,13 +224,13 @@ private struct WhatsNewScreen: View {
                 } label: {
                     Label("Check What’s Due", systemImage: "arrow.clockwise")
                 }
-                .disabled(state.isCheckingWhatsNew || state.ao3Username == nil)
+                .disabled(state.isCheckingWhatsNew)
                 Button {
                     state.startWhatsNewCheck(all: true)
                 } label: {
                     Label("Check Everything", systemImage: "arrow.clockwise.circle")
                 }
-                .disabled(state.isCheckingWhatsNew || state.ao3Username == nil)
+                .disabled(state.isCheckingWhatsNew)
                 if state.whatsNewCheckSources.count > 1 {
                     Menu {
                         ForEach(state.whatsNewCheckSources, id: \.id) { source in

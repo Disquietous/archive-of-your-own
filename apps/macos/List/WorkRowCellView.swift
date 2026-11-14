@@ -598,8 +598,8 @@ final class WorkRowCellView: NSTableCellView {
     private func renderCorner(for work: Work, availableTextWidth: CGFloat) -> NSSize {
         datesLabel.stringValue = work.updated.isEmpty ? "" : "Updated \(work.updated)"
         datesLabel.isHidden = work.updated.isEmpty
-        // Sized like the summary text; shaped like a work-details tag.
-        statusPill.configure(text: work.status, font: MacFont.ui(12.5, weight: .medium))
+        // Sized like the updated date; shaped like a work-details tag.
+        statusPill.configure(text: work.status, font: MacFont.ui(10, weight: .medium))
         statusPill.isHidden = work.status.isEmpty
         titleLabel.preferredMaxLayoutWidth = availableTextWidth
 

@@ -561,7 +561,7 @@ final class AppState {
         // No automatic check at launch — warn instead when a full check is
         // overdue. Rust decides per row: any checked follow whose
         // own last-checked stamp is missing or older than the threshold.
-        if ao3Username != nil, !whatsNewOverdueWarned {
+        if !whatsNewOverdueWarned {
             if let counts = bridge.whatsNewOverdue(maxAgeSecs: Self.whatsNewOverdueSecs), counts.overdue > 0 {
                 whatsNewOverdueWarned = true
                 whatsNewOverdueCounts = counts

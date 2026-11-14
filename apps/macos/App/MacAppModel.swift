@@ -27,6 +27,15 @@ final class MacAppModel {
 
     /// The app opens on Currently Reading — the primary use case.
     var section: Section = .reading
+    /// The Sources area is showing: a tab per source, each with its own
+    /// sidebar of options (MacAppModel+Sources). `section` stays the
+    /// content the area's panes render.
+    var sourcesShown = false
+    /// The selected source tab (a source id); "" until the area first opens.
+    var sourceTab = ""
+    /// The option each source tab last showed, so a tab reopens where it
+    /// was left. Session-scoped.
+    @ObservationIgnored var sourceOptionMemory: [String: Section] = [:]
     /// A Settings tab (its title, e.g. "Privacy") someone asked to open;
     /// the Settings view selects it and clears the request.
     var settingsTabRequest: String?
@@ -157,6 +166,9 @@ final class MacAppModel {
     }
 
     func goSection(_ s: Section) {
+        // A section that belongs to a source opens inside the Sources
+        // area, whoever asked for it; any other leaves the area.
+        noteSourcesArea(for: s)
         guard s != section else { return }
         // Remember what this section's pane was showing; restore the target's.
         // Drill-in state (author/subscription works lists, inbox selection)
@@ -513,6 +525,7 @@ final class MacAppModel {
             snapshotPane(for: section)
             searchReturnSection = section
             section = .search
+            sourcesShown = false
         } else {
             searchReturnSection = nil
         }
