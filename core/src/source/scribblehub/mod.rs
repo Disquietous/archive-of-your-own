@@ -188,13 +188,14 @@ impl ScribbleHubSource {
         client.transport().get_page(url, timeout, false, &HOOKS).await
     }
 
-    /// One page of TOC rows beyond the first, from the releases endpoint
-    /// the site's own pager calls.
-    async fn toc_page(&self, id: &str, page: u32) -> Result<String, AppError> {
+    /// The story's whole table of contents in one response: the releases
+    /// endpoint with `pagenum=-1`, the request the page's own "Show All
+    /// Chapters" button makes. The TOC pages are never walked.
+    async fn full_toc(&self, id: &str) -> Result<String, AppError> {
         Self::guard()?;
         let form = [
             ("action".to_string(), "wi_getreleases_pagination".to_string()),
-            ("pagenum".to_string(), page.to_string()),
+            ("pagenum".to_string(), "-1".to_string()),
             ("mypostid".to_string(), id.to_string()),
         ];
         let client = self.client.read().await;
@@ -204,7 +205,7 @@ impl ScribbleHubSource {
         if out.status >= 400 {
             return Err(AppError::Http {
                 kind: crate::client::FailureKind::from_status(out.status, None),
-                detail: format!("HTTP {} from the releases endpoint (TOC page {page})", out.status),
+                detail: format!("HTTP {} from the releases endpoint (full TOC)", out.status),
             });
         }
         Ok(out.body)
@@ -276,10 +277,13 @@ impl Source for ScribbleHubSource {
         let url = if work.url.contains("/series/") { work.url.clone() } else { Self::series_url(id, "") };
         let html = self.page(&url).await?;
         let page = parse::parse_series_page(&html, id)?;
-        let mut toc = page.toc.clone();
-        for n in 2..=page.toc_pages {
-            toc.extend(parse::parse_toc_fragment(&self.toc_page(id, n).await?));
-        }
+        // The series page lists the newest chapters only. A story with
+        // more gets its whole list in one further request.
+        let mut toc = if page.toc_pages > 1 {
+            parse::parse_toc_fragment(&self.full_toc(id).await?)
+        } else {
+            page.toc.clone()
+        };
         toc.sort_by_key(|t| t.chapter_id);
         toc.dedup_by_key(|t| t.chapter_id);
         if toc.iter().any(|t| t.number == 0) {

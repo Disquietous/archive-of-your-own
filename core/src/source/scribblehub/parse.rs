@@ -1054,6 +1054,21 @@ mod tests {
         assert_eq!(more[1], TocEntry { chapter_id: 2300101, number: 1, title: "Chapter 1: The Posting".into(), date: "2026-09-28".into() });
     }
 
+    /// The "Show All Chapters" response (`pagenum=-1`): every row of the
+    /// story in the page's own table wrapper, newest first, with the
+    /// endpoint's trailing `0`.
+    #[test]
+    fn full_toc_response_lists_every_chapter() {
+        let rows: String = (1..=40u32).rev().map(|n| format!(
+            r#"<li title="Bookmark Chapter" class="toc_w" order="{n}"><a class="toc_a" href="https://www.scribblehub.com/read/900100-a-quiet-ledger/chapter/{}/">Chapter {n}</a><span class="fic_date_pub" title="Sep 28, 2026 09:14 PM">Sep 28, 2026</span></li>"#,
+            2300100 + n)).collect();
+        let body = format!(r#"<div class="wi_fic_table main"><div class="wi_fic_table toc"><ol class="toc_ol">{rows}</ol></div></div>0"#);
+        let toc = parse_toc_fragment(&body);
+        assert_eq!(toc.len(), 40);
+        assert_eq!(toc[0], TocEntry { chapter_id: 2300140, number: 40, title: "Chapter 40".into(), date: "2026-09-28".into() });
+        assert_eq!(toc[39].number, 1);
+    }
+
     #[test]
     fn series_page_reviews() {
         let page = series();

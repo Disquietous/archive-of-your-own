@@ -179,6 +179,129 @@ async fn fetch_all_chapters(
     Ok(fetched.chapters.into_iter().map(UChapter::from).collect())
 }
 
+/// The whole-work download for a per-chapter source: the work page lands
+/// the table of contents (stubs keep text already fetched), then every
+/// chapter still without text is fetched in order, a varying 1–10 s
+/// apart (see `pacing`) so the download stays polite and never settles
+/// into a fixed cadence.
+///
+/// Returns whether any request went out.
+///
+/// `reuse_toc`: skip the work-page fetch when the library already holds
+/// a chapter row for every chapter the work counts — a details fetch
+/// that just ran (a listing's, the reader's) already landed the table of
+/// contents, and asking for it again would repeat those requests.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_missing_chapters(
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    registry: Arc<crate::source::SourceRegistry>,
+    source: Arc<dyn crate::source::Source>,
+    external: ExternalRef,
+    work_id: u64,
+    op_id: Option<u64>,
+    reuse_toc: bool,
+) -> Result<bool, AO3Error> {
+    let toc_held = reuse_toc && {
+        let s = storage.lock().await;
+        let counted = s.get_work(work_id).ok().flatten().map(|w| w.chapter_count).unwrap_or(0);
+        let rows = s.get_chapters(work_id).map_err(AO3Error::from)?;
+        counted > 0 && rows.len() as u32 == counted && rows.iter().all(|c| c.id.is_some())
+    };
+    if !toc_held {
+        fetch_and_save_work(client.clone(), storage.clone(), registry, work_id, op_id).await?;
+    }
+    let stubs: Vec<Chapter> = {
+        let s = storage.lock().await;
+        s.get_chapters(work_id).map_err(AO3Error::from)?
+            .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
+    };
+    let requested = !toc_held || !stubs.is_empty();
+    let mut first = toc_held;
+    for stub in stubs {
+        // No request came before the first chapter when the table of
+        // contents was reused, so there is nothing to space it from.
+        if !std::mem::take(&mut first) {
+            crate::client::pacing::request_gap().await;
+        }
+        fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
+    }
+    Ok(requested)
+}
+
+/// Every chapter of a work the library lacks, fetched and saved: one
+/// request for a source that serves the whole work as a page, the paced
+/// per-chapter walk for one that serves a page per chapter. This is the
+/// download the content queue runs — the same plan `fetch_chapters`
+/// ("Download for offline") follows.
+///
+/// A chapter whose text the library already holds is never fetched
+/// again: a work with every counted chapter in the library costs no
+/// request at all. (A chapter edited at its source after it was saved
+/// therefore keeps the saved text.) A library-only work has nothing to
+/// fetch. Returns whether any request went out.
+pub(super) async fn download_work(
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    registry: Arc<crate::source::SourceRegistry>,
+    work_id: u64,
+) -> Result<bool, AO3Error> {
+    let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
+    if source.library_only() {
+        return Ok(false);
+    }
+    if !source.fetches_chapters_individually() {
+        // The whole work is one page: skip it only when nothing is missing.
+        let complete = {
+            let s = storage.lock().await;
+            let counted = s.get_work(work_id).ok().flatten().map(|w| w.chapter_count).unwrap_or(0);
+            let held = s.get_chapters(work_id).map_err(AO3Error::from)?
+                .iter().filter(|c| !c.content.is_empty()).count() as u32;
+            counted > 0 && held >= counted
+        };
+        if complete {
+            return Ok(false);
+        }
+        fetch_all_chapters(client, storage, source, external, work_id, None).await?;
+        return Ok(true);
+    }
+    fetch_missing_chapters(client, storage, registry, source, external, work_id, None, true).await
+}
+
+/// Fetch every embedded image of a work's saved chapters into the image
+/// cache — the image half of a download, shared by "Download for
+/// offline" and the content queue. An image already cached costs no
+/// request; over-cap and failed images are skipped (logged), not fatal.
+/// `max_bytes`: the per-image size cap, 0 = no limit. Returns how many
+/// images were newly fetched.
+pub(super) async fn prefetch_work_images(
+    client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
+    storage: Arc<Mutex<Storage>>,
+    work_id: u64,
+    max_bytes: u64,
+) -> Result<u32, AO3Error> {
+    let srcs: Vec<String> = {
+        let s = storage.lock().await;
+        let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
+        let mut srcs = Vec::new();
+        for chapter in &chapters {
+            collect_image_srcs(&chapter.content, &mut srcs);
+        }
+        srcs
+    };
+    log_info!("image", "Offline prefetch for work {work_id}: {} image(s), cap {max_bytes} bytes",
+              srcs.len());
+    let mut fetched = 0u32;
+    for src in srcs {
+        match fetch_image_cached(client.clone(), storage.clone(), &src, max_bytes).await {
+            Ok((_, true)) => fetched += 1,
+            Ok((_, false)) => {}
+            Err(e) => { log_info!("image", "Offline prefetch skipped {src}: {e}"); }
+        }
+    }
+    Ok(fetched)
+}
+
 /// One chapter of a per-chapter source, fetched from its stub (id + title
 /// from the table of contents) and saved over it.
 async fn fetch_one_chapter(
@@ -659,21 +782,7 @@ impl AO3App {
             if !source.fetches_chapters_individually() {
                 return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
             }
-            // A per-chapter source: the work page lands the table of
-            // contents (stubs keep text already fetched), then every
-            // chapter still without text is fetched in order, a varying
-            // 1–10 s apart (see `pacing`) so the whole-work download
-            // stays polite and never settles into a fixed cadence.
-            fetch_and_save_work(client.clone(), storage.clone(), registry.clone(), work_id, op_id).await?;
-            let stubs: Vec<Chapter> = {
-                let s = storage.lock().await;
-                s.get_chapters(work_id).map_err(AO3Error::from)?
-                    .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
-            };
-            for stub in stubs {
-                crate::client::pacing::request_gap().await;
-                fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
-            }
+            fetch_missing_chapters(client, storage.clone(), registry, source, external, work_id, op_id, false).await?;
             let s = storage.lock().await;
             Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
         }).await
@@ -759,26 +868,7 @@ impl AO3App {
     /// (logged), not fatal. Returns how many images were newly fetched.
     pub async fn download_work_images(&self, work_id: u64, max_bytes: u64) -> Result<u32, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            let srcs: Vec<String> = {
-                let s = storage.lock().await;
-                let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
-                let mut srcs = Vec::new();
-                for chapter in &chapters {
-                    collect_image_srcs(&chapter.content, &mut srcs);
-                }
-                srcs
-            };
-            log_info!("image", "Offline prefetch for work {work_id}: {} image(s), cap {max_bytes} bytes",
-                      srcs.len());
-            let mut fetched = 0u32;
-            for src in srcs {
-                match fetch_image_cached(client.clone(), storage.clone(), &src, max_bytes).await {
-                    Ok((_, true)) => fetched += 1,
-                    Ok((_, false)) => {}
-                    Err(e) => { log_info!("image", "Offline prefetch skipped {src}: {e}"); }
-                }
-            }
-            Ok(fetched)
+            prefetch_work_images(client, storage, work_id, max_bytes).await
         }).await
     }
 

@@ -43,8 +43,11 @@ impl AO3App {
         crate::events::init(&runtime.handle().clone());
 
         let client = Arc::new(tokio::sync::RwLock::new(client));
+        let sources = Arc::new(super::sources::registry(client.clone()));
         let app = AO3App {
-            sources: Arc::new(super::sources::registry(client.clone())),
+            content_worker: super::content_queue::spawn_worker(
+                runtime.handle(), Arc::downgrade(&storage), client.clone(), sources.clone()),
+            sources,
             client,
             storage,
             state_dir,
@@ -83,10 +86,16 @@ impl AO3App {
 
         // No events::init here: the shared runtime already registered its
         // handle when `previous` (or its ancestor) was constructed.
+        let storage = Arc::new(Mutex::new(storage));
         let app = AO3App {
+            // The previous instance's worker stops when that instance
+            // drops; this one works the freshly opened database.
+            content_worker: super::content_queue::spawn_worker(
+                previous._runtime.handle(), Arc::downgrade(&storage),
+                previous.client.clone(), previous.sources.clone()),
             client: previous.client.clone(),
             sources: previous.sources.clone(),
-            storage: Arc::new(Mutex::new(storage)),
+            storage,
             state_dir,
             timeout_secs: previous.timeout_secs.clone(),
             active_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

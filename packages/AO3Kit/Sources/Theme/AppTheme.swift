@@ -104,7 +104,11 @@ final class AppTheme {
     }
     /// Per-image download cap in megabytes; 0 = no limit. Default 2 MB.
     var imageMaxMB: Int {
-        didSet { UserDefaults.standard.set(imageMaxMB, forKey: "imageMaxMB") }
+        didSet {
+            UserDefaults.standard.set(imageMaxMB, forKey: "imageMaxMB")
+            // The core prefetches images for works it downloads on its own.
+            setImagePrefetchCap(maxBytes: imageMaxBytes)
+        }
     }
     /// The cap as bytes for the fetch APIs.
     var imageMaxBytes: UInt64 { UInt64(max(0, imageMaxMB)) * 1_048_576 }
@@ -172,6 +176,8 @@ final class AppTheme {
         fullscreenReading = d.object(forKey: "fullscreenReading") as? Bool ?? true
         openWorksInWindow = d.object(forKey: "openWorksInWindow") as? Bool ?? false
         imageMaxMB = d.object(forKey: "imageMaxMB") as? Int ?? 2
+        // didSet does not run during init: hand the core the loaded cap.
+        setImagePrefetchCap(maxBytes: imageMaxBytes)
     }
 
     // MARK: - Theme switching

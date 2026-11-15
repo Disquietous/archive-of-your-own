@@ -19,18 +19,89 @@ struct AuthorsList: View {
     @State private var suggestionsTask: Task<Void, Never>?
     @State private var searching = false
 
-    /// One kind's follows, alphabetical, narrowed by the in-list filter.
+    /// One kind's follows, narrowed by the name and source filters, in
+    /// the chosen order.
     private func rows(_ kind: FollowModel.Kind) -> [UFollow] {
         let needle = model.lists.authorsListFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        let source = activeSourceFilter
+        let sort = model.lists.followsSort
+        let byName: (UFollow, UFollow) -> Bool = {
+            displayName($0).localizedCaseInsensitiveCompare(displayName($1)) == .orderedAscending
+        }
         return model.follows.follows(of: kind)
             .filter { needle.isEmpty || $0.name.lowercased().contains(needle)
                 || $0.targetId.lowercased().contains(needle) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .filter { source.isEmpty || $0.source == source }
+            .sorted { a, b in
+                switch sort {
+                case .nameAscending: return byName(a, b)
+                case .nameDescending: return byName(b, a)
+                case .checkedNewest, .checkedOldest:
+                    // Never checked counts as older than any date; ties by name.
+                    let (x, y) = (a.lastCheckedAt ?? "", b.lastCheckedAt ?? "")
+                    if x == y { return byName(a, b) }
+                    return sort == .checkedNewest ? x > y : x < y
+                }
+            }
+    }
+
+    /// The kinds this list shows (fandoms have their own list).
+    private static let listedKinds: [FollowModel.Kind] = [.author, .work, .series]
+
+    /// Sources that have at least one follow, in the registry's order.
+    private var followedSources: [SourceCapabilities] {
+        let used = Set(Self.listedKinds.flatMap { model.follows.follows(of: $0) }.map(\.source))
+        return appState.bridge.listSources().filter { used.contains($0.id) }
+    }
+
+    /// The source filter, ignored once nothing followed is on that source.
+    private var activeSourceFilter: String {
+        let picked = model.lists.followsSourceFilter
+        return followedSources.contains { $0.id == picked } ? picked : ""
+    }
+
+    /// Source filter and sort order, under the name filter.
+    private var filterSortBar: some View {
+        let source = activeSourceFilter
+        let sourceName = followedSources.first { $0.id == source }?.name ?? "All sources"
+        return HStack(spacing: 8) {
+            Menu {
+                Picker("Source", selection: Binding(
+                    get: { activeSourceFilter },
+                    set: { model.lists.followsSourceFilter = $0 })) {
+                    Text("All sources").tag("")
+                    ForEach(followedSources, id: \.id) { Text($0.name).tag($0.id) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Label(sourceName, systemImage: "line.3.horizontal.decrease")
+            }
+            .help("Show follows from one source")
+            Menu {
+                Picker("Sort", selection: Binding(
+                    get: { model.lists.followsSort },
+                    set: { model.lists.followsSort = $0 })) {
+                    ForEach(FollowsSort.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Label(model.lists.followsSort.label, systemImage: "arrow.up.arrow.down")
+            }
+            .help("Sort order")
+            Spacer(minLength: 0)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: false, vertical: true)
+        .font(Font(MacFont.ui(12)))
+        .foregroundStyle(theme.ink2)
     }
 
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         let authors = rows(.author), works = rows(.work), series = rows(.series)
+        let nothingFollowed = Self.listedKinds.allSatisfy { model.follows.follows(of: $0).isEmpty }
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if model.lists.showFollowAuthorField {
@@ -40,11 +111,13 @@ struct AuthorsList: View {
                 usernameFilterField
                     .padding(.init(top: model.lists.showFollowAuthorField ? 0 : 12,
                                    leading: 16, bottom: 2, trailing: 16))
+                filterSortBar
+                    .padding(.horizontal, 16)
 
                 if authors.isEmpty && works.isEmpty && series.isEmpty {
                     EmptyStateMac(theme: theme, icon: "bell",
-                                  title: "Nothing followed yet",
-                                  message: "Follow an author by AO3 username or by profile link from any source, or use a bell on any author, work or series. What’s New checks what you follow.")
+                                  title: nothingFollowed ? "Nothing followed yet" : "No matches",
+                                  message: !nothingFollowed ? "Nothing you follow matches the filter." : "Follow an author by AO3 username or by profile link from any source, or use a bell on any author, work or series. What’s New checks what you follow.")
                         .frame(minHeight: 260)
                 } else {
                     VStack(alignment: .leading, spacing: 0) {

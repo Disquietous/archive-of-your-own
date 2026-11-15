@@ -294,6 +294,10 @@ final class LibraryListModel {
     var subscriptionListFilter = ""
     /// Following list: name.
     var authorsListFilter = ""
+    /// Following list: only follows on this source ("" = every source).
+    var followsSourceFilter = ""
+    /// Following list: row order within each kind.
+    var followsSort: FollowsSort = .nameAscending
     /// Whether the "Follow an author" input is showing (header + button).
     var showFollowAuthorField = false
     /// Fandoms list: fandom name.
@@ -363,6 +367,20 @@ final class LibraryListModel {
             (author.isEmpty || item.author.lowercased().contains(author))
                 && (work.isEmpty || item.workReference.lowercased().contains(work))
                 && (text.isEmpty || item.contentJson.lowercased().contains(text))
+        }
+    }
+}
+
+/// How the Following list orders its rows.
+public enum FollowsSort: String, CaseIterable, Sendable {
+    case nameAscending, nameDescending, checkedNewest, checkedOldest
+
+    public var label: String {
+        switch self {
+        case .nameAscending: "Name, A to Z"
+        case .nameDescending: "Name, Z to A"
+        case .checkedNewest: "Checked, newest first"
+        case .checkedOldest: "Checked, oldest first"
         }
     }
 }

@@ -127,6 +127,10 @@ pub enum CoreEvent {
     /// The registered VPN's verified state changed (a path change, a
     /// register, or the first check after one). Only emitted on change.
     VpnStatusChanged { status: crate::client::VpnStatus },
+    /// The background content queue finished a work: every chapter and
+    /// its embedded images are in the library and the work is marked
+    /// downloaded.
+    WorkContentSaved { work_id: u64 },
 }
 
 // ---------------------------------------------------------------------------

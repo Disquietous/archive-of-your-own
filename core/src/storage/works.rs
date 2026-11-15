@@ -95,9 +95,15 @@ impl Storage {
     /// "unknown", not "none" — only `set_work_series` (work page) clears.
     pub fn save_work(&self, work: &WorkSummary) -> Result<u64, AppError> {
         self.with_savepoint(Savepoint::SaveWork, || {
-            let old_series = self.works_cache
+            let known = self.works_cache
                 .resolve(&work.source, &work.external_id)
-                .and_then(|id| self.works_cache.get(id))
+                .and_then(|id| self.works_cache.get(id));
+            // What decides a content fetch: a work the library never held
+            // (a stub counts as never held), or one whose chapter or word
+            // count this save changes.
+            let content_before = known.as_ref().filter(|e| !e.stub)
+                .map(|e| (e.summary.chapter_count, e.summary.word_count));
+            let old_series = known
                 .map(|e| e.summary.series.clone())
                 .unwrap_or_default();
             let series = if work.series.is_empty() {
@@ -128,6 +134,11 @@ impl Storage {
             // them with `link_work_authors` once recorded.
             if work.source == crate::models::SOURCE_AO3 {
                 self.link_ao3_bylines(id, &work.authors)?;
+            }
+            // Added or updated: queue its full content for the background
+            // worker. The save itself never waits on it.
+            if content_before != Some((work.chapter_count, work.word_count)) {
+                self.queue_content(id)?;
             }
             Ok(id)
         })

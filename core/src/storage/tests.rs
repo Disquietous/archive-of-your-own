@@ -3997,3 +3997,80 @@ fn a_listing_adds_to_a_work_and_only_its_own_page_replaces() {
     assert_ne!(new_id, id);
     assert_eq!(db.get_work(new_id).unwrap().unwrap().tags, vec!["Fantasy", "Adventure"]);
 }
+
+// ---------------------------------------------------------------------------
+// Content queue
+// ---------------------------------------------------------------------------
+
+fn queue_test_work(external_id: &str, chapters: u32, words: Option<u64>) -> WorkSummary {
+    WorkSummary {
+        chapter_count: chapters,
+        word_count: words,
+        ..sample_work(external_id.parse().unwrap())
+    }
+}
+
+#[test]
+fn saving_a_new_or_changed_work_queues_its_content() {
+    let db = Storage::open_in_memory("k").unwrap();
+    // A work the library never held is queued.
+    let id = db.save_work(&queue_test_work("9001", 3, Some(1200))).unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+    db.finish_content_item(id).unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), None);
+
+    // Saving it again unchanged queues nothing — a listing refresh of a
+    // work that did not move costs no download.
+    db.save_work(&queue_test_work("9001", 3, Some(1200))).unwrap();
+    db.save_listed_work(&queue_test_work("9001", 3, Some(1200))).unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), None);
+
+    // A new chapter count or word count queues it again.
+    db.save_listed_work(&queue_test_work("9001", 4, Some(1200))).unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+    db.finish_content_item(id).unwrap();
+    db.save_work(&queue_test_work("9001", 4, Some(1500))).unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+}
+
+#[test]
+fn a_stub_becoming_a_work_queues_its_content() {
+    let db = Storage::open_in_memory("k").unwrap();
+    let external = ExternalRef { source: "ao3".into(), external_id: "9002".into(), url: String::new() };
+    let id = db.ensure_work_stub(&external, "Known by id only").unwrap();
+    assert_eq!(db.next_content_item(0).unwrap(), None, "a stub is not a saved work");
+    assert_eq!(db.save_work(&queue_test_work("9002", 0, None)).unwrap(), id);
+    assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+}
+
+#[test]
+fn content_queue_orders_holds_back_and_gives_up() {
+    use super::content_queue::CONTENT_MAX_ATTEMPTS;
+    let db = Storage::open_in_memory("k").unwrap();
+    let a = db.save_work(&queue_test_work("9101", 1, None)).unwrap();
+    let b = db.save_work(&queue_test_work("9102", 1, None)).unwrap();
+    assert_eq!(db.next_content_item(100).unwrap(), Some(a), "longest queued first");
+
+    // A failed work waits for its retry time and goes behind the others.
+    db.defer_content_item(a, 500, "timeout", true).unwrap();
+    assert_eq!(db.content_item_attempts(a).unwrap(), Some(1));
+    assert_eq!(db.next_content_item(100).unwrap(), Some(b));
+    db.finish_content_item(b).unwrap();
+    assert_eq!(db.next_content_item(100).unwrap(), None, "held until its retry time");
+    assert_eq!(db.next_content_item(500).unwrap(), Some(a));
+
+    // A hold that is no fault of the work costs it no attempt.
+    db.defer_content_item(a, 600, "source blocks Tor", false).unwrap();
+    assert_eq!(db.content_item_attempts(a).unwrap(), Some(1));
+
+    // After the last allowed failure the work is left alone…
+    for _ in 1..CONTENT_MAX_ATTEMPTS {
+        db.defer_content_item(a, 0, "timeout", true).unwrap();
+    }
+    assert_eq!(db.content_item_attempts(a).unwrap(), Some(CONTENT_MAX_ATTEMPTS));
+    assert_eq!(db.next_content_item(u32::MAX as u64).unwrap(), None);
+    // …until its next change queues it again with a clean slate.
+    db.save_work(&queue_test_work("9101", 2, None)).unwrap();
+    assert_eq!(db.content_item_attempts(a).unwrap(), Some(0));
+    assert_eq!(db.next_content_item(0).unwrap(), Some(a));
+}

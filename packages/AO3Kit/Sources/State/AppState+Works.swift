@@ -242,6 +242,22 @@ extension AppState {
         downloadingWorkIDs.remove(id)
     }
 
+    /// The core's content queue finished a work in the background: every
+    /// chapter and its images are in the library and the work is marked
+    /// downloaded. Mirror that here.
+    func handleWorkContentSaved(_ workId: UInt64) {
+        let id = String(workId)
+        downloadedWorkIDs.insert(id)
+        if let cached = bridge.getCachedWork(workId) {
+            fetchedWorks[id] = Self.workFromSummary(cached)
+        }
+        // Chapters already held in memory are a copy from before the
+        // fetch; an unopened work loads from the library when opened.
+        if fetchedChapters[id] != nil {
+            fetchedChapters[id] = bridge.getCachedChapters(workId)
+        }
+    }
+
     /// Works in `ids` that "Download all" would fetch: real works not
     /// already offline.
     func pendingDownloads(_ ids: [String]) -> [String] {

@@ -167,6 +167,9 @@ extension AppState {
         case .vpnStatusChanged(let status):
             bridge.vpnStatus = status
 
+        case .workContentSaved(let workId):
+            handleWorkContentSaved(workId)
+
         case .operationTick, .dataInvalidated:
             break
         }

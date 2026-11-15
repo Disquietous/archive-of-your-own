@@ -24,6 +24,7 @@ use crate::storage::Storage;
 mod account;
 mod capabilities;
 mod connection;
+mod content_queue;
 mod controls;
 mod error;
 mod follows;
@@ -140,6 +141,16 @@ pub struct AO3App {
     /// AO3 behind the contract, plus the rated mock. Shared across
     /// lock/unlock like the client it wraps.
     sources: Arc<crate::source::SourceRegistry>,
+    /// The content queue's worker for this instance's database. Aborted
+    /// when the instance drops, so a lock releases the storage (and its
+    /// key material) without waiting out a download in flight.
+    content_worker: tokio::task::AbortHandle,
+}
+
+impl Drop for AO3App {
+    fn drop(&mut self) {
+        self.content_worker.abort();
+    }
 }
 
 impl AO3App {
@@ -353,24 +364,31 @@ impl AO3App {
     }
 
     fn flush_request_log(&self) {
-        let records = crate::client::drain_request_records();
-        if records.is_empty() { return; }
-        let tuples: Vec<_> = records.into_iter().map(|r| (
-            r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
-            r.request_bytes, r.response_bytes, r.error, r.payload, r.transport,
-            r.source,
-        )).collect();
-        if let Ok(storage) = self.storage.try_lock() {
-            let cap = upkeep::request_log_row_cap(&storage);
-            log_db("insert_request_logs", storage.insert_request_logs(&tuples, cap));
-        } else {
-            for t in tuples.into_iter().rev() {
-                crate::client::push_request_record(crate::client::RequestRecord {
-                    source: t.10, started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
-                    duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
-                    error: t.7, payload: t.8, transport: t.9,
-                });
-            }
+        flush_request_log_to(&self.storage);
+    }
+}
+
+/// Persist the requests made since the last flush (durable audit log).
+/// When the storage is busy the records go back on the buffer for the
+/// next flush.
+pub(super) fn flush_request_log_to(storage: &Arc<Mutex<Storage>>) {
+    let records = crate::client::drain_request_records();
+    if records.is_empty() { return; }
+    let tuples: Vec<_> = records.into_iter().map(|r| (
+        r.started_at_ms, r.method, r.url, r.status, r.duration_ms,
+        r.request_bytes, r.response_bytes, r.error, r.payload, r.transport,
+        r.source,
+    )).collect();
+    if let Ok(storage) = storage.try_lock() {
+        let cap = upkeep::request_log_row_cap(&storage);
+        log_db("insert_request_logs", storage.insert_request_logs(&tuples, cap));
+    } else {
+        for t in tuples.into_iter().rev() {
+            crate::client::push_request_record(crate::client::RequestRecord {
+                source: t.10, started_at_ms: t.0, method: t.1, url: t.2, status: t.3,
+                duration_ms: t.4, request_bytes: t.5, response_bytes: t.6,
+                error: t.7, payload: t.8, transport: t.9,
+            });
         }
     }
 }

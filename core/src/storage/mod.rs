@@ -12,6 +12,7 @@ use crate::models::Rating;
 mod accounts;
 pub use accounts::AccountRow;
 mod consts;
+pub mod content_queue;
 mod drafts;
 pub use drafts::CommentDraft;
 mod fields;
@@ -314,7 +315,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 35;
+    pub(crate) const SCHEMA_VERSION: u32 = 36;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -400,6 +401,7 @@ impl Storage {
                 33 => self.migrate_v33_work_reactions(),
                 34 => self.migrate_v34_scribblehub_status_values(),
                 35 => self.migrate_v35_work_status(),
+                36 => self.migrate_v36_content_queue(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1070,6 +1072,22 @@ impl Storage {
             ).map_err(map_sql)?;
         }
         Ok(())
+    }
+
+    /// v36: `content_queue` — works whose full text is still to be
+    /// fetched by the background worker (see `content_queue.rs`). Starts
+    /// empty: only works added or changed from here on are queued.
+    fn migrate_v36_content_queue(&self) -> Result<(), AppError> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS content_queue (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 work_id    INTEGER NOT NULL UNIQUE,
+                 queued_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                 attempts   INTEGER NOT NULL DEFAULT 0,
+                 retry_at   INTEGER NOT NULL DEFAULT 0,
+                 last_error TEXT NOT NULL DEFAULT ''
+             );"
+        ).map_err(map_sql)
     }
 
     fn migrate_v33_work_reactions(&self) -> Result<(), AppError> {
