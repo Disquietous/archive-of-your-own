@@ -336,28 +336,47 @@ async fn set_subscription_remote(
          })
     };
 
-    let c = client.read().await;
-    let mut outcome: Option<(bool, Option<String>)> = None;
-    if want {
-        let direct = match (kind.as_str(), numeric) {
-            ("author", _) => match &profile_id {
-                Some(nid) => c.subscribe_user_direct(&username, nid).await,
-                None => Ok(None),
-            },
-            ("work", Some(id)) => c.subscribe_work_direct(&username, id).await,
-            ("series", Some(id)) => c.subscribe_series_direct(&username, id).await,
-            _ => Ok(None),
-        };
-        if let Ok(Some(new_id)) = direct {
-            outcome = Some((true, Some(new_id)));
+    // The one-POST shortcut, through the recovery engine like every
+    // request (a challenge shows the human check and retries). AtMostOnce:
+    // a direct subscribe has no dedup, so only a failure that provably
+    // never reached AO3 is retried. Any other failure falls through to
+    // the page path below, which reads live state first.
+    let direct: Result<Option<(bool, Option<String>)>, AO3Error> = with_recovery(
+        client.clone(), storage.clone(), OpKind::Fetch { label: format!("{kind}_subscribe") }, RetrySafety::AtMostOnce,
+        |client| {
+            let (kind, username, profile_id, stored_ao3_id) =
+                (kind.clone(), username.clone(), profile_id.clone(), stored_ao3_id.clone());
+            async move {
+                let c = client.read().await;
+                if want {
+                    let new_id = match (kind.as_str(), numeric) {
+                        ("author", _) => match &profile_id {
+                            Some(nid) => c.subscribe_user_direct(&username, nid).await,
+                            None => Ok(None),
+                        },
+                        ("work", Some(id)) => c.subscribe_work_direct(&username, id).await,
+                        ("series", Some(id)) => c.subscribe_series_direct(&username, id).await,
+                        _ => Ok(None),
+                    }.map_err(AO3Error::from)?;
+                    Ok(new_id.map(|id| (true, Some(id))))
+                } else if let Some(ao3_id) = &stored_ao3_id {
+                    // The unsubscribe endpoint is type-agnostic.
+                    let done = c.unsubscribe_work_direct(&username, ao3_id).await.map_err(AO3Error::from)?;
+                    Ok(done.then_some((false, None)))
+                } else {
+                    Ok(None)
+                }
+            }
+        }).await;
+    let outcome = match direct {
+        Ok(outcome) => outcome,
+        // The connection is gone: the page path could only be refused too.
+        Err(AO3Error::NetworkDisabled) => return Err(AO3Error::NetworkDisabled),
+        Err(e) => {
+            log_info!("follows", "direct {kind} subscription change failed, taking the page path: {e}");
+            None
         }
-    } else if let Some(ref ao3_id) = stored_ao3_id {
-        // The unsubscribe endpoint is type-agnostic.
-        if let Ok(true) = c.unsubscribe_work_direct(&username, ao3_id).await {
-            outcome = Some((false, None));
-        }
-    }
-    drop(c);
+    };
     if let Some(o) = outcome {
         return Ok(o);
     }

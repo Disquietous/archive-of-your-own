@@ -165,7 +165,9 @@ where
     F: Fn(Arc<RwLock<AO3Client>>) -> Fut,
     Fut: std::future::Future<Output = Result<T, AO3Error>>,
 {
-    events::scoped(id, run_loop(client, storage, id, kind, safety, op)).await
+    let result = events::scoped(id, run_loop(client, storage, id, kind, safety, op)).await;
+    crate::client::clearance::forget_operation(id);
+    result
 }
 
 async fn run_loop<T, F, Fut>(
@@ -286,7 +288,7 @@ async fn perform_remedy(
             events::set_operation_step(id, RecoveryStep::RotatingCircuit);
             rotate(client).await;
             events::set_operation_step(id, RecoveryStep::EarningClearance);
-            earn_clearance(client, storage).await;
+            earn_clearance(client, storage, id).await;
         }
         Remedy::Backoff => {
             let secs = 2u32;
@@ -455,7 +457,7 @@ async fn rotate(client: &Arc<RwLock<AO3Client>>) {
     { let _ = client; }
 }
 
-async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Storage>>) {
+async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Storage>>, id: OpId) {
     let socks_port = client.read().await.socks_port().unwrap_or(0);
     if socks_port == 0 {
         return; // Not on Tor — no clearance to earn.
@@ -464,15 +466,27 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
         log_info!("recovery", "no PlatformCapabilities registered — skipping clearance");
         return;
     };
-    match capability.earn_cloudflare_clearance(socks_port, format!("{}/", crate::source::ao3::BASE_URL)).await {
+    // The site that challenged, when the transport noted one: another
+    // source's check is passed on its own page and its cookies go to its
+    // own origin. Anything else is AO3's, as before.
+    let elsewhere = crate::client::clearance::take_challenge(id)
+        .filter(|c| c.source != crate::models::SOURCE_AO3)
+        .and_then(|c| crate::client::clearance::origin_of(&c.url).map(|origin| (c.url, origin)));
+    let page = match &elsewhere {
+        Some((url, _)) => url.clone(),
+        None => format!("{}/", crate::source::ao3::BASE_URL),
+    };
+    match capability.earn_cloudflare_clearance(socks_port, page).await {
         Ok(cookies) => {
             // Mirrors `resolveCloudflare()`'s existing ordering: auth
             // cookies first, Cloudflare's cookies layered on top.
             restore_persisted_cookies(client, storage).await;
             let c = client.read().await;
             for cookie in &cookies {
-                if !cookie.is_empty() {
-                    c.set_session_cookies(cookie);
+                if cookie.is_empty() { continue; }
+                match &elsewhere {
+                    Some((_, origin)) => c.transport().set_cookies(origin, cookie),
+                    None => c.set_session_cookies(cookie),
                 }
             }
         }
@@ -480,18 +494,44 @@ async fn earn_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Sto
     }
 }
 
+/// How long a dismissed check keeps unattended work (the content queue)
+/// from raising it again. Anything the user asks for still shows it.
+const DISMISSED_QUIET: Duration = Duration::from_secs(15 * 60);
+
 /// The site challenge noted for operation `id` (see
 /// `client::clearance::note_challenge`), passed by the user through the
 /// platform's web view; the clearance is applied to the live client and
 /// persisted so it outlives this transport and this launch. False when
 /// there is nothing to pass, no platform UI, or the user dismissed it.
+///
+/// One sheet per source at a time: operations challenged together wait
+/// for the first one's check and then simply retry (or all end, if the
+/// user dismissed it). A clearance that later expires is challenged
+/// again under a new operation, which shows the check again.
 async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mutex<Storage>>, id: OpId) -> bool {
     use crate::client::clearance;
-    let Some((source, url)) = clearance::take_challenge(id) else {
+    let Some(challenge) = clearance::take_challenge(id) else {
         log_info!("recovery", "403 without a challenge note — nothing to clear");
         return false;
     };
-    let Some(origin) = clearance::origin_of(&url) else { return false };
+    let source = challenge.source;
+    let Some(origin) = clearance::origin_of(&challenge.url) else { return false };
+
+    let dismissals_before = clearance::dismissals(&source);
+    let lock = clearance::earning_lock(&source);
+    let _earning = lock.lock().await;
+    if clearance::generation(&source) > challenge.generation {
+        log_info!("recovery", "{source} clearance was earned while this request was out — retrying with it");
+        return true;
+    }
+    if clearance::dismissals(&source) != dismissals_before {
+        log_info!("recovery", "{source} check was dismissed while this operation waited — not asking again");
+        return false;
+    }
+    if clearance::is_unattended() && clearance::dismissed_within(&source, DISMISSED_QUIET) {
+        log_info!("recovery", "{source} check was dismissed recently — not raising it for background work");
+        return false;
+    }
     if !clearance::mark_cleared(id) {
         log_info!("recovery", "{source} challenged again after a passed check — clearance not accepted");
         return false;
@@ -500,7 +540,7 @@ async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mute
         log_info!("recovery", "no PlatformCapabilities registered — skipping site clearance");
         return false;
     };
-    match capability.earn_site_clearance(source.clone(), url).await {
+    match capability.earn_site_clearance(source.clone(), challenge.url).await {
         Ok(earned) => {
             let saved = clearance::SavedClearance { origin, clearance: earned };
             {
@@ -508,10 +548,12 @@ async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mute
                 clearance::save(&s, &source, &saved);
             }
             clearance::apply(client.read().await.transport(), &source, &saved);
+            clearance::mark_earned(&source);
             log_info!("recovery", "site clearance for {source}: {} cookies", saved.clearance.cookies.len());
             true
         }
         Err(e) => {
+            clearance::mark_dismissed(&source);
             log_info!("recovery", "site clearance for {source} not earned: {e}");
             false
         }

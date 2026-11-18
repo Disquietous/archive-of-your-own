@@ -176,7 +176,7 @@ impl AO3App {
     /// explicit lookup control calls this, never a keystroke.
     pub async fn search_autocomplete(&self, source_id: String, key: String, prefix: String) -> Result<Vec<FieldOption>, AO3Error> {
         let registry = self.sources.clone();
-        self.run_on_runtime(move |_client, _storage| async move {
+        self.run_on_runtime(move |client, storage| async move {
             let Some(source) = registry.by_id(&source_id) else {
                 return Err(AO3Error::NotFound { message: format!("no source {source_id}") });
             };
@@ -188,7 +188,12 @@ impl AO3App {
                 Some(crate::source::search::FieldKind::Text { autocomplete: Some(kind) }) => kind.clone(),
                 _ => return Err(AO3Error::NotFound { message: format!("field {key} offers no suggestions") }),
             };
-            source.autocomplete(&kind, &prefix).await.map_err(AO3Error::from)
+            super::with_recovery(
+                client, storage, OpKind::Fetch { label: "suggestions".to_string() }, RetrySafety::Idempotent,
+                move |_client| {
+                    let (source, kind, prefix) = (source.clone(), kind.clone(), prefix.clone());
+                    async move { source.autocomplete(&kind, &prefix).await.map_err(AO3Error::from) }
+                }).await
         }).await
     }
 }

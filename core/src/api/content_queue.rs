@@ -131,16 +131,21 @@ async fn run_next(
     }
 
     log_info!("content_queue", "Fetching the content of work {work_id}");
-    let mut result = super::works::download_work(client.clone(), storage.clone(), registry.clone(), work_id).await;
-    if let Ok(requested) = &mut result {
-        // The chapters are in: their embedded images complete the work.
-        // A skipped or failed image never fails the download.
-        let cap = IMAGE_CAP_BYTES.load(std::sync::atomic::Ordering::Relaxed);
-        match super::works::prefetch_work_images(client.clone(), storage.clone(), work_id, cap).await {
-            Ok(fetched) => *requested |= fetched > 0,
-            Err(e) => { log_error!("content_queue", "Image prefetch for work {work_id} failed: {e}"); }
+    // Unattended: a human check the user just dismissed is not raised
+    // again for a download nobody is waiting on.
+    let result = crate::client::clearance::unattended(async {
+        let mut result = super::works::download_work(client.clone(), storage.clone(), registry.clone(), work_id).await;
+        if let Ok(requested) = &mut result {
+            // The chapters are in: their embedded images complete the work.
+            // A skipped or failed image never fails the download.
+            let cap = IMAGE_CAP_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+            match super::works::prefetch_work_images(client.clone(), storage.clone(), work_id, cap).await {
+                Ok(fetched) => *requested |= fetched > 0,
+                Err(e) => { log_error!("content_queue", "Image prefetch for work {work_id} failed: {e}"); }
+            }
         }
-    }
+        result
+    }).await;
     let s = storage.lock().await;
     match result {
         Ok(requested) => {

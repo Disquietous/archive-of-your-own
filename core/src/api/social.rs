@@ -4,6 +4,7 @@ use super::*;
 /// chapter's comments) through that source's adapter; the AO3 paths stay
 /// as they are until the AO3 adapter move. None = this is an AO3 work.
 async fn fetch_discussion_elsewhere(
+    client: Arc<tokio::sync::RwLock<AO3Client>>,
     storage: &Arc<Mutex<Storage>>,
     registry: &crate::source::SourceRegistry,
     work_id: u64,
@@ -14,7 +15,11 @@ async fn fetch_discussion_elsewhere(
     if source.id() == SOURCE_AO3 {
         return Ok(None);
     }
-    let cp = source.fetch_discussion(&external, chapter, page).await.map_err(AO3Error::from)?;
+    let cp = with_recovery(client, storage.clone(), OpKind::Fetch { label: "comments".to_string() }, RetrySafety::Idempotent,
+        move |_client| {
+            let (source, external) = (source.clone(), external.clone());
+            async move { source.fetch_discussion(&external, chapter, page).await.map_err(AO3Error::from) }
+        }).await?;
     let s = storage.lock().await;
     save_comments(&s, work_id, chapter.unwrap_or(0), &cp.comments, chapter.is_none());
     let json_comments: Vec<CommentJson> = cp.comments.into_iter().map(CommentJson::from).collect();
@@ -137,7 +142,7 @@ impl AO3App {
     pub async fn fetch_chapter_comments(&self, work_id: u64, chapter_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
         let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
-            if let Some(page) = fetch_discussion_elsewhere(&storage, &registry, work_id, Some(chapter_id), page).await? {
+            if let Some(page) = fetch_discussion_elsewhere(client.clone(), &storage, &registry, work_id, Some(chapter_id), page).await? {
                 return Ok(page);
             }
             let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };
@@ -159,7 +164,7 @@ impl AO3App {
     pub async fn fetch_work_comments(&self, work_id: u64, page: u32) -> Result<UCommentsPage, AO3Error> {
         let registry = self.sources.clone();
         self.run_on_runtime(move |client, storage| async move {
-            if let Some(page) = fetch_discussion_elsewhere(&storage, &registry, work_id, None, page).await? {
+            if let Some(page) = fetch_discussion_elsewhere(client.clone(), &storage, &registry, work_id, None, page).await? {
                 return Ok(page);
             }
             let number = { let s = storage.lock().await; ao3_work_number(&s, work_id)? };

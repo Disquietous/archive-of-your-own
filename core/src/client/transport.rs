@@ -43,14 +43,24 @@ pub trait SiteHooks: Sync {
     fn user_agent(&self) -> Option<String> { None }
 }
 
-/// A challenged (403) response under a tracked operation: leave the note
-/// the recovery engine needs to earn clearance for this site and page.
-fn note_challenge(code: u16, hooks: &dyn SiteHooks, url: &str) {
-    if code == 403 {
-        if let Some(id) = crate::events::current_op() {
-            super::clearance::note_challenge(id, hooks.source(), url);
+/// A challenged response: leave the note the recovery engine needs to
+/// earn clearance for this site. `sent_generation` is the source's
+/// clearance generation when the request left. A challenge outside any
+/// tracked operation cannot be recovered — it is logged so the call site
+/// can be moved onto the engine.
+fn note_challenge(hooks: &dyn SiteHooks, url: &str, is_get: bool, sent_generation: u64) {
+    match crate::events::current_op() {
+        Some(id) => super::clearance::note_challenge(
+            id, hooks.source(), &super::clearance::challenge_page(url, is_get), sent_generation),
+        None => {
+            log_error!("http", "{} challenged {url} outside a tracked operation — the human check cannot be shown",
+                       hooks.source());
         }
     }
+}
+
+fn cf_mitigated(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers.get("cf-mitigated").and_then(|v| v.to_str().ok()).map(str::to_string)
 }
 
 /// The connection behind the transport.
@@ -403,6 +413,7 @@ impl Transport {
             progress!(crate::events::OpPhase::Connecting, 0, None);
 
             let client = self.http()?;
+            let sent_generation = super::clearance::generation(hooks.source());
 
             // Phase 1: Connect + TLS + headers (short timeout — dead connections fail fast)
             let send_start = std::time::Instant::now();
@@ -450,6 +461,17 @@ impl Transport {
             let status = response.status();
             let code = status.as_u16();
 
+            // The site's human check, whatever status it came with: not
+            // the site's answer, and no reload gets past it.
+            let mitigated = cf_mitigated(response.headers());
+            if mitigated.is_some() && super::clearance::is_challenge(code, mitigated.as_deref()) {
+                progress!(crate::events::OpPhase::Failed, 0, None);
+                let detail = format!("HTTP {status} (human check) for {url}");
+                audit.record(code, 0, Some(detail.clone()));
+                note_challenge(hooks, url, true, sent_generation);
+                return Err(AppError::Http { kind: FailureKind::Challenged, detail });
+            }
+
             // 429/503: first, retry ONCE with hard-reload headers: edge
             // caches can serve a stored 429/503 for the URL, in which case
             // every client gets it regardless of exit IP (new circuits
@@ -488,7 +510,9 @@ impl Transport {
                 progress!(crate::events::OpPhase::Failed, 0, None);
                 let detail = format!("HTTP {status} for {url}");
                 audit.record(code, 0, Some(detail.clone()));
-                note_challenge(code, hooks, url);
+                if super::clearance::is_challenge(code, None) {
+                    note_challenge(hooks, url, true, sent_generation);
+                }
                 return Err(AppError::Http { kind: FailureKind::from_status(code, None), detail });
             }
 
@@ -560,6 +584,7 @@ impl Transport {
         let audit = AuditCtx::new(hooks.source(), "POST", url, Some(redact_payload(
             &form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
 
+        let sent_generation = super::clearance::generation(hooks.source());
         let result = tokio::time::timeout(timeout, async {
             let mut req = client.post(url).form(form);
             if let Some(ua) = hooks.user_agent() {
@@ -573,6 +598,14 @@ impl Transport {
                 .await
                 .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
             let status = resp.status().as_u16();
+            // The site's human check is never the endpoint's answer.
+            let mitigated = cf_mitigated(resp.headers());
+            if mitigated.is_some() && super::clearance::is_challenge(status, mitigated.as_deref()) {
+                return Err(AppError::Http {
+                    kind: FailureKind::Challenged,
+                    detail: format!("HTTP {status} (human check) for {url}"),
+                });
+            }
             let set_cookies = resp.headers().get_all("set-cookie")
                 .iter()
                 .filter_map(|v| v.to_str().ok().map(str::to_string))
@@ -588,11 +621,19 @@ impl Transport {
                 audit.record(0, 0, Some("timeout".to_string()));
                 Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
             }
-            Ok(Err(e)) => { audit.record(0, 0, Some(format!("{e}"))); Err(e) }
+            Ok(Err(e)) => {
+                audit.record(0, 0, Some(format!("{e}")));
+                if matches!(e, AppError::Http { kind: FailureKind::Challenged, .. }) {
+                    note_challenge(hooks, url, false, sent_generation);
+                }
+                Err(e)
+            }
             Ok(Ok(out)) => {
                 let error = if ok(out.status, &out.body) { None } else { Some(format!("HTTP {} for {url}", out.status)) };
                 audit.record(out.status, out.body.len() as u64, error);
-                note_challenge(out.status, hooks, url);
+                if super::clearance::is_challenge(out.status, None) {
+                    note_challenge(hooks, url, false, sent_generation);
+                }
                 Ok(out)
             }
         }
@@ -607,6 +648,7 @@ impl Transport {
         let client = self.http()?;
         let timeout = self.request_timeout();
 
+        let sent_generation = super::clearance::generation(hooks.source());
         log_info!("image", "Fetching {}", url);
         // Image-appropriate headers (override the client's document-navigation
         // defaults): a CDN seeing Accept: text/html on an image URL may serve
@@ -616,6 +658,11 @@ impl Transport {
             .header("Sec-Fetch-Dest", "image")
             .header("Sec-Fetch-Mode", "no-cors")
             .header("Sec-Fetch-Site", "cross-site");
+        // A clearance is bound to the User-Agent that earned it.
+        let request = match hooks.user_agent() {
+            Some(ua) => request.header(USER_AGENT, ua),
+            None => request,
+        };
         let response = match tokio::time::timeout(timeout, request.send()).await {
             Err(_) => {
                 log_error!("image", "Timeout connecting to {}", url);
@@ -643,6 +690,13 @@ impl Transport {
         if !status.is_success() {
             let detail = format!("HTTP {status}");
             audit.record(status.as_u16(), 0, Some(detail.clone()));
+            // An image host's bare 403 is usually hotlink protection, so
+            // only a marked challenge raises the check — on the host's
+            // front page, since an image is no page to pass it on.
+            if cf_mitigated(response.headers()).is_some_and(|v| super::clearance::is_challenge(status.as_u16(), Some(&v))) {
+                note_challenge(hooks, url, false, sent_generation);
+                return Err(AppError::Http { kind: FailureKind::Challenged, detail });
+            }
             return Err(AppError::Http { kind: FailureKind::from_status(status.as_u16(), None), detail });
         }
         if response.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES) {
