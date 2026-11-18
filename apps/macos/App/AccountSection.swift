@@ -21,6 +21,8 @@ struct AccountSection: View {
     @State private var addSource: String?
     @State private var confirmLogoutID: String?
     @State private var confirmRemoveID: String?
+    @State private var hoveredID: String?
+    @FocusState private var passwordFocused: Bool
 
     /// One account with the source it belongs to.
     private struct Row: Identifiable {
@@ -37,10 +39,11 @@ struct AccountSection: View {
         groups.flatMap { group in group.accounts.map { Row(account: $0, group: group) } }
     }
 
-    /// An active account that signs in by password is logged out — the
-    /// password field for it shows under the list.
-    private var activeIsLoggedOut: Bool {
-        rows.contains { $0.group.signIn == .credentials && $0.account.isActive && !$0.account.loggedIn }
+    /// An active account that signs in by password and is logged out —
+    /// the one the password field belongs to. The field shows inside the
+    /// list, directly under this row, and the pair is tinted as one block.
+    private func needsPassword(_ row: Row) -> Bool {
+        row.group.signIn == .credentials && row.account.isActive && !row.account.loggedIn
     }
 
     var body: some View {
@@ -48,9 +51,6 @@ struct AccountSection: View {
         SettingsGroup(theme: theme, label: "Accounts") {
             if !rows.isEmpty {
                 accountsList
-                if activeIsLoggedOut && !showAddForm {
-                    logInActiveForm
-                }
             }
             if rows.isEmpty || showAddForm {
                 addAccountForm
@@ -176,15 +176,16 @@ struct AccountSection: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private var logInActiveForm: some View {
+    private func logInActiveForm(_ row: Row) -> some View {
         VStack(spacing: 8) {
             if appState.bridge.networkBlocked {
                 SettingsCard(theme: theme) {
                     SettingsInfoRow(theme: theme, label: "Log in", value: appState.bridge.privacyStatus.connectHint)
                 }
             } else {
-                SecureField("Password for \(appState.ao3ActiveAccount ?? "account")", text: $password)
+                SecureField("Password for \(row.account.username)", text: $password)
                     .textFieldStyle(.roundedBorder)
+                    .focused($passwordFocused)
                     .onSubmit(logInActive)
                 if let error = appState.ao3LoginError {
                     Text(error)
@@ -210,6 +211,8 @@ struct AccountSection: View {
                 .disabled(appState.ao3LoginInFlight || password.isEmpty)
             }
         }
+        .padding(.leading, 17)
+        .padding(.bottom, 10)
     }
 
     private func credentialsFields(buttonLabel: String, action: @escaping () -> Void) -> some View {
@@ -252,7 +255,23 @@ struct AccountSection: View {
                 if index > 0 {
                     theme.line.frame(height: 1)
                 }
-                accountRow(row)
+                let focused = needsPassword(row) && !showAddForm
+                VStack(spacing: 0) {
+                    accountRow(row)
+                    if focused {
+                        logInActiveForm(row)
+                    }
+                }
+                // Bleeds to the card's edges (the card pads 13).
+                .background(
+                    (focused ? theme.accentSoft
+                     : hoveredID == row.id && !row.account.isActive ? theme.surface2
+                     : Color.clear)
+                        .padding(.horizontal, -13)
+                )
+                .onHover { inside in
+                    if inside { hoveredID = row.id } else if hoveredID == row.id { hoveredID = nil }
+                }
             }
         }
     }
@@ -300,15 +319,30 @@ struct AccountSection: View {
         .padding(.vertical, 9)
         .contentShape(Rectangle())
         .onTapGesture {
-            guard !account.isActive else { return }
+            if account.isActive {
+                if needsPassword(row) { passwordFocused = true }
+                return
+            }
+            // The typed password belonged to the account switched away from.
+            password = ""
+            appState.ao3LoginError = nil
             appState.switchAccount(account.id)
+            // The field for the new account exists only after this update.
+            DispatchQueue.main.async { passwordFocused = true }
         }
     }
 
     /// "ScribbleHub · Active · Logged in" — active is per source.
     private func rowStatus(_ row: Row) -> String {
         let login = row.account.loggedIn ? "Logged in" : "Logged out"
-        let state = row.account.isActive ? "Active · \(login)" : "\(login) · tap to switch"
+        let state: String
+        if needsPassword(row) {
+            state = "Active · Logged out · enter password to log in"
+        } else if row.account.isActive {
+            state = "Active · \(login)"
+        } else {
+            state = "\(login) · click to switch"
+        }
         return "\(row.group.name) · \(state)"
     }
 
