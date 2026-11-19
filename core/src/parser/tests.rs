@@ -279,6 +279,10 @@ fn test_parse_chapters_format() {
     assert_eq!(parse_chapters("3/12"), (3, Some(12)));
     assert_eq!(parse_chapters("1/?"), (1, None));
     assert_eq!(parse_chapters("24/30"), (24, Some(30)));
+    // AO3 writes counts of a thousand and up with a comma.
+    assert_eq!(parse_chapters("999/1,000"), (999, Some(1000)));
+    assert_eq!(parse_chapters("1,024/1,500"), (1024, Some(1500)));
+    assert_eq!(parse_chapters("1,024/?"), (1024, None));
 }
 
 #[test]

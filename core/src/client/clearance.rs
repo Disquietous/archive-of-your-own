@@ -4,7 +4,12 @@
 //! clearance cookie is bound to both, so every later request to that site
 //! must present the same pair.
 //!
-//! Three pieces live here: the per-source User-Agent the transport sends
+//! Everything is kept per site — the host that challenged — never per
+//! source: a chapter's images come from hosts of their own, and passing
+//! one of theirs must not touch the clearance (or the User-Agent) of the
+//! source the chapter belongs to.
+//!
+//! Three pieces live here: the per-site User-Agent the transport sends
 //! (`user_agent`), the note the transport leaves when a request is
 //! challenged so the recovery engine knows which site and page to show
 //! (`note_challenge` / `take_challenge`), and the persisted form every
@@ -13,7 +18,7 @@
 //!
 //! A clearance expires, and the site then challenges again: every
 //! operation is asked afresh, so the check is simply shown again. What
-//! is kept per source (`generation`, `earning_lock`, `dismissals`) makes
+//! is kept per site (`generation`, `earning_lock`, `dismissals`) makes
 //! several operations challenged at once share one sheet.
 
 use std::collections::HashMap;
@@ -44,27 +49,41 @@ pub struct SavedClearance {
     pub clearance: SiteClearance,
 }
 
-/// app_state key: a JSON map of source id → `SavedClearance`.
+/// app_state key: a JSON map of site host → `SavedClearance`. (Entries
+/// written before clearances were per site are keyed by source id; `load`
+/// re-keys them by their origin's host.)
 pub const STATE_KEY: &str = "site_clearances";
 
 static USER_AGENTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-/// The User-Agent a source's requests must carry, once a clearance has
-/// been earned for it. `None` → the shared app User-Agent.
-pub fn user_agent(source: &str) -> Option<String> {
-    USER_AGENTS.lock().unwrap().as_ref()?.get(source).cloned()
+/// The host of a URL — the site a clearance is earned at and kept for.
+pub fn site_of(url: &str) -> Option<String> {
+    url::Url::parse(url).ok()?.host_str().map(str::to_string)
 }
 
-pub fn set_user_agent(source: &str, ua: &str) {
-    USER_AGENTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(source.to_string(), ua.to_string());
+/// The User-Agent requests to a site must carry, once a clearance has
+/// been earned there. `None` → the shared app User-Agent.
+pub fn user_agent(site: &str) -> Option<String> {
+    USER_AGENTS.lock().unwrap().as_ref()?.get(site).cloned()
+}
+
+/// `user_agent` for the site a request URL goes to.
+pub fn user_agent_for(url: &str) -> Option<String> {
+    user_agent(&site_of(url)?)
+}
+
+pub fn set_user_agent(site: &str, ua: &str) {
+    USER_AGENTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(site.to_string(), ua.to_string());
 }
 
 /// A challenged request, as the transport noted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {
+    /// The source whose request it was (the platform names it to the user).
     pub source: String,
-    /// The page the platform shows the user to pass the check on.
+    /// The page the platform shows the user to pass the check on; its
+    /// host is the site the clearance is for.
     pub url: String,
-    /// The source's clearance generation when the request was sent
+    /// The site's clearance generation when the request was sent
     /// (`generation`): a later generation means a clearance was earned
     /// after this request left, so it is retried instead of asked again.
     pub generation: u64,
@@ -72,7 +91,7 @@ pub struct Challenge {
 
 static CHALLENGES: Mutex<Option<HashMap<OpId, Challenge>>> = Mutex::new(None);
 
-/// Per source: how many clearances have been earned this launch, how many
+/// Per site: how many clearances have been earned this launch, how many
 /// checks the user dismissed (and when the last one was), and the lock
 /// that keeps the check to one sheet at a time.
 #[derive(Default)]
@@ -90,8 +109,11 @@ fn with_source<T>(source: &str, f: impl FnOnce(&mut SourceState) -> T) -> T {
     f(guard.get_or_insert_with(HashMap::new).entry(source.to_string()).or_default())
 }
 
-/// How many clearances `source` has earned this launch.
-pub fn generation(source: &str) -> u64 { with_source(source, |s| s.generation) }
+/// How many clearances `site` has earned this launch.
+pub fn generation(site: &str) -> u64 { with_source(site, |s| s.generation) }
+
+/// `generation` for the site a request URL goes to.
+pub fn generation_for(url: &str) -> u64 { site_of(url).map(|site| generation(&site)).unwrap_or(0) }
 
 /// A clearance was just earned for `source`.
 pub fn mark_earned(source: &str) { with_source(source, |s| s.generation += 1) }
@@ -180,9 +202,13 @@ pub fn origin_of(url: &str) -> Option<String> {
 }
 
 /// Put a clearance to work on the live transport: its cookies into the jar
-/// for the site, its User-Agent on the source's requests.
-pub fn apply(transport: &Transport, source: &str, saved: &SavedClearance) {
-    set_user_agent(source, &saved.clearance.user_agent);
+/// for the site, its User-Agent on every request to the site.
+pub fn apply(transport: &Transport, saved: &SavedClearance) {
+    if let Some(site) = site_of(&saved.origin) {
+        if !saved.clearance.user_agent.is_empty() {
+            set_user_agent(&site, &saved.clearance.user_agent);
+        }
+    }
     let joined = saved.clearance.cookies.iter()
         .filter(|c| !c.is_empty())
         .cloned()
@@ -193,20 +219,35 @@ pub fn apply(transport: &Transport, source: &str, saved: &SavedClearance) {
     }
 }
 
-/// Every saved clearance, by source id.
+/// Every saved clearance, by site host.
 pub fn load(storage: &Storage) -> HashMap<String, SavedClearance> {
-    storage.get_state(STATE_KEY).ok().flatten()
+    let stored: HashMap<String, SavedClearance> = storage.get_state(STATE_KEY).ok().flatten()
         .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    by_site(stored)
 }
 
-/// Record (or replace) a source's clearance.
-pub fn save(storage: &Storage, source: &str, saved: &SavedClearance) {
+/// Key every entry by its origin's host. An entry already keyed that way
+/// wins over an older one (keyed by source id) for the same site.
+fn by_site(stored: HashMap<String, SavedClearance>) -> HashMap<String, SavedClearance> {
+    let mut out: HashMap<String, SavedClearance> = HashMap::new();
+    for (key, saved) in stored {
+        let Some(site) = site_of(&saved.origin) else { continue };
+        if key == site || !out.contains_key(&site) {
+            out.insert(site, saved);
+        }
+    }
+    out
+}
+
+/// Record (or replace) the clearance for the site `saved` was earned at.
+pub fn save(storage: &Storage, saved: &SavedClearance) {
+    let Some(site) = site_of(&saved.origin) else { return };
     let mut all = load(storage);
-    all.insert(source.to_string(), saved.clone());
+    all.insert(site.clone(), saved.clone());
     if let Ok(json) = serde_json::to_string(&all) {
         if let Err(e) = storage.set_state(STATE_KEY, &json) {
-            log_error!("clearance", "could not persist site clearance for {source}: {e}");
+            log_error!("clearance", "could not persist site clearance for {site}: {e}");
         }
     }
 }
@@ -214,8 +255,8 @@ pub fn save(storage: &Storage, source: &str, saved: &SavedClearance) {
 /// Re-apply every saved clearance — after a relaunch, or whenever the
 /// transport is rebuilt with an empty jar.
 pub fn restore_all(storage_snapshot: &HashMap<String, SavedClearance>, transport: &Transport) {
-    for (source, saved) in storage_snapshot {
-        apply(transport, source, saved);
+    for saved in storage_snapshot.values() {
+        apply(transport, saved);
     }
 }
 
@@ -281,6 +322,22 @@ mod tests {
         assert_eq!(generation("other-counting-test"), 0);
     }
 
+    #[test]
+    fn older_entries_are_rekeyed_by_site() {
+        let entry = |ua: &str| SavedClearance {
+            origin: "https://www.scribblehub.com".into(),
+            clearance: SiteClearance { cookies: vec![], user_agent: ua.into() },
+        };
+        let mut stored = HashMap::new();
+        stored.insert("scribblehub".to_string(), entry("old"));
+        let rekeyed = by_site(stored.clone());
+        assert_eq!(rekeyed.get("www.scribblehub.com").map(|s| s.clearance.user_agent.as_str()), Some("old"));
+        stored.insert("www.scribblehub.com".to_string(), entry("new"));
+        let rekeyed = by_site(stored);
+        assert_eq!(rekeyed.len(), 1);
+        assert_eq!(rekeyed["www.scribblehub.com"].clearance.user_agent, "new");
+    }
+
     #[tokio::test]
     async fn unattended_is_scoped() {
         assert!(!is_unattended());
@@ -305,8 +362,10 @@ mod tests {
             origin: "https://clearance.example".into(),
             clearance: SiteClearance { cookies: vec!["cf_clearance=abc".into(), "__cf_bm=d".into()], user_agent: "UA/2".into() },
         };
-        apply(&transport, "clearance-test", &saved);
-        assert_eq!(user_agent("clearance-test").as_deref(), Some("UA/2"));
+        apply(&transport, &saved);
+        assert_eq!(user_agent("clearance.example").as_deref(), Some("UA/2"));
+        assert_eq!(user_agent_for("https://clearance.example/a/b.png").as_deref(), Some("UA/2"));
+        assert_eq!(user_agent_for("https://other.example/"), None);
         let header = transport.cookies_for("https://clearance.example");
         assert!(header.contains("cf_clearance=abc") && header.contains("__cf_bm=d"), "{header}");
     }

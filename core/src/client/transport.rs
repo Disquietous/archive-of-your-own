@@ -37,10 +37,6 @@ pub trait SiteHooks: Sync {
     /// Runs on every fetched page body before it is returned: harvest
     /// tokens, strip site chrome the parsers would trip over.
     fn on_page(&self, body: String) -> String { body }
-    /// The User-Agent this site's requests must carry instead of the
-    /// shared one — a clearance earned in a web view is bound to the web
-    /// view's (`client::clearance`).
-    fn user_agent(&self) -> Option<String> { None }
 }
 
 /// A challenged response: leave the note the recovery engine needs to
@@ -413,12 +409,12 @@ impl Transport {
             progress!(crate::events::OpPhase::Connecting, 0, None);
 
             let client = self.http()?;
-            let sent_generation = super::clearance::generation(hooks.source());
+            let sent_generation = super::clearance::generation_for(url);
 
             // Phase 1: Connect + TLS + headers (short timeout — dead connections fail fast)
             let send_start = std::time::Instant::now();
             let mut req = client.get(url);
-            if let Some(ua) = hooks.user_agent() {
+            if let Some(ua) = super::clearance::user_agent_for(url) {
                 req = req.header(USER_AGENT, ua);
             }
             if ajax {
@@ -584,10 +580,10 @@ impl Transport {
         let audit = AuditCtx::new(hooks.source(), "POST", url, Some(redact_payload(
             &form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
 
-        let sent_generation = super::clearance::generation(hooks.source());
+        let sent_generation = super::clearance::generation_for(url);
         let result = tokio::time::timeout(timeout, async {
             let mut req = client.post(url).form(form);
-            if let Some(ua) = hooks.user_agent() {
+            if let Some(ua) = super::clearance::user_agent_for(url) {
                 req = req.header(USER_AGENT, ua);
             }
             for (name, value) in headers {
@@ -648,7 +644,7 @@ impl Transport {
         let client = self.http()?;
         let timeout = self.request_timeout();
 
-        let sent_generation = super::clearance::generation(hooks.source());
+        let sent_generation = super::clearance::generation_for(url);
         log_info!("image", "Fetching {}", url);
         // Image-appropriate headers (override the client's document-navigation
         // defaults): a CDN seeing Accept: text/html on an image URL may serve
@@ -659,7 +655,7 @@ impl Transport {
             .header("Sec-Fetch-Mode", "no-cors")
             .header("Sec-Fetch-Site", "cross-site");
         // A clearance is bound to the User-Agent that earned it.
-        let request = match hooks.user_agent() {
+        let request = match super::clearance::user_agent_for(url) {
             Some(ua) => request.header(USER_AGENT, ua),
             None => request,
         };
@@ -694,7 +690,11 @@ impl Transport {
             // only a marked challenge raises the check — on the host's
             // front page, since an image is no page to pass it on.
             if cf_mitigated(response.headers()).is_some_and(|v| super::clearance::is_challenge(status.as_u16(), Some(&v))) {
-                note_challenge(hooks, url, false, sent_generation);
+                // Not for unattended work: a background image prefetch
+                // never puts a check for an image host in front of the user.
+                if !super::clearance::is_unattended() {
+                    note_challenge(hooks, url, false, sent_generation);
+                }
                 return Err(AppError::Http { kind: FailureKind::Challenged, detail });
             }
             return Err(AppError::Http { kind: FailureKind::from_status(status.as_u16(), None), detail });

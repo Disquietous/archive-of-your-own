@@ -51,7 +51,6 @@ struct Hooks;
 
 impl SiteHooks for Hooks {
     fn source(&self) -> &'static str { SOURCE_ID }
-    fn user_agent(&self) -> Option<String> { crate::client::clearance::user_agent(SOURCE_ID) }
 }
 
 static HOOKS: Hooks = Hooks;

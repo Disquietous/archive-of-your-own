@@ -162,10 +162,12 @@ final class ChallengeSheetController: NSObject, WKNavigationDelegate, WKHTTPCook
         }
     }
 
-    /// Cookie domains come as "www.site.com" or ".site.com".
+    /// Cookie domains come as "www.site.com" or ".site.com" — and the
+    /// clearance cookie is often set on a parent of the page's host
+    /// (".site.com" for a page on "d.site.com"), which the page is sent too.
     private static func belongs(_ domain: String, to site: String) -> Bool {
         let bare = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
-        return bare == site || bare.hasSuffix("." + site)
+        return bare == site || bare.hasSuffix("." + site) || site.hasSuffix("." + bare)
     }
 
     nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {

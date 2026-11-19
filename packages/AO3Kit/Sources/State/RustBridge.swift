@@ -168,6 +168,24 @@ final class RustBridge {
         return fingerprint
     }
 
+    /// What the tunnel carrying traffic now looks like, when the registered
+    /// VPN doesn't recognise it and the user could confirm it as theirs
+    /// (a changed server or protocol). Nil otherwise.
+    var unrecognisedVPNConnection: String? {
+        (app ?? torOnlyApp)?.unrecognisedVpnConnection()
+    }
+
+    /// The user confirmed the current tunnel is their registered VPN:
+    /// recognise it from now on, alongside what was already registered.
+    func acceptCurrentVPNConnection() throws {
+        guard let runtime = app ?? torOnlyApp else {
+            throw Ao3Error.Network(message: "No runtime available")
+        }
+        _ = try runtime.acceptVpnConnection()
+        VpnSettings.fingerprintJSON = runtime.vpnFingerprintJson()
+        vpnStatus = runtime.vpnStatus()
+    }
+
     func forgetVPN() {
         VpnSettings.fingerprintJSON = nil
         for runtime in [app, torOnlyApp].compactMap({ $0 }) {

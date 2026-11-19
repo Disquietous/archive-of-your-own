@@ -35,6 +35,21 @@ pub struct VpnFingerprint {
     /// same; the primary match, since providers keep their resolvers.
     pub dns: Vec<String>,
     pub captured_at_ms: u64,
+    /// Other connections the user confirmed as this same VPN: a provider
+    /// changes subnet and resolvers with the server or protocol, so one
+    /// VPN is recognised by any of them.
+    #[serde(default)]
+    pub also: Vec<VpnConnection>,
+}
+
+/// One more way the registered VPN's tunnel can look, added when the user
+/// confirmed a changed connection as theirs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct VpnConnection {
+    pub tunnel_kind: String,
+    pub subnet: String,
+    pub dns: Vec<String>,
+    pub captured_at_ms: u64,
 }
 
 /// The result of comparing the network now with the registered fingerprint.
@@ -171,7 +186,49 @@ pub(crate) fn capture(label: &str, facts: &NetworkFacts, now_ms: u64) -> Result<
         subnet,
         dns,
         captured_at_ms: now_ms,
+        also: Vec::new(),
     })
+}
+
+/// The tunnel carrying traffic now, when it is one the user could confirm
+/// as their registered VPN: a tunnel on the default route that the
+/// fingerprint does not recognise, with no IPv6 path around it. None when
+/// it already matches or when there is nothing safe to add.
+pub(crate) fn unrecognised(fp: &VpnFingerprint, facts: &NetworkFacts) -> Option<String> {
+    let iface = facts.default_iface_v4.as_deref()?;
+    tunnel_kind(iface)?;
+    if facts.default_iface_v6.as_deref().is_some_and(|v6| tunnel_kind(v6).is_none()) {
+        return None;
+    }
+    if verify(fp, facts) == VpnStatus::Matched {
+        return None;
+    }
+    Some(describe(facts, iface))
+}
+
+/// Add the tunnel carrying traffic now to the fingerprint's recognised
+/// connections — the user confirmed it is the same VPN. Refused under the
+/// same conditions as a first capture, and when IPv6 would bypass the
+/// tunnel. A connection that already matches changes nothing.
+pub(crate) fn accept(fp: &VpnFingerprint, facts: &NetworkFacts, now_ms: u64) -> Result<VpnFingerprint, AppError> {
+    let seen = capture(&fp.label, facts, now_ms)?;
+    if let Some(v6) = facts.default_iface_v6.as_deref() {
+        if tunnel_kind(v6).is_none() {
+            return Err(AppError::NetworkError(format!(
+                "IPv6 traffic would bypass the tunnel through {v6}, so this connection can't be trusted."
+            )));
+        }
+    }
+    let mut fp = fp.clone();
+    if verify(&fp, facts) != VpnStatus::Matched {
+        fp.also.push(VpnConnection {
+            tunnel_kind: seen.tunnel_kind,
+            subnet: seen.subnet,
+            dns: seen.dns,
+            captured_at_ms: now_ms,
+        });
+    }
+    Ok(fp)
 }
 
 /// Compare the network now with a fingerprint.
@@ -185,9 +242,11 @@ pub(crate) fn verify(fp: &VpnFingerprint, facts: &NetworkFacts) -> VpnStatus {
             return VpnStatus::DifferentTunnel { seen: format!("IPv6 traffic would bypass the tunnel through {v6}") };
         }
     }
-    let dns_ok = same_dns(&fp.dns, &facts.dns);
-    let subnet_ok = tunnel_addr(facts, iface).is_some_and(|a| in_subnet(a.addr, &fp.subnet));
-    if dns_ok || subnet_ok {
+    let addr = tunnel_addr(facts, iface).map(|a| a.addr);
+    let recognised = |dns: &[String], subnet: &str| {
+        same_dns(dns, &facts.dns) || addr.is_some_and(|a| in_subnet(a, subnet))
+    };
+    if recognised(&fp.dns, &fp.subnet) || fp.also.iter().any(|c| recognised(&c.dns, &c.subnet)) {
         VpnStatus::Matched
     } else {
         VpnStatus::DifferentTunnel { seen: describe(facts, iface) }
@@ -558,6 +617,47 @@ mod tests {
         assert!(matches!(verify(&fp, &leaky), VpnStatus::DifferentTunnel { ref seen } if seen.contains("en0")));
         leaky.default_iface_v6 = Some("utun4".into());
         assert_eq!(verify(&fp, &leaky), VpnStatus::Matched);
+    }
+
+    #[test]
+    fn an_accepted_connection_is_recognised_alongside_the_first() {
+        let fp = capture("NordVPN", &facts("utun4", "10.5.0.2", 16, &["100.64.0.2"]), 1).unwrap();
+        let obfuscated = facts("utun6", "10.3.0.2", 32, &["103.86.96.100", "103.86.99.100"]);
+        assert!(matches!(verify(&fp, &obfuscated), VpnStatus::DifferentTunnel { .. }));
+        assert_eq!(unrecognised(&fp, &obfuscated).as_deref(),
+                   Some("utun6 10.3.0.2/32, DNS 103.86.96.100 103.86.99.100"));
+
+        let both = accept(&fp, &obfuscated, 2).unwrap();
+        assert_eq!(both.also.len(), 1);
+        assert_eq!(verify(&both, &obfuscated), VpnStatus::Matched);
+        assert_eq!(unrecognised(&both, &obfuscated), None);
+        // The original connection still matches, and accepting a known
+        // one adds nothing.
+        let original = facts("utun4", "10.5.0.9", 16, &["100.64.0.2"]);
+        assert_eq!(verify(&both, &original), VpnStatus::Matched);
+        assert_eq!(accept(&both, &original, 3).unwrap(), both);
+        // A third, unconfirmed tunnel is still refused.
+        let other = facts("utun5", "10.8.0.3", 24, &["1.1.1.1"]);
+        assert!(matches!(verify(&both, &other), VpnStatus::DifferentTunnel { .. }));
+    }
+
+    #[test]
+    fn nothing_unprotected_can_be_accepted() {
+        let fp = nord();
+        let plain = facts("en0", "192.168.1.5", 24, &["192.168.1.1"]);
+        assert!(accept(&fp, &plain, 2).is_err());
+        assert_eq!(unrecognised(&fp, &plain), None);
+        let mut leaky = facts("utun5", "10.8.0.3", 24, &["1.1.1.1"]);
+        leaky.default_iface_v6 = Some("en0".into());
+        assert!(accept(&fp, &leaky, 2).is_err());
+        assert_eq!(unrecognised(&fp, &leaky), None);
+    }
+
+    #[test]
+    fn a_fingerprint_saved_before_extra_connections_still_loads() {
+        let json = r#"{"label":"NordVPN","tunnel_kind":"utun","subnet":"10.5.0.2/16","dns":["100.64.0.2"],"captured_at_ms":1}"#;
+        let fp: VpnFingerprint = serde_json::from_str(json).unwrap();
+        assert!(fp.also.is_empty());
     }
 
     #[test]

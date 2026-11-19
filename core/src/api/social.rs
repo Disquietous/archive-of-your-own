@@ -634,20 +634,13 @@ impl AO3App {
             let url = match known_url {
                 Some(url) => url,
                 None => {
-                    let username_for_fetch = username.clone();
-                    let profile = with_recovery(client.clone(), storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
-                        move |client| {
-                            let username = username_for_fetch.clone();
-                            async move { client.read().await.fetch_user_profile(&username).await.map_err(AO3Error::from) }
-                        }).await?;
-                    let Some(url) = profile.avatar_url.clone() else {
+                    // The shared profile fetch records the avatar URL, and
+                    // rides along with a profile fetch already in flight.
+                    super::users::fetch_ao3_profile(client.clone(), storage.clone(), &username).await?;
+                    let s = storage.lock().await;
+                    let Some(url) = s.get_known_avatar_url(&username).unwrap_or(None) else {
                         return Err(AO3Error::from(AppError::ElementNotFound(format!("profile icon for {username}"))));
                     };
-                    // A profile-page fetch is the authoritative source for
-                    // this user's avatar URL — record it so future lookups
-                    // skip the profile request.
-                    let s = storage.lock().await;
-                    log_db("record_user", s.record_user(&profile));
                     url
                 }
             };

@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
-pub use super::vpn::{VpnFingerprint, VpnStatus};
+pub use super::vpn::{VpnConnection, VpnFingerprint, VpnStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum PrivacyMode {
@@ -81,6 +81,27 @@ pub fn register_vpn(label: &str) -> Result<VpnFingerprint, crate::error::AppErro
     let fp = super::vpn::capture(label, &facts, super::now_ms())?;
     set_vpn_fingerprint(Some(fp.clone()));
     Ok(fp)
+}
+
+/// The user confirmed the tunnel carrying traffic now is their registered
+/// VPN (a changed server or protocol): recognise it from now on, alongside
+/// what was already registered.
+pub fn accept_current_vpn() -> Result<VpnFingerprint, crate::error::AppError> {
+    let Some(fp) = vpn_fingerprint() else {
+        return Err(crate::error::AppError::NetworkError("No VPN is registered yet.".into()));
+    };
+    let facts = super::vpn::observe()?;
+    let fp = super::vpn::accept(&fp, &facts, super::now_ms())?;
+    set_vpn_fingerprint(Some(fp.clone()));
+    Ok(fp)
+}
+
+/// A description of the tunnel carrying traffic now, when it is one the
+/// registered VPN does not recognise and the user could confirm. None
+/// when nothing is registered, it already matches, or no tunnel is up.
+pub fn unrecognised_vpn_connection() -> Option<String> {
+    let fp = vpn_fingerprint()?;
+    super::vpn::unrecognised(&fp, &super::vpn::observe().ok()?)
 }
 
 /// The VPN's state right now, by local inspection. Microseconds; no I/O
@@ -157,6 +178,7 @@ mod tests {
             subnet: "10.5.0.2/16".into(),
             dns: vec![],
             captured_at_ms: 0,
+            also: vec![],
         }
     }
 

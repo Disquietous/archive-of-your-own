@@ -19,7 +19,7 @@ pub use circuit::{CircuitHopInfo, StreamInfo, current_circuit_hops, current_stre
 pub use clearance::SiteClearance;
 pub use failure::FailureKind;
 pub use helpers::sniff_image_kind;
-pub use privacy::{NetworkRefusal, PrivacyMode, VpnFingerprint, VpnStatus};
+pub use privacy::{NetworkRefusal, PrivacyMode, VpnConnection, VpnFingerprint, VpnStatus};
 pub use transport::{PostOutcome, SiteHooks, Transport};
 
 #[cfg(feature = "tor")]

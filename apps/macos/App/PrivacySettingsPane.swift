@@ -13,6 +13,8 @@ struct PrivacySettingsPane: View {
     @State private var chapterCleanupRan = false
     @State private var confirmOpen = false
     @State private var confirmVpnOptional = false
+    /// The unrecognised tunnel awaiting the user's confirmation, if any.
+    @State private var confirmTrustConnection: String?
     @State private var vpnLabel = "NordVPN"
     @State private var vpnError: String?
 
@@ -120,6 +122,21 @@ struct PrivacySettingsPane: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Requests will go out even when your VPN is off or unrecognised. The status is still shown, but nothing is blocked.")
+            }
+            .alert("Trust this connection?",
+                   isPresented: Binding(get: { confirmTrustConnection != nil },
+                                        set: { if !$0 { confirmTrustConnection = nil } })) {
+                Button("Trust") {
+                    do {
+                        try appState.bridge.acceptCurrentVPNConnection()
+                        vpnError = nil
+                    } catch {
+                        vpnError = AppState.readableError(error)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("\(confirmTrustConnection ?? "")\n\nThe app will treat this as \(appState.bridge.vpnFingerprint?.label ?? "your VPN") from now on, along with the connections it already knows. Only trust it if you changed the VPN’s server or protocol yourself.")
             }
 
             SettingsGroup(theme: theme, label: "Storage") {
@@ -284,6 +301,11 @@ struct PrivacySettingsPane: View {
                     theme.line.frame(height: 1)
                     SettingsInfoRow(theme: theme, label: "Status",
                                     value: status.titleWithCheck(at: appState.bridge.vpnCheckedAt))
+                    if !fingerprint.also.isEmpty {
+                        theme.line.frame(height: 1)
+                        SettingsInfoRow(theme: theme, label: "Recognised connections",
+                                        value: "\(fingerprint.also.count + 1)")
+                    }
                     theme.line.frame(height: 1)
                     SettingsToggleRow(theme: theme, label: "Block requests when my VPN is off",
                                       sublabel: "Off: requests go out anyway; the status is still shown",
@@ -315,6 +337,11 @@ struct PrivacySettingsPane: View {
             } else {
                 ghostButton("Register Current VPN", tint: theme.ink) {
                     registerVPN(label: vpnLabel)
+                }
+            }
+            if fingerprint != nil, let changed = appState.bridge.unrecognisedVPNConnection {
+                ghostButton("Trust This Connection", tint: theme.ink) {
+                    confirmTrustConnection = changed
                 }
             }
             if let vpnError {

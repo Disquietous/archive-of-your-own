@@ -515,46 +515,50 @@ async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mute
         return false;
     };
     let source = challenge.source;
-    let Some(origin) = clearance::origin_of(&challenge.url) else { return false };
+    // The site is the host that challenged — the source's own, or an
+    // image host's; everything about the clearance is kept under it.
+    let (Some(origin), Some(site)) = (clearance::origin_of(&challenge.url), clearance::site_of(&challenge.url)) else {
+        return false;
+    };
 
-    let dismissals_before = clearance::dismissals(&source);
-    let lock = clearance::earning_lock(&source);
+    let dismissals_before = clearance::dismissals(&site);
+    let lock = clearance::earning_lock(&site);
     let _earning = lock.lock().await;
-    if clearance::generation(&source) > challenge.generation {
-        log_info!("recovery", "{source} clearance was earned while this request was out — retrying with it");
+    if clearance::generation(&site) > challenge.generation {
+        log_info!("recovery", "{site} clearance was earned while this request was out — retrying with it");
         return true;
     }
-    if clearance::dismissals(&source) != dismissals_before {
-        log_info!("recovery", "{source} check was dismissed while this operation waited — not asking again");
+    if clearance::dismissals(&site) != dismissals_before {
+        log_info!("recovery", "{site} check was dismissed while this operation waited — not asking again");
         return false;
     }
-    if clearance::is_unattended() && clearance::dismissed_within(&source, DISMISSED_QUIET) {
-        log_info!("recovery", "{source} check was dismissed recently — not raising it for background work");
+    if clearance::is_unattended() && clearance::dismissed_within(&site, DISMISSED_QUIET) {
+        log_info!("recovery", "{site} check was dismissed recently — not raising it for background work");
         return false;
     }
     if !clearance::mark_cleared(id) {
-        log_info!("recovery", "{source} challenged again after a passed check — clearance not accepted");
+        log_info!("recovery", "{site} challenged again after a passed check — clearance not accepted");
         return false;
     }
     let Some(capability) = capabilities::get() else {
         log_info!("recovery", "no PlatformCapabilities registered — skipping site clearance");
         return false;
     };
-    match capability.earn_site_clearance(source.clone(), challenge.url).await {
+    match capability.earn_site_clearance(source, challenge.url).await {
         Ok(earned) => {
             let saved = clearance::SavedClearance { origin, clearance: earned };
             {
                 let s = storage.lock().await;
-                clearance::save(&s, &source, &saved);
+                clearance::save(&s, &saved);
             }
-            clearance::apply(client.read().await.transport(), &source, &saved);
-            clearance::mark_earned(&source);
-            log_info!("recovery", "site clearance for {source}: {} cookies", saved.clearance.cookies.len());
+            clearance::apply(client.read().await.transport(), &saved);
+            clearance::mark_earned(&site);
+            log_info!("recovery", "site clearance for {site}: {} cookies", saved.clearance.cookies.len());
             true
         }
         Err(e) => {
-            clearance::mark_dismissed(&source);
-            log_info!("recovery", "site clearance for {source} not earned: {e}");
+            clearance::mark_dismissed(&site);
+            log_info!("recovery", "site clearance for {site} not earned: {e}");
             false
         }
     }

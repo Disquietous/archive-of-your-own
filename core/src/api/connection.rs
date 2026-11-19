@@ -345,6 +345,23 @@ impl AO3App {
         Ok(fp)
     }
 
+    /// The user confirmed that the tunnel carrying traffic now is their
+    /// registered VPN on a different server or protocol: add it to the
+    /// connections the VPN is recognised by. Fails when no tunnel carries
+    /// the default route or IPv6 would bypass it.
+    pub fn accept_vpn_connection(&self) -> Result<crate::client::VpnFingerprint, AO3Error> {
+        let fp = crate::client::privacy::accept_current_vpn()?;
+        self.network_path_changed();
+        Ok(fp)
+    }
+
+    /// What the tunnel carrying traffic now looks like, when the registered
+    /// VPN does not recognise it and the user could confirm it. None
+    /// otherwise.
+    pub fn unrecognised_vpn_connection(&self) -> Option<String> {
+        crate::client::privacy::unrecognised_vpn_connection()
+    }
+
     /// The registered VPN's state right now.
     pub fn vpn_status(&self) -> crate::client::VpnStatus {
         crate::client::privacy::vpn_status()

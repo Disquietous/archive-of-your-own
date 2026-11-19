@@ -298,16 +298,12 @@ fn extract_blurb_stats(blurb: &ElementRef) -> (u64, u32, Option<u32>, u32, u64, 
     (words, chapter_count, total_chapters, kudos, hits, bookmarks, comments)
 }
 
+/// "3/12", "1/?", "1,024/1,500" — AO3 groups thousands with a comma.
 pub(super) fn parse_chapters(s: &str) -> (u32, Option<u32>) {
+    let number = |part: &str| part.trim().replace(',', "").parse::<u32>().ok();
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() == 2 {
-        let current = parts[0].trim().parse().unwrap_or(0);
-        let total = if parts[1].trim() == "?" {
-            None
-        } else {
-            parts[1].trim().parse().ok()
-        };
-        (current, total)
+        (number(parts[0]).unwrap_or(0), number(parts[1]))
     } else {
         (1, Some(1))
     }

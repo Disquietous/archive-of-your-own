@@ -403,8 +403,8 @@ impl AO3App {
                         log_db("update_account_cookies", s.update_account_cookies(current.id, &previous));
                     }
                 }
-                clearance::save(&s, &source, &saved);
-                clearance::apply(c.transport(), &source, &saved);
+                clearance::save(&s, &saved);
+                clearance::apply(c.transport(), &saved);
                 put_jar_session(&c, &source, &session);
                 previous
             };

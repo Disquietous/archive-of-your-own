@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::client::audit::{ActiveRequestGuard, AuditCtx};
-use crate::client::{clearance, is_cloudflare_cookie, FailureKind, SiteHooks, Transport};
+use crate::client::{is_cloudflare_cookie, FailureKind, SiteHooks, Transport};
 use crate::error::AppError;
 
 mod auth;
@@ -60,10 +60,6 @@ pub struct AO3Client {
 impl SiteHooks for AO3Client {
     fn source(&self) -> &'static str {
         crate::models::SOURCE_AO3
-    }
-
-    fn user_agent(&self) -> Option<String> {
-        clearance::user_agent(crate::models::SOURCE_AO3)
     }
 
     /// AO3 answers a request made with a dead session by redirecting to

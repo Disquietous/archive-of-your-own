@@ -352,36 +352,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let status = appState.bridge.privacyStatus
         let viaVPN: Bool
         if case .vpn = status { viaVPN = true } else { viaVPN = false }
-        alert.messageText = status.title
-        alert.informativeText = viaVPN
-            ? """
-            This needs the internet, and the app only goes online while your registered VPN \
-            carries the connection — so nothing was sent. \(status.subtitle) You can change \
-            the privacy mode in Settings › Privacy.
+        // A tunnel is up but isn't one the registered VPN is known by —
+        // a changed server or protocol looks exactly like this, so the
+        // user can confirm it as theirs right here.
+        let changed = viaVPN ? appState.bridge.unrecognisedVPNConnection : nil
+        let name = appState.bridge.vpnFingerprint?.label ?? "your VPN"
+        enum Action { case trust, check, connect, settings, dismiss }
+        var actions: [Action] = []
+        func add(_ title: String, _ action: Action) {
+            alert.addButton(withTitle: title)
+            actions.append(action)
+        }
+        if let changed {
+            alert.messageText = "Your VPN connection looks different"
+            alert.informativeText = """
+            Nothing was sent. Traffic is going through a VPN tunnel, but not one \(name) \
+            was registered with:
+
+            \(changed)
+
+            If you changed \(name)’s server or protocol, trust this connection and the app \
+            will recognise it from now on, along with the ones it already knows. If you \
+            didn’t change anything, check your VPN before trusting it.
             """
-            : """
-            This needs the internet, and the app only goes online through Tor, which isn’t \
-            connected — so nothing was sent. Connect to Tor, or choose a different privacy \
-            mode in Settings › Privacy.
-            """
-        alert.addButton(withTitle: viaVPN ? "Check Again" : "Connect to Tor")
-        alert.addButton(withTitle: "Open Settings")
-        alert.addButton(withTitle: "OK")
+            add("Check Again", .check)
+            add("Trust This Connection", .trust)
+            add("Open Settings", .settings)
+            add("Cancel", .dismiss)
+        } else {
+            alert.messageText = status.title
+            alert.informativeText = viaVPN
+                ? """
+                This needs the internet, and the app only goes online while your registered VPN \
+                carries the connection — so nothing was sent. \(status.subtitle) You can change \
+                the privacy mode in Settings › Privacy.
+                """
+                : """
+                This needs the internet, and the app only goes online through Tor, which isn’t \
+                connected — so nothing was sent. Connect to Tor, or choose a different privacy \
+                mode in Settings › Privacy.
+                """
+            if viaVPN { add("Check Again", .check) } else { add("Connect to Tor", .connect) }
+            add("Open Settings", .settings)
+            add("OK", .dismiss)
+        }
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard let self else { return }
             appState.networkDisabledNotice = false
-            switch response {
-            case .alertFirstButtonReturn:
-                if viaVPN {
-                    appState.bridge.refreshVpnStatus()
-                } else {
-                    appState.connectFromNotice()
+            let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            guard actions.indices.contains(index) else { return }
+            switch actions[index] {
+            case .trust:
+                do {
+                    try appState.bridge.acceptCurrentVPNConnection()
+                } catch {
+                    let failed = NSAlert()
+                    failed.messageText = "Couldn’t trust this connection"
+                    failed.informativeText = AppState.readableError(error)
+                    failed.runModal()
                 }
-            case .alertSecondButtonReturn:
+            case .check:
+                appState.bridge.refreshVpnStatus()
+            case .connect:
+                appState.connectFromNotice()
+            case .settings:
                 model.settingsTabRequest = "Privacy"
                 model.goSection(.settings)
                 mainWindowController?.window?.makeKeyAndOrderFront(nil)
-            default:
+            case .dismiss:
                 break
             }
         }

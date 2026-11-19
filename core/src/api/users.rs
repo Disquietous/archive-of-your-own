@@ -17,6 +17,58 @@ pub(super) fn user_dto(s: &Storage, u: &UserRecord) -> UUser {
     UUser::from_record(u, subscribed)
 }
 
+/// Profile-page fetches in flight, by lowercased AO3 username.
+static AO3_PROFILE_FETCHES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn profile_stamp(s: &Storage, username: &str) -> Option<String> {
+    s.get_ao3_user_record(username)
+        .and_then(|u| u.property(crate::user_fields::PROFILE_FETCHED_AT).map(str::to_string))
+}
+
+/// Fetch an AO3 user's profile page and store it: the profile (avatar URL
+/// included) and, for a signed-in viewer, the live subscription state
+/// (never follows). Every caller that needs the page goes through here so
+/// one user costs one request at a time — a caller that arrives while
+/// another's fetch is in flight waits and uses what that fetch stored.
+pub(super) async fn fetch_ao3_profile(client: Arc<tokio::sync::RwLock<AO3Client>>, storage: Arc<Mutex<Storage>>, username: &str)
+    -> Result<(), AO3Error>
+{
+    let key = username.to_lowercase();
+    let before = { profile_stamp(&*storage.lock().await, username) };
+    let gate = AO3_PROFILE_FETCHES.lock().unwrap_or_else(|e| e.into_inner())
+        .entry(key.clone()).or_default().clone();
+    let result = async {
+        let _held = gate.lock().await;
+        if { profile_stamp(&*storage.lock().await, username) } != before {
+            return Ok(());
+        }
+        let name = username.to_string();
+        let page = with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
+            move |client| {
+                let name = name.clone();
+                async move { client.read().await.fetch_user_profile_full(&name).await.map_err(AO3Error::from) }
+            }).await?;
+        let s = storage.lock().await;
+        log_db("upsert_user_profile", s.upsert_user_profile(&page.profile));
+        // Subscription data only — never follows.
+        if let (true, Some(account)) = (page.viewer_signed_in, s.subscription_account()) {
+            if page.subscribed {
+                log_db("add_subscription", s.add_subscription(account.id, "author", &page.profile.username,
+                    &page.profile.username, page.subscription_ao3_id.as_deref()));
+            } else {
+                log_db("remove_subscription", s.remove_subscription(account.id, "author", &page.profile.username));
+            }
+        }
+        Ok(())
+    }.await;
+    let mut fetches = AO3_PROFILE_FETCHES.lock().unwrap_or_else(|e| e.into_inner());
+    if Arc::strong_count(&gate) <= 2 {
+        fetches.remove(&key);
+    }
+    result
+}
+
 #[uniffi::export]
 impl AO3App {
     /// A user by row id, from the library. No network.
@@ -103,23 +155,8 @@ impl AO3App {
             let record = { storage.lock().await.get_user(user_id as i64) }
                 .ok_or_else(|| AO3Error::NotFound { message: format!("no user with id {user_id}") })?;
             if record.source == crate::models::SOURCE_AO3 {
-                let username = record.username.clone();
-                let page = with_recovery(client, storage.clone(), OpKind::Fetch { label: "user_profile".to_string() }, RetrySafety::Idempotent,
-                    move |client| {
-                        let username = username.clone();
-                        async move { client.read().await.fetch_user_profile_full(&username).await.map_err(AO3Error::from) }
-                    }).await?;
+                fetch_ao3_profile(client, storage.clone(), &record.username).await?;
                 let s = storage.lock().await;
-                log_db("upsert_user_profile", s.upsert_user_profile(&page.profile));
-                // Subscription data only — never follows.
-                if let (true, Some(account)) = (page.viewer_signed_in, s.subscription_account()) {
-                    if page.subscribed {
-                        log_db("add_subscription", s.add_subscription(account.id, "author", &page.profile.username,
-                            &page.profile.username, page.subscription_ao3_id.as_deref()));
-                    } else {
-                        log_db("remove_subscription", s.remove_subscription(account.id, "author", &page.profile.username));
-                    }
-                }
                 let fresh = s.get_user(user_id as i64)
                     .ok_or_else(|| AO3Error::NotFound { message: format!("user {user_id} vanished") })?;
                 return Ok(user_dto(&s, &fresh));
