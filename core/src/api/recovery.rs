@@ -528,6 +528,24 @@ async fn earn_site_clearance(client: &Arc<RwLock<AO3Client>>, storage: &Arc<Mute
         log_info!("recovery", "{site} clearance was earned while this request was out — retrying with it");
         return true;
     }
+    // The challenged request carried a clearance the site did not accept.
+    // Presenting one it refuses gets even its freely served pages
+    // challenged, so it goes — live and saved — before anything else.
+    let discarded = {
+        let c = client.read().await;
+        let s = storage.lock().await;
+        clearance::discard(c.transport(), &s, &site)
+    };
+    if discarded {
+        // Requests still out with it retry without it instead of asking.
+        clearance::mark_earned(&site);
+        if clearance::was_cleared(id) {
+            log_info!("recovery", "{site} challenged again after a passed check — clearance not accepted, dropped");
+            return false;
+        }
+        log_info!("recovery", "{site} refused the saved clearance — dropped, retrying without it");
+        return true;
+    }
     if clearance::dismissals(&site) != dismissals_before {
         log_info!("recovery", "{site} check was dismissed while this operation waited — not asking again");
         return false;

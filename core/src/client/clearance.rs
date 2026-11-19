@@ -75,6 +75,10 @@ pub fn set_user_agent(site: &str, ua: &str) {
     USER_AGENTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(site.to_string(), ua.to_string());
 }
 
+fn clear_user_agent(site: &str) {
+    if let Some(agents) = USER_AGENTS.lock().unwrap().as_mut() { agents.remove(site); }
+}
+
 /// A challenged request, as the transport noted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Challenge {
@@ -188,6 +192,11 @@ pub fn mark_cleared(id: OpId) -> bool {
     CLEARED.lock().unwrap().get_or_insert_with(Default::default).insert(id)
 }
 
+/// Whether operation `id` has already earned a clearance (`mark_cleared`).
+pub fn was_cleared(id: OpId) -> bool {
+    CLEARED.lock().unwrap().as_ref().is_some_and(|cleared| cleared.contains(&id))
+}
+
 /// Operation `id` is over: drop what was kept for it.
 pub fn forget_operation(id: OpId) {
     if let Some(notes) = CHALLENGES.lock().unwrap().as_mut() { notes.remove(&id); }
@@ -217,6 +226,35 @@ pub fn apply(transport: &Transport, saved: &SavedClearance) {
     if !joined.is_empty() {
         transport.set_cookies(&saved.origin, &joined);
     }
+}
+
+/// Take a clearance off the live transport: its cookies out of the jar,
+/// its User-Agent off the site's requests.
+pub fn forget(transport: &Transport, saved: &SavedClearance) {
+    let names: std::collections::HashSet<&str> = saved.clearance.cookies.iter()
+        .filter_map(|c| c.split('=').next())
+        .collect();
+    transport.expire_cookies(&saved.origin, |name| names.contains(name));
+    if let Some(site) = site_of(&saved.origin) {
+        clear_user_agent(&site);
+    }
+}
+
+/// Drop the clearance kept for `site`, live and saved. A site challenges
+/// a request that presents a clearance it does not accept — one earned on
+/// another connection, expired, or never good for this client — even on
+/// pages it serves freely without one, so a refused clearance must not be
+/// sent again. False when none was kept.
+pub fn discard(transport: &Transport, storage: &Storage, site: &str) -> bool {
+    let mut all = load(storage);
+    let Some(saved) = all.remove(site) else { return false };
+    if let Ok(json) = serde_json::to_string(&all) {
+        if let Err(e) = storage.set_state(STATE_KEY, &json) {
+            log_error!("clearance", "could not remove the saved clearance for {site}: {e}");
+        }
+    }
+    forget(transport, &saved);
+    true
 }
 
 /// Every saved clearance, by site host.
@@ -368,5 +406,27 @@ mod tests {
         assert_eq!(user_agent_for("https://other.example/"), None);
         let header = transport.cookies_for("https://clearance.example");
         assert!(header.contains("cf_clearance=abc") && header.contains("__cf_bm=d"), "{header}");
+    }
+
+    #[tokio::test]
+    async fn forget_takes_back_only_what_the_clearance_set() {
+        let transport = Transport::new_direct().await.unwrap();
+        transport.set_cookies("https://forget.example", "session=keep");
+        let saved = SavedClearance {
+            origin: "https://forget.example".into(),
+            clearance: SiteClearance { cookies: vec!["cf_clearance=abc".into(), "__cf_ob=d".into()], user_agent: "UA/3".into() },
+        };
+        apply(&transport, &saved);
+        forget(&transport, &saved);
+        assert_eq!(user_agent("forget.example"), None);
+        assert_eq!(transport.cookies_for("https://forget.example"), "session=keep");
+    }
+
+    #[test]
+    fn was_cleared_does_not_mark() {
+        assert!(!was_cleared(9004));
+        assert!(mark_cleared(9004));
+        assert!(was_cleared(9004));
+        forget_operation(9004);
     }
 }

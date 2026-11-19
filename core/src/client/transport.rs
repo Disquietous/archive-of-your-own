@@ -37,6 +37,11 @@ pub trait SiteHooks: Sync {
     /// Runs on every fetched page body before it is returned: harvest
     /// tokens, strip site chrome the parsers would trip over.
     fn on_page(&self, body: String) -> String { body }
+    /// Headers a page request to this site carries on top of the shared
+    /// ones (which describe a page opened from nowhere: `Sec-Fetch-Site:
+    /// none`, no `Referer`). A site whose bot check challenges that on its
+    /// inner pages says here that the request came from the site itself.
+    fn page_headers(&self) -> &'static [(&'static str, &'static str)] { &[] }
 }
 
 /// A challenged response: leave the note the recovery engine needs to
@@ -416,6 +421,9 @@ impl Transport {
             let mut req = client.get(url);
             if let Some(ua) = super::clearance::user_agent_for(url) {
                 req = req.header(USER_AGENT, ua);
+            }
+            for (name, value) in hooks.page_headers() {
+                req = req.header(*name, *value);
             }
             if ajax {
                 req = req.header("X-Requested-With", "XMLHttpRequest")

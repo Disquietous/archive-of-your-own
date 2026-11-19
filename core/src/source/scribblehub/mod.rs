@@ -32,6 +32,22 @@ use super::{DiscussionShape, FetchedWork, ListingPage, ReactionShape, Reachabili
 pub const SOURCE_ID: &str = "scribblehub";
 pub const BASE_URL: &str = "https://www.scribblehub.com";
 const RELEASES_ENDPOINT: &str = "https://www.scribblehub.com/wp-admin/admin-ajax.php";
+/// What the site's own pages send with a call to that endpoint: a
+/// same-origin script request. The transport's defaults describe a page
+/// navigation (`Sec-Fetch-Dest: document`, no `Origin`), and the site's
+/// bot check challenges an endpoint call that claims to be one.
+const PAGE_HEADERS: &[(&str, &str)] = &[
+    ("Referer", "https://www.scribblehub.com/"),
+    ("Sec-Fetch-Site", "same-origin"),
+];
+const AJAX_HEADERS: &[(&str, &str)] = &[
+    ("X-Requested-With", "XMLHttpRequest"),
+    ("Origin", BASE_URL),
+    ("Referer", "https://www.scribblehub.com/"),
+    ("Sec-Fetch-Dest", "empty"),
+    ("Sec-Fetch-Mode", "cors"),
+    ("Sec-Fetch-Site", "same-origin"),
+];
 
 /// WordPress names its login cookie `wordpress_logged_in_<site hash>`.
 const LOGIN_COOKIE_PREFIX: &str = "wordpress_logged_in_";
@@ -51,6 +67,10 @@ struct Hooks;
 
 impl SiteHooks for Hooks {
     fn source(&self) -> &'static str { SOURCE_ID }
+    /// A page reached by a link on the site, as every chapter is: the
+    /// site's bot check challenges a chapter request that arrives with
+    /// neither a same-site `Referer` nor `Sec-Fetch-Site: same-origin`.
+    fn page_headers(&self) -> &'static [(&'static str, &'static str)] { PAGE_HEADERS }
 }
 
 static HOOKS: Hooks = Hooks;
@@ -112,10 +132,11 @@ impl ScribbleHubSource {
         if slug.is_empty() { format!("{BASE_URL}/series/{id}/") } else { format!("{BASE_URL}/series/{id}/{slug}/") }
     }
 
-    /// The story's statistics page (`Statistics` in its nav): no trailing
-    /// slash, as the site links it.
+    /// The story's statistics page (`Statistics` in its nav), with the
+    /// trailing slash: the site links it without one, but its bot check
+    /// challenges that form from this client and serves this one.
     pub fn stats_url(id: &str, slug: &str) -> String {
-        format!("{}stats", Self::series_url(id, slug))
+        format!("{}stats/", Self::series_url(id, slug))
     }
 
     pub fn read_url(id: &str, slug: &str, chapter_id: u64) -> String {
@@ -168,7 +189,7 @@ impl ScribbleHubSource {
         ];
         let client = self.client.read().await;
         let out = client.transport().post_form(
-            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            RELEASES_ENDPOINT, &form, AJAX_HEADERS,
             &|status, _| status < 400, &HOOKS).await?;
         drop(client);
         if out.status >= 400 {
@@ -199,7 +220,7 @@ impl ScribbleHubSource {
         ];
         let client = self.client.read().await;
         let out = client.transport().post_form(
-            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            RELEASES_ENDPOINT, &form, AJAX_HEADERS,
             &|status, _| status < 400, &HOOKS).await?;
         if out.status >= 400 {
             return Err(AppError::Http {
@@ -349,7 +370,7 @@ impl Source for ScribbleHubSource {
         ];
         let client = self.client.read().await;
         let out = client.transport().post_form(
-            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            RELEASES_ENDPOINT, &form, AJAX_HEADERS,
             &|status, _| status < 400, &HOOKS).await?;
         drop(client);
         if out.status >= 400 {
@@ -399,7 +420,7 @@ impl Source for ScribbleHubSource {
         ];
         let client = self.client.read().await;
         let out = client.transport().post_form(
-            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            RELEASES_ENDPOINT, &form, AJAX_HEADERS,
             &|status, _| status < 400, &HOOKS).await?;
         drop(client);
         if out.status >= 400 {
@@ -537,7 +558,7 @@ impl Source for ScribbleHubSource {
         ];
         let client = self.client.read().await;
         let out = client.transport().post_form(
-            RELEASES_ENDPOINT, &form, &[("X-Requested-With", "XMLHttpRequest")],
+            RELEASES_ENDPOINT, &form, AJAX_HEADERS,
             &|status, _| status < 400, &HOOKS).await?;
         drop(client);
         if out.status >= 400 {
@@ -635,7 +656,7 @@ mod tests {
                    "https://www.scribblehub.com/read/700412-the-lighthouse-ledger/chapter/2300107/");
         assert_eq!(ScribbleHubSource::slug_of("https://www.scribblehub.com/series/700412/"), "");
         assert_eq!(ScribbleHubSource::read_url("700412", "", 5), "https://www.scribblehub.com/read/700412/chapter/5/");
-        assert_eq!(ScribbleHubSource::stats_url("700412", &slug), "https://www.scribblehub.com/series/700412/the-lighthouse-ledger/stats");
+        assert_eq!(ScribbleHubSource::stats_url("700412", &slug), "https://www.scribblehub.com/series/700412/the-lighthouse-ledger/stats/");
     }
 
     #[tokio::test]
