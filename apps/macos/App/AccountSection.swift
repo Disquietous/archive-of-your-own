@@ -123,7 +123,9 @@ struct AccountSection: View {
                     switch group.signIn {
                     case .credentials:
                         credentialsFields(buttonLabel: "Log In") {
-                            group.accounts.isEmpty ? firstLogin() : addAccount()
+                            if !group.primary { signIn(at: group.source, as: username) }
+                            else if group.accounts.isEmpty { firstLogin() }
+                            else { addAccount() }
                         }
                         note("Your password is used once to sign in to \(group.name) and never stored.")
                     case .site:
@@ -186,14 +188,14 @@ struct AccountSection: View {
                 SecureField("Password for \(row.account.username)", text: $password)
                     .textFieldStyle(.roundedBorder)
                     .focused($passwordFocused)
-                    .onSubmit(logInActive)
+                    .onSubmit { logInActive(row) }
                 if let error = appState.ao3LoginError {
                     Text(error)
                         .font(Font(MacFont.ui(12, weight: .medium)))
                         .foregroundStyle(Color(hex: "CE514D"))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Button(action: logInActive) {
+                Button { logInActive(row) } label: {
                     Group {
                         if appState.ao3LoginInFlight {
                             ProgressView().controlSize(.small)
@@ -427,11 +429,21 @@ struct AccountSection: View {
         }
     }
 
-    private func logInActive() {
+    private func logInActive(_ row: Row) {
         guard !password.isEmpty else { return }
         Task { @MainActor in
-            if await appState.logInActiveAccount(password: password) {
-                clearForm()
+            let done = row.group.primary
+                ? await appState.logInActiveAccount(password: password)
+                : await appState.signInWithCredentials(source: row.group.source, username: row.account.username, password: password)
+            if done { clearForm() }
+        }
+    }
+
+    /// Password sign-in at a source other than the archive.
+    private func signIn(at source: String, as name: String) {
+        Task { @MainActor in
+            if await appState.signInWithCredentials(source: source, username: name, password: password) {
+                closeAddForm()
             }
         }
     }

@@ -279,8 +279,9 @@ extension ReadPaneViewController {
             }
         } else {
             // The source tabs (AO3, ScribbleHub, …) live where the title
-            // would be, with AO3's scope tabs beside them while its forms
-            // show; results keep a plain header.
+            // would be. AO3's kinds of search are a row of their own at
+            // the top of its forms (ArchiveScopeBar), under its tab.
+            // Results keep a plain header.
             let sources = sourceTabsView()
             sources.configure(selected: search.sourceTab)
             toolbar.configure(title: "", sub: nil)
@@ -290,9 +291,7 @@ extension ReadPaneViewController {
                 toolbar.setTrailing([searchGoButton(), searchEyeButton()])
                 show(mode: .sourceForm(search.sourceTab))
             } else {
-                let tabs = scopeTabsView()
-                tabs.configure(selected: search.scope)
-                toolbar.setAfterTitle(sources.segmentCount > 1 ? [sources, tabs] : [tabs])
+                toolbar.setAfterTitle(sources.segmentCount > 1 ? [sources] : [])
                 if search.scope == .works {
                     toolbar.setTrailing([searchGoButton(), reloadCriteriaButton(),
                                          searchEyeButton(), searchSourceButton()])

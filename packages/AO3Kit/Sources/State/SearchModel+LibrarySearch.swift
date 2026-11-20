@@ -93,6 +93,24 @@ extension SearchModel {
         librarySearchHandle = search.handle
     }
 
+    /// The Library tab's search: every source's cached works, by the
+    /// shared fields and any per-source conditions. Results land in the
+    /// works results pane like any library read.
+    @MainActor
+    func runLibraryQuery(_ query: LibraryQuery, appState: AppState) {
+        scopeNotice = nil
+        originScope = scope
+        scope = .works
+        guard let search = appState.bridge.runLibraryQuery(query) else {
+            presentLibraryWorks([], appState: appState)
+            return
+        }
+        let works = appState.bridge.getLibrarySearchPage(search.handle)
+            .map(AppState.workFromSummary)
+        presentLibraryWorks(works, appState: appState) // releases any prior handle
+        librarySearchHandle = search.handle
+    }
+
     /// Land a library (no-network) result set in the works results pane.
     /// activeQuery stays nil so the pager stays inert — library reads
     /// return everything at once.

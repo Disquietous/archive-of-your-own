@@ -246,6 +246,7 @@ impl WorksCache {
                             work: &WorkSummary, series: &[SeriesMembership], fetched_at: &str)
         -> Result<u64, AppError>
     {
+        super::library_query::mark_facts_stale();
         let existing_id = self.resolve(&work.source, &work.external_id);
         let old = existing_id.and_then(|id| self.get(id));
         conn.execute(
@@ -525,6 +526,7 @@ impl WorksCache {
     /// Delete the works row (every dependent table cascades via its
     /// foreign key or trigger; the entity's tag refs go with it).
     pub(super) fn delete(&self, conn: &Connection, work_id: u64) -> Result<(), AppError> {
+        super::library_query::mark_facts_stale();
         conn.execute("DELETE FROM works WHERE id = ?1", params![work_id as i64])
             .map_err(map_sql)?;
         if let Some(e) = self.map.borrow_mut().remove(&work_id) {

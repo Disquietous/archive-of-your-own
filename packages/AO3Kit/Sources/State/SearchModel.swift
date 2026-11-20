@@ -9,7 +9,20 @@ import Observation
 final class SearchModel {
     /// Stable session key so the form survives launches in the DB cache table.
 
-    var formFields: [UFormField] = []
+    var formFields: [UFormField] = [] {
+        didSet {
+            // The archive's "single chapter" option is not offered:
+            // length is searched by word count, never by chapter count.
+            // Dropped here so a form cached before this is covered too.
+            if formFields.contains(where: Self.isDroppedField) {
+                formFields.removeAll(where: Self.isDroppedField)
+            }
+        }
+    }
+
+    private static func isDroppedField(_ field: UFormField) -> Bool {
+        field.name.hasSuffix("[single_chapter]")
+    }
     var fieldValues: [String: String] = [:]
     var checkboxValues: [String: Set<String>] = [:]
 
@@ -25,6 +38,8 @@ final class SearchModel {
     /// (multi-source-plan Phase 3) retires it.
     static let archiveFormSource = "ao3"
     /// Whether the selected tab uses that form.
+    /// The tab that searches the library across sources; not a source.
+    static let libraryTab = "library"
     var usesArchiveForm: Bool { sourceTab == Self.archiveFormSource }
     /// The query behind the source works results now showing; sort
     /// re-runs amend this, never the form.

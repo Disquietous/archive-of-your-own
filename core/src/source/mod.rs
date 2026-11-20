@@ -14,6 +14,7 @@
 //! exercises the second set of shapes offline.
 
 pub mod ao3;
+pub mod hentaifoundry;
 pub mod local;
 pub mod mock_rated;
 pub mod scribblehub;
@@ -118,6 +119,7 @@ pub fn is_login_cookie(source: &str, name: &str) -> bool {
     match source {
         crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name),
         scribblehub::SOURCE_ID => scribblehub::is_login_cookie(name),
+        hentaifoundry::SOURCE_ID => hentaifoundry::is_login_cookie(name),
         _ => false,
     }
 }
@@ -129,6 +131,7 @@ pub fn is_session_cookie(source: &str, name: &str) -> bool {
     match source {
         crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name) || name == "_otwarchive_session",
         scribblehub::SOURCE_ID => scribblehub::is_session_cookie(name),
+        hentaifoundry::SOURCE_ID => hentaifoundry::is_session_cookie(name),
         _ => false,
     }
 }
@@ -139,6 +142,7 @@ pub fn session_origin(source: &str) -> Option<&'static str> {
     match source {
         crate::models::SOURCE_AO3 => Some(crate::source::ao3::BASE_URL),
         scribblehub::SOURCE_ID => Some(scribblehub::BASE_URL),
+        hentaifoundry::SOURCE_ID => Some(hentaifoundry::BASE_URL),
         _ => None,
     }
 }
@@ -731,7 +735,8 @@ mod tests {
         let client = Arc::new(tokio::sync::RwLock::new(crate::source::ao3::AO3Client::new_direct().await.unwrap()));
         let sources: Vec<Arc<dyn Source>> = vec![
             Arc::new(ao3::AO3Source::new(client.clone())),
-            Arc::new(scribblehub::ScribbleHubSource::new(client)),
+            Arc::new(scribblehub::ScribbleHubSource::new(client.clone())),
+            Arc::new(hentaifoundry::HentaiFoundrySource::new(client)),
             Arc::new(mock_rated::MockRatedSource::new()),
         ];
         for s in &sources {

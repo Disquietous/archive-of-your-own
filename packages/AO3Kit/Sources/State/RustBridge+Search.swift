@@ -31,6 +31,32 @@ extension RustBridge {
         app?.dropLibrarySearch(handle: handle)
     }
 
+    // MARK: - Library query (every source's works, no network)
+
+    func libraryQuerySources() -> [LibrarySourceCount] {
+        app?.libraryQuerySources() ?? []
+    }
+
+    func libraryQueryLanguages() -> [String] {
+        app?.libraryQueryLanguages() ?? []
+    }
+
+    func libraryQueryFields() -> [LibraryField] {
+        app?.libraryQueryFields() ?? []
+    }
+
+    /// The values a field has in the library now, most-used first.
+    func libraryFieldValues(_ field: LibraryField, filter: String = "", limit: UInt32? = nil) -> [LibraryFieldValue] {
+        app?.libraryFieldValues(source: field.source, kind: field.kind, key: field.key,
+                                filter: filter, limit: limit) ?? []
+    }
+
+    /// Run a library query; the result set is held and read like any
+    /// library search. nil = the search failed.
+    func runLibraryQuery(_ query: LibraryQuery) -> ULibrarySearch? {
+        try? app?.runLibraryQuery(query: query)
+    }
+
     // MARK: - Schema-driven search (design/source-search-plan.md)
 
     /// A source's search form: static configuration, no I/O.

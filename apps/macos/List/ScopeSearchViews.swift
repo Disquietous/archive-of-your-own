@@ -25,7 +25,7 @@ struct ScopeSearchFormView: View {
 
     var body: some View {
         let search = model.search
-        ScrollView {
+        SearchFormScroll {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass")

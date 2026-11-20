@@ -13,7 +13,7 @@ struct SearchFormView: View {
     var body: some View {
         let _ = theme.uiFontScale  // track app text size so fonts refresh live
         @Bindable var search = model.search
-        ScrollView {
+        SearchFormScroll {
             VStack(alignment: .leading, spacing: 14) {
                 SavedSearchField(theme: theme, appState: appState, search: search)
                 queryField
@@ -401,6 +401,7 @@ private struct SavedSearchField: View {
 
             if focused && !matches.isEmpty {
                 suggestionList
+                    .revealedInForm(when: matches.map(\.id), onAppear: true)
             }
         }
     }

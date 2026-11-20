@@ -643,6 +643,65 @@ impl Transport {
         }
     }
 
+    /// GET a page and return whatever came back, status and body, without
+    /// judging it: for a caller that has to read a non-success page (a
+    /// site's automatic check states its terms in a 401's body). One
+    /// deadline covers the round trip; the body is capped like any page.
+    /// `ok` decides whether the audit row counts the response a success.
+    pub async fn get_outcome(&self, url: &str, headers: &[(&str, &str)],
+                             ok: &(dyn Fn(u16) -> bool + Sync), hooks: &dyn SiteHooks) -> Result<PostOutcome, AppError> {
+        self.enforce_rate_limit(url).await;
+        let client = self.http()?;
+        let timeout = self.request_timeout();
+        let _active = ActiveRequestGuard::new("GET", url, timeout.as_secs());
+        let audit = AuditCtx::new(hooks.source(), "GET", url, None);
+        let result = tokio::time::timeout(timeout, async {
+            let mut req = client.get(url);
+            if let Some(ua) = super::clearance::user_agent_for(url) {
+                req = req.header(USER_AGENT, ua);
+            }
+            for (name, value) in hooks.page_headers().iter().chain(headers) {
+                req = req.header(*name, *value);
+            }
+            let mut resp = req.send().await
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
+            let status = resp.status().as_u16();
+            let final_url = resp.url().to_string();
+            let set_cookies = resp.headers().get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(str::to_string))
+                .collect();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp.chunk().await
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })? {
+                if (bytes.len() + chunk.len()) as u64 > MAX_PAGE_BYTES {
+                    return Err(AppError::Http {
+                        kind: FailureKind::Malformed,
+                        detail: format!("response too large: over {MAX_PAGE_BYTES} bytes"),
+                    });
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let body = String::from_utf8_lossy(&bytes).into_owned();
+            Ok::<PostOutcome, AppError>(PostOutcome { status, final_url, set_cookies, body })
+        }).await;
+        match result {
+            Err(_) => {
+                audit.record(0, 0, Some("timeout".to_string()));
+                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
+            }
+            Ok(Err(e)) => {
+                audit.record(0, 0, Some(format!("{e}")));
+                Err(e)
+            }
+            Ok(Ok(out)) => {
+                let error = if ok(out.status) { None } else { Some(format!("HTTP {} for {url}", out.status)) };
+                audit.record(out.status, out.body.len() as u64, error);
+                Ok(out)
+            }
+        }
+    }
+
     /// GET raw bytes (images) with image-appropriate headers and the image
     /// size cap. Logs the content headers so decode failures are diagnosable.
     pub async fn get_bytes(&self, url: &str, hooks: &dyn SiteHooks) -> Result<Vec<u8>, AppError> {

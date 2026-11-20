@@ -6,13 +6,14 @@ use super::*;
 use crate::source::search::{FieldOption, SearchQuery, SearchSchema};
 use crate::source::{LinkTarget, SourceCapabilities, SourceRegistry, UserPane};
 
-/// The app's sources, in display order. AO3 first, then ScribbleHub (on
-/// the same transport); the rated mock answers only while the mock
+/// The app's sources, in display order. AO3 first, then ScribbleHub and
+/// Hentai Foundry (on the same transport); the rated mock answers only while the mock
 /// archive is on; local files last (no site, nothing to fetch).
 pub(super) fn registry(client: Arc<tokio::sync::RwLock<AO3Client>>) -> SourceRegistry {
     SourceRegistry::new(vec![
         Arc::new(crate::source::ao3::AO3Source::new(client.clone())),
-        Arc::new(crate::source::scribblehub::ScribbleHubSource::new(client)),
+        Arc::new(crate::source::scribblehub::ScribbleHubSource::new(client.clone())),
+        Arc::new(crate::source::hentaifoundry::HentaiFoundrySource::new(client)),
         Arc::new(crate::source::mock_rated::MockRatedSource::new()),
         Arc::new(crate::source::local::LocalSource::new()),
     ])

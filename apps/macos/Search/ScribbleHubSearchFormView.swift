@@ -14,7 +14,7 @@ struct ScribbleHubSearchFormView: View {
     var body: some View {
         let _ = theme.uiFontScale
         @Bindable var form = model.scribbleHubSearch
-        ScrollView {
+        SearchFormScroll {
             VStack(alignment: .leading, spacing: 16) {
                 titleField
 
@@ -76,6 +76,7 @@ struct ScribbleHubSearchFormView: View {
 
                 if form.showAdvanced {
                     advanced
+                        .revealedInForm(when: true, onAppear: true, anchor: .top)
                 }
             }
             .padding(20)
@@ -325,6 +326,7 @@ private struct TagPicker: View {
                 .background(theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(theme.line, lineWidth: 1))
+                .revealedInForm(when: matches.map(\.value), onAppear: true)
             }
         }
     }

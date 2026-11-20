@@ -24,6 +24,11 @@ pub struct UAccountGroup {
     /// The source's display name.
     pub name: String,
     pub sign_in: SignInShape,
+    /// The archive account: the one the app's own account features
+    /// (subscriptions, bookmarks, inbox) follow. It signs in through the
+    /// account calls (`login`, `add_account`, `reauthenticate`); every
+    /// other password sign-in goes through `sign_in_with_credentials`.
+    pub primary: bool,
     pub accounts: Vec<UAccount>,
 }
 
@@ -337,6 +342,7 @@ impl AO3App {
                 source: caps.id.clone(),
                 name: caps.name.clone(),
                 sign_in: caps.sign_in,
+                primary: caps.id == SOURCE_AO3,
                 accounts: accounts.iter().filter(|a| a.source == caps.id).map(account_dto).collect(),
             })
             .collect()
@@ -424,6 +430,74 @@ impl AO3App {
                     }));
                 }
             };
+            let s = storage.lock().await;
+            let id = s.create_account_at(&source, &who.external_id, &who.username, &session).map_err(AO3Error::from)?;
+            s.set_active_account(id).map_err(AO3Error::from)?;
+            log_info!("accounts", "Signed in at {source} as {}", who.username);
+            s.get_account(id).map_err(AO3Error::from)?
+                .map(|a| account_dto(&a))
+                .ok_or(AO3Error::NotFound { message: "the account just saved is missing".to_string() })
+        }).await
+    }
+
+    /// Sign in at a source that takes a username and password the app
+    /// sends itself (`SignInShape::Credentials`), other than AO3 (whose
+    /// own calls keep its whole jar). The source's adapter sends its
+    /// login; the site then says who that is, and that account is created
+    /// or refreshed and made the source's active one. The password is
+    /// used for the one request and kept nowhere.
+    pub async fn sign_in_with_credentials(&self, source: String, username: String, password: String) -> Result<UAccount, AO3Error> {
+        let Some(src) = self.sources.by_id(&source) else {
+            return Err(AO3Error::NotFound { message: format!("unknown source {source}") });
+        };
+        let name = src.capabilities().name.clone();
+        if source == SOURCE_AO3 || src.capabilities().sign_in != SignInShape::Credentials || session_origin(&source).is_none() {
+            return Err(AO3Error::Network { message: format!("{name} is not signed in to with a password here") });
+        }
+        check_reachable(&src)?;
+        self.run_on_runtime(move |client, storage| async move {
+            let previous = {
+                let c = client.read().await;
+                let s = storage.lock().await;
+                // The account signed in until now keeps its session.
+                let previous = jar_session(&c, &source);
+                if let Ok(Some(current)) = s.get_active_account_at(&source) {
+                    if crate::source::session_logged_in(&source, &previous) {
+                        log_db("update_account_cookies", s.update_account_cookies(current.id, &previous));
+                    }
+                }
+                drop_jar_session(&c, &source);
+                previous
+            };
+            let asked = src.clone();
+            let signed_in = with_recovery(client.clone(), storage.clone(), OpKind::Login, RetrySafety::Idempotent,
+                move |_client| {
+                    let (asked, username, password) = (asked.clone(), username.clone(), password.clone());
+                    async move { asked.login(&username, &password).await.map_err(AO3Error::from) }
+                }).await;
+            let who = match signed_in {
+                Ok(true) => {
+                    let asked = src.clone();
+                    with_recovery(client.clone(), storage.clone(), OpKind::Login, RetrySafety::Idempotent,
+                        move |_client| {
+                            let asked = asked.clone();
+                            async move { asked.whoami().await.map_err(AO3Error::from) }
+                        }).await
+                }
+                Ok(false) => Err(AO3Error::Network { message: format!("{name} did not accept that username and password.") }),
+                Err(e) => Err(e),
+            };
+            let who = match who {
+                Ok(Some(who)) => who,
+                other => {
+                    // Not signed in after all: the jar goes back to what it held.
+                    put_jar_session(&*client.read().await, &source, &previous);
+                    return Err(other.err().unwrap_or(AO3Error::Network {
+                        message: format!("{name} did not recognise the sign-in"),
+                    }));
+                }
+            };
+            let session = jar_session(&*client.read().await, &source);
             let s = storage.lock().await;
             let id = s.create_account_at(&source, &who.external_id, &who.username, &session).map_err(AO3Error::from)?;
             s.set_active_account(id).map_err(AO3Error::from)?;

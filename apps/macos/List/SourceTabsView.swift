@@ -2,7 +2,7 @@ import AppKit
 
 /// The Search section's top-level tabs: one per source that searches, in
 /// the registry's order (AO3 first), each its badge and name in the same
-/// segmented track as `ScopeTabsView`. Clicking reports the source id to
+/// segmented track as the settings segment controls. Clicking reports the source id to
 /// `onSelect`; the owning render calls `configure(selected:)` back with
 /// the model's tab so the highlight always reflects model state.
 final class SourceTabsView: NSView {
@@ -12,7 +12,7 @@ final class SourceTabsView: NSView {
 
     var segmentCount: Int { segments.count }
 
-    init(theme: AppTheme, sources: [SourceCapabilities]) {
+    init(theme: AppTheme, sources: [(id: String, name: String)]) {
         self.theme = theme
         super.init(frame: .zero)
         wantsLayer = true

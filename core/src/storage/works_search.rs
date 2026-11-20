@@ -75,7 +75,7 @@ pub(super) enum NumRange {
 /// time ago (more recent) and `>` longer ago, matching AO3. Absolute dates
 /// compare lexically, prefixes included.
 #[derive(Debug, PartialEq)]
-enum DateCmp {
+pub(super) enum DateCmp {
     RelSince(String),
     RelBefore(String),
     RelOn(String),
@@ -87,7 +87,7 @@ enum DateCmp {
 /// One filter from the search form, typed. Semantics live here and in the
 /// compiler — never string-built at call sites.
 #[derive(Debug, PartialEq)]
-enum Predicate {
+pub(super) enum Predicate {
     /// Free-text query: substring across title, summary, authors, and every
     /// tag name on the work.
     FreeText(String),
@@ -119,6 +119,8 @@ enum Predicate {
     /// A registry field's numeric value within bounds (source-specific
     /// stats). `field_id` resolved up front; None = no such field.
     StatRange { field_id: Option<i64>, min: Option<f64>, max: Option<f64> },
+    /// A registry field's text value is one of `values` (exact).
+    StatTextIn { field_id: Option<i64>, values: Vec<String> },
     /// Exact tag names of one kind: all/any of `include`, none of
     /// `exclude`. Names pre-lowered (ASCII).
     TagSet { tag_type: String, include: Vec<String>, exclude: Vec<String>, all: bool },
@@ -215,7 +217,7 @@ fn parse_criteria(c: &LocalSearchCriteria) -> Vec<Predicate> {
 
 /// Numeric columns the schema translator may name; anything else is
 /// dropped rather than interpolated.
-fn numeric_column(name: &str) -> Option<&'static str> {
+pub(super) fn numeric_column(name: &str) -> Option<&'static str> {
     match name {
         "chapter_count" => Some("works.chapter_count"),
         "word_count" => Some("works.word_count"),
@@ -272,7 +274,7 @@ pub(super) fn parse_range(expr: &str) -> Option<NumRange> {
 }
 
 /// `revised_matches` as a parser — same operator and relative-date handling.
-fn parse_revised(expr: &str) -> Option<DateCmp> {
+pub(super) fn parse_revised(expr: &str) -> Option<DateCmp> {
     let expr = expr.trim();
     if expr.is_empty() {
         return None;
@@ -384,7 +386,7 @@ impl Storage {
         Ok((sql, params))
     }
 
-    fn compile_predicate(
+    pub(super) fn compile_predicate(
         &self,
         pred: &Predicate,
         fragments: &mut Vec<String>,
@@ -499,6 +501,19 @@ impl Storage {
                 params.push(Value::Integer(*field_id));
                 if let Some(min) = min { params.push(Value::Real(*min)); }
                 if let Some(max) = max { params.push(Value::Real(*max)); }
+            }
+            Predicate::StatTextIn { field_id, values } => {
+                let Some(field_id) = field_id else {
+                    fragments.push("0".into());
+                    return Ok(());
+                };
+                fragments.push(format!(
+                    "EXISTS (SELECT 1 FROM work_stats ws
+                      WHERE ws.work_id = works.id AND ws.field_id = ? AND ws.text_value IN ({}))",
+                    sql_placeholders(values.len())
+                ));
+                params.push(Value::Integer(*field_id));
+                for v in values { params.push(Value::Text(v.clone())); }
             }
             Predicate::TagSet { tag_type, include, exclude, all } => {
                 const ONE: &str = "EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
@@ -658,7 +673,7 @@ impl Storage {
 /// back to Date Updated, direction defaulting ascending only for title.
 /// Ends with an id tiebreak so equal keys order deterministically (the
 /// oracle leaves ties in arbitrary order).
-fn sort_sql(column: &str, direction: &str) -> String {
+pub(super) fn sort_sql(column: &str, direction: &str) -> String {
     let column = column.trim();
     let key = match column {
         SORT_KEY_TITLE => "ao3_lower(works.title)",

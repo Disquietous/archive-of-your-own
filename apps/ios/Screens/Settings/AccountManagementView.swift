@@ -202,6 +202,11 @@ struct AccountManagementView: View {
                         // page: that page again.
                         switch row.group.signIn {
                         case .site: Task { await state.signInAtSite(source: row.group.source) }
+                        case .credentials where !row.group.primary:
+                            // Not the archive account: it signs in
+                            // again through the add form.
+                            addSource = row.group.source
+                            showAddAccount = true
                         case .credentials, .none: nav.presentedSheet = .reauth
                         }
                     } label: {
@@ -304,7 +309,7 @@ struct AccountManagementView: View {
         }
 
         Button {
-            Task { await performAddAccount() }
+            Task { await performAddAccount(group) }
         } label: {
             Text(isAddingAccount ? "Signing in…" : "Sign in")
                 .font(Typography.smallButtonLabel())
@@ -357,7 +362,7 @@ struct AccountManagementView: View {
         }
     }
 
-    private func performAddAccount() async {
+    private func performAddAccount(_ group: UAccountGroup) async {
         guard !state.bridge.networkBlocked else {
             addError = "Connect to Tor first."
             return
@@ -365,7 +370,11 @@ struct AccountManagementView: View {
         isAddingAccount = true
         addError = nil
         do {
-            _ = try await state.bridge.addAccount(username: addUsername, password: addPassword)
+            if group.primary {
+                _ = try await state.bridge.addAccount(username: addUsername, password: addPassword)
+            } else {
+                _ = try await state.bridge.signInWithCredentials(source: group.source, username: addUsername, password: addPassword)
+            }
             state.refreshAO3Username()
             showAddAccount = false
         } catch {

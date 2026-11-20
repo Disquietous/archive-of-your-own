@@ -47,6 +47,7 @@ impl AO3App {
         let app = AO3App {
             content_worker: super::content_queue::spawn_worker(
                 runtime.handle(), Arc::downgrade(&storage), client.clone(), sources.clone()),
+            facts_worker: super::library_query::spawn_facts_worker(runtime.handle(), Arc::downgrade(&storage)),
             sources,
             client,
             storage,
@@ -93,6 +94,7 @@ impl AO3App {
             content_worker: super::content_queue::spawn_worker(
                 previous._runtime.handle(), Arc::downgrade(&storage),
                 previous.client.clone(), previous.sources.clone()),
+            facts_worker: super::library_query::spawn_facts_worker(previous._runtime.handle(), Arc::downgrade(&storage)),
             client: previous.client.clone(),
             sources: previous.sources.clone(),
             storage,

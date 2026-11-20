@@ -40,7 +40,6 @@ pub fn schema() -> SearchSchema {
                     opt("F", "Exclude crossovers"),
                     opt("T", "Show only crossovers"),
                 ], Some("Include crossovers")),
-                SearchField::toggle("single_chapter", "Single Chapter").column("chapter_count"),
                 SearchField::count_range("word_count", "Word Count").column("word_count"),
                 SearchField::choice("language", "Language", language_options, Some("Any")).column("language"),
             ]),

@@ -562,6 +562,7 @@ impl AO3App {
             return Err(AO3Error::from(e));
         }
         self.library_searches.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        crate::storage::library_query::mark_facts_stale();
         state.last_pushed_generation = expected_generation;
         state.known_cloud_generation = state.known_cloud_generation.max(expected_generation);
         state.last_push_at = now_ms();
@@ -619,6 +620,7 @@ impl AO3App {
             return Err(AO3Error::from(e));
         }
         self.library_searches.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        crate::storage::library_query::mark_facts_stale();
         // A restored library is a new lineage as far as iCloud is
         // concerned: it must be pushed (or the cloud copy adopted)
         // deliberately, so drop the ownership mark.

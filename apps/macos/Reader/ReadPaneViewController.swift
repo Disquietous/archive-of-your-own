@@ -301,7 +301,6 @@ final class ReadPaneViewController: NSViewController {
     var searchBackBtn: ToolButton?
     var searchGoBtn: ToolButton?
     var reloadCriteriaBtn: ToolButton?
-    var scopeTabs: ScopeTabsView?
     var sourceTabs: SourceTabsView?
     var searchSourceBtn: ToolButton?
     var searchEyeBtn: ToolButton?

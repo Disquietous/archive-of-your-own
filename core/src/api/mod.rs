@@ -30,6 +30,7 @@ mod error;
 mod follows;
 mod helpers;
 mod library;
+mod library_query;
 mod listing;
 mod logs;
 mod prefs;
@@ -145,11 +146,15 @@ pub struct AO3App {
     /// when the instance drops, so a lock releases the storage (and its
     /// key material) without waiting out a download in flight.
     content_worker: tokio::task::AbortHandle,
+    /// The worker that rebuilds the library facts after the library
+    /// changes (api/library_query.rs). Aborted with the instance.
+    facts_worker: tokio::task::AbortHandle,
 }
 
 impl Drop for AO3App {
     fn drop(&mut self) {
         self.content_worker.abort();
+        self.facts_worker.abort();
     }
 }
 

@@ -19,6 +19,9 @@ struct TagTokenField: View {
     /// Where the explicit lookup goes: AO3's tag autocomplete by default;
     /// a source form passes its own (site name, lookup) pair.
     var remote: (site: String, lookup: (String) async throws -> [String])? = nil
+    /// The library search: suggestions come from the tags cache only and
+    /// there is no site lookup to offer.
+    var localOnly = false
 
     @State private var input = ""
     @State private var localSuggestions: [String] = []
@@ -42,7 +45,7 @@ struct TagTokenField: View {
     }
 
     private var showSuggestions: Bool {
-        focused && term.count >= 2
+        focused && term.count >= 2 && (!localOnly || !localSuggestions.isEmpty)
     }
 
     var body: some View {
@@ -77,6 +80,7 @@ struct TagTokenField: View {
 
             if showSuggestions {
                 suggestionList
+                    .revealedInForm(when: localSuggestions.count + remoteSuggestions.count, onAppear: true)
             }
         }
     }
@@ -117,34 +121,36 @@ struct TagTokenField: View {
                 suggestionHeader("From \(remote?.site ?? "AO3")")
                 ForEach(remoteSuggestions, id: \.self) { suggestionRow($0) }
             }
-            // The explicit — and only — network trigger.
-            Button {
-                lookUpOnAO3()
-            } label: {
-                HStack(spacing: 6) {
-                    if isLookingUp {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "magnifyingglass.circle")
-                            .font(.system(size: 11, weight: .medium))
+            if !localOnly {
+                // The explicit — and only — network trigger.
+                Button {
+                    lookUpOnAO3()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isLookingUp {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "magnifyingglass.circle")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        Text(isLookingUp ? "Searching \(remote?.site ?? "AO3")…" : "Search \(remote?.site ?? "AO3") for “\(term)”…")
+                            .font(Font(MacFont.ui(11.5, weight: .semibold)))
+                        Spacer()
                     }
-                    Text(isLookingUp ? "Searching \(remote?.site ?? "AO3")…" : "Search \(remote?.site ?? "AO3") for “\(term)”…")
-                        .font(Font(MacFont.ui(11.5, weight: .semibold)))
-                    Spacer()
-                }
-                .foregroundStyle(theme.accent)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(isLookingUp)
-            if let lookupError {
-                Text(lookupError)
-                    .font(Font(MacFont.ui(11)))
-                    .foregroundStyle(Color(hex: "CE514D"))
+                    .foregroundStyle(theme.accent)
                     .padding(.horizontal, 10)
-                    .padding(.bottom, 6)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isLookingUp)
+                if let lookupError {
+                    Text(lookupError)
+                        .font(Font(MacFont.ui(11)))
+                        .foregroundStyle(Color(hex: "CE514D"))
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 6)
+                }
             }
         }
         .padding(.vertical, 4)

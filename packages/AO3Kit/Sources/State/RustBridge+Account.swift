@@ -320,6 +320,14 @@ extension RustBridge {
         return try await app.signInAtSite(source: source)
     }
 
+    /// Sign in with a username and password at a source other than the
+    /// archive; the account that results is saved and made that source's
+    /// active one. The password is used for the one request.
+    func signInWithCredentials(source: String, username: String, password: String) async throws -> UAccount {
+        guard let app else { throw BridgeError.notInitialized }
+        return try await app.signInWithCredentials(source: source, username: username, password: password)
+    }
+
     func getActiveAccountUsername() -> String {
         guard let app else { return "" }
         return (try? app.getActiveAccountUsername()) ?? ""

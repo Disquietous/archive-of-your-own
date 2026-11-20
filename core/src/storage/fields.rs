@@ -57,6 +57,7 @@ impl Storage {
     /// nothing about it — only the work's own page can take one away
     /// (`set_work_stats`).
     pub fn merge_work_stats(&self, work_id: u64, stats: &[WorkStat]) -> Result<(), AppError> {
+        super::library_query::mark_facts_stale();
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO work_stats (work_id, field_id, num_value, text_value) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(work_id, field_id) DO UPDATE SET
@@ -73,6 +74,7 @@ impl Storage {
     /// absent from the slice is removed — absent, never zero). For a
     /// fetch of the work itself, which states everything the source has.
     pub fn set_work_stats(&self, work_id: u64, stats: &[WorkStat]) -> Result<(), AppError> {
+        super::library_query::mark_facts_stale();
         self.conn.execute("DELETE FROM work_stats WHERE work_id = ?1", params![work_id as i64])
             .map_err(map_sql)?;
         let mut stmt = self.conn.prepare_cached(

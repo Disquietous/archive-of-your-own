@@ -83,6 +83,30 @@ extension AppState {
         }
     }
 
+    /// Sign in with a username and password at a source whose account
+    /// group is not the archive's (`UAccountGroup.primary` false): first
+    /// sign-in, another account, or the same account again all take the
+    /// one call. Shares the password form's in-flight flag and error.
+    @discardableResult
+    func signInWithCredentials(source: String, username: String, password: String) async -> Bool {
+        guard !ao3LoginInFlight else { return false }
+        guard !bridge.networkBlocked else {
+            ao3LoginError = bridge.privacyStatus.connectHint + "."
+            return false
+        }
+        ao3LoginInFlight = true
+        ao3LoginError = nil
+        defer { ao3LoginInFlight = false }
+        do {
+            _ = try await bridge.signInWithCredentials(source: source, username: username, password: password)
+        } catch {
+            ao3LoginError = error.localizedDescription
+            return false
+        }
+        accountsRevision += 1
+        return true
+    }
+
     /// One login at a time; the flag and error stay set until AO3 answers.
     private func runAO3Login(failure: String, _ attempt: () async throws -> Bool) async -> Bool {
         guard !ao3LoginInFlight else { return false }

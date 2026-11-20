@@ -5,27 +5,13 @@ extension ReadPaneViewController {
     // MARK: - Search pane buttons (the list pane is collapsed in Search,
     // so the form's actions live in this pane's header)
 
-    /// The search scope tabs living where the "Search" title used to be.
-    /// One instance for the pane's lifetime; render() re-reads the model's
-    /// scope into it every pass (observable input, per the relay rule).
-    func scopeTabsView() -> ScopeTabsView {
-        let tabs = scopeTabs ?? {
-            let view = ScopeTabsView(theme: theme)
-            view.onSelect = { [weak self] scope in
-                guard let self else { return }
-                self.model.search.setScope(scope)
-            }
-            return view
-        }()
-        scopeTabs = tabs
-        return tabs
-    }
-
     /// The top-level source tabs: one per source with the search
     /// capability, AO3 first. One instance for the pane's lifetime.
     func sourceTabsView() -> SourceTabsView {
         let tabs = sourceTabs ?? {
-            let sources = appState.bridge.listSources().filter(\.search)
+            // Each searchable source, then the library across all of them.
+            let sources = appState.bridge.listSources().filter(\.search).map { (id: $0.id, name: $0.name) }
+                + [(id: SearchModel.libraryTab, name: "Library")]
             let view = SourceTabsView(theme: theme, sources: sources)
             view.onSelect = { [weak self] id in
                 guard let self else { return }
@@ -121,7 +107,14 @@ extension ReadPaneViewController {
             if model.search.usesArchiveForm {
                 model.search.performScopedSearch(appState)
             } else {
-                model.scribbleHubSearch.run(model.search, appState: appState)
+                switch model.search.sourceTab {
+                case SearchModel.libraryTab:
+                    model.librarySearch.run(model.search, appState: appState)
+                case HentaiFoundrySearchModel.sourceID:
+                    model.hentaiFoundrySearch.run(model.search, appState: appState)
+                default:
+                    model.scribbleHubSearch.run(model.search, appState: appState)
+                }
             }
         }
         searchGoBtn = button

@@ -18,6 +18,7 @@ pub use drafts::CommentDraft;
 mod fields;
 pub use fields::WorkStat;
 mod library;
+pub mod library_query;
 pub mod library_file;
 mod schema_v26;
 mod subscriptions;
@@ -286,6 +287,17 @@ impl Storage {
             rusqlite::functions::FunctionFlags::SQLITE_UTF8
                 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
             |ctx| Ok(ctx.get::<String>(0)?.to_lowercase()),
+        )
+        .map_err(map_sql)?;
+        // A text value read as an amount ("41k", "1,200"), NULL when it
+        // is not one; lets a stat a source reports as text be searched
+        // as the number it is.
+        conn.create_scalar_function(
+            "ao3_quantity",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |ctx| Ok(ctx.get::<Option<String>>(0)?.as_deref().and_then(library_query::quantity)),
         )
         .map_err(map_sql)?;
         Ok(conn)

@@ -4074,3 +4074,130 @@ fn content_queue_orders_holds_back_and_gives_up() {
     assert_eq!(db.content_item_attempts(a).unwrap(), Some(0));
     assert_eq!(db.next_content_item(0).unwrap(), Some(a));
 }
+
+#[test]
+fn library_query_groups_conditions_by_source() {
+    use super::library_query::{parse_bounds, quantity, LibraryCondition, LibraryFieldInput, LibraryFieldKind, LibraryQuery};
+    let db = open_test_db();
+    let work = |n: u64, source: &str, kudos: Option<u32>| {
+        let mut w = sample_work(n);
+        w.source = source.to_string();
+        w.url = format!("https://{source}.mock/story/{n}");
+        w.kudos = kudos;
+        if kudos.is_none() { w.hits = None; w.bookmarks = None; w.comments = None; }
+        w.title = format!("Work {n:02}");
+        w
+    };
+    // AO3: 5 and 50 kudos. Rated: 2 and 4 stars. Voted: 30 votes. File: imported.
+    let a_low = db.save_work(&work(1, SOURCE_AO3, Some(5))).unwrap();
+    let a_high = db.save_work(&work(2, SOURCE_AO3, Some(50))).unwrap();
+    let r_low = db.save_work(&work(3, "rated", None)).unwrap();
+    let r_high = db.save_work(&work(4, "rated", None)).unwrap();
+    let mut voted = work(5, "voted", None);
+    voted.tags = vec!["Yuri".into()];
+    let v = db.save_work(&voted).unwrap();
+    let file = db.save_work(&work(6, "file", None)).unwrap();
+    let stars = db.ensure_field("rated", "rating", "Rating", "num", 1).unwrap();
+    let status = db.ensure_field("rated", "status", "Status", "text", 2).unwrap();
+    let votes = db.ensure_field("voted", "votes", "Votes", "num", 1).unwrap();
+    db.set_work_stats(r_low, &[WorkStat { field_id: stars, num_value: Some(2.0), text_value: None }]).unwrap();
+    db.set_work_stats(r_high, &[
+        WorkStat { field_id: stars, num_value: Some(4.0), text_value: None },
+        WorkStat { field_id: status, num_value: None, text_value: Some("Completed".into()) },
+    ]).unwrap();
+    // A size the source reports as text ("41k") is still an amount.
+    let size = db.ensure_field("voted", "size", "Size", "text", 2).unwrap();
+    db.set_work_stats(v, &[
+        WorkStat { field_id: votes, num_value: Some(30.0), text_value: None },
+        WorkStat { field_id: size, num_value: None, text_value: Some("41k".into()) },
+    ]).unwrap();
+
+    let at_least = |source: &str, kind, key: &str, min: f64| LibraryCondition {
+        source: source.into(), kind, key: key.into(), range: format!(">={min}"), ..Default::default()
+    };
+    let run = |sources: &[&str], conditions: Vec<LibraryCondition>| db.run_library_query(&LibraryQuery {
+        sources: sources.iter().map(|s| s.to_string()).collect(), conditions,
+        sort_column: "title_to_sort_on".into(), sort_direction: "asc".into(),
+        excluded_sources: vec!["file".into()], ..Default::default()
+    }).unwrap();
+
+    assert_eq!(run(&[], vec![]), vec![a_low, a_high, r_low, r_high, v], "imported files are never searched");
+    assert!(!run(&[], vec![]).contains(&file));
+    // One condition per source: each source answers its own.
+    assert_eq!(run(&[], vec![
+        at_least("rated", LibraryFieldKind::Stat, "rating", 3.0),
+        at_least(SOURCE_AO3, LibraryFieldKind::Column, "kudos", 10.0),
+        at_least("voted", LibraryFieldKind::Stat, "votes", 20.0),
+    ]), vec![a_high, r_high, v]);
+    // Conditions and no picked sources: only the sources named contribute.
+    assert_eq!(run(&[], vec![at_least(SOURCE_AO3, LibraryFieldKind::Column, "kudos", 10.0)]), vec![a_high]);
+    // A picked source with no condition contributes everything it has.
+    assert_eq!(run(&["rated"], vec![at_least(SOURCE_AO3, LibraryFieldKind::Column, "kudos", 10.0)]), vec![a_high, r_low, r_high]);
+    assert_eq!(run(&["rated"], vec![]), vec![r_low, r_high]);
+    // Two conditions on one source both hold.
+    let completed = LibraryCondition { source: "rated".into(), kind: LibraryFieldKind::Stat, key: "status".into(),
+                                       values: vec!["Completed".into()], ..Default::default() };
+    assert_eq!(run(&[], vec![at_least("rated", LibraryFieldKind::Stat, "rating", 1.0), completed.clone()]), vec![r_high]);
+    // A tag condition takes any of its values; an unfilled one takes no part.
+    let tagged = LibraryCondition { source: "voted".into(), kind: LibraryFieldKind::Tag, key: "freeform".into(),
+                                    values: vec!["yuri".into(), "Nope".into()], ..Default::default() };
+    assert_eq!(run(&[], vec![tagged]), vec![v]);
+    let unfilled = LibraryCondition { source: "voted".into(), kind: LibraryFieldKind::Tag, key: "freeform".into(),
+                                      ..Default::default() };
+    assert_eq!(run(&[], vec![unfilled]).len(), 5);
+
+    let facts = db.library_facts().unwrap();
+    let fields = &facts.fields;
+    assert_eq!(facts.sources.iter().map(|(s, n)| (s.as_str(), *n)).collect::<Vec<_>>(),
+               vec![(SOURCE_AO3, 2), ("file", 1), ("rated", 2), ("voted", 1)]);
+    assert_eq!(facts.languages, vec!["English".to_string()]);
+    let has = |source: &str, kind, key: &str| fields.iter().any(|f| f.source == source && f.kind == kind && f.key == key);
+    assert!(has(SOURCE_AO3, LibraryFieldKind::Column, "kudos"));
+    assert!(!has("rated", LibraryFieldKind::Column, "kudos"), "a column no work fills is not offered");
+    assert!(has("rated", LibraryFieldKind::Stat, "status") && has("voted", LibraryFieldKind::Tag, "freeform"));
+    let values = facts.field_values("rated", LibraryFieldKind::Stat, "status", "", 0);
+    assert_eq!(values.iter().map(|v| (v.value.as_str(), v.works)).collect::<Vec<_>>(), vec![("Completed", 1)]);
+    let tags = facts.field_values("voted", LibraryFieldKind::Tag, "freeform", "yu", 10);
+    assert_eq!(tags.iter().map(|v| v.value.as_str()).collect::<Vec<_>>(), vec!["Yuri"]);
+
+    // A text stat of amounts is a range field and compares as amounts.
+    let field = |source: &str, key: &str| fields.iter().find(|f| f.source == source && f.key == key).unwrap();
+    assert_eq!(field("voted", "size").input, LibraryFieldInput::Range);
+    assert_eq!((field("voted", "size").low.as_str(), field("voted", "size").high.as_str()), ("41000", "41000"));
+    assert_eq!(field("rated", "status").input, LibraryFieldInput::Choice);
+    assert_eq!(field("rated", "rating").input, LibraryFieldInput::Range);
+    assert!(facts.field_values("voted", LibraryFieldKind::Stat, "votes", "", 0).is_empty());
+    let sized = |range: &str| run(&[], vec![LibraryCondition {
+        source: "voted".into(), kind: LibraryFieldKind::Stat, key: "size".into(), range: range.into(), ..Default::default()
+    }]);
+    assert_eq!(sized(">1500"), vec![v]);
+    assert_eq!(sized("1500-100000"), vec![v]);
+    assert_eq!(sized("10k-50k"), vec![v]);
+    assert!(sized("<41000").is_empty() && sized(">41k").is_empty());
+    assert_eq!(sized("<=41k"), vec![v]);
+    assert_eq!(sized("not a range").len(), 5, "an unreadable range takes no part");
+    // The shared word count takes the same expression.
+    let worded = |words: &str| db.run_library_query(&LibraryQuery {
+        words: words.into(), excluded_sources: vec!["file".into()], ..Default::default()
+    }).unwrap().len();
+    assert_eq!((worded(">12000"), worded("<100"), worded("12345")), (5, 0, 5));
+    // The shared fields: title, tag kinds by name, dates, chapter state.
+    let shared = |q: LibraryQuery| db.run_library_query(&LibraryQuery { excluded_sources: vec!["file".into()], ..q }).unwrap();
+    assert_eq!(shared(LibraryQuery { title: "work 02".into(), ..Default::default() }), vec![a_high]);
+    assert_eq!(shared(LibraryQuery { tags: "yur".into(), ..Default::default() }), vec![v]);
+    assert_eq!(shared(LibraryQuery { fandoms: "fandom a".into(), ..Default::default() }).len(), 5);
+    assert_eq!(shared(LibraryQuery { characters: "nobody".into(), ..Default::default() }).len(), 0);
+    assert_eq!(shared(LibraryQuery { updated: "> 2025-01-01".into(), ..Default::default() }).len(), 5);
+    assert_eq!(shared(LibraryQuery { published: "> 2025-01-01".into(), ..Default::default() }).len(), 0);
+    assert_eq!(shared(LibraryQuery { published: "2024-11".into(), ..Default::default() }).len(), 5);
+    assert_eq!(shared(LibraryQuery { fully_downloaded: true, ..Default::default() }).len(), 0);
+
+    assert_eq!(quantity("1,200"), Some(1200.0));
+    assert_eq!(quantity("2.5m"), Some(2_500_000.0));
+    assert_eq!(quantity("Completed"), None);
+    assert_eq!(parse_bounds(">1500"), Some((Some((1500.0, false)), None)));
+    assert_eq!(parse_bounds("1500-10000"), Some((Some((1500.0, true)), Some((10000.0, true)))));
+    assert_eq!(parse_bounds("-5"), Some((Some((-5.0, true)), Some((-5.0, true)))));
+    assert_eq!(parse_bounds("-5-10"), Some((Some((-5.0, true)), Some((10.0, true)))));
+    assert_eq!(parse_bounds(""), None);
+}

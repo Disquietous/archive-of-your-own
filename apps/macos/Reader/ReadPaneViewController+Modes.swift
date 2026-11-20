@@ -111,7 +111,10 @@ extension ReadPaneViewController {
             resultsController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(SearchFormView(theme: theme, appState: appState, model: model))
+            host.rootView = AnyView(VStack(spacing: 0) {
+                ArchiveScopeBar(theme: theme, model: model)
+                SearchFormView(theme: theme, appState: appState, model: model)
+            })
             detailHost = host
             pin(host)
 
@@ -129,16 +132,28 @@ extension ReadPaneViewController {
             resultsController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(ScopeSearchFormView(theme: theme, appState: appState, model: model))
+            host.rootView = AnyView(VStack(spacing: 0) {
+                ArchiveScopeBar(theme: theme, model: model)
+                ScopeSearchFormView(theme: theme, appState: appState, model: model)
+            })
             detailHost = host
             pin(host)
 
-        case .sourceForm:
+        case .sourceForm(let source):
             readerController.view.removeFromSuperview()
             resultsController?.view.removeFromSuperview()
             emptyHost?.removeFromSuperview()
             let host = detailHost ?? NSHostingView(rootView: AnyView(EmptyView()))
-            host.rootView = AnyView(ScribbleHubSearchFormView(theme: theme, appState: appState, model: model))
+            // Each searchable source's form is laid out for its site;
+            // the tab's source picks which.
+            switch source {
+            case SearchModel.libraryTab:
+                host.rootView = AnyView(LibrarySearchFormView(theme: theme, appState: appState, model: model))
+            case HentaiFoundrySearchModel.sourceID:
+                host.rootView = AnyView(HentaiFoundrySearchFormView(theme: theme, appState: appState, model: model))
+            default:
+                host.rootView = AnyView(ScribbleHubSearchFormView(theme: theme, appState: appState, model: model))
+            }
             detailHost = host
             pin(host)
 
