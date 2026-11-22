@@ -9,7 +9,13 @@ use crate::source::{Gate, Reaction, ReactionControl, ReactionOutcome, ReactionSh
                     UserControls, UserList, WorkControls};
 
 fn reaction_control(source: &Arc<dyn Source>, s: &Storage, work_id: u64) -> ReactionControl {
-    let gate = source.reaction_gate(s.signed_in_at(source.id()));
+    let signed_in = s.signed_in_at(source.id());
+    let gate = match s.work_ref(work_id) {
+        Some(work) => source.reaction_gate_for(&work, signed_in),
+        None => source.reaction_gate(signed_in),
+    };
+    // A work its source takes no reaction on draws no control at all.
+    if gate == Gate::Hidden { return ReactionControl::None }
     match source.capabilities().reaction {
         ReactionShape::None => ReactionControl::None,
         ReactionShape::Kudos => {

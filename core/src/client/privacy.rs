@@ -32,9 +32,19 @@ pub enum NetworkRefusal {
     VpnNotVerified { status: VpnStatus },
     /// The mock archive is on and has no page for the request.
     MockUnserved,
+    /// The app has not yet told the core its privacy settings. Nothing
+    /// is sent until it has: the mode, the VPN requirement and the VPN's
+    /// details all decide whether and how a request may go out.
+    SettingsNotEstablished,
 }
 
 static MODE: AtomicU8 = AtomicU8::new(0);
+/// Whether the app has handed over its privacy settings since the
+/// process started (`establish`). Until then the values here are only
+/// placeholders, and the gate refuses every request. (Tests run without
+/// an app to hand anything over.)
+static ESTABLISHED: AtomicBool = AtomicBool::new(cfg!(test));
+static ESTABLISHED_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static VPN_REQUIRED: AtomicBool = AtomicBool::new(true);
 static FINGERPRINT: Mutex<Option<VpnFingerprint>> = Mutex::new(None);
 static LAST_STATUS: Mutex<Option<VpnStatus>> = Mutex::new(None);
@@ -44,6 +54,32 @@ fn mode_from(v: u8) -> PrivacyMode {
         1 => PrivacyMode::Vpn,
         2 => PrivacyMode::Open,
         _ => PrivacyMode::Tor,
+    }
+}
+
+/// The app's privacy settings, all at once, and from here on the gate
+/// decides by them. This is the only way requests become possible.
+pub fn establish(mode: PrivacyMode, vpn_required: bool, fingerprint: Option<VpnFingerprint>) {
+    set_privacy_mode(mode);
+    set_vpn_required(vpn_required);
+    set_vpn_fingerprint(fingerprint);
+    if !ESTABLISHED.swap(true, Ordering::SeqCst) {
+        crate::log_info!("network", "Privacy settings established ({mode:?}); requests may now be decided");
+    }
+    ESTABLISHED_NOTIFY.notify_waiters();
+}
+
+pub fn is_established() -> bool {
+    ESTABLISHED.load(Ordering::SeqCst)
+}
+
+/// Wait until the app has handed over its privacy settings. Background
+/// work that would use the network starts here.
+pub async fn wait_established() {
+    loop {
+        let notified = ESTABLISHED_NOTIFY.notified();
+        if is_established() { return }
+        notified.await;
     }
 }
 
@@ -147,7 +183,15 @@ pub(crate) fn decide(
 
 /// May a request go out on a client whose transport is (or isn't) Tor?
 pub fn gate(is_tor: bool) -> Result<(), NetworkRefusal> {
+    require_established(is_established())?;
     decide(privacy_mode(), vpn_required(), is_tor, || refresh_vpn_status().0)
+}
+
+/// The first question of the gate, before any setting is read: has the
+/// app handed its settings over? Whatever the placeholders happen to
+/// say, the answer without them is no.
+pub(crate) fn require_established(established: bool) -> Result<(), NetworkRefusal> {
+    if established { Ok(()) } else { Err(NetworkRefusal::SettingsNotEstablished) }
 }
 
 /// Label for the request log's transport column when the request did not
@@ -224,5 +268,11 @@ mod tests {
         assert_eq!(label_for(PrivacyMode::Vpn, Some(&fp())).as_deref(), Some("vpn:NordVPN"));
         assert_eq!(label_for(PrivacyMode::Vpn, None).as_deref(), Some("vpn:unregistered"));
         assert_eq!(label_for(PrivacyMode::Open, None).as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn nothing_is_sent_before_the_settings_are_established() {
+        assert_eq!(require_established(false), Err(NetworkRefusal::SettingsNotEstablished));
+        assert_eq!(require_established(true), Ok(()));
     }
 }

@@ -151,6 +151,8 @@ extension ReadPaneViewController {
                 host.rootView = AnyView(LibrarySearchFormView(theme: theme, appState: appState, model: model))
             case HentaiFoundrySearchModel.sourceID:
                 host.rootView = AnyView(HentaiFoundrySearchFormView(theme: theme, appState: appState, model: model))
+            case LiteroticaSearchModel.sourceID:
+                host.rootView = AnyView(LiteroticaSearchFormView(theme: theme, appState: appState, model: model))
             default:
                 host.rootView = AnyView(ScribbleHubSearchFormView(theme: theme, appState: appState, model: model))
             }

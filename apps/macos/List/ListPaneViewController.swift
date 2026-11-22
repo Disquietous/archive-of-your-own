@@ -52,6 +52,8 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     /// render (an observable read, so stamp changes re-render the list).
     var renderedSection: MacAppModel.Section?
     var renderedWorkIDs: [String] = []
+    /// `WorkRowCellView.layoutKey` per rendered row, in row order.
+    var renderedRowKeys: [Int] = []
     var renderedSubscriptionIDs: [String] = []
     var expandedSummaries: Set<String> = []
     var expandedTags: Set<String> = []

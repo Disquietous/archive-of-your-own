@@ -6,14 +6,15 @@ use super::*;
 use crate::source::search::{FieldOption, SearchQuery, SearchSchema};
 use crate::source::{LinkTarget, SourceCapabilities, SourceRegistry, UserPane};
 
-/// The app's sources, in display order. AO3 first, then ScribbleHub and
-/// Hentai Foundry (on the same transport); the rated mock answers only while the mock
+/// The app's sources, in display order. AO3 first, then ScribbleHub,
+/// Hentai Foundry and Literotica (on the same transport); the rated mock answers only while the mock
 /// archive is on; local files last (no site, nothing to fetch).
 pub(super) fn registry(client: Arc<tokio::sync::RwLock<AO3Client>>) -> SourceRegistry {
     SourceRegistry::new(vec![
         Arc::new(crate::source::ao3::AO3Source::new(client.clone())),
         Arc::new(crate::source::scribblehub::ScribbleHubSource::new(client.clone())),
-        Arc::new(crate::source::hentaifoundry::HentaiFoundrySource::new(client)),
+        Arc::new(crate::source::hentaifoundry::HentaiFoundrySource::new(client.clone())),
+        Arc::new(crate::source::literotica::LiteroticaSource::new(client)),
         Arc::new(crate::source::mock_rated::MockRatedSource::new()),
         Arc::new(crate::source::local::LocalSource::new()),
     ])
@@ -151,7 +152,9 @@ impl AO3App {
         Some(schema)
     }
 
-    /// One page of a source's search results, cached like every listing.
+    /// One page of a source's search results. A result the library does
+    /// not hold is saved as listed (and so queued for download); one it
+    /// holds is returned as held — a search checks nothing for updates.
     /// `op_id`: request-tracking standard.
     pub async fn search_source(&self, query: SearchQuery, page: u32, op_id: Option<u64>) -> Result<UPagedWorks, AO3Error> {
         let registry = self.sources.clone();
@@ -169,7 +172,7 @@ impl AO3App {
                     async move { source.search(&query, page).await.map_err(AO3Error::from) }
                 }).await?;
             let s = storage.lock().await;
-            save_listing_page(&s, &listing)
+            save_listing_page(&s, &listing, HeldWorks::Keep)
         }).await
     }
 

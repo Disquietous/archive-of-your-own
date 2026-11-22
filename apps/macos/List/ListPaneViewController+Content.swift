@@ -49,9 +49,23 @@ extension ListPaneViewController {
         // can change a work's dates/counts without changing which rows are
         // shown — those edits must repaint, not just selection state.
         let ids = works.map { "\($0.id)|\($0.updated)|\($0.chapterCount)|\($0.words)" }
-        if sectionChanged || ids != renderedWorkIDs {
+        // Everything a row's height depends on. The signature above misses
+        // a summary, tags or status filled in later by a details fetch or
+        // the download queue; a row drawn from the newer work at the height
+        // measured for the older one overflows or crushes its labels.
+        let keys = works.map { WorkRowCellView.layoutKey(for: $0, hasProgress: appState.progress(for: $0) > 0) }
+        defer { renderedRowKeys = keys }
+        if sectionChanged || ids != renderedWorkIDs || keys.count != renderedRowKeys.count {
             tableView.reloadData()
         } else {
+            let changed = IndexSet(keys.indices.filter { keys[$0] != renderedRowKeys[$0] })
+            if !changed.isEmpty {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    tableView.noteHeightOfRows(withIndexesChanged: changed)
+                }
+                tableView.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
+            }
             // Same rows — only move the selection highlight and the bookmark
             // and follow indicators. Reloading here replaces every cell and
             // makes expand/collapse look like a flash. (Reading

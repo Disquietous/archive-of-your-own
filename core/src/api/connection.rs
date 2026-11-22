@@ -298,6 +298,23 @@ impl AO3App {
     // verified by local inspection (`client::vpn`) before every request.
     // Process-wide, pushed by the app at launch and on every change.
 
+    /// The app's privacy settings, all at once. Until this has been
+    /// called once in the process, the core sends nothing: every request
+    /// is refused, Tor is not connected, and the content queue's worker
+    /// waits. `vpn_fingerprint_json` is what the app persisted (None =
+    /// no VPN registered).
+    pub fn establish_privacy_settings(&self, mode: crate::client::PrivacyMode, vpn_required: bool,
+                                      vpn_fingerprint_json: Option<String>) -> Result<(), AO3Error> {
+        let fingerprint = match vpn_fingerprint_json {
+            Some(j) => Some(serde_json::from_str(&j).map_err(|e| AO3Error::Network {
+                message: format!("Saved VPN details could not be read: {e}"),
+            })?),
+            None => None,
+        };
+        crate::client::privacy::establish(mode, vpn_required, fingerprint);
+        Ok(())
+    }
+
     pub fn set_privacy_mode(&self, mode: crate::client::PrivacyMode) {
         crate::client::privacy::set_privacy_mode(mode);
     }

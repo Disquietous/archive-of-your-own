@@ -15,6 +15,7 @@
 
 pub mod ao3;
 pub mod hentaifoundry;
+pub mod literotica;
 pub mod local;
 pub mod mock_rated;
 pub mod scribblehub;
@@ -120,6 +121,7 @@ pub fn is_login_cookie(source: &str, name: &str) -> bool {
         crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name),
         scribblehub::SOURCE_ID => scribblehub::is_login_cookie(name),
         hentaifoundry::SOURCE_ID => hentaifoundry::is_login_cookie(name),
+        literotica::SOURCE_ID => literotica::is_login_cookie(name),
         _ => false,
     }
 }
@@ -132,6 +134,7 @@ pub fn is_session_cookie(source: &str, name: &str) -> bool {
         crate::models::SOURCE_AO3 => crate::source::ao3::is_ao3_login_cookie(name) || name == "_otwarchive_session",
         scribblehub::SOURCE_ID => scribblehub::is_session_cookie(name),
         hentaifoundry::SOURCE_ID => hentaifoundry::is_session_cookie(name),
+        literotica::SOURCE_ID => literotica::is_session_cookie(name),
         _ => false,
     }
 }
@@ -143,6 +146,8 @@ pub fn session_origin(source: &str) -> Option<&'static str> {
         crate::models::SOURCE_AO3 => Some(crate::source::ao3::BASE_URL),
         scribblehub::SOURCE_ID => Some(scribblehub::BASE_URL),
         hentaifoundry::SOURCE_ID => Some(hentaifoundry::BASE_URL),
+        // Held at the site's sign-in service, not its pages.
+        literotica::SOURCE_ID => Some(literotica::AUTH_URL),
         _ => None,
     }
 }
@@ -630,6 +635,13 @@ pub trait Source: Send + Sync {
         }
     }
 
+    /// The same for one work, for a source where only some works take a
+    /// reaction. Default: every work alike.
+    fn reaction_gate_for(&self, work: &ExternalRef, signed_in: bool) -> Gate {
+        let _ = work;
+        self.reaction_gate(signed_in)
+    }
+
     /// Whether the reader can post to the discussion right now. Hidden
     /// where the source takes no posts; otherwise it needs the login.
     fn post_gate(&self, signed_in: bool) -> Gate {
@@ -736,7 +748,8 @@ mod tests {
         let sources: Vec<Arc<dyn Source>> = vec![
             Arc::new(ao3::AO3Source::new(client.clone())),
             Arc::new(scribblehub::ScribbleHubSource::new(client.clone())),
-            Arc::new(hentaifoundry::HentaiFoundrySource::new(client)),
+            Arc::new(hentaifoundry::HentaiFoundrySource::new(client.clone())),
+            Arc::new(literotica::LiteroticaSource::new(client)),
             Arc::new(mock_rated::MockRatedSource::new()),
         ];
         for s in &sources {

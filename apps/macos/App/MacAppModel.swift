@@ -21,6 +21,8 @@ final class MacAppModel {
     let scribbleHubSearch: ScribbleHubSearchModel
     /// The Hentai Foundry tab's form state (the site's story search).
     let hentaiFoundrySearch: HentaiFoundrySearchModel
+    /// The Literotica tab's form state (the site's advanced story search).
+    let literoticaSearch: LiteroticaSearchModel
     let librarySearch: LibrarySearchModel
     let lists: LibraryListModel
     let follows: FollowModel
@@ -82,6 +84,7 @@ final class MacAppModel {
         self.search = SearchModel()
         self.scribbleHubSearch = ScribbleHubSearchModel()
         self.hentaiFoundrySearch = HentaiFoundrySearchModel()
+        self.literoticaSearch = LiteroticaSearchModel()
         self.librarySearch = LibrarySearchModel()
         self.lists = LibraryListModel(appState: appState)
         self.follows = FollowModel(appState: appState)

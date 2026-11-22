@@ -336,6 +336,11 @@ static RECONNECT: std::sync::Mutex<Option<tokio::sync::watch::Receiver<Option<bo
 /// Bootstrap a fresh Tor client, abandoned the moment the user cancels.
 #[cfg(feature = "tor")]
 pub(crate) async fn bootstrap_tor(state_dir: &str) -> Result<AO3Client, AO3Error> {
+    // Connecting to Tor is network use like any request: not before the
+    // app has handed over its privacy settings.
+    if !crate::client::privacy::is_established() {
+        return Err(AO3Error::Network { message: "Privacy settings are not loaded yet.".to_string() });
+    }
     let cancelled = CONNECT_CANCEL.notified();
     tokio::pin!(cancelled);
     cancelled.as_mut().enable();

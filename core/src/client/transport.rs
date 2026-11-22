@@ -201,6 +201,9 @@ impl Transport {
                     log_info!("network", "Refused request: VPN not verified ({status:?})");
                 }
                 NetworkRefusal::MockUnserved => {}
+                NetworkRefusal::SettingsNotEstablished => {
+                    log_info!("network", "Refused request: privacy settings are not established yet");
+                }
             }
             crate::events::emit(crate::events::CoreEvent::NetworkRefused {
                 id: crate::events::current_op(),
@@ -375,6 +378,22 @@ impl Transport {
         let Ok(url) = base_url.parse::<url::Url>() else { return };
         for name in names {
             self.cookie_jar.add_cookie_str(&format!("{name}=; Max-Age=0"), &url);
+        }
+    }
+
+    /// Move the cookies a site set for its whole domain (`Domain=…`, so
+    /// every host of it) onto the one host at `base_url`: the wide copies
+    /// are expired and the same values kept for that host alone. A
+    /// sign-in service that sets its session domain-wide is then held —
+    /// read, replaced, dropped — at one address like any other session.
+    pub fn rehome_cookies(&self, base_url: &str, domain: &str, matches: impl Fn(&str) -> bool) {
+        let Ok(url) = base_url.parse::<url::Url>() else { return };
+        let held = self.cookies_for(base_url);
+        for part in held.split("; ") {
+            let name = part.split('=').next().unwrap_or("");
+            if name.is_empty() || !matches(name) { continue }
+            self.cookie_jar.add_cookie_str(&format!("{name}=; Max-Age=0; Domain={domain}; Path=/"), &url);
+            self.cookie_jar.add_cookie_str(part, &url);
         }
     }
 
@@ -638,6 +657,75 @@ impl Transport {
                 if super::clearance::is_challenge(out.status, None) {
                     note_challenge(hooks, url, false, sent_generation);
                 }
+                Ok(out)
+            }
+        }
+    }
+
+    /// Send a JSON body (`method` = POST, PATCH…) and return whatever came
+    /// back, for a site whose own pages talk to a data service. Same
+    /// deadline, audit and human-check handling as `post_form`; the audit
+    /// row lists the body's top-level fields, secrets redacted.
+    pub async fn send_json(&self, method: &str, url: &str, body: &serde_json::Value, headers: &[(&str, &str)],
+                           ok: &(dyn Fn(u16, &str) -> bool + Sync), hooks: &dyn SiteHooks) -> Result<PostOutcome, AppError> {
+        let verb = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|_| AppError::NetworkError(format!("{method} is not a request method")))?;
+        self.enforce_rate_limit(url).await;
+        let client = self.http()?;
+        let timeout = self.request_timeout();
+        let _active = ActiveRequestGuard::new(method, url, timeout.as_secs());
+        let fields: Vec<(String, String)> = body.as_object().map(|o| o.iter()
+            .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect())
+            .unwrap_or_default();
+        let audit = AuditCtx::new(hooks.source(), method, url, Some(redact_payload(
+            &fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())));
+
+        let sent_generation = super::clearance::generation_for(url);
+        let result = tokio::time::timeout(timeout, async {
+            let mut req = client.request(verb, url)
+                .header("Content-Type", "application/json")
+                .body(body.to_string());
+            if let Some(ua) = super::clearance::user_agent_for(url) {
+                req = req.header(USER_AGENT, ua);
+            }
+            for (name, value) in headers {
+                req = req.header(*name, *value);
+            }
+            let resp = req.send().await
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
+            let status = resp.status().as_u16();
+            let mitigated = cf_mitigated(resp.headers());
+            if mitigated.is_some() && super::clearance::is_challenge(status, mitigated.as_deref()) {
+                return Err(AppError::Http {
+                    kind: FailureKind::Challenged,
+                    detail: format!("HTTP {status} (human check) for {url}"),
+                });
+            }
+            let set_cookies = resp.headers().get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(str::to_string))
+                .collect();
+            let final_url = resp.url().to_string();
+            let body = resp.text().await
+                .map_err(|e| AppError::Http { kind: FailureKind::from_transport(&e), detail: format!("{e}") })?;
+            Ok::<PostOutcome, AppError>(PostOutcome { status, final_url, set_cookies, body })
+        }).await;
+
+        match result {
+            Err(_) => {
+                audit.record(0, 0, Some("timeout".to_string()));
+                Err(AppError::Http { kind: FailureKind::ConnectFailure, detail: "timeout".to_string() })
+            }
+            Ok(Err(e)) => {
+                audit.record(0, 0, Some(format!("{e}")));
+                if matches!(e, AppError::Http { kind: FailureKind::Challenged, .. }) {
+                    note_challenge(hooks, url, false, sent_generation);
+                }
+                Err(e)
+            }
+            Ok(Ok(out)) => {
+                let error = if ok(out.status, &out.body) { None } else { Some(format!("HTTP {} for {url}", out.status)) };
+                audit.record(out.status, out.body.len() as u64, error);
                 Ok(out)
             }
         }
@@ -929,5 +1017,24 @@ mod tests {
         assert_eq!(t.cookies_for("https://a.example"), "j=2");
         t.expire_named_cookies("https://a.example", &["j"]);
         assert_eq!(t.cookies_for("https://a.example"), "");
+    }
+}
+
+#[cfg(test)]
+mod rehome_tests {
+    #[tokio::test]
+    async fn domain_wide_cookies_move_to_the_one_host() {
+        let t = super::Transport::new_direct().await.unwrap();
+        let (service, pages) = ("https://auth.site.example", "https://www.site.example");
+        let url: url::Url = service.parse().unwrap();
+        // As a sign-in service sets them: for every host of the site.
+        t.cookie_jar.add_cookie_str("token=a.b.c; Domain=site.example; Path=/", &url);
+        t.cookie_jar.add_cookie_str("visitor=v; Domain=site.example; Path=/", &url);
+        assert!(t.cookies_for(pages).contains("token=a.b.c"));
+        t.rehome_cookies(service, "site.example", |name| name == "token");
+        assert!(t.cookies_for(service).contains("token=a.b.c"));
+        assert_eq!(t.cookies_for(pages), "visitor=v", "only the named cookie moved");
+        t.expire_cookies(service, |name| name == "token");
+        assert_eq!(t.cookies_for(service), "visitor=v", "held at one host, it is dropped there");
     }
 }

@@ -204,7 +204,7 @@ impl AO3App {
                     let (source, external) = (source.clone(), external.clone());
                     async move { source.fetch_author_works(&external, page).await.map_err(AO3Error::from) }
                 }).await?;
-            let mut page = { let s = storage.lock().await; save_listing_page(&s, &listing)? };
+            let mut page = { let s = storage.lock().await; save_listing_page(&s, &listing, HeldWorks::Update)? };
             if needs_details {
                 fetch_listed_details(client, storage, registry, &mut page, op_id).await?;
             }

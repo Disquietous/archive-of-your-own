@@ -53,6 +53,12 @@ pub(super) fn source_for_work(s: &Storage, registry: &crate::source::SourceRegis
 /// in Tor mode).
 pub(super) fn check_reachable(source: &Arc<dyn crate::source::Source>) -> Result<(), AO3Error> {
     let caps = source.capabilities();
+    // Before the app has handed over its privacy settings the mode is a
+    // placeholder and says nothing about reach; the gate refuses the
+    // request itself.
+    if !crate::client::privacy::is_established() {
+        return Ok(());
+    }
     if crate::client::privacy::privacy_mode() == crate::client::PrivacyMode::Tor && !caps.reach.tor {
         return Err(AO3Error::Network {
             message: format!("{} blocks Tor. Switch to My VPN in Settings › Privacy to read it.", caps.name),
@@ -61,12 +67,35 @@ pub(super) fn check_reachable(source: &Arc<dyn crate::source::Source>) -> Result
     Ok(())
 }
 
+/// What a listing does to a work the library already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeldWorks {
+    /// Merge what the listing says into it (and queue its content when
+    /// its chapter or word count changed).
+    Update,
+    /// Leave it exactly as the library holds it.
+    Keep,
+}
+
 /// Save one page of a source listing (every work, its authors and its
 /// figures) in one transaction and shape it for the bridge.
-pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPage) -> Result<UPagedWorks, AO3Error> {
+///
+/// `held`: what a listed work the library already holds gets. Search
+/// results leave it alone — a search is not an update check, so a work
+/// seen again changes nothing and queues nothing, and the row shows what
+/// the library holds. An author's list updates it.
+pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPage, held: HeldWorks) -> Result<UPagedWorks, AO3Error> {
     let tx = s.begin_tx().map_err(AO3Error::from)?;
     let mut works = Vec::with_capacity(listing.works.len());
     for listed in &listing.works {
+        if held == HeldWorks::Keep {
+            let known = s.resolve_work(&listed.summary.source, &listed.summary.external_id)
+                .and_then(|id| s.get_work(id).ok().flatten());
+            if let Some(known) = known {
+                works.push(UWorkSummary::from(known));
+                continue;
+            }
+        }
         match s.save_listed_work(&listed.summary) {
             Ok(id) => {
                 if !listed.authors.is_empty() {
@@ -586,5 +615,39 @@ mod byline_tests {
         // Same pseud as username still splits to the clean account name.
         assert_eq!(split_author_byline("astolat (astolat)"),
                    ("astolat".to_string(), Some("astolat".to_string())));
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use crate::source::ListingPage;
+
+    /// One listed story, as the Literotica adapter reads it.
+    fn page(slug: &str, words: u64) -> ListingPage {
+        let body = format!(r#"{{"data": [{{"url": "{slug}", "title": "The Tide Ledger", "type": "story", "authorname": "Saltwick",
+            "category": 15, "date_approve": "03/09/2024", "words_count": {words}}}], "meta": {{"pageSize": 50, "total": 1}}}}"#);
+        crate::source::literotica::parse::parse_listing(&body, 1, true).unwrap()
+    }
+
+    /// A search result the library already holds is left alone: seen
+    /// again — even with a different word count — it changes nothing
+    /// and queues nothing. An author's list still updates it.
+    #[test]
+    fn a_search_result_already_held_is_not_touched_or_queued_again() {
+        let s = Storage::open_in_memory("k").unwrap();
+        let first = save_listing_page(&s, &page("the-tide-ledger", 5000), HeldWorks::Keep).unwrap();
+        let id = first.works[0].id;
+        assert_eq!(s.next_content_item(4_000_000_000).unwrap(), Some(id), "a new result is saved and queued");
+        s.finish_content_item(id).unwrap();
+
+        let again = save_listing_page(&s, &page("the-tide-ledger", 9000), HeldWorks::Keep).unwrap();
+        assert_eq!((again.works[0].id, again.works[0].word_count), (id, Some(5000)));
+        assert_eq!(s.get_work(id).unwrap().unwrap().word_count, Some(5000));
+        assert!(s.next_content_item(4_000_000_000).unwrap().is_none(), "nothing is queued again");
+
+        let updated = save_listing_page(&s, &page("the-tide-ledger", 9000), HeldWorks::Update).unwrap();
+        assert_eq!(updated.works[0].word_count, Some(9000));
+        assert_eq!(s.next_content_item(4_000_000_000).unwrap(), Some(id));
     }
 }

@@ -46,6 +46,7 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
     private var overlayHost: NSView?
     private var works: [Work] = []
     private var renderedWorkIDs: [String] = []
+    private var renderedRowKeys: [Int] = []
     private var expandedTags: Set<String> = []
     private var renderedDensity: Density?
     private var renderedUIScale: Double?
@@ -164,10 +165,25 @@ final class SearchResultsViewController: NSViewController, NSTableViewDataSource
         // Content-aware signature — data refreshes must repaint rows even
         // when the id set is unchanged (see ListPaneViewController).
         let ids = works.map { "\($0.id)|\($0.updated)|\($0.chapterCount)|\($0.words)" }
+        // Everything a row's height depends on (see ListPaneViewController):
+        // details arriving after a listing change a row's content without
+        // changing the signature above.
+        let keys = works.map { WorkRowCellView.layoutKey(for: $0, hasProgress: appState.progress(for: $0) > 0) }
+        defer { renderedRowKeys = keys }
         if ids != renderedWorkIDs {
             tableView.reloadData()
             tableView.scroll(.zero)
+        } else if keys.count != renderedRowKeys.count {
+            tableView.reloadData()
         } else {
+            let changed = IndexSet(keys.indices.filter { keys[$0] != renderedRowKeys[$0] })
+            if !changed.isEmpty {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0
+                    tableView.noteHeightOfRows(withIndexesChanged: changed)
+                }
+                tableView.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: 0))
+            }
             // Same rows — only move the selection highlight and the bookmark
             // and follow indicators, as in ListPaneViewController. (Reading
             // bookmarkedWorkIDs also re-renders the moment a bookmark

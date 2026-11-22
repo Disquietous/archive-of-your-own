@@ -100,12 +100,39 @@ extension WorkRowCellView {
         return (collapsed, max(full, collapsed))
     }
 
+    /// Everything about a work that a row lays text out from, as one
+    /// value. A list compares it between renders: a work whose details
+    /// arrived after its row was measured (a fuller summary, more tags, a
+    /// status, first reading progress) has to be measured and drawn again
+    /// together, or the row keeps the old height under the new content.
+    /// Not the whole `Work` hash: that would walk cached chapter content.
+    static func layoutKey(for work: Work, hasProgress: Bool) -> Int {
+        var h = Hasher()
+        h.combine(work.id)
+        h.combine(work.title)
+        h.combine(work.author)
+        h.combine(work.fandomList)
+        h.combine(work.summary)
+        h.combine(work.tags)
+        h.combine(work.rating)
+        h.combine(work.published)
+        h.combine(work.updated)
+        h.combine(work.chapterCount)
+        h.combine(work.totalChapters)
+        h.combine(work.complete)
+        h.combine(work.status)
+        h.combine(work.words)
+        h.combine(work.kudos)
+        h.combine(hasProgress)
+        return h.finalize()
+    }
+
     static func axDescription(for work: Work, progress: Double,
                               downloaded: Bool, bookmarked: Bool, finished: Bool) -> String {
         var parts: [String] = [work.title, "by \(work.author)"]
         if !work.fandomDisplay.isEmpty { parts.append(work.fandomDisplay) }
         parts.append("rated \(work.rating.rawValue)")
-        parts.append("\(Fmt.k(work.words)) words")
+        if work.words > 0 { parts.append("\(Fmt.k(work.words)) words") }
         parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")
         if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
         if downloaded { parts.append("available offline") }

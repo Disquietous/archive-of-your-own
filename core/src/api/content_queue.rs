@@ -72,6 +72,9 @@ pub(super) fn spawn_worker(
     registry: Arc<crate::source::SourceRegistry>,
 ) -> tokio::task::AbortHandle {
     handle.spawn(async move {
+        // Nothing is looked at, judged or sent before the app has handed
+        // over its privacy settings.
+        crate::client::privacy::wait_established().await;
         loop {
             let Some(strong) = storage.upgrade() else { return };
             let step = run_next(&client, &strong, &registry).await;

@@ -81,10 +81,18 @@ final class RustBridge {
         let required = VpnSettings.required
         let fingerprint = VpnSettings.fingerprintJSON
         for runtime in [app, torOnlyApp].compactMap({ $0 }) {
-            runtime.setPrivacyMode(mode: mode.core)
-            runtime.setVpnRequired(required: required)
-            if runtime.vpnFingerprintJson() != fingerprint {
-                try? runtime.setVpnFingerprintJson(json: fingerprint)
+            // One call hands over everything that decides a request, and
+            // is what first lets the core send at all: until it has run,
+            // the core refuses every request, does not connect to Tor and
+            // holds its background downloads.
+            do {
+                try runtime.establishPrivacySettings(mode: mode.core, vpnRequired: required,
+                                                     vpnFingerprintJson: fingerprint)
+            } catch {
+                // Saved VPN details that cannot be read count as no VPN
+                // registered; VPN mode then refuses until one is.
+                try? runtime.establishPrivacySettings(mode: mode.core, vpnRequired: required,
+                                                      vpnFingerprintJson: nil)
             }
         }
         if PrivacyModeSetting.current == .vpn { refreshVpnStatus() }

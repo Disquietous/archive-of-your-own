@@ -159,7 +159,7 @@ struct DetailView: View {
 
     private var statGrid: some View {
         HStack(spacing: 1) {
-            statCell(Fmt.k(work.words), "Words")
+            if work.words > 0 { statCell(Fmt.k(work.words), "Words") }
             statCell("\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")", "Chapters")
             // Kudos is a count only where the source has that shape; a
             // rated source's figures are registry stats shown as chips.

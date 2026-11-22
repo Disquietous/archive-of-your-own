@@ -354,7 +354,11 @@ final class WorkRowCellView: NSTableCellView {
         // stretches), and during the resize animation it degrades gracefully
         // instead of fighting the in-flight frame.
         bodyBottom = body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
-        bodyBottom.priority = .defaultHigh
+        // One below the labels' compression resistance (750): at a tie, a
+        // row shorter than its content let Auto Layout crush any label it
+        // liked (half a title, no meta line) instead of running past the
+        // bottom edge.
+        bodyBottom.priority = .init(749)
         bodyTop = body.topAnchor.constraint(equalTo: topAnchor, constant: 12)
         spineTop = spine.topAnchor.constraint(equalTo: topAnchor, constant: 12)
         spineBottom = spine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
@@ -552,7 +556,8 @@ final class WorkRowCellView: NSTableCellView {
         summaryHeight.constant = summaryExpanded ? fullSummaryHeight : collapsedSummaryHeight
 
         var meta = (showsKudos ? " \(Fmt.k(work.kudos))   " : "")
-            + "\(Fmt.k(work.words)) words   \(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
+            + (work.words > 0 ? "\(Fmt.k(work.words)) words   " : "")
+            + "\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
         if downloaded {
             meta += "   ⤓ Offline"
         }
@@ -570,10 +575,13 @@ final class WorkRowCellView: NSTableCellView {
                                                  finished: finished))
 
         applyTheme()
-        if progress > 0 {
-            layoutSubtreeIfNeeded()
-            progressWidth.constant = progressTrack.bounds.width * progress
-        }
+        // A share of the track, not a measured width: measuring forced a
+        // layout pass here, at whatever frame the cell had (none, for a new
+        // cell), and the width went stale when the row resized.
+        progressWidth.isActive = false
+        progressWidth = progressFill.widthAnchor.constraint(
+            equalTo: progressTrack.widthAnchor, multiplier: CGFloat(min(1, max(0, progress))))
+        progressWidth.isActive = true
     }
 
     private func applyDensityMetrics() {

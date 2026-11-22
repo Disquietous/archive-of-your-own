@@ -112,6 +112,8 @@ extension ReadPaneViewController {
                     model.librarySearch.run(model.search, appState: appState)
                 case HentaiFoundrySearchModel.sourceID:
                     model.hentaiFoundrySearch.run(model.search, appState: appState)
+                case LiteroticaSearchModel.sourceID:
+                    model.literoticaSearch.run(model.search, appState: appState)
                 default:
                     model.scribbleHubSearch.run(model.search, appState: appState)
                 }
