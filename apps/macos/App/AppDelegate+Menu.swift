@@ -135,6 +135,10 @@ extension AppDelegate {
         monitor.keyEquivalentModifierMask = [.command, .option]
         monitor.target = self
         viewMenu.addItem(monitor)
+        let downloads = NSMenuItem(title: "Download Queue…", action: #selector(openDownloadQueue), keyEquivalent: "j")
+        downloads.keyEquivalentModifierMask = [.command, .option]
+        downloads.target = self
+        viewMenu.addItem(downloads)
         // Troubleshooting tools, grouped (Settings › Diagnostics holds
         // their retention and timeout settings).
         let diagnosticsMenu = NSMenu(title: "Diagnostics")

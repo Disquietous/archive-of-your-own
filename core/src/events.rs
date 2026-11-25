@@ -131,6 +131,11 @@ pub enum CoreEvent {
     /// its embedded images are in the library and the work is marked
     /// downloaded.
     WorkContentSaved { work_id: u64 },
+    /// The content queue changed: a work joined or left it, the worker
+    /// started or finished one, or it was paused or resumed. Carries
+    /// nothing — a monitor reads `content_queue_status` /
+    /// `content_queue_items` for the picture as it stands.
+    ContentQueueChanged,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,6 +375,9 @@ pub(crate) mod tests {
 
     impl CoreObserver for RecordingObserver {
         fn on_event(&self, event: CoreEvent) {
+            // Any storage test that queues a work emits this from its own
+            // thread; it is a "read again" hint, never part of an ordering.
+            if matches!(event, CoreEvent::ContentQueueChanged) { return }
             self.events.lock().unwrap().push(event);
         }
     }

@@ -13,6 +13,12 @@
 //!
 //! The worker never sends into a closed network gate: while the privacy
 //! policy would refuse a request it waits, and the queue keeps.
+//!
+//! The queue can be paused (`set_content_queue_paused`). A pause takes
+//! effect between works: the work in flight — every chapter and image
+//! request it needs — runs to its end first, and the status reads
+//! `Pausing` until it has. The pause lasts for the session; a launch
+//! starts with the queue running.
 
 use super::*;
 use crate::storage::content_queue::CONTENT_QUEUED;
@@ -40,6 +46,168 @@ static IMAGE_CAP_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 #[uniffi::export]
 pub fn set_image_prefetch_cap(max_bytes: u64) {
     IMAGE_CAP_BYTES.store(max_bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The user's pause. Process-wide, so it carries over a library
+/// replacement's fresh worker.
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Wakes a paused worker when the pause is lifted.
+static RESUMED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// The work in flight (0 = none) and when it started (epoch seconds).
+static CURRENT_WORK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CURRENT_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The worker's last pass found the network gate closed.
+static BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the content queue's worker is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ContentQueueState {
+    /// Running, with nothing due right now.
+    Idle,
+    /// Downloading a work.
+    Working,
+    /// Paused by the user, with a work still in flight: it is finished
+    /// in full, then nothing further starts.
+    Pausing,
+    /// Paused by the user; nothing is in flight and nothing starts.
+    Paused,
+    /// Nothing can be sent in the current privacy mode; the worker waits.
+    Blocked,
+}
+
+/// The worker's status, for the monitor.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UContentQueueStatus {
+    pub state: ContentQueueState,
+    /// The user's pause, whether or not the in-flight work has finished.
+    pub paused: bool,
+    /// The work in flight, if any.
+    pub current_work_id: Option<u64>,
+    /// When the in-flight work started, epoch seconds.
+    pub current_started_at: Option<u64>,
+}
+
+/// One queued work, for the monitor.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UContentQueueItem {
+    pub work_id: u64,
+    pub title: String,
+    /// The display name of the work's source.
+    pub source_name: String,
+    /// UTC "YYYY-MM-DD HH:MM:SS".
+    pub queued_at: String,
+    /// Failed downloads so far, out of `max_attempts`; at the maximum the
+    /// work is left alone until it changes again.
+    pub attempts: u32,
+    pub max_attempts: u32,
+    /// Epoch seconds the work is held back until; 0 = not held.
+    pub retry_at: u64,
+    /// Why it was last held back or failed; empty when it never was.
+    pub last_error: String,
+}
+
+fn queue_state(paused: bool, working: bool, blocked: bool) -> ContentQueueState {
+    match (paused, working) {
+        (true, true) => ContentQueueState::Pausing,
+        (true, false) => ContentQueueState::Paused,
+        (false, true) => ContentQueueState::Working,
+        (false, false) if blocked => ContentQueueState::Blocked,
+        (false, false) => ContentQueueState::Idle,
+    }
+}
+
+fn queue_changed() {
+    crate::events::emit(crate::events::CoreEvent::ContentQueueChanged);
+}
+
+/// Marks a work in flight for as long as it lives, so the mark clears
+/// however the download ends — the worker being aborted included.
+struct InFlight;
+
+impl InFlight {
+    fn begin(work_id: u64) -> Self {
+        CURRENT_STARTED.store(crate::timefmt::epoch_now(), std::sync::atomic::Ordering::Relaxed);
+        CURRENT_WORK.store(work_id, std::sync::atomic::Ordering::Relaxed);
+        // A fresh list of requests for this work.
+        crate::steps::clear();
+        queue_changed();
+        InFlight
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        CURRENT_WORK.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::steps::clear();
+        queue_changed();
+    }
+}
+
+#[uniffi::export]
+impl AO3App {
+    /// What the content queue's worker is doing right now. Reads no
+    /// storage.
+    pub fn content_queue_status(&self) -> UContentQueueStatus {
+        use std::sync::atomic::Ordering::Relaxed;
+        let paused = PAUSED.load(Relaxed);
+        let current = Some(CURRENT_WORK.load(Relaxed)).filter(|id| *id != 0);
+        UContentQueueStatus {
+            state: queue_state(paused, current.is_some(), BLOCKED.load(Relaxed)),
+            paused,
+            current_work_id: current,
+            current_started_at: current.map(|_| CURRENT_STARTED.load(Relaxed)),
+        }
+    }
+
+    /// Everything queued, in the order the worker gets to it: due works,
+    /// then held-back ones, then the ones it gave up on. The work in
+    /// flight is still listed (it leaves the queue when it finishes).
+    pub fn content_queue_items(&self) -> Result<Vec<UContentQueueItem>, AO3Error> {
+        let s = self.storage.blocking_lock();
+        let rows = s.content_queue_items(crate::timefmt::epoch_now()).map_err(AO3Error::from)?;
+        Ok(rows.into_iter().map(|row| {
+            let source_name = s.work_ref(row.work_id)
+                .and_then(|external| self.sources.by_id(&external.source))
+                .map(|source| source.capabilities().name.clone())
+                .unwrap_or_default();
+            let title = s.get_work(row.work_id).ok().flatten().map(|w| w.title)
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| format!("Work {}", row.work_id));
+            UContentQueueItem {
+                work_id: row.work_id,
+                title,
+                source_name,
+                queued_at: row.queued_at,
+                attempts: row.attempts,
+                max_attempts: crate::storage::content_queue::CONTENT_MAX_ATTEMPTS,
+                retry_at: row.retry_at,
+                last_error: row.last_error,
+            }
+        }).collect())
+    }
+
+    /// The requests the work in flight needs, as far as they are known,
+    /// under names a reader understands: the chapter list, each chapter,
+    /// each page of a chapter, each image. Empty when nothing is in
+    /// flight; a finished work's list is cleared. Reads no storage.
+    pub fn content_queue_steps(&self) -> Vec<crate::steps::UContentQueueStep> {
+        crate::steps::snapshot()
+    }
+
+    /// Pause or resume the content queue. A pause lets the work in
+    /// flight finish in full — every request it needs — and starts
+    /// nothing after it; `content_queue_status` reads `Pausing` until
+    /// then. Queued works keep their place. Lasts for the session.
+    pub fn set_content_queue_paused(&self, paused: bool) {
+        if PAUSED.swap(paused, std::sync::atomic::Ordering::Relaxed) == paused {
+            return;
+        }
+        log_info!("content_queue", "{}", if paused { "Paused by the user" } else { "Resumed by the user" });
+        if !paused {
+            RESUMED.notify_one();
+        }
+        queue_changed();
+    }
 }
 
 /// What one pass over the queue did.
@@ -76,10 +244,21 @@ pub(super) fn spawn_worker(
         // over its privacy settings.
         crate::client::privacy::wait_established().await;
         loop {
+            // A pause holds here, between works: the pass below always
+            // runs a work it started to its end.
+            if PAUSED.load(std::sync::atomic::Ordering::Relaxed) {
+                if storage.strong_count() == 0 { return }
+                let _ = tokio::time::timeout(POLL, RESUMED.notified()).await;
+                continue;
+            }
             let Some(strong) = storage.upgrade() else { return };
             let step = run_next(&client, &strong, &registry).await;
             flush_request_log_to(&strong);
             drop(strong);
+            let blocked = matches!(step, Step::Blocked);
+            if BLOCKED.swap(blocked, std::sync::atomic::Ordering::Relaxed) != blocked {
+                queue_changed();
+            }
             match step {
                 // The same pause that spaces the works of "Download all".
                 Step::Worked => crate::client::pacing::request_gap().await,
@@ -115,6 +294,7 @@ async fn run_next(
         let source = s.work_ref(work_id).and_then(|external| registry.by_id(&external.source));
         let Some(source) = source.filter(|source| !source.library_only()) else {
             log_db("finish_content_item", s.finish_content_item(work_id));
+            queue_changed();
             return Step::Skipped;
         };
         // A source the current privacy mode can't reach: hold the work
@@ -122,6 +302,7 @@ async fn run_next(
         if let Err(e) = check_reachable(&source) {
             log_db("defer_content_item",
                    s.defer_content_item(work_id, now + UNREACHABLE_RETRY_SECS, &format!("{e}"), false));
+            queue_changed();
             return Step::Skipped;
         }
         work_id
@@ -134,9 +315,10 @@ async fn run_next(
     }
 
     log_info!("content_queue", "Fetching the content of work {work_id}");
+    let in_flight = InFlight::begin(work_id);
     // Unattended: a human check the user just dismissed is not raised
     // again for a download nobody is waiting on.
-    let result = crate::client::clearance::unattended(async {
+    let result = crate::client::clearance::unattended(crate::steps::recording(async {
         let mut result = super::works::download_work(client.clone(), storage.clone(), registry.clone(), work_id).await;
         if let Ok(requested) = &mut result {
             // The chapters are in: their embedded images complete the work.
@@ -148,8 +330,11 @@ async fn run_next(
             }
         }
         result
-    }).await;
+    })).await;
     let s = storage.lock().await;
+    // The queue row is settled below before the monitor is told the work
+    // is no longer in flight.
+    let _in_flight = in_flight;
     match result {
         Ok(requested) => {
             log_db("mark_downloaded", s.mark_downloaded(work_id));
@@ -180,6 +365,16 @@ async fn run_next(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pause_waits_for_the_work_in_flight() {
+        assert_eq!(queue_state(true, true, false), ContentQueueState::Pausing);
+        assert_eq!(queue_state(true, false, false), ContentQueueState::Paused);
+        assert_eq!(queue_state(true, false, true), ContentQueueState::Paused);
+        assert_eq!(queue_state(false, true, true), ContentQueueState::Working);
+        assert_eq!(queue_state(false, false, true), ContentQueueState::Blocked);
+        assert_eq!(queue_state(false, false, false), ContentQueueState::Idle);
+    }
 
     #[test]
     fn retry_delay_doubles_to_the_cap() {

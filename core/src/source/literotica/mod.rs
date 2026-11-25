@@ -332,10 +332,22 @@ impl LiteroticaSource {
                         .send_json(method, url, body, &headers, &|status, _| status < 400, &HOOKS).await?,
                 }
             };
+            if out.status == 401 {
+                // What the refusal was answering, never the token itself:
+                // whether one was sent, how long it had left, and whether
+                // the sign-in service still marks a session.
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let left = token.as_deref().and_then(parse::token_expiry).map(|end| end as i64 - now as i64);
+                log_info!("literotica", "401 for {url}: token sent {}, seconds left {:?}, session open {}, already renewed {}, said {:?}",
+                    token.is_some(), left, self.session_open().await, renewed, out.body.chars().take(300).collect::<String>());
+            }
             if out.status == 401 && token.is_some() && !renewed {
                 renewed = true;
                 token = self.renew_token().await?;
-                if token.is_some() { continue }
+                log_info!("literotica", "renewal after the 401 gave a token: {}", token.is_some());
+                // The sign-in is over: what anyone may read is asked for
+                // again without it; a write has nothing to fall back to.
+                if token.is_some() || send.is_none() { continue }
             }
             return Ok(out);
         }
@@ -448,9 +460,9 @@ impl LiteroticaSource {
 
     /// A series' record and its parts: two requests.
     async fn fetch_series(&self, id: u64) -> Result<FetchedWork, AppError> {
-        let record = self.api(&format!("/series/{id}"), None).await?;
+        let record = crate::steps::run("Series", self.api(&format!("/series/{id}"), None)).await?;
         crate::client::pacing::request_gap().await;
-        let parts = self.api(&format!("/series/{id}/works"), None).await?;
+        let parts = crate::steps::run("Series parts", self.api(&format!("/series/{id}/works"), None)).await?;
         let page = parse::parse_series(&record, &parts)?;
         self.remember_stories(page.stories);
         Ok(FetchedWork {
@@ -517,7 +529,7 @@ impl Source for LiteroticaSource {
         if let Some(id) = Self::series_of_key(&work.external_id) {
             return self.fetch_series(id).await;
         }
-        let body = self.api(&format!("/stories/{}", Self::segment(&work.external_id)), None).await?;
+        let body = crate::steps::run("Story", self.api(&format!("/stories/{}", Self::segment(&work.external_id)), None)).await?;
         let page = parse::parse_story(&body)?;
         self.remember_stories([(page.id, page.slug.clone())]);
         if let Some(series) = page.series {
@@ -550,13 +562,16 @@ impl Source for LiteroticaSource {
         let path = format!("/stories/{story_id}");
         let first = match self.take_first_page(story_id) {
             Some(page) => page,
-            None => parse::parse_story(&self.api(&path, None).await?)?,
+            None => parse::parse_story(&crate::steps::run("Page 1", self.api(&path, None)).await?)?,
         };
         self.remember_stories([(first.id, first.slug.clone())]);
         let mut text = first.text;
+        let page_step = |number: u32| format!("Page {number} of {}", first.pages);
+        crate::steps::plan((2..=first.pages).map(page_step));
         for number in 2..=first.pages {
             crate::client::pacing::request_gap().await;
-            let page = parse::parse_story(&self.api(&path, Some(json!({ "contentPage": number }))).await?)?;
+            let body = crate::steps::run(&page_step(number), self.api(&path, Some(json!({ "contentPage": number })))).await?;
+            let page = parse::parse_story(&body)?;
             text.push_str("\r\n\r\n");
             text.push_str(&page.text);
         }

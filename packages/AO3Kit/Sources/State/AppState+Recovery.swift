@@ -170,6 +170,9 @@ extension AppState {
         case .workContentSaved(let workId):
             handleWorkContentSaved(workId)
 
+        case .contentQueueChanged:
+            downloadQueueChanged()
+
         case .operationTick, .dataInvalidated:
             break
         }

@@ -295,12 +295,12 @@ impl Source for ScribbleHubSource {
     async fn fetch_work(&self, work: &ExternalRef, known: Option<&WorkSummary>) -> Result<FetchedWork, AppError> {
         let id = work.external_id.as_str();
         let url = if work.url.contains("/series/") { work.url.clone() } else { Self::series_url(id, "") };
-        let html = self.page(&url).await?;
+        let html = crate::steps::run("Series page", self.page(&url)).await?;
         let page = parse::parse_series_page(&html, id)?;
         // The series page lists the newest chapters only. A story with
         // more gets its whole list in one further request.
         let mut toc = if page.toc_pages > 1 {
-            parse::parse_toc_fragment(&self.full_toc(id).await?)
+            parse::parse_toc_fragment(&crate::steps::run("Full chapter list", self.full_toc(id)).await?)
         } else {
             page.toc.clone()
         };
@@ -333,7 +333,7 @@ impl Source for ScribbleHubSource {
         if summary.word_count.is_none() {
             let slug = Self::slug_of(&page.canonical_url);
             let slug = if slug.is_empty() { Self::slug_of(&work.url) } else { slug };
-            match self.page(&Self::stats_url(id, &slug)).await {
+            match crate::steps::run("Statistics page", self.page(&Self::stats_url(id, &slug))).await {
                 Ok(html) => {
                     let extra = parse::parse_stats_page(&html);
                     summary.word_count = extra.word_count;

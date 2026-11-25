@@ -23,7 +23,39 @@ pub const CONTENT_MAX_ATTEMPTS: u32 = 5;
 /// instead of on its next poll.
 pub static CONTENT_QUEUED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
+/// One queued work as the queue holds it, for the monitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentQueueRow {
+    pub work_id: u64,
+    /// UTC "YYYY-MM-DD HH:MM:SS".
+    pub queued_at: String,
+    pub attempts: u32,
+    /// Epoch seconds the work is held back until; 0 = not held.
+    pub retry_at: u64,
+    pub last_error: String,
+}
+
 impl Storage {
+    /// Everything queued, in the order the worker gets to it at `now`
+    /// (epoch seconds): the works that are due (fewest failures first,
+    /// then longest queued), then the held-back ones by retry time, then
+    /// the ones left alone after `CONTENT_MAX_ATTEMPTS` failures.
+    pub fn content_queue_items(&self, now: u64) -> Result<Vec<ContentQueueRow>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT work_id, queued_at, attempts, retry_at, last_error FROM content_queue
+             ORDER BY attempts >= ?1, retry_at > ?2,
+                      CASE WHEN retry_at > ?2 THEN retry_at ELSE 0 END, attempts, id",
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![CONTENT_MAX_ATTEMPTS, now as i64], |row| Ok(ContentQueueRow {
+            work_id: row.get::<_, i64>(0)? as u64,
+            queued_at: row.get(1)?,
+            attempts: row.get::<_, i64>(2)? as u32,
+            retry_at: row.get::<_, i64>(3)? as u64,
+            last_error: row.get(4)?,
+        })).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
     /// Queue a work for a full content fetch. Queuing a work that is
     /// already queued clears its failure count and retry time.
     pub fn queue_content(&self, work_id: u64) -> Result<(), AppError> {
@@ -33,6 +65,7 @@ impl Storage {
             params![work_id as i64],
         ).map_err(map_sql)?;
         CONTENT_QUEUED.notify_one();
+        crate::events::emit(crate::events::CoreEvent::ContentQueueChanged);
         Ok(())
     }
 

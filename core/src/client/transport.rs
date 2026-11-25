@@ -388,8 +388,12 @@ impl Transport {
     /// read, replaced, dropped — at one address like any other session.
     pub fn rehome_cookies(&self, base_url: &str, domain: &str, matches: impl Fn(&str) -> bool) {
         let Ok(url) = base_url.parse::<url::Url>() else { return };
-        let held = self.cookies_for(base_url);
-        for part in held.split("; ") {
+        // Only the wide copies, read where nothing else is held: another
+        // host of the domain. The one host may still hold an earlier
+        // value under the same name (a renewed token), and the two
+        // cannot be told apart from there.
+        let wide = self.cookies_for(&format!("{}://domain-wide.{domain}/", url.scheme()));
+        for part in wide.split("; ") {
             let name = part.split('=').next().unwrap_or("");
             if name.is_empty() || !matches(name) { continue }
             self.cookie_jar.add_cookie_str(&format!("{name}=; Max-Age=0; Domain={domain}; Path=/"), &url);
@@ -1036,5 +1040,22 @@ mod rehome_tests {
         assert_eq!(t.cookies_for(pages), "visitor=v", "only the named cookie moved");
         t.expire_cookies(service, |name| name == "token");
         assert_eq!(t.cookies_for(service), "visitor=v", "held at one host, it is dropped there");
+    }
+
+    #[tokio::test]
+    async fn a_renewed_cookie_replaces_the_one_held() {
+        let (service, pages) = ("https://auth.site.example", "https://www.site.example");
+        let url: url::Url = service.parse().unwrap();
+        // Whichever order the jar lists the two copies in.
+        for _ in 0..20 {
+            let t = super::Transport::new_direct().await.unwrap();
+            t.cookie_jar.add_cookie_str("token=old; Domain=site.example; Path=/", &url);
+            t.rehome_cookies(service, "site.example", |name| name == "token");
+            // The service sets a fresh one, again for every host.
+            t.cookie_jar.add_cookie_str("token=new; Domain=site.example; Path=/", &url);
+            t.rehome_cookies(service, "site.example", |name| name == "token");
+            assert_eq!(t.cookies_for(service), "token=new", "the fresh value alone is held");
+            assert_eq!(t.cookies_for(pages), "", "and only at the one host");
+        }
     }
 }

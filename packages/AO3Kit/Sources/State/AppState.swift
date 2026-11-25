@@ -243,6 +243,10 @@ final class AppState {
     /// Live picture of the check for monitor UIs (queue, current item,
     /// outcomes, pause/stop requests).
     let checkMonitor = WhatsNewCheckMonitor()
+    /// Live picture of the core's download queue for monitor UIs.
+    let downloadQueue = DownloadQueueMonitor()
+    /// A folded refresh of `downloadQueue` is already scheduled.
+    @ObservationIgnored var downloadQueueRefreshPending = false
     var whatsNewCheckTotal: Int = 0
     var whatsNewCheckRemaining: Int = 0
     /// Per-follow last-completed-check stamps ("kind:target_id" lowercased

@@ -60,10 +60,13 @@ pub(super) async fn fetch_image_cached(
         }
     }
     let url_for_fetch = url.to_string();
-    let bytes = with_recovery(client, storage.clone(), OpKind::Image, RetrySafety::Idempotent, move |client| {
-        let url = url_for_fetch.clone();
-        async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
-    }).await?;
+    // Named by its file for the queue monitor's request list.
+    let file = url.split(['?', '#']).next().unwrap_or(url).trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let bytes = crate::steps::run(&format!("Image {file}"),
+        with_recovery(client, storage.clone(), OpKind::Image, RetrySafety::Idempotent, move |client| {
+            let url = url_for_fetch.clone();
+            async move { client.read().await.fetch_image(&url).await.map_err(AO3Error::from) }
+        })).await?;
     if max_bytes > 0 && bytes.len() as u64 > max_bytes {
         log_info!("image", "Skipping {url}: {} bytes exceeds the {max_bytes}-byte cap", bytes.len());
         return Err(AO3Error::Network {
@@ -157,14 +160,14 @@ async fn fetch_all_chapters(
     op_id: Option<u64>,
 ) -> Result<Vec<UChapter>, AO3Error> {
     let plan = source.clone();
-    let fetched = super::with_recovery_as(
+    let fetched = crate::steps::run("Whole work", super::with_recovery_as(
         client.clone(), storage.clone(),
         op_id.unwrap_or_else(crate::events::next_op_id),
         OpKind::Fetch { label: "chapters".to_string() }, RetrySafety::Idempotent,
         move |_client| {
             let (source, external) = (source.clone(), external.clone());
             async move { source.fetch_work(&external, None).await.map_err(AO3Error::from) }
-        }).await;
+        })).await;
     let fetched = note_work_presence(&storage, work_id, fetched).await?;
     let c = client.read().await;
     let s = storage.lock().await;
@@ -209,7 +212,8 @@ async fn fetch_missing_chapters(
         counted > 0 && rows.len() as u32 == counted && rows.iter().all(|c| c.id.is_some())
     };
     if !toc_held {
-        fetch_and_save_work(client.clone(), storage.clone(), registry, work_id, op_id).await?;
+        crate::steps::run("Details and chapter list",
+            fetch_and_save_work(client.clone(), storage.clone(), registry, work_id, op_id)).await?;
     }
     let stubs: Vec<Chapter> = {
         let s = storage.lock().await;
@@ -217,6 +221,7 @@ async fn fetch_missing_chapters(
             .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
     };
     let requested = !toc_held || !stubs.is_empty();
+    crate::steps::plan(stubs.iter().map(chapter_step));
     let mut first = toc_held;
     for stub in stubs {
         // No request came before the first chapter when the table of
@@ -224,9 +229,19 @@ async fn fetch_missing_chapters(
         if !std::mem::take(&mut first) {
             crate::client::pacing::request_gap().await;
         }
-        fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id).await?;
+        let step = chapter_step(&stub);
+        crate::steps::run(&step,
+            fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id)).await?;
     }
     Ok(requested)
+}
+
+/// A chapter's name in the queue monitor's request list.
+fn chapter_step(chapter: &Chapter) -> String {
+    match chapter.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(title) => format!("Chapter {}: {title}", chapter.number),
+        None => format!("Chapter {}", chapter.number),
+    }
 }
 
 /// Every chapter of a work the library lacks, fetched and saved: one

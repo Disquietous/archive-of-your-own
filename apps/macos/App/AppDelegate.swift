@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The What's New check monitor; the view reaches it to toggle
     /// keep-on-top, so it is not private.
     var whatsNewMonitor: WhatsNewMonitorWindowController?
+    var downloadQueueWindow: DownloadQueueWindowController?
 
     // Auto-lock: every in-app event stamps lastActivity; a coarse timer
     // compares the idle span against the user's setting.
@@ -459,6 +460,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         whatsNewMonitor?.show()
+    }
+
+    @objc func openDownloadQueue() {
+        if downloadQueueWindow == nil {
+            let controller = DownloadQueueWindowController(theme: theme, appState: appState)
+            downloadQueueWindow = controller
+            releaseOnClose(controller.window) { [weak self] in
+                self?.downloadQueueWindow = nil
+            }
+        }
+        downloadQueueWindow?.show()
     }
 
     @objc func openDebugLog() {

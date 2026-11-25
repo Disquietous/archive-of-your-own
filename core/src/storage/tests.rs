@@ -4076,6 +4076,28 @@ fn content_queue_orders_holds_back_and_gives_up() {
 }
 
 #[test]
+fn content_queue_items_list_in_working_order() {
+    use super::content_queue::CONTENT_MAX_ATTEMPTS;
+    let db = Storage::open_in_memory("k").unwrap();
+    let ids: Vec<u64> = ["9201", "9202", "9203", "9204"].iter()
+        .map(|ext| db.save_work(&queue_test_work(ext, 1, None)).unwrap()).collect();
+    let (parked, held, failed_once, fresh) = (ids[0], ids[1], ids[2], ids[3]);
+    for _ in 0..CONTENT_MAX_ATTEMPTS {
+        db.defer_content_item(parked, 0, "gone", true).unwrap();
+    }
+    db.defer_content_item(held, 900, "source blocks Tor", false).unwrap();
+    db.defer_content_item(failed_once, 50, "timeout", true).unwrap();
+
+    let listed = db.content_queue_items(100).unwrap();
+    let order: Vec<u64> = listed.iter().map(|r| r.work_id).collect();
+    assert_eq!(order, vec![fresh, failed_once, held, parked], "due, then held, then given up");
+    assert_eq!(listed[2].retry_at, 900);
+    assert_eq!(listed[2].last_error, "source blocks Tor");
+    assert_eq!(listed[3].attempts, CONTENT_MAX_ATTEMPTS);
+    assert!(!listed[0].queued_at.is_empty());
+}
+
+#[test]
 fn library_query_groups_conditions_by_source() {
     use super::library_query::{parse_bounds, quantity, LibraryCondition, LibraryFieldInput, LibraryFieldKind, LibraryQuery};
     let db = open_test_db();

@@ -181,6 +181,7 @@ pub mod mock_site;
 pub mod client;
 pub mod source;
 pub mod events;
+pub mod steps;
 pub mod api;
 pub mod epub;
 
