@@ -47,6 +47,10 @@ struct Work: Identifiable, Hashable {
     /// "Hiatus"); "" when the source states none. Decided in the core by
     /// the source's adapter — shown as is.
     var status: String = ""
+    /// The work's length in characters, when the listing this row came
+    /// from states one (a source that measures in characters, not
+    /// words). nil everywhere else — then nothing is shown.
+    var characters: Int? = nil
 
     /// The membership to follow at end-of-work — first series that has a
     /// next work.

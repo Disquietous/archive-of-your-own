@@ -502,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Go menu
 
-    /// Sidebar sections in Go-menu order; index = menu item tag, ⌘1–⌘9, ⌘0.
+    /// Sidebar sections in Go-menu order; index = menu item tag, ⌘1–⌘9.
     static let goSections: [(title: String, section: MacAppModel.Section, key: String)] = [
         ("Currently Reading", .reading, "1"),
         ("Search", .search, "2"),
@@ -514,7 +514,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ("Inbox", .inbox, "8"),
         ("Bookmarks", .bookmarks, "9"),
         ("Reading Lists", .readingLists, ""),
-        ("Offline", .downloads, "0"),
     ]
 
     @objc func goSectionMenu(_ sender: NSMenuItem) {

@@ -15,13 +15,14 @@ allowed=(
   'apps/macos/Search/ScribbleHubSearchModel.swift:static let sourceID = "scribblehub"'
   'apps/macos/Search/HentaiFoundrySearchModel.swift:static let sourceID = "hentaifoundry"'
   'apps/macos/Search/LiteroticaSearchModel.swift:static let sourceID = "literotica"'
+  'apps/macos/Search/WattpadSearchModel.swift:static let sourceID = "wattpad"'
 )
 
-pattern='(==|!=|\?\?|\bcase)[[:space:]]*"(ao3|scribblehub|hentaifoundry|literotica|mockrated)"|"(ao3|scribblehub|hentaifoundry|literotica|mockrated)"[[:space:]]*(==|!=)|\bisAO3\b|\b(ao3|scribblehub|hentaifoundry|literotica|mockrated)Only\b|source(ID|Id|_id|Tab)?[[:space:]]*(==|!=)[[:space:]]*"'
+pattern='(==|!=|\?\?|\bcase)[[:space:]]*"(ao3|scribblehub|hentaifoundry|literotica|wattpad|mockrated)"|"(ao3|scribblehub|hentaifoundry|literotica|wattpad|mockrated)"[[:space:]]*(==|!=)|\bisAO3\b|\b(ao3|scribblehub|hentaifoundry|literotica|wattpad|mockrated)Only\b|source(ID|Id|_id|Tab)?[[:space:]]*(==|!=)[[:space:]]*"'
 hits=$(grep -rnE "$pattern" apps packages/AO3Kit/Sources --include='*.swift' \
        | grep -v '/Generated/' || true)
 # Any remaining bare source-id literal is also a comparison in waiting.
-literals=$(grep -rnE '"(ao3|scribblehub|hentaifoundry|literotica|mockrated)"' apps packages/AO3Kit/Sources --include='*.swift' \
+literals=$(grep -rnE '"(ao3|scribblehub|hentaifoundry|literotica|wattpad|mockrated)"' apps packages/AO3Kit/Sources --include='*.swift' \
        | grep -v '/Generated/' || true)
 # Comment lines may name a source as an example.
 all=$(printf '%s\n%s\n' "$hits" "$literals" | sort -u | sed '/^$/d' \
@@ -42,7 +43,7 @@ done <<< "$all"
 
 # Multi-source plan, Phase 6: no Swift file names a source's host either.
 # Links are classified, built and shortened by the core's adapters.
-hosts=$(grep -rnE 'archiveofourown\.org|scribblehub\.com|hentai-foundry\.com|literotica\.com' apps packages/AO3Kit/Sources --include='*.swift' \
+hosts=$(grep -rnE 'archiveofourown\.org|scribblehub\.com|hentai-foundry\.com|literotica\.com|wattpad\.com' apps packages/AO3Kit/Sources --include='*.swift' \
        | grep -v '/Generated/' || true)
 if [[ -n "$hosts" ]]; then
   echo "error: Swift names a source's host — ask the core (openLink, controls, capabilities) instead:" >&2

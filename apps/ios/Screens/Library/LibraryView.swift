@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The Library tab: the hub. One row per macOS sidebar section, grouped
 /// the same way, with counts and badges; each row pushes its section
@@ -8,6 +9,10 @@ struct LibraryView: View {
     @Environment(AppState.self) private var state
     @Environment(NavigationState.self) private var nav
     @Environment(FollowModel.self) private var follows
+
+    @State private var pickingFile = false
+    @State private var isImporting = false
+    @State private var importError: String?
 
     var body: some View {
         ScrollView {
@@ -45,7 +50,6 @@ struct LibraryView: View {
                 hubGroup("Saved") {
                     hubRow(.bookmarks, "bookmark", "Bookmarks", count: state.bookmarkedWorkIDs.count)
                     hubRow(.readingLists, "books.vertical", "Reading Lists", count: state.readingLists.count)
-                    hubRow(.downloads, "arrow.down.circle", "Offline", count: state.downloadedWorkIDs.count)
                     hubRow(.stats, "chart.bar", "Reading Stats")
                 }
             }
@@ -54,6 +58,30 @@ struct LibraryView: View {
         .background { ThemeBackgroundView() }
         .onChange(of: nav.goHomeRequested) { _, requested in
             if requested { nav.goHomeRequested = false }
+        }
+        .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.epub],
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task { @MainActor in
+                    isImporting = true
+                    let outcome = await state.importLocalFile(url)
+                    isImporting = false
+                    switch outcome {
+                    case .imported(let workID): nav.openWork(workID)
+                    case .failed(let message): importError = message
+                    }
+                }
+            case .failure(let error):
+                importError = error.localizedDescription
+            }
+        }
+        .alert("Couldn’t import the file", isPresented: Binding(
+            get: { importError != nil }, set: { if !$0 { importError = nil } })) {
+            Button("OK", role: .cancel) { importError = nil }
+        } message: {
+            Text(importError ?? "")
         }
     }
 
@@ -64,6 +92,24 @@ struct LibraryView: View {
             WordmarkView()
 
             Spacer()
+
+            // Import EPUB…: a book file read into the library.
+            Button {
+                pickingFile = true
+            } label: {
+                if isImporting {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(theme.ink2)
+                } else {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.ink2)
+                }
+            }
+            .buttonStyle(IconButtonPressStyle())
+            .disabled(isImporting)
+            .accessibilityLabel("Import EPUB")
 
             // What's New check button
             // Checks what's due (and resumes a stopped run); the

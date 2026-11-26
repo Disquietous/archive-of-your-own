@@ -122,6 +122,7 @@ extension WorkRowCellView {
         h.combine(work.complete)
         h.combine(work.status)
         h.combine(work.words)
+        h.combine(work.characters)
         h.combine(work.kudos)
         h.combine(hasProgress)
         return h.finalize()
@@ -133,6 +134,7 @@ extension WorkRowCellView {
         if !work.fandomDisplay.isEmpty { parts.append(work.fandomDisplay) }
         parts.append("rated \(work.rating.rawValue)")
         if work.words > 0 { parts.append("\(Fmt.k(work.words)) words") }
+        if let characters = work.characters { parts.append("\(Fmt.k(characters)) characters") }
         parts.append("\(work.chapterCount) of \(work.complete ? String(work.totalChapters) : "unknown") chapters")
         if progress > 0 { parts.append("\(Int((progress * 100).rounded())) percent read") }
         if downloaded { parts.append("available offline") }

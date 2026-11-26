@@ -196,11 +196,9 @@ extension ReadPaneViewController {
         let sub = summary.totalCount == 0
             ? "Reading list"
             : "\(Fmt.k(summary.totalWords)) words · \(summary.readCount) of \(summary.totalCount) read"
-        toolbar.configure(title: name, sub: sub + bulkDownload.statusSuffix)
+        toolbar.configure(title: name, sub: sub)
         toolbar.setLeading([readingListCloseButton()])
-        let listWorkIDs = appState.worksInReadingList(listID).map(\.id)
-        toolbar.setTrailing([bulkDownload.update(ids: listWorkIDs),
-                             sortFilterMenu.makeButton(for: .readingLists),
+        toolbar.setTrailing([sortFilterMenu.makeButton(for: .readingLists),
                              worksFilterButton(for: .readingLists)])
         show(mode: .searchResults)
         return true
@@ -349,7 +347,7 @@ extension ReadPaneViewController {
         bookmarkButton.tintOverride = bookmarked ? theme.nsAccent : nil
         let refreshLabel = controls?.vocabulary.refresh ?? "Refresh"
         // Hidden for a work that was imported, not fetched: it is whole
-        // and offline already, so refresh and download have no meaning.
+        // and offline already, so refresh has no meaning.
         let canRefresh = controls?.refresh != .hidden
         let hasDiscussion = controls.map { $0.discussion != .none } ?? true
         let remoteBookmark = controls?.remoteBookmark ?? .enabled
@@ -374,7 +372,7 @@ extension ReadPaneViewController {
             }
             trailing += [detachButton, settingsButton]
             if canRefresh {
-                trailing += [detailRefreshButton(label: refreshLabel), downloadButton]
+                trailing.append(detailRefreshButton(label: refreshLabel))
             }
             trailing.append(readingListButton)
             if controls?.subscribe != .hidden { trailing.append(subscribeButton) }

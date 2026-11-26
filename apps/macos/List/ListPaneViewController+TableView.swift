@@ -265,7 +265,7 @@ extension ListPaneViewController {
     }
 
     // Swipe right on a row → Remove. Currently Reading clears the saved
-    // progress; Offline deletes the download (cached chapters purge later).
+    // progress.
     func tableView(_ tableView: NSTableView, rowActionsForRow row: Int,
                    edge: NSTableView.RowActionEdge) -> [NSTableViewRowAction] {
         guard edge == .leading, row < works.count else { return [] }
@@ -274,13 +274,6 @@ extension ListPaneViewController {
         case .reading:
             let remove = NSTableViewRowAction(style: .destructive, title: "Remove") { [weak self] _, _ in
                 self?.model.removeFromCurrentlyReading(workID)
-                tableView.rowActionsVisible = false
-            }
-            return [remove]
-        case .downloads:
-            let remove = NSTableViewRowAction(style: .destructive, title: "Delete") { [weak self] _, _ in
-                guard let self, appState.downloadedWorkIDs.contains(workID) else { return }
-                appState.toggleDownload(workID)
                 tableView.rowActionsVisible = false
             }
             return [remove]

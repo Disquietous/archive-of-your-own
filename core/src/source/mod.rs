@@ -20,6 +20,7 @@ pub mod local;
 pub mod mock_rated;
 pub mod scribblehub;
 pub mod search;
+pub mod wattpad;
 
 use std::sync::Arc;
 
@@ -122,6 +123,7 @@ pub fn is_login_cookie(source: &str, name: &str) -> bool {
         scribblehub::SOURCE_ID => scribblehub::is_login_cookie(name),
         hentaifoundry::SOURCE_ID => hentaifoundry::is_login_cookie(name),
         literotica::SOURCE_ID => literotica::is_login_cookie(name),
+        wattpad::SOURCE_ID => wattpad::is_login_cookie(name),
         _ => false,
     }
 }
@@ -135,6 +137,7 @@ pub fn is_session_cookie(source: &str, name: &str) -> bool {
         scribblehub::SOURCE_ID => scribblehub::is_session_cookie(name),
         hentaifoundry::SOURCE_ID => hentaifoundry::is_session_cookie(name),
         literotica::SOURCE_ID => literotica::is_session_cookie(name),
+        wattpad::SOURCE_ID => wattpad::is_session_cookie(name),
         _ => false,
     }
 }
@@ -148,6 +151,7 @@ pub fn session_origin(source: &str) -> Option<&'static str> {
         hentaifoundry::SOURCE_ID => Some(hentaifoundry::BASE_URL),
         // Held at the site's sign-in service, not its pages.
         literotica::SOURCE_ID => Some(literotica::AUTH_URL),
+        wattpad::SOURCE_ID => Some(wattpad::BASE_URL),
         _ => None,
     }
 }
@@ -370,6 +374,10 @@ pub struct ReactionOutcome {
 
 /// The stat key a star-rated source reports its site average under.
 pub const STAT_SITE_RATING: &str = "rating";
+
+/// The stat key a source that measures length in characters reports a
+/// work's count under. A listing row that carries it shows it.
+pub const STAT_CHARACTERS: &str = "characters";
 
 /// The reaction control for one work: its shape, the reader's own state,
 /// and whether it can be used.
@@ -749,7 +757,8 @@ mod tests {
             Arc::new(ao3::AO3Source::new(client.clone())),
             Arc::new(scribblehub::ScribbleHubSource::new(client.clone())),
             Arc::new(hentaifoundry::HentaiFoundrySource::new(client.clone())),
-            Arc::new(literotica::LiteroticaSource::new(client)),
+            Arc::new(literotica::LiteroticaSource::new(client.clone())),
+            Arc::new(wattpad::WattpadSource::new(client)),
             Arc::new(mock_rated::MockRatedSource::new()),
         ];
         for s in &sources {

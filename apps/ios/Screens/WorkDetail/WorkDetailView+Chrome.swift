@@ -68,13 +68,11 @@ extension WorkDetailView {
             }
             .disabled(!isReal)
 
-            Button {
-                state.toggleDownload(workID)
-            } label: {
-                if isDownloaded {
+            if isDownloaded {
+                Button {
+                    state.deleteDownload(workID)
+                } label: {
                     Label("Delete Download", systemImage: "trash")
-                } else {
-                    Label("Download for Offline", systemImage: "arrow.down.circle")
                 }
             }
 

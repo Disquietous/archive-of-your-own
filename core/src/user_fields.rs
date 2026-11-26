@@ -117,6 +117,18 @@ pub const LITEROTICA: &[Mapping] = &[
     m("following", UserField::Following, "Following", true),
 ];
 
+/// Wattpad's native names, as `source::wattpad::parse` writes them.
+pub const WATTPAD: &[Mapping] = &[
+    m("profile_url", UserField::ProfileUrl, "Profile", false),
+    m("avatar", UserField::AvatarUrl, "Picture", false),
+    m("about", UserField::Info, "About", false),
+    m("joined", UserField::Joined, "Joined", false),
+    m("location", UserField::Location, "Location", false),
+    m("stories", UserField::Works, "Stories", true),
+    m("followers", UserField::Followers, "Followers", true),
+    m("following", UserField::Following, "Following", true),
+];
+
 /// Properties AO3 keeps that are not shown anywhere but drive flows.
 pub const AO3_BLOCK_RECORD: &str = "block_record_id";
 pub const AO3_MUTE_RECORD: &str = "mute_record_id";
@@ -129,6 +141,7 @@ pub fn mappings(source: &str) -> &'static [Mapping] {
         "scribblehub" => SCRIBBLEHUB,
         "hentaifoundry" => HENTAIFOUNDRY,
         "literotica" => LITEROTICA,
+        "wattpad" => WATTPAD,
         _ => &[],
     }
 }
@@ -159,7 +172,7 @@ mod tests {
     #[test]
     fn each_source_maps_one_name_per_field() {
         for (source, table) in [("ao3", AO3), ("scribblehub", SCRIBBLEHUB), ("hentaifoundry", HENTAIFOUNDRY),
-                                ("literotica", LITEROTICA)] {
+                                ("literotica", LITEROTICA), ("wattpad", WATTPAD)] {
             let mut seen = std::collections::HashSet::new();
             for m in table {
                 assert!(seen.insert(m.field), "{source} maps {:?} twice", m.field);

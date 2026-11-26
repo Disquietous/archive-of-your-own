@@ -153,6 +153,8 @@ extension ReadPaneViewController {
                 host.rootView = AnyView(HentaiFoundrySearchFormView(theme: theme, appState: appState, model: model))
             case LiteroticaSearchModel.sourceID:
                 host.rootView = AnyView(LiteroticaSearchFormView(theme: theme, appState: appState, model: model))
+            case WattpadSearchModel.sourceID:
+                host.rootView = AnyView(WattpadSearchFormView(theme: theme, appState: appState, model: model))
             default:
                 host.rootView = AnyView(ScribbleHubSearchFormView(theme: theme, appState: appState, model: model))
             }
@@ -266,12 +268,6 @@ extension ReadPaneViewController {
         startReadingButton.isOn = true
         startReadingButton.toolTip = started
             ? "Continue reading · Chapter \(currentChapter)" : "Start reading"
-
-        let downloaded = appState.downloadedWorkIDs.contains(work.id)
-        downloadButton.setSymbol(appState.isDownloading(work.id) ? "arrow.down.circle.dotted"
-                                 : downloaded ? "checkmark.circle" : "arrow.down.circle")
-        downloadButton.tintOverride = downloaded ? theme.nsSage : nil
-        downloadButton.toolTip = downloaded ? "Downloaded" : "Download for offline"
 
         let workId = UInt64(work.id)
         let inList = workId.map { !appState.readingListIDs(forWork: $0).isEmpty } ?? false

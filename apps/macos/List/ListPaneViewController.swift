@@ -20,7 +20,6 @@ final class ListPaneViewController: NSViewController, NSTableViewDataSource, NST
     var variantHost: NSView?
     var overlayHost: NSView?
     var removeAllButton: ToolButton?
-    lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
     var clearHistoryBtn: ToolButton?
     var ownAO3BookmarksBtn: ToolButton?
     /// Author view: the drilled-in author's profile card, hosted in this

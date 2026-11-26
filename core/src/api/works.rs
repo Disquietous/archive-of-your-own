@@ -825,7 +825,16 @@ impl AO3App {
     pub async fn fetch_work_full(&self, work_id: u64, op_id: Option<u64>) -> Result<UWorkSummary, AO3Error> {
         let registry = self.sources.clone();
         self.run_on_runtime_for(op_id, move |client, storage| async move {
-            fetch_and_save_work(client, storage, registry, work_id, op_id).await
+            let summary = fetch_and_save_work(client, storage.clone(), registry, work_id, op_id).await?;
+            // A work the user fetches again that the library does not
+            // hold whole goes back on the content queue, failure count
+            // cleared — the save alone queues only a new or changed work,
+            // so this is how a download that gave up gets another run.
+            let s = storage.lock().await;
+            if !s.is_downloaded(summary.id).unwrap_or(true) {
+                log_db("queue_content", s.queue_content(summary.id));
+            }
+            Ok(summary)
         }).await
     }
 

@@ -43,8 +43,9 @@ final class WorkRowMenuController: NSObject {
             menu.addItem(item(appState.hasAO3Bookmark(work.id) ? "Edit \(site) Bookmark…" : "Add \(site) Bookmark…",
                               #selector(menuEditBookmark(_:)), row))
         }
-        menu.addItem(item(appState.downloadedWorkIDs.contains(work.id) ? "Delete Download" : "Download for Offline",
-                          #selector(menuToggleDownload(_:)), row))
+        if appState.downloadedWorkIDs.contains(work.id) {
+            menu.addItem(item("Delete Download", #selector(menuDeleteDownload(_:)), row))
+        }
         if UInt64(work.id) != nil {
             menu.addItem(item("Copy AO3 Link", #selector(menuCopyWorkLink(_:)), row))
         }
@@ -141,9 +142,9 @@ final class WorkRowMenuController: NSObject {
         appState.toggleBookmark(work.id)
     }
 
-    @objc private func menuToggleDownload(_ sender: NSMenuItem) {
+    @objc private func menuDeleteDownload(_ sender: NSMenuItem) {
         guard let work = clickedWork(sender) else { return }
-        appState.toggleDownload(work.id)
+        appState.deleteDownload(work.id)
     }
 
     @objc private func menuCopyWorkLink(_ sender: NSMenuItem) {

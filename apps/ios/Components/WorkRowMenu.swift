@@ -57,13 +57,11 @@ struct WorkRowMenu<Tail: View>: View {
                       systemImage: "bookmark.square")
             }
         }
-        Button {
-            state.toggleDownload(work.id)
-        } label: {
-            if state.downloadedWorkIDs.contains(work.id) {
+        if state.downloadedWorkIDs.contains(work.id) {
+            Button {
+                state.deleteDownload(work.id)
+            } label: {
                 Label("Delete Download", systemImage: "trash")
-            } else {
-                Label("Download for Offline", systemImage: "arrow.down.circle")
             }
         }
         if !work.url.isEmpty {

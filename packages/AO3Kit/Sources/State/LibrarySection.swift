@@ -5,7 +5,7 @@ import Foundation
 /// persist under the same keys on both platforms.
 enum LibrarySection: String, CaseIterable {
     case reading, history, subscriptions, whatsNew, inbox, fandoms, authors,
-         bookmarks, downloads, stats, search, authorWorks, readingLists,
+         bookmarks, stats, search, authorWorks, readingLists,
          settings,
          /// iOS Browse tab (the latest-works listing) — its own sort/filter slot.
          browse

@@ -87,12 +87,18 @@ pub(super) enum HeldWorks {
 pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPage, held: HeldWorks) -> Result<UPagedWorks, AO3Error> {
     let tx = s.begin_tx().map_err(AO3Error::from)?;
     let mut works = Vec::with_capacity(listing.works.len());
+    // A row shows the character count its own listing states, held or not.
+    let shaped = |work: WorkSummary, listed: &crate::source::ListedWork| UWorkSummary {
+        char_count: listed.stats.iter().find(|stat| stat.key == crate::source::STAT_CHARACTERS)
+            .and_then(|stat| stat.num).filter(|n| *n >= 0.0).map(|n| n as u64),
+        ..UWorkSummary::from(work)
+    };
     for listed in &listing.works {
         if held == HeldWorks::Keep {
             let known = s.resolve_work(&listed.summary.source, &listed.summary.external_id)
                 .and_then(|id| s.get_work(id).ok().flatten());
             if let Some(known) = known {
-                works.push(UWorkSummary::from(known));
+                works.push(shaped(known, listed));
                 continue;
             }
         }
@@ -106,8 +112,8 @@ pub(super) fn save_listing_page(s: &Storage, listing: &crate::source::ListingPag
                 }
                 merge_listed_stats(s, id, &listed.summary.source, &listed.stats);
                 // What the library holds now: the listing merged into it.
-                works.push(UWorkSummary::from(s.get_work(id).ok().flatten()
-                    .unwrap_or_else(|| WorkSummary { id, ..listed.summary.clone() })));
+                works.push(shaped(s.get_work(id).ok().flatten()
+                    .unwrap_or_else(|| WorkSummary { id, ..listed.summary.clone() }), listed));
             }
             Err(e) => { log_error!("db", "save_work failed: {e}"); }
         }
@@ -649,5 +655,21 @@ mod listing_tests {
         let updated = save_listing_page(&s, &page("the-tide-ledger", 9000), HeldWorks::Update).unwrap();
         assert_eq!(updated.works[0].word_count, Some(9000));
         assert_eq!(s.next_content_item(4_000_000_000).unwrap(), Some(id));
+    }
+
+    /// A row shows the character count its own listing states — a held
+    /// work's too — and nothing where the listing states none.
+    #[test]
+    fn a_listed_character_count_rides_on_the_row() {
+        let s = Storage::open_in_memory("k").unwrap();
+        let listing = crate::source::wattpad::parse::parse_listing(
+            r#"{"total": 1, "stories": [{"id": "55001", "title": "The Tide Ledger", "user": {"name": "saltwick"}, "numParts": 2, "length": 10100}]}"#,
+            0, 15).unwrap();
+        let first = save_listing_page(&s, &listing, HeldWorks::Keep).unwrap();
+        assert_eq!((first.works[0].char_count, first.works[0].word_count), (Some(10100), None));
+        let again = save_listing_page(&s, &listing, HeldWorks::Keep).unwrap();
+        assert_eq!(again.works[0].char_count, Some(10100));
+        let other = save_listing_page(&s, &page("the-tide-ledger", 5000), HeldWorks::Keep).unwrap();
+        assert_eq!(other.works[0].char_count, None);
     }
 }

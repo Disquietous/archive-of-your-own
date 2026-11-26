@@ -175,6 +175,10 @@ pub struct UWorkSummary {
     /// When this summary last arrived from AO3 (UTC "YYYY-MM-DD HH:MM:SS",
     /// "" = unknown). Display metadata only — never a refresh trigger.
     pub fetched_at: String,
+    /// The work's length in characters, as the listing this row came
+    /// from states it (a source that measures in characters, not words).
+    /// None wherever the listing does not say — then nothing is shown.
+    pub char_count: Option<u64>,
 }
 
 impl From<WorkSummary> for UWorkSummary {
@@ -209,6 +213,7 @@ impl From<WorkSummary> for UWorkSummary {
             status: w.status,
             series: w.series.into_iter().map(USeriesMembership::from).collect(),
             fetched_at: w.fetched_at,
+            char_count: None,
         }
     }
 }

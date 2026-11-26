@@ -23,6 +23,8 @@ final class MacAppModel {
     let hentaiFoundrySearch: HentaiFoundrySearchModel
     /// The Literotica tab's form state (the site's advanced story search).
     let literoticaSearch: LiteroticaSearchModel
+    /// The Wattpad tab's form state (the site's story search and its filters).
+    let wattpadSearch: WattpadSearchModel
     let librarySearch: LibrarySearchModel
     let lists: LibraryListModel
     let follows: FollowModel
@@ -85,6 +87,7 @@ final class MacAppModel {
         self.scribbleHubSearch = ScribbleHubSearchModel()
         self.hentaiFoundrySearch = HentaiFoundrySearchModel()
         self.literoticaSearch = LiteroticaSearchModel()
+        self.wattpadSearch = WattpadSearchModel()
         self.librarySearch = LibrarySearchModel()
         self.lists = LibraryListModel(appState: appState)
         self.follows = FollowModel(appState: appState)

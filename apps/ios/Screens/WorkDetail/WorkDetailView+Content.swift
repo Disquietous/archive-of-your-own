@@ -61,14 +61,7 @@ extension WorkDetailView {
 
             Spacer()
 
-            if state.isDownloading(workID) {
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small).tint(theme.ink3)
-                    Text("Downloading…")
-                        .font(Typography.uiSmall())
-                        .foregroundStyle(theme.ink3)
-                }
-            } else if isDownloaded {
+            if isDownloaded {
                 HStack(spacing: 5) {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 13, weight: .medium))
@@ -180,26 +173,6 @@ extension WorkDetailView {
                 .foregroundStyle(theme.line)
 
             HStack(spacing: 12) {
-                // Download button
-                Button { state.toggleDownload(workID) } label: {
-                    Group {
-                        if state.isDownloading(workID) {
-                            ProgressView().controlSize(.small).tint(theme.ink2)
-                        } else {
-                            Image(systemName: isDownloaded ? "checkmark.circle" : "arrow.down.circle")
-                                .font(.system(size: 22, weight: .medium))
-                                .foregroundStyle(isDownloaded ? theme.sage : theme.ink2)
-                        }
-                    }
-                    .frame(width: 48, height: 48)
-                    .background(
-                        RoundedRectangle(cornerRadius: Radius.button)
-                            .stroke(theme.line, lineWidth: 1)
-                    )
-                }
-                .buttonStyle(ButtonPressStyle())
-                .accessibilityLabel(isDownloaded ? "Downloaded" : "Download for offline")
-
                 // Entire work button
                 if work.chapterCount > 1 {
                     Button { nav.openEntireWork(workID) } label: {

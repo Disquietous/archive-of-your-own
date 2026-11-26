@@ -38,7 +38,6 @@ struct SidebarView: View {
                     item(.whatsNew, "bell.badge", "What\u{2019}s New", badge: appState.newUnviewedWorkCount)
                     item(.bookmarks, "bookmark", "Bookmarks", count: appState.bookmarkedWorkIDs.count)
                     item(.readingLists, "books.vertical", "Reading Lists", count: appState.readingLists.count)
-                    item(.downloads, "arrow.down.circle", "Offline", count: appState.downloadedWorkIDs.count)
                     item(.stats, "chart.bar", "Reading Stats")
                     // Everything that belongs to one source lives behind
                     // this: a tab per source, each with its own sidebar.

@@ -24,7 +24,6 @@ final class ReadPaneViewController: NSViewController {
     // Detail-mode work actions (the detail view's buttons live in this
     // header toolbar, not in the scroll body).
     var startReadingButton: ToolButton!
-    var downloadButton: ToolButton!
     var readingListButton: ToolButton!
     var subscribeButton: ToolButton!
     var kudosButton: ToolButton!
@@ -172,10 +171,6 @@ final class ReadPaneViewController: NSViewController {
             guard let self, let id = model.selectedWorkID else { return }
             model.openReader(id, chapter: max(0, (appState.progressMap[id]?.chapter ?? 1) - 1))
         }
-        downloadButton = ToolButton(theme: theme, symbol: "arrow.down.circle", tooltip: "Download for offline") { [weak self] in
-            guard let self, let id = model.selectedWorkID else { return }
-            appState.toggleDownload(id)
-        }
         readingListButton = ToolButton(theme: theme, symbol: "books.vertical", tooltip: "Add to reading list") { [weak self] in
             self?.toggleReadingListPopover()
         }
@@ -312,7 +307,6 @@ final class ReadPaneViewController: NSViewController {
     var authorCollectionsRefreshBtn: ToolButton?
 
     var markAllReadBtn: ToolButton?
-    lazy var bulkDownload = BulkDownloadButton(theme: theme, appState: appState)
 
     /// The works the header toggle acts on — set each render pass so the
     /// cached button's closure always targets the list on screen.

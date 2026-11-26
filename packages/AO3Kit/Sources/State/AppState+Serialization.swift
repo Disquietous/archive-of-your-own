@@ -43,7 +43,8 @@ extension AppState {
             url: s.url,
             source: s.source,
             authorIDs: s.authorIds,
-            status: s.status
+            status: s.status,
+            characters: s.charCount.map { Int($0) }
         )
     }
 

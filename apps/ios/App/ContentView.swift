@@ -171,7 +171,6 @@ struct ContentView: View {
             Section("Saved") {
                 sidebarSection(.bookmarks, "bookmark", "Bookmarks", count: state.bookmarkedWorkIDs.count)
                 sidebarSection(.readingLists, "books.vertical", "Reading Lists", count: state.readingLists.count)
-                sidebarSection(.downloads, "arrow.down.circle", "Offline", count: state.downloadedWorkIDs.count)
                 sidebarSection(.stats, "chart.bar", "Reading Stats")
             }
             Section("App") {
@@ -192,7 +191,7 @@ struct ContentView: View {
             .toolbar(.hidden, for: .navigationBar)
     }
 
-    /// Hardware keyboard section jumps — the mac Go menu's ⌘1–⌘0, minus
+    /// Hardware keyboard section jumps — the mac Go menu's ⌘1–⌘9, minus
     /// the entries that have no key there either. Invisible buttons keep
     /// the shortcuts registered whatever column has focus.
     private var sectionShortcuts: some View {
@@ -205,7 +204,6 @@ struct ContentView: View {
             shortcutButton("7") { nav.showLibrarySection(.whatsNew) }
             shortcutButton("8") { nav.showLibrarySection(.inbox) }
             shortcutButton("9") { nav.showLibrarySection(.bookmarks) }
-            shortcutButton("0") { nav.showLibrarySection(.downloads) }
         }
         .frame(width: 0, height: 0)
         .opacity(0)

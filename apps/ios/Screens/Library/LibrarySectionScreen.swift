@@ -1,5 +1,4 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Routes a Library hub section to its screen. The work-list sections
 /// configure one `WorkListScreen`; the others have their own screens.
@@ -17,7 +16,6 @@ struct LibrarySectionScreen: View {
         case .history: history
         case .whatsNew: whatsNew
         case .bookmarks: bookmarks
-        case .downloads: downloads
         case .readingLists: ReadingListsScreen()
         case .fandoms: FandomsScreen()
         case .authors: AuthorsScreen()
@@ -53,72 +51,6 @@ struct LibrarySectionScreen: View {
     private var bookmarks: some View {
         BookmarksScreen()
     }
-
-    // MARK: - Offline
-
-    private var downloads: some View {
-        OfflineScreen()
-    }
-}
-
-// MARK: - Offline
-
-/// Works kept whole on the device: the ones downloaded from a source, and
-/// the books imported from a file (the menu's Import EPUB…).
-private struct OfflineScreen: View {
-    @Environment(AppState.self) private var state
-    @Environment(NavigationState.self) private var nav
-
-    @State private var pickingFile = false
-    @State private var isImporting = false
-    @State private var importError: String?
-
-    var body: some View {
-        WorkListScreen(
-            section: .downloads,
-            title: "Offline",
-            subtitle: isImporting ? "Importing…" : nil,
-            rawWorks: { state.downloadedWorkIDs.compactMap { state.work(byID: $0) }
-                .sorted { $0.title < $1.title } },
-            empty: .init(systemImage: "arrow.down.circle", title: "No downloads",
-                         subtitle: "Works you download or import from a file will appear here for offline reading."),
-            swipe: .init(label: "Delete", systemImage: "trash") { work in
-                if state.downloadedWorkIDs.contains(work.id) { state.toggleDownload(work.id) }
-            },
-            menuItems: AnyView(
-                Button {
-                    pickingFile = true
-                } label: {
-                    Label("Import EPUB…", systemImage: "square.and.arrow.down")
-                }
-                .disabled(isImporting)
-            )
-        )
-        .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.epub],
-                      allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else { return }
-                Task { @MainActor in
-                    isImporting = true
-                    let outcome = await state.importLocalFile(url)
-                    isImporting = false
-                    switch outcome {
-                    case .imported(let workID): nav.openWork(workID)
-                    case .failed(let message): importError = message
-                    }
-                }
-            case .failure(let error):
-                importError = error.localizedDescription
-            }
-        }
-        .alert("Couldn’t import the file", isPresented: Binding(
-            get: { importError != nil }, set: { if !$0 { importError = nil } })) {
-            Button("OK", role: .cancel) { importError = nil }
-        } message: {
-            Text(importError ?? "")
-        }
-    }
 }
 
 // MARK: - Currently Reading
@@ -139,9 +71,7 @@ private struct CurrentlyReadingScreen: View {
             swipe: .init(label: "Remove", systemImage: "minus.circle") { work in
                 state.resetProgress(work.id)
             },
-            header: state.bulkDownload != nil ? AnyView(BulkDownloadStatusBar()) : nil,
             menuItems: AnyView(Group {
-                BulkDownloadMenuItem { state.currentlyReading.map(\.id) }
                 Button(role: .destructive) {
                     confirmRemoveAll = true
                 } label: {

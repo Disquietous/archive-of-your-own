@@ -28,7 +28,7 @@ extension ListPaneViewController {
             // reading pane hosts the whole flow. Nothing to render here.
             break
 
-        case .reading, .history, .bookmarks, .downloads:
+        case .reading, .history, .bookmarks:
             renderLibraryWorks(section: section)
 
         case .whatsNew:
@@ -59,13 +59,11 @@ extension ListPaneViewController {
     private func renderLibraryWorks(section: MacAppModel.Section) {
         works = model.works(for: section)
         let meta = sectionMeta(for: section)
-        let downloading = section == .reading ? bulkDownload.statusSuffix : ""
-        toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)\(downloading)")
+        toolbar.configure(title: meta.title, sub: "\(works.count) · \(meta.sub)")
         toolbar.setLeading([])
         var trailing: [NSView] = [sortFilterMenu.makeButton(for: section), worksFilterButton(for: section)]
         if section == .reading && !works.isEmpty {
             trailing.insert(removeAllReadingButton(), at: 0)
-            trailing.insert(bulkDownload.update(ids: works.map(\.id)), at: 0)
         }
         if section == .history && !works.isEmpty {
             trailing.insert(clearHistoryButton(), at: 0)
@@ -342,7 +340,6 @@ extension ListPaneViewController {
         case .reading: return ("Currently Reading", "In progress", ("book", "Nothing in progress", "Open a work to begin reading."))
         case .history: return ("History", "Recently read", ("clock", "No history yet", "Works you read appear here."))
         case .bookmarks: return ("Bookmarks", "Saved in the app", ("bookmark", "No bookmarks", "Bookmark works from any source to keep them here."))
-        case .downloads: return ("Downloaded", "Available offline", ("arrow.down.circle", "No downloads", "Download works to read offline."))
         default: return ("Works", "", ("book", "Nothing here", ""))
         }
     }

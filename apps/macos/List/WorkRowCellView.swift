@@ -557,6 +557,7 @@ final class WorkRowCellView: NSTableCellView {
 
         var meta = (showsKudos ? " \(Fmt.k(work.kudos))   " : "")
             + (work.words > 0 ? "\(Fmt.k(work.words)) words   " : "")
+            + (work.characters.map { "\(Fmt.k($0)) characters   " } ?? "")
             + "\(work.chapterCount)/\(work.complete ? String(work.totalChapters) : "?")"
         if downloaded {
             meta += "   ⤓ Offline"

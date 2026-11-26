@@ -216,6 +216,10 @@ struct WorkCardView: View {
                          iconColor: kudosGiven ? Self.kudosRed : nil)
             }
             statItem(icon: "text.word.spacing", value: work.words.abbreviated)
+            // Only a listing that states a character count carries one.
+            if let characters = work.characters {
+                statItem(icon: "character.cursor.ibeam", value: "\(characters.abbreviated) characters")
+            }
 
             let chapterText = work.totalChapters > 0
                 ? "\(work.chapterCount)/\(work.totalChapters)"

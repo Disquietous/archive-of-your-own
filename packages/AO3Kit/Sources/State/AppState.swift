@@ -406,11 +406,6 @@ final class AppState {
     /// Why the last login attempt failed; cleared when a new one starts.
     var ao3LoginError: String?
 
-    var downloadingWorkIDs: Set<String> = []
-    /// A running "Download all": works finished so far of the batch.
-    var bulkDownload: BulkDownloadProgress?
-    /// Stop requested: the batch ends after the work in flight.
-    @ObservationIgnored var bulkDownloadStopRequested = false
 
     /// The user's per-image size cap (AppTheme persists it in UserDefaults;
     /// read directly here to keep AppState theme-independent). 0 = no limit.

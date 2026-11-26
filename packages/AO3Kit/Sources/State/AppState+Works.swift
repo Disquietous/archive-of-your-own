@@ -207,39 +207,10 @@ extension AppState {
         }
     }
 
-    func toggleDownload(_ id: String) {
-        if downloadedWorkIDs.contains(id) {
-            downloadedWorkIDs.remove(id)
-            if let workId = UInt64(id) {
-                bridge.unmarkDownloaded(workId)
-            }
-        } else {
-            downloadedWorkIDs.insert(id)
-            if let workId = UInt64(id) {
-                bridge.markDownloaded(workId)
-                Task { await downloadWork(id) }
-            }
-        }
-    }
-
-    func downloadWork(_ id: String) async {
-        guard let workId = UInt64(id) else { return }
-        downloadingWorkIDs.insert(id)
-        do {
-            let chapters = try await retryOnTimeout(task: downloadTask, using: bridge) {
-                try await self.bridge.fetchChapters(workId)
-            }
-            fetchedChapters[id] = chapters
-            if let cached = bridge.getCachedWork(workId) {
-                fetchedWorks[id] = Self.workFromSummary(cached)
-            }
-            // Complete offline reading: prefetch embedded images too
-            // (over-cap and failed images are skipped, never fatal).
-            await bridge.downloadWorkImages(workId: workId, maxBytes: Self.imageMaxBytesSetting)
-        } catch {
-            downloadedWorkIDs.remove(id)
-        }
-        downloadingWorkIDs.remove(id)
+    /// Drop a work's downloaded mark (its cached chapters purge later).
+    func deleteDownload(_ id: String) {
+        guard downloadedWorkIDs.remove(id) != nil, let workId = UInt64(id) else { return }
+        bridge.unmarkDownloaded(workId)
     }
 
     /// The core's content queue finished a work in the background: every
@@ -258,50 +229,6 @@ extension AppState {
         }
     }
 
-    /// Works in `ids` that "Download all" would fetch: real works not
-    /// already offline.
-    func pendingDownloads(_ ids: [String]) -> [String] {
-        ids.filter { UInt64($0) != nil && !downloadedWorkIDs.contains($0) }
-    }
-
-    /// "Download all" for a list: each work not yet offline, one after
-    /// another, with the core's varying 1–10 s pause before each work after
-    /// the first (the same pacer that spaces a per-chapter download). Stop
-    /// ends the batch after the work in flight, so nothing is left
-    /// half-saved. One batch at a time.
-    func downloadAll(_ ids: [String]) {
-        guard bulkDownload == nil else { return }
-        let pending = pendingDownloads(ids)
-        guard !pending.isEmpty else { return }
-        bulkDownloadStopRequested = false
-        bulkDownload = BulkDownloadProgress(done: 0, total: pending.count)
-        Task { @MainActor in
-            for (index, id) in pending.enumerated() {
-                if bulkDownloadStopRequested { break }
-                if index > 0 {
-                    await bridge.paceDownloadGap()
-                    if bulkDownloadStopRequested { break }
-                }
-                if !downloadedWorkIDs.contains(id), let workId = UInt64(id) {
-                    downloadedWorkIDs.insert(id)
-                    bridge.markDownloaded(workId)
-                    await downloadWork(id)
-                }
-                bulkDownload?.done += 1
-            }
-            bulkDownload = nil
-            bulkDownloadStopRequested = false
-        }
-    }
-
-    func stopBulkDownload() {
-        guard bulkDownload != nil else { return }
-        bulkDownloadStopRequested = true
-    }
-
-    func isDownloading(_ id: String) -> Bool {
-        downloadingWorkIDs.contains(id)
-    }
 
     func pushHistory(_ id: String) {
         // Session continuity (resume UI) works regardless of mode; the
@@ -372,13 +299,3 @@ extension AppState {
     }
 }
 
-/// Progress of a running "Download all".
-struct BulkDownloadProgress: Equatable {
-    var done: Int
-    var total: Int
-
-    /// "Downloading 3 of 12" — the work in flight is `done + 1`.
-    var label: String {
-        "Downloading \(min(done + 1, total)) of \(total)"
-    }
-}

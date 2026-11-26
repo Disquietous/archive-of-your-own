@@ -32,9 +32,6 @@ extension MacAppModel {
                 .sorted { $0.title < $1.title }
         case .readingLists:
             selectedReadingListID.map { appState.worksInReadingList($0) } ?? []
-        case .downloads:
-            appState.downloadedWorkIDs.compactMap { appState.work(byID: $0) }
-                .sorted { $0.title < $1.title }
         case .authorWorks:
             author.works
         case .whatsNew:
