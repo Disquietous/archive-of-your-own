@@ -135,10 +135,17 @@ impl Storage {
             if work.source == crate::models::SOURCE_AO3 {
                 self.link_ao3_bylines(id, &work.authors)?;
             }
-            // Added or updated: queue its full content for the background
-            // worker. The save itself never waits on it.
-            if content_before != Some((work.chapter_count, work.word_count)) {
-                self.queue_content(id)?;
+            // Added or updated: queue its content for the background
+            // worker. The save itself never waits on it. A work the
+            // library never held is queued whole; a change to one it
+            // holds queues only the chapters past the ones counted
+            // before — the earlier ones are taken as unchanged.
+            match content_before {
+                Some(before) if before == (work.chapter_count, work.word_count) => {}
+                Some((counted, _)) if counted > 0 => {
+                    self.queue_content_span(id, super::content_queue::ChapterSpan::after(counted))?;
+                }
+                _ => self.queue_content(id)?,
             }
             Ok(id)
         })

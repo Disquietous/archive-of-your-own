@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::content_queue::ChapterSpan;
 
 // Every `blocking_*` call below runs on Swift's calling thread, never on
 // `_runtime` — see the lock discipline invariant in `api/mod.rs`.
@@ -194,6 +195,11 @@ async fn fetch_all_chapters(
 /// a chapter row for every chapter the work counts — a details fetch
 /// that just ran (a listing's, the reader's) already landed the table of
 /// contents, and asking for it again would repeat those requests.
+///
+/// `span`: the chapters asked for. Short of the whole work, a chapter
+/// outside it is left as it is, text or none — with one exception: a
+/// chapter whose text the table of contents just threw out (a different
+/// chapter now sits at its number) is fetched again wherever it is.
 #[allow(clippy::too_many_arguments)]
 async fn fetch_missing_chapters(
     client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
@@ -204,7 +210,17 @@ async fn fetch_missing_chapters(
     work_id: u64,
     op_id: Option<u64>,
     reuse_toc: bool,
+    span: ChapterSpan,
 ) -> Result<bool, AO3Error> {
+    // The chapters whose text is held going in: one the table of contents
+    // empties below was replaced at its source.
+    let held_before: std::collections::HashSet<u32> = if span.is_whole() {
+        Default::default()
+    } else {
+        let s = storage.lock().await;
+        s.get_chapters(work_id).map_err(AO3Error::from)?
+            .into_iter().filter(|c| !c.content.is_empty()).map(|c| c.number).collect()
+    };
     let toc_held = reuse_toc && {
         let s = storage.lock().await;
         let counted = s.get_work(work_id).ok().flatten().map(|w| w.chapter_count).unwrap_or(0);
@@ -217,8 +233,13 @@ async fn fetch_missing_chapters(
     }
     let stubs: Vec<Chapter> = {
         let s = storage.lock().await;
-        s.get_chapters(work_id).map_err(AO3Error::from)?
-            .into_iter().filter(|c| c.content.is_empty() && c.id.is_some()).collect()
+        // The details fetch may have found the work longer still and
+        // widened its queue row: what the row asks for now is the span.
+        let span = match s.content_item_span(work_id).ok().flatten() {
+            Some(queued) if !span.is_whole() => span.widened(queued),
+            _ => span,
+        };
+        chapters_to_fetch(s.get_chapters(work_id).map_err(AO3Error::from)?, span, &held_before)
     };
     let requested = !toc_held || !stubs.is_empty();
     crate::steps::plan(stubs.iter().map(chapter_step));
@@ -234,6 +255,17 @@ async fn fetch_missing_chapters(
             fetch_one_chapter(client.clone(), storage.clone(), source.clone(), external.clone(), work_id, stub, op_id)).await?;
     }
     Ok(requested)
+}
+
+/// The chapters a per-chapter download fetches, of the rows the table of
+/// contents left: those without text that `span` asks for, and any whose
+/// text was held going in (`held_before`) and is gone now — replaced at
+/// its source — wherever it is.
+fn chapters_to_fetch(rows: Vec<Chapter>, span: ChapterSpan, held_before: &std::collections::HashSet<u32>) -> Vec<Chapter> {
+    rows.into_iter()
+        .filter(|c| c.content.is_empty() && c.id.is_some())
+        .filter(|c| span.contains(c.number) || held_before.contains(&c.number))
+        .collect()
 }
 
 /// A chapter's name in the queue monitor's request list.
@@ -255,11 +287,18 @@ fn chapter_step(chapter: &Chapter) -> String {
 /// request at all. (A chapter edited at its source after it was saved
 /// therefore keeps the saved text.) A library-only work has nothing to
 /// fetch. Returns whether any request went out.
+///
+/// `span`: the chapters asked for (`ChapterSpan::WHOLE` = all of them).
+/// A per-chapter source fetches only the missing chapters inside it. A
+/// source that serves the whole work as one page has nothing smaller to
+/// ask for: its one request goes out when a chapter inside the span is
+/// missing, and not otherwise.
 pub(super) async fn download_work(
     client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
     storage: Arc<Mutex<Storage>>,
     registry: Arc<crate::source::SourceRegistry>,
     work_id: u64,
+    span: ChapterSpan,
 ) -> Result<bool, AO3Error> {
     let (source, external) = { let s = storage.lock().await; source_for_work(&s, &registry, work_id)? };
     if source.library_only() {
@@ -270,9 +309,13 @@ pub(super) async fn download_work(
         let complete = {
             let s = storage.lock().await;
             let counted = s.get_work(work_id).ok().flatten().map(|w| w.chapter_count).unwrap_or(0);
-            let held = s.get_chapters(work_id).map_err(AO3Error::from)?
-                .iter().filter(|c| !c.content.is_empty()).count() as u32;
-            counted > 0 && held >= counted
+            let held: std::collections::HashSet<u32> = s.get_chapters(work_id).map_err(AO3Error::from)?
+                .iter().filter(|c| !c.content.is_empty()).map(|c| c.number).collect();
+            if span.is_whole() {
+                counted > 0 && held.len() as u32 >= counted
+            } else {
+                (1..=counted).filter(|n| span.contains(*n)).all(|n| held.contains(&n))
+            }
         };
         if complete {
             return Ok(false);
@@ -280,26 +323,35 @@ pub(super) async fn download_work(
         fetch_all_chapters(client, storage, source, external, work_id, None).await?;
         return Ok(true);
     }
-    fetch_missing_chapters(client, storage, registry, source, external, work_id, None, true).await
+    fetch_missing_chapters(client, storage, registry, source, external, work_id, None, true, span).await
+}
+
+/// Whether the library holds the text of every chapter the work counts.
+pub(super) fn work_content_complete(s: &Storage, work_id: u64) -> bool {
+    let counted = s.get_work(work_id).ok().flatten().map(|w| w.chapter_count).unwrap_or(0);
+    let held = s.get_chapters(work_id).map(|rows| rows.iter().filter(|c| !c.content.is_empty()).count()).unwrap_or(0);
+    counted > 0 && held as u32 >= counted
 }
 
 /// Fetch every embedded image of a work's saved chapters into the image
 /// cache — the image half of a download, shared by "Download for
 /// offline" and the content queue. An image already cached costs no
 /// request; over-cap and failed images are skipped (logged), not fatal.
-/// `max_bytes`: the per-image size cap, 0 = no limit. Returns how many
-/// images were newly fetched.
+/// `max_bytes`: the per-image size cap, 0 = no limit. `span`: the
+/// chapters whose images are wanted (`ChapterSpan::WHOLE` = all).
+/// Returns how many images were newly fetched.
 pub(super) async fn prefetch_work_images(
     client: Arc<tokio::sync::RwLock<crate::source::ao3::AO3Client>>,
     storage: Arc<Mutex<Storage>>,
     work_id: u64,
     max_bytes: u64,
+    span: ChapterSpan,
 ) -> Result<u32, AO3Error> {
     let srcs: Vec<String> = {
         let s = storage.lock().await;
         let chapters = s.get_chapters(work_id).map_err(AO3Error::from)?;
         let mut srcs = Vec::new();
-        for chapter in &chapters {
+        for chapter in chapters.iter().filter(|c| span.contains(c.number)) {
             collect_image_srcs(&chapter.content, &mut srcs);
         }
         srcs
@@ -797,7 +849,7 @@ impl AO3App {
             if !source.fetches_chapters_individually() {
                 return fetch_all_chapters(client, storage, source, external, work_id, op_id).await;
             }
-            fetch_missing_chapters(client, storage.clone(), registry, source, external, work_id, op_id, false).await?;
+            fetch_missing_chapters(client, storage.clone(), registry, source, external, work_id, op_id, false, ChapterSpan::WHOLE).await?;
             let s = storage.lock().await;
             Ok(s.get_chapters(work_id).map_err(AO3Error::from)?.into_iter().map(UChapter::from).collect())
         }).await
@@ -883,7 +935,7 @@ impl AO3App {
     /// (logged), not fatal. Returns how many images were newly fetched.
     pub async fn download_work_images(&self, work_id: u64, max_bytes: u64) -> Result<u32, AO3Error> {
         self.run_on_runtime(move |client, storage| async move {
-            prefetch_work_images(client, storage, work_id, max_bytes).await
+            prefetch_work_images(client, storage, work_id, max_bytes, ChapterSpan::WHOLE).await
         }).await
     }
 
@@ -990,5 +1042,52 @@ impl LibrarySearchCache {
 
     pub(super) fn remove(&mut self, handle: u64) {
         self.entries.remove(&handle);
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    fn row(number: u32, text: bool) -> Chapter {
+        Chapter {
+            id: Some(7000 + number as u64),
+            number,
+            title: None,
+            content: if text { vec![crate::models::ContentBlock::HorizontalRule] } else { Vec::new() },
+            notes_before: None,
+            notes_after: None,
+        }
+    }
+
+    fn numbers(rows: Vec<Chapter>) -> Vec<u32> {
+        rows.into_iter().map(|c| c.number).collect()
+    }
+
+    #[test]
+    fn a_grown_work_fetches_only_its_new_chapters() {
+        let none = std::collections::HashSet::new();
+        // Ten held, the eleventh new.
+        let rows = || (1..=11).map(|n| row(n, n <= 10)).collect::<Vec<_>>();
+        assert_eq!(numbers(chapters_to_fetch(rows(), ChapterSpan::after(10), &none)), vec![11]);
+        // A long work never downloaded: the update still asks for one chapter.
+        let bare = || (1..=1801).map(|n| row(n, false)).collect::<Vec<_>>();
+        assert_eq!(numbers(chapters_to_fetch(bare(), ChapterSpan::after(1800), &none)), vec![1801]);
+        assert_eq!(chapters_to_fetch(bare(), ChapterSpan::WHOLE, &none).len(), 1801);
+        // A range is the chapters named, less the ones already held.
+        assert_eq!(numbers(chapters_to_fetch(rows(), ChapterSpan { first: 9, last: 11 }, &none)), vec![11]);
+        assert_eq!(numbers(chapters_to_fetch(bare(), ChapterSpan { first: 3, last: 5 }, &none)), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn a_replaced_chapter_is_fetched_again_outside_the_range() {
+        // Chapter 4 held going in, emptied by the table of contents.
+        let held: std::collections::HashSet<u32> = (1..=10).collect();
+        let rows = (1..=11).map(|n| row(n, n <= 10 && n != 4)).collect::<Vec<_>>();
+        assert_eq!(numbers(chapters_to_fetch(rows, ChapterSpan::after(10), &held)), vec![4, 11]);
+        // A chapter never fetched is not mistaken for a replaced one.
+        let held: std::collections::HashSet<u32> = (5..=10).collect();
+        let rows = (1..=11).map(|n| row(n, (5..=10).contains(&n))).collect::<Vec<_>>();
+        assert_eq!(numbers(chapters_to_fetch(rows, ChapterSpan::after(10), &held)), vec![11]);
     }
 }

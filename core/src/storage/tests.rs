@@ -4000,6 +4000,7 @@ fn a_listing_adds_to_a_work_and_only_its_own_page_replaces() {
 
 // ---------------------------------------------------------------------------
 // Content queue
+use super::content_queue::ChapterSpan;
 // ---------------------------------------------------------------------------
 
 fn queue_test_work(external_id: &str, chapters: u32, words: Option<u64>) -> WorkSummary {
@@ -4025,12 +4026,68 @@ fn saving_a_new_or_changed_work_queues_its_content() {
     db.save_listed_work(&queue_test_work("9001", 3, Some(1200))).unwrap();
     assert_eq!(db.next_content_item(0).unwrap(), None);
 
-    // A new chapter count or word count queues it again.
+    // A new chapter count or word count queues it again — only the
+    // chapters past the ones it counted before.
     db.save_listed_work(&queue_test_work("9001", 4, Some(1200))).unwrap();
     assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan::after(3)));
     db.finish_content_item(id).unwrap();
     db.save_work(&queue_test_work("9001", 4, Some(1500))).unwrap();
     assert_eq!(db.next_content_item(0).unwrap(), Some(id));
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan::after(4)), "no new chapter: none of the held ones");
+}
+
+#[test]
+fn a_new_work_is_queued_whole_and_a_grown_one_by_its_new_chapters() {
+    let db = Storage::open_in_memory("k").unwrap();
+    let id = db.save_work(&queue_test_work("9003", 10, None)).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan::WHOLE));
+    // Growing before the worker got to it leaves it whole.
+    db.save_work(&queue_test_work("9003", 11, None)).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan::WHOLE));
+    db.finish_content_item(id).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), None);
+
+    // Ten chapters became eleven, then twelve: one row, from the eleventh on.
+    db.save_work(&queue_test_work("9003", 12, None)).unwrap();
+    db.save_work(&queue_test_work("9003", 13, None)).unwrap();
+    let span = db.content_item_span(id).unwrap().unwrap();
+    assert_eq!(span, ChapterSpan::after(11));
+    assert!(!span.contains(11) && span.contains(12) && span.contains(1900));
+    assert_eq!(db.content_queue_items(0).unwrap().len(), 1);
+
+    // A work held without a chapter count (a listing that gives none)
+    // has no earlier chapters to assume: it is queued whole.
+    let bare = db.save_work(&WorkSummary { complete: true, ..queue_test_work("9004", 0, None) }).unwrap();
+    db.finish_content_item(bare).unwrap();
+    db.save_work(&WorkSummary { complete: true, ..queue_test_work("9004", 5, None) }).unwrap();
+    assert_eq!(db.content_item_span(bare).unwrap(), Some(ChapterSpan::WHOLE));
+}
+
+#[test]
+fn queued_chapter_ranges_widen_into_one_row() {
+    let db = Storage::open_in_memory("k").unwrap();
+    let id = db.save_work(&queue_test_work("9005", 40, None)).unwrap();
+    db.finish_content_item(id).unwrap();
+
+    db.queue_content_span(id, ChapterSpan { first: 11, last: 12 }).unwrap();
+    db.defer_content_item(id, 900, "timeout", true).unwrap();
+    db.queue_content_span(id, ChapterSpan { first: 20, last: 25 }).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan { first: 11, last: 25 }));
+    assert_eq!(db.content_item_attempts(id).unwrap(), Some(0), "asking again clears the failures");
+    // An open end stays open; the whole work swallows any range.
+    db.queue_content_span(id, ChapterSpan { first: 30, last: 0 }).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan { first: 11, last: 0 }));
+    db.queue_content_span(id, ChapterSpan { first: 5, last: 6 }).unwrap();
+    assert_eq!(db.content_item_span(id).unwrap(), Some(ChapterSpan { first: 5, last: 0 }));
+    db.queue_content(id).unwrap();
+    assert!(db.content_item_span(id).unwrap().unwrap().is_whole());
+    db.queue_content_span(id, ChapterSpan { first: 3, last: 4 }).unwrap();
+    assert!(db.content_item_span(id).unwrap().unwrap().is_whole());
+
+    let range = ChapterSpan { first: 3, last: 4 };
+    assert!(!range.is_whole() && !range.contains(2) && range.contains(3) && range.contains(4) && !range.contains(5));
+    assert!(ChapterSpan { first: 1, last: 0 }.is_whole() && ChapterSpan::WHOLE.contains(1));
 }
 
 #[test]

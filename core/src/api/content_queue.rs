@@ -21,7 +21,7 @@
 //! starts with the queue running.
 
 use super::*;
-use crate::storage::content_queue::CONTENT_QUEUED;
+use crate::storage::content_queue::{ChapterSpan, CONTENT_QUEUED};
 use std::time::Duration;
 
 /// How long the worker waits before looking again when the queue is
@@ -94,6 +94,10 @@ pub struct UContentQueueItem {
     pub title: String,
     /// The display name of the work's source.
     pub source_name: String,
+    /// The chapters asked for, by number: `first_chapter` 0 = from the
+    /// first, `last_chapter` 0 = to the last; both 0 = the whole work.
+    pub first_chapter: u32,
+    pub last_chapter: u32,
     /// UTC "YYYY-MM-DD HH:MM:SS".
     pub queued_at: String,
     /// Failed downloads so far, out of `max_attempts`; at the maximum the
@@ -177,6 +181,8 @@ impl AO3App {
                 work_id: row.work_id,
                 title,
                 source_name,
+                first_chapter: if row.span.is_whole() { 0 } else { row.span.first },
+                last_chapter: row.span.last,
                 queued_at: row.queued_at,
                 attempts: row.attempts,
                 max_attempts: crate::storage::content_queue::CONTENT_MAX_ATTEMPTS,
@@ -184,6 +190,25 @@ impl AO3App {
                 last_error: row.last_error,
             }
         }).collect())
+    }
+
+    /// Queue a work's content for the background download: the whole
+    /// work when neither bound is given, else the chapters numbered
+    /// `first_chapter` (None = from the first) to `last_chapter` (None =
+    /// to the last), both included, in either order. A work already queued keeps its one
+    /// entry, widened to cover both requests. A chapter whose text the
+    /// library holds is not fetched again either way.
+    pub fn queue_work_content(&self, work_id: u64, first_chapter: Option<u32>, last_chapter: Option<u32>) -> Result<(), AO3Error> {
+        let mut span = ChapterSpan { first: first_chapter.unwrap_or(0), last: last_chapter.unwrap_or(0) };
+        // Bounds given the wrong way round name the same chapters.
+        if span.last != 0 && span.first > span.last {
+            span = ChapterSpan { first: span.last, last: span.first };
+        }
+        let s = self.storage.blocking_lock();
+        if s.get_work(work_id).map_err(AO3Error::from)?.is_none() {
+            return Err(AO3Error::NotFound { message: format!("no work with id {work_id}") });
+        }
+        s.queue_content_span(work_id, span).map_err(AO3Error::from)
     }
 
     /// The requests the work in flight needs, as far as they are known,
@@ -279,7 +304,7 @@ async fn run_next(
     registry: &Arc<crate::source::SourceRegistry>,
 ) -> Step {
     let now = crate::timefmt::epoch_now();
-    let work_id = {
+    let (work_id, span) = {
         let s = storage.lock().await;
         let work_id = match s.next_content_item(now) {
             Ok(Some(id)) => id,
@@ -305,7 +330,7 @@ async fn run_next(
             queue_changed();
             return Step::Skipped;
         }
-        work_id
+        (work_id, s.content_item_span(work_id).ok().flatten().unwrap_or(ChapterSpan::WHOLE))
     };
     // Ask the privacy policy before sending anything: a refused request
     // is reported to the user, and nobody asked for this one.
@@ -314,17 +339,22 @@ async fn run_next(
         return Step::Blocked;
     }
 
-    log_info!("content_queue", "Fetching the content of work {work_id}");
+    if span.is_whole() {
+        log_info!("content_queue", "Fetching the content of work {work_id}");
+    } else {
+        log_info!("content_queue", "Fetching chapters {} to {} of work {work_id}",
+                  span.first.max(1), if span.last == 0 { "the last".to_string() } else { span.last.to_string() });
+    }
     let in_flight = InFlight::begin(work_id);
     // Unattended: a human check the user just dismissed is not raised
     // again for a download nobody is waiting on.
     let result = crate::client::clearance::unattended(crate::steps::recording(async {
-        let mut result = super::works::download_work(client.clone(), storage.clone(), registry.clone(), work_id).await;
+        let mut result = super::works::download_work(client.clone(), storage.clone(), registry.clone(), work_id, span).await;
         if let Ok(requested) = &mut result {
             // The chapters are in: their embedded images complete the work.
             // A skipped or failed image never fails the download.
             let cap = IMAGE_CAP_BYTES.load(std::sync::atomic::Ordering::Relaxed);
-            match super::works::prefetch_work_images(client.clone(), storage.clone(), work_id, cap).await {
+            match super::works::prefetch_work_images(client.clone(), storage.clone(), work_id, cap, span).await {
                 Ok(fetched) => *requested |= fetched > 0,
                 Err(e) => { log_error!("content_queue", "Image prefetch for work {work_id} failed: {e}"); }
             }
@@ -337,10 +367,16 @@ async fn run_next(
     let _in_flight = in_flight;
     match result {
         Ok(requested) => {
-            log_db("mark_downloaded", s.mark_downloaded(work_id));
+            // A range leaves the work downloaded only when nothing else
+            // of it is missing.
+            let complete = span.is_whole() || super::works::work_content_complete(&s, work_id);
+            if complete {
+                log_db("mark_downloaded", s.mark_downloaded(work_id));
+            }
             log_db("finish_content_item", s.finish_content_item(work_id));
             drop(s);
-            log_info!("content_queue", "Work {work_id} is fully in the library{}",
+            log_info!("content_queue", "Work {work_id}: {}{}",
+                      if complete { "fully in the library" } else { "the chapters asked for are in the library" },
                       if requested { "" } else { " (nothing was missing)" });
             crate::events::emit(crate::events::CoreEvent::WorkContentSaved { work_id });
             // Nothing sent, nothing to space the next work from.

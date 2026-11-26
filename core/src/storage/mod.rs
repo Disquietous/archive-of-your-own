@@ -327,7 +327,7 @@ impl Storage {
     /// Current schema version (PRAGMA user_version). v1 is the pre-versioning
     /// baseline; every later version is one MIGRATIONS-ladder step. Bump this
     /// when adding a step to `migrate`.
-    pub(crate) const SCHEMA_VERSION: u32 = 36;
+    pub(crate) const SCHEMA_VERSION: u32 = 37;
 
     pub(crate) fn schema_version(&self) -> Result<u32, AppError> {
         self.conn
@@ -414,6 +414,7 @@ impl Storage {
                 34 => self.migrate_v34_scribblehub_status_values(),
                 35 => self.migrate_v35_work_status(),
                 36 => self.migrate_v36_content_queue(),
+                37 => self.migrate_v37_content_queue_span(),
                 _ => Err(AppError::StorageError(format!("no migration defined for v{next}"))),
             };
             step.map_err(|e| migration_failed(next, e))?;
@@ -1100,6 +1101,19 @@ impl Storage {
                  last_error TEXT NOT NULL DEFAULT ''
              );"
         ).map_err(map_sql)
+    }
+
+    /// v37: a queued work names the chapters asked for — 0/0 = the whole
+    /// work, which is what every row queued before this asked for.
+    fn migrate_v37_content_queue_span(&self) -> Result<(), AppError> {
+        for column in ["first_chapter", "last_chapter"] {
+            if !self.column_exists("content_queue", column)? {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE content_queue ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"
+                )).map_err(map_sql)?;
+            }
+        }
+        Ok(())
     }
 
     fn migrate_v33_work_reactions(&self) -> Result<(), AppError> {

@@ -34,6 +34,14 @@ extension AppState {
         refreshDownloadQueue()
     }
 
+    /// Queue a work for the background download: the whole work, or —
+    /// with `chapters` — only the chapters numbered in that range. A
+    /// work already queued keeps its one entry, widened to cover both. A
+    /// chapter the library already holds is not fetched again.
+    func queueDownload(workID: UInt64, chapters: ClosedRange<UInt32>? = nil) {
+        bridge.queueWorkContent(workId: workID, firstChapter: chapters?.lowerBound, lastChapter: chapters?.upperBound)
+    }
+
     /// A monitor UI appeared or went away.
     func watchDownloadQueue(_ watching: Bool) {
         downloadQueue.isWatched = watching
@@ -52,6 +60,10 @@ extension RustBridge {
 
     func contentQueueSteps() -> [UContentQueueStep] {
         app?.contentQueueSteps() ?? []
+    }
+
+    func queueWorkContent(workId: UInt64, firstChapter: UInt32?, lastChapter: UInt32?) {
+        try? app?.queueWorkContent(workId: workId, firstChapter: firstChapter, lastChapter: lastChapter)
     }
 
     func setContentQueuePaused(_ paused: Bool) {
