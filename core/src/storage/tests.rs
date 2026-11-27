@@ -4152,6 +4152,19 @@ fn content_queue_items_list_in_working_order() {
     assert_eq!(listed[2].last_error, "source blocks Tor");
     assert_eq!(listed[3].attempts, CONTENT_MAX_ATTEMPTS);
     assert!(!listed[0].queued_at.is_empty());
+
+    // What the worker still means to fetch: the due ones in the order it
+    // takes them, then the held one; the one it gave up on is left out.
+    assert_eq!(db.pending_content_items(100).unwrap(),
+               vec![(fresh, true), (failed_once, true), (held, false)]);
+    assert_eq!(db.pending_content_items(10).unwrap(),
+               vec![(fresh, true), (held, false), (failed_once, false)]);
+
+    // Settled in one go: one dropped, one held back at no cost in attempts.
+    db.settle_content_items(&[fresh], &[(failed_once, "source blocks Tor".to_string())], 700).unwrap();
+    assert_eq!(db.pending_content_items(100).unwrap(), vec![(held, false), (failed_once, false)]);
+    assert_eq!(db.content_item_attempts(failed_once).unwrap(), Some(1));
+    assert_eq!(db.next_content_item(700).unwrap(), Some(failed_once));
 }
 
 #[test]

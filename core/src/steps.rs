@@ -6,9 +6,11 @@
 //! what it has learned is still to come with `plan`. Both do nothing
 //! outside `recording` — the content queue's worker is the only caller
 //! of that, so a reader's own fetch through the same code records
-//! nothing. The worker downloads one work at a time, so one list is the
-//! whole picture; it is cleared when a work starts and when it ends.
+//! nothing. The worker downloads one work of each source at a time, so
+//! there is one list a source, kept under the source's id; a source's
+//! list is cleared when its work starts and when it ends.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 /// Where one step stands.
@@ -37,17 +39,20 @@ struct Steps {
     active: Vec<Vec<String>>,
 }
 
-static STEPS: Mutex<Steps> = Mutex::new(Steps { list: Vec::new(), active: Vec::new() });
+/// The list of each source with a work in flight, by source id.
+static STEPS: Mutex<BTreeMap<String, Steps>> = Mutex::new(BTreeMap::new());
 
 tokio::task_local! {
-    static RECORDING: ();
+    /// The source whose list the running task records into.
+    static RECORDING: String;
 }
 
-fn steps() -> std::sync::MutexGuard<'static, Steps> {
+fn steps() -> std::sync::MutexGuard<'static, BTreeMap<String, Steps>> {
     STEPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn recording_now() -> bool { RECORDING.try_with(|_| ()).is_ok() }
+/// The source the running task records for, when it records at all.
+fn recording_for() -> Option<String> { RECORDING.try_with(|source| source.clone()).ok() }
 
 fn changed() {
     crate::events::emit(crate::events::CoreEvent::ContentQueueChanged);
@@ -76,32 +81,36 @@ impl Steps {
     }
 }
 
-/// Run `fut` with its steps recorded.
-pub async fn recording<F: std::future::Future>(fut: F) -> F::Output {
-    RECORDING.scope((), fut).await
+/// Run `fut` with its steps recorded in `source`'s list.
+pub async fn recording<F: std::future::Future>(source: &str, fut: F) -> F::Output {
+    RECORDING.scope(source.to_string(), fut).await
 }
 
-/// Forget every step: a work is starting or has ended.
-pub fn clear() {
-    let mut s = steps();
-    s.list.clear();
-    s.active.clear();
+/// Forget every step of `source`: its work is starting or has ended.
+pub fn clear(source: &str) {
+    steps().remove(source);
 }
 
-/// The steps of the work in flight, in order.
-pub fn snapshot() -> Vec<UContentQueueStep> {
-    steps().list.clone()
+/// The steps of `source`'s work in flight, in order.
+pub fn snapshot(source: &str) -> Vec<UContentQueueStep> {
+    steps().get(source).map(|s| s.list.clone()).unwrap_or_default()
+}
+
+/// The steps of every work in flight, in order, by source id.
+pub fn snapshot_all() -> std::collections::HashMap<String, Vec<UContentQueueStep>> {
+    steps().iter().map(|(source, s)| (source.clone(), s.list.clone())).collect()
 }
 
 /// Name steps now known to be coming, under the step being run.
 pub fn plan<I: IntoIterator<Item = String>>(labels: I) {
-    if !recording_now() { return }
-    let mut s = steps();
+    let Some(source) = recording_for() else { return };
+    let mut all = steps();
+    let s = all.entry(source).or_insert_with(|| Steps { list: Vec::new(), active: Vec::new() });
     for label in labels {
         let parts = s.under_active(&label);
         s.place(&parts);
     }
-    drop(s);
+    drop(all);
     changed();
 }
 
@@ -109,9 +118,10 @@ pub fn plan<I: IntoIterator<Item = String>>(labels: I) {
 /// result. Steps run inside it are listed under it.
 pub async fn run<T, E, F>(label: &str, fut: F) -> Result<T, E>
 where F: std::future::Future<Output = Result<T, E>> {
-    if !recording_now() { return fut.await }
+    let Some(source) = recording_for() else { return fut.await };
     let parts = {
-        let mut s = steps();
+        let mut all = steps();
+        let s = all.entry(source.clone()).or_insert_with(|| Steps { list: Vec::new(), active: Vec::new() });
         let parts = s.under_active(label);
         let at = s.place(&parts);
         s.list[at].state = StepState::Active;
@@ -120,8 +130,8 @@ where F: std::future::Future<Output = Result<T, E>> {
     };
     changed();
     let result = fut.await;
-    {
-        let mut s = steps();
+    // A list cleared meanwhile (its work ended) is not brought back.
+    if let Some(s) = steps().get_mut(&source) {
         s.active.retain(|p| p != &parts);
         if let Some(step) = s.list.iter_mut().find(|step| step.parts == parts) {
             step.state = if result.is_ok() { StepState::Done } else { StepState::Failed };
@@ -135,24 +145,24 @@ where F: std::future::Future<Output = Result<T, E>> {
 mod tests {
     use super::*;
 
-    fn names() -> Vec<(String, StepState)> {
-        snapshot().into_iter().map(|s| (s.parts.join(" > "), s.state)).collect()
+    fn names(source: &str) -> Vec<(String, StepState)> {
+        snapshot(source).into_iter().map(|s| (s.parts.join(" > "), s.state)).collect()
     }
 
-    // One test: the list is process-wide.
     #[tokio::test]
     async fn steps_are_listed_as_they_become_known() {
+        const SOURCE: &str = "steps-test-listed";
         // Outside a recording nothing is kept.
-        clear();
+        clear(SOURCE);
         let _ = run("Chapter 1", async { Ok::<_, ()>(()) }).await;
-        assert!(snapshot().is_empty());
+        assert!(snapshot(SOURCE).is_empty());
 
-        recording(async {
+        recording(SOURCE, async {
             let _ = run("Chapter list", async { Ok::<_, ()>(()) }).await;
             plan(["Chapter 1".to_string(), "Chapter 2".to_string()]);
             let _ = run("Chapter 1", async {
                 plan(["Page 2 of 2".to_string()]);
-                assert_eq!(names(), vec![
+                assert_eq!(names(SOURCE), vec![
                     ("Chapter list".to_string(), StepState::Done),
                     ("Chapter 1".to_string(), StepState::Active),
                     ("Chapter 1 > Page 2 of 2".to_string(), StepState::Pending),
@@ -161,13 +171,48 @@ mod tests {
                 run("Page 2 of 2", async { Err::<(), _>(()) }).await
             }).await;
         }).await;
-        assert_eq!(names(), vec![
+        assert_eq!(names(SOURCE), vec![
             ("Chapter list".to_string(), StepState::Done),
             ("Chapter 1".to_string(), StepState::Failed),
             ("Chapter 1 > Page 2 of 2".to_string(), StepState::Failed),
             ("Chapter 2".to_string(), StepState::Pending),
         ]);
-        clear();
-        assert!(snapshot().is_empty());
+        clear(SOURCE);
+        assert!(snapshot(SOURCE).is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_source_keeps_its_own_list() {
+        const A: &str = "steps-test-a";
+        const B: &str = "steps-test-b";
+        // Two works in flight at once, their steps interleaved.
+        let a = recording(A, async {
+            let _ = run("Chapter list", async {
+                tokio::task::yield_now().await;
+                Ok::<_, ()>(())
+            }).await;
+            plan(["Chapter 1".to_string()]);
+        });
+        let b = recording(B, async {
+            let _ = run("Story", async {
+                tokio::task::yield_now().await;
+                Err::<(), _>(())
+            }).await;
+        });
+        tokio::join!(a, b);
+        assert_eq!(names(A), vec![
+            ("Chapter list".to_string(), StepState::Done),
+            ("Chapter 1".to_string(), StepState::Pending),
+        ]);
+        assert_eq!(names(B), vec![("Story".to_string(), StepState::Failed)]);
+        let all = snapshot_all();
+        assert_eq!(all.get(A).map(Vec::len), Some(2));
+        assert_eq!(all.get(B).map(Vec::len), Some(1));
+
+        // One source's work ending leaves the other's list alone.
+        clear(A);
+        assert!(snapshot(A).is_empty());
+        assert_eq!(names(B).len(), 1);
+        clear(B);
     }
 }

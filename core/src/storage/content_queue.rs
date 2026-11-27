@@ -2,9 +2,9 @@
 //!
 //! A work joins the queue when it is added to the library or when a save
 //! changes its chapter or word count (`Storage::save_work`). The core's
-//! background worker (`api::content_queue`) takes one work at a time and
-//! runs the same download a user's "Download for offline" runs, so the
-//! triggering save never waits on chapter text.
+//! background worker (`api::content_queue`) takes one work of each
+//! source at a time and runs the same download a user's "Download for
+//! offline" runs, so the triggering save never waits on chapter text.
 //!
 //! A queued work carries the chapters asked for (`ChapterSpan`): the
 //! whole work, or a range of chapter numbers. The queue stays one row a
@@ -135,6 +135,23 @@ impl Storage {
         ).optional().map(|id| id.map(|id| id as u64)).map_err(map_sql)
     }
 
+    /// Every queued work the worker still means to fetch at `now` (epoch
+    /// seconds), each with whether it is due: the due ones first, in the
+    /// order `next_content_item` hands them out, then the held-back ones.
+    /// Works left alone after `CONTENT_MAX_ATTEMPTS` failures are not
+    /// listed.
+    pub fn pending_content_items(&self, now: u64) -> Result<Vec<(u64, bool)>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT work_id, retry_at <= ?2 FROM content_queue
+             WHERE attempts < ?1
+             ORDER BY retry_at > ?2, attempts, id",
+        ).map_err(map_sql)?;
+        let rows = stmt.query_map(params![CONTENT_MAX_ATTEMPTS, now as i64], |row| {
+            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, bool>(1)?))
+        }).map_err(map_sql)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sql)
+    }
+
     /// The work's content is in the library (or can never be fetched):
     /// drop it from the queue.
     pub fn finish_content_item(&self, work_id: u64) -> Result<(), AppError> {
@@ -156,6 +173,31 @@ impl Storage {
             params![work_id as i64, retry_at as i64, error, failed as i64],
         ).map_err(map_sql)?;
         Ok(())
+    }
+
+    /// Settle many queued works at once, in one transaction: drop the
+    /// works in `finished` and hold the ones in `held` back until
+    /// `retry_at` (epoch seconds) with their reason, at no cost in
+    /// attempts — a source the current privacy mode can't reach can have
+    /// a long run of works waiting.
+    pub fn settle_content_items(&self, finished: &[u64], held: &[(u64, String)], retry_at: u64) -> Result<(), AppError> {
+        if finished.is_empty() && held.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction().map_err(map_sql)?;
+        {
+            let mut delete = tx.prepare("DELETE FROM content_queue WHERE work_id = ?1").map_err(map_sql)?;
+            for work_id in finished {
+                delete.execute(params![*work_id as i64]).map_err(map_sql)?;
+            }
+            let mut hold = tx.prepare(
+                "UPDATE content_queue SET retry_at = ?2, last_error = ?3 WHERE work_id = ?1",
+            ).map_err(map_sql)?;
+            for (work_id, error) in held {
+                hold.execute(params![*work_id as i64, retry_at as i64, error]).map_err(map_sql)?;
+            }
+        }
+        tx.commit().map_err(map_sql)
     }
 
     /// The chapters a queued work's row asks for. None when the work is

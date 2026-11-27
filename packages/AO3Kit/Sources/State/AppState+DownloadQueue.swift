@@ -11,7 +11,7 @@ extension AppState {
         downloadQueue.update(
             status: status,
             items: watched ? bridge.contentQueueItems() : nil,
-            steps: watched ? bridge.contentQueueSteps() : [])
+            steps: watched ? bridge.contentQueueSteps() : [:])
     }
 
     /// The core reported a queue change. A listing page queues its works
@@ -26,9 +26,9 @@ extension AppState {
         }
     }
 
-    /// Pause or resume the download queue. A pause lets the work in
-    /// flight finish in full (the monitor shows "Pausing" until it has),
-    /// then nothing further starts.
+    /// Pause or resume the download queue. A pause lets every work in
+    /// flight finish in full (the monitor shows "Pausing" until they
+    /// have), then nothing further starts.
     func setDownloadQueuePaused(_ paused: Bool) {
         bridge.setContentQueuePaused(paused)
         refreshDownloadQueue()
@@ -58,8 +58,9 @@ extension RustBridge {
         (try? app?.contentQueueItems()) ?? []
     }
 
-    func contentQueueSteps() -> [UContentQueueStep] {
-        app?.contentQueueSteps() ?? []
+    /// The requests of each work in flight, by source id.
+    func contentQueueSteps() -> [String: [UContentQueueStep]] {
+        app?.contentQueueSteps() ?? [:]
     }
 
     func queueWorkContent(workId: UInt64, firstChapter: UInt32?, lastChapter: UInt32?) {
