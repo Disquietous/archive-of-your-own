@@ -270,16 +270,72 @@ pub fn part_story(body: &str) -> Option<u64> {
     v.get("group").and_then(|g| number(g, "id")).or_else(|| number(&v, "groupId"))
 }
 
-/// A part's text as the reader's content tree. The site ends most
-/// paragraphs with breaks that only space them on its own page.
+/// A part's text as the reader's content tree. The site spaces its
+/// paragraphs with breaks at their start or end (bare, or inside the
+/// markup that opens or closes the paragraph); those are dropped, and
+/// a paragraph left with nothing is too. Many parts also hold several
+/// paragraphs in one, set apart by a blank line (two or more breaks in
+/// a row): each becomes a paragraph of its own, so every paragraph is
+/// spaced alike. A single break between two lines is the author's and
+/// stays.
 pub fn part_blocks(html: &str, part_url: &str) -> Vec<ContentBlock> {
-    let mut html = html.trim().to_string();
-    for end in ["<br></p>", "<br/></p>", "<br /></p>"] {
-        while html.contains(end) { html = html.replace(end, "</p>"); }
+    let mut out = Vec::new();
+    for block in html_to_blocks(html.trim(), part_url) {
+        let ContentBlock::Paragraph { text } = block else {
+            out.push(block);
+            continue;
+        };
+        for mut text in split_at_blank_lines(text) {
+            trim_blank_edge(&mut text, true);
+            trim_blank_edge(&mut text, false);
+            if !text.is_empty() { out.push(ContentBlock::Paragraph { text }); }
+        }
     }
-    html_to_blocks(&html, part_url).into_iter()
-        .filter(|block| !matches!(block, ContentBlock::Paragraph { text } if text.is_empty()))
-        .collect()
+    out
+}
+
+/// A paragraph's content cut wherever two or more breaks stand in a row
+/// (blank text between them does not part them); the breaks themselves
+/// are left out.
+fn split_at_blank_lines(text: Vec<InlineContent>) -> Vec<Vec<InlineContent>> {
+    let is_break = |i: &InlineContent| matches!(i, InlineContent::LineBreak);
+    let is_blank = |i: &InlineContent| matches!(i, InlineContent::Text { value } if value.trim().is_empty());
+    let mut parts = vec![Vec::new()];
+    let mut at = 0;
+    while at < text.len() {
+        if is_break(&text[at]) {
+            let run = text[at..].iter().take_while(|i| is_break(i) || is_blank(i)).count();
+            if text[at..at + run].iter().filter(|i| is_break(i)).count() >= 2 {
+                parts.push(Vec::new());
+                at += run;
+                continue;
+            }
+        }
+        parts.last_mut().expect("never empty").push(text[at].clone());
+        at += 1;
+    }
+    parts
+}
+
+/// Drop the breaks and blank text at one end of a line of inline
+/// content, reaching into the markup that sits at that end.
+fn trim_blank_edge(inlines: &mut Vec<InlineContent>, front: bool) {
+    loop {
+        let at = if front { 0 } else { inlines.len().saturating_sub(1) };
+        let emptied = match inlines.get_mut(at) {
+            None => return,
+            Some(InlineContent::LineBreak) => true,
+            Some(InlineContent::Text { value }) => value.trim().is_empty(),
+            Some(InlineContent::Bold { content } | InlineContent::Italic { content }
+                 | InlineContent::Link { content, .. } | InlineContent::Strikethrough { content }
+                 | InlineContent::Superscript { content }) => {
+                trim_blank_edge(content, front);
+                content.is_empty()
+            }
+        };
+        if !emptied { return; }
+        inlines.remove(at);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +498,26 @@ mod tests {
         assert!(out.iter().any(|b| matches!(b, ContentBlock::Image { src, .. } if src == "https://img.example/1.jpg")));
         assert!(out.iter().all(|b| !matches!(b, ContentBlock::Paragraph { text } if text.is_empty())));
         assert!(part_blocks("  ", "https://www.wattpad.com/1").is_empty());
+    }
+
+    #[test]
+    fn spacing_breaks_go_from_the_ends_of_a_paragraph_and_blank_lines_part_it() {
+        let text = |value: &str| InlineContent::Text { value: value.to_string() };
+        let html = "<p><br>Opens with a break.</p>\n<p><br> <br>Two, with a space.<br> </p>\n\
+                    <p><i><br>Stressed.<br></i><br></p>\n<p><b><br></b>&nbsp;<br></p>\n\
+                    <p>One line.<br>Its second line.<br><br>Another, after a gap.<br /></p>\n\
+                    <p>Three<br> <br>in<br>&nbsp;<br><br>one.</p>";
+        let out = part_blocks(html, "https://www.wattpad.com/700101-the-lamp-room");
+        assert_eq!(out, vec![
+            ContentBlock::Paragraph { text: vec![text("Opens with a break.")] },
+            ContentBlock::Paragraph { text: vec![text("Two, with a space.")] },
+            ContentBlock::Paragraph { text: vec![InlineContent::Italic { content: vec![text("Stressed.")] }] },
+            ContentBlock::Paragraph { text: vec![text("One line."), InlineContent::LineBreak, text("Its second line.")] },
+            ContentBlock::Paragraph { text: vec![text("Another, after a gap.")] },
+            ContentBlock::Paragraph { text: vec![text("Three")] },
+            ContentBlock::Paragraph { text: vec![text("in")] },
+            ContentBlock::Paragraph { text: vec![text("one.")] },
+        ]);
     }
 
     #[test]
